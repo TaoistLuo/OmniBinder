@@ -1,0 +1,6 @@
+package hmi_common;
+
+struct OperationResult {
+    int32 code;
+    string message;
+}

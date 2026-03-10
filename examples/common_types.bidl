@@ -1,0 +1,14 @@
+// common_types.bidl
+// 公共类型定义
+
+package common;
+
+struct Timestamp {
+    int64   seconds;
+    int32   nanos;
+}
+
+struct StatusResponse {
+    int32   code;
+    string  message;
+}

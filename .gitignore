@@ -1,0 +1,8 @@
+build/*
+.cache/*
+docs/dev/
+.opencode/
+session-*.md
+tmp.txt
+/*.json
+/opencode*
