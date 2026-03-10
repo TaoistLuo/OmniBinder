@@ -1,0 +1,33 @@
+// sensor_service.bidl
+// 传感器服务接口定义
+
+package demo;
+
+import "common_types.bidl";
+
+struct SensorData {
+    int32   sensor_id;
+    float64 temperature;
+    float64 humidity;
+    int64   timestamp;
+    string  location;
+}
+
+struct ControlCommand {
+    int32   command_type;
+    string  target;
+    int32   value;
+}
+
+topic SensorUpdate {
+    SensorData data;
+    int64      publish_time;
+}
+
+service SensorService {
+    SensorData              GetLatestData();
+    common.StatusResponse   SetThreshold(ControlCommand cmd);
+    void                    ResetSensor(int32 sensor_id);
+
+    publishes SensorUpdate;
+}

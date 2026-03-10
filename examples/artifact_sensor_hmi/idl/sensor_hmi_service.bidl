@@ -1,0 +1,40 @@
+package sensor_hmi;
+
+import "sensor_hmi_common.bidl";
+
+struct SensorSnapshot {
+    int32 sensor_id;
+    bool enabled;
+    int32 sampling_interval_ms;
+    float64 current_value;
+    string mode;
+    int64 timestamp_us;
+}
+
+struct SensorControlRequest {
+    bool enabled;
+    int32 sampling_interval_ms;
+    string mode;
+    int64 request_time_us;
+}
+
+struct RpcProbeResult {
+    SensorSnapshot snapshot;
+    int64 request_time_us;
+    int64 server_handle_time_us;
+    int64 response_time_us;
+}
+
+topic SensorStatusTopic {
+    SensorSnapshot snapshot;
+    int64 publish_time_us;
+}
+
+service SensorControlService {
+    SensorSnapshot GetSnapshot();
+    hmi_common.OperationResult ApplyControl(SensorControlRequest request);
+    void TriggerCalibration(int32 sensor_id);
+    RpcProbeResult MeasureRpcLatency(int64 request_time_us);
+
+    publishes SensorStatusTopic;
+}

@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/OmniBinderTargets.cmake" OPTIONAL)
+include("${CMAKE_CURRENT_LIST_DIR}/OmniBinderIDL.cmake" OPTIONAL)
+
+check_required_components(OmniBinder)
