@@ -1,5 +1,7 @@
 # omni-cli 使用指南
 
+中文 | [English](omni-tool-usage.en.md)
+
 > **版本**：1.0.0  
 > **更新日期**：2026-03-05
 

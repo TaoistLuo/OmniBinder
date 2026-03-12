@@ -1,5 +1,7 @@
 # Sensor ↔ HMI 下游集成示例
 
+中文 | [English](README.en.md)
+
 本文档不是简单的“怎么运行 demo”，而是把 `examples/artifact_sensor_hmi/` 当作一个**下游业务工程模板**来说明：
 
 - 如何在你自己的项目中依赖 OmniBinder 的构建产物

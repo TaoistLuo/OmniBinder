@@ -1,5 +1,7 @@
 # OmniBinder 使用示例
 
+中文 | [English](examples.en.md)
+
 ## 1. 概述
 
 本文档展示 OmniBinder 的完整使用示例，包括：
