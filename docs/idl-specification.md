@@ -1,5 +1,7 @@
 # OmniBinder IDL 语法规范
 
+中文 | [English](idl-specification.en.md)
+
 ## 1. 概述
 
 OmniBinder IDL（Interface Definition Language）使用类 protobuf 风格的语法来定义服务接口、

@@ -25,6 +25,8 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <mutex>
+#include <condition_variable>
 
 using namespace omnibinder;
 
@@ -95,14 +97,14 @@ struct LatencyStats {
 
     void printReport() const {
         printf("  %-40s\n", name.c_str());
-        printf("    Samples:  %zu\n", count());
-        printf("    Min:      %.1f us\n", min());
-        printf("    Max:      %.1f us\n", max());
-        printf("    Avg:      %.1f us\n", avg());
-        printf("    Median:   %.1f us\n", median());
-        printf("    P95:      %.1f us\n", percentile(95));
-        printf("    P99:      %.1f us\n", percentile(99));
-        printf("    StdDev:   %.1f us\n", stddev());
+        printf("    样本数:      %zu\n", count());
+        printf("    最小值:      %.1f us\n", min());
+        printf("    最大值:      %.1f us\n", max());
+        printf("    平均值:      %.1f us\n", avg());
+        printf("    中位数:      %.1f us\n", median());
+        printf("    95%% 情况:    %.1f us\n", percentile(95));
+        printf("    99%% 情况:    %.1f us\n", percentile(99));
+        printf("    标准差:      %.1f us\n", stddev());
         printf("\n");
     }
 
@@ -134,7 +136,7 @@ static const uint16_t SM_PORT    = 19910;
 static const int WARMUP_ROUNDS   = 50;
 static const int RPC_ROUNDS      = 1000;
 static const int TOPIC_WARMUP_ROUNDS = 10;
-static const int TOPIC_ROUNDS    = 50;
+static const int TOPIC_ROUNDS    = 1000;
 static const bool RUN_TOPIC_BENCH = true;
 
 // ============================================================
@@ -438,9 +440,18 @@ static LatencyStats benchRpcAdd(OmniRuntime& runtime, int warmup, int rounds) {
 // 性能测试: 话题发布到接收延迟
 // ============================================================
 struct TopicBenchContext {
-    std::atomic<bool> received;
+    std::mutex mutex;
+    std::condition_variable cv;
+    uint32_t expected_seq;
+    uint32_t received_seq;
     int64_t recv_time_us;
-    TopicBenchContext() : received(false), recv_time_us(0) {}
+    int expected_payload_size;
+
+    TopicBenchContext()
+        : expected_seq(0)
+        , received_seq(0)
+        , recv_time_us(0)
+        , expected_payload_size(0) {}
 };
 
 struct TopicSubscriberContext {
@@ -463,6 +474,7 @@ struct TopicPublisherContext {
     std::atomic<bool> broadcast_pending;
     std::vector<uint8_t> payload;
     std::atomic<int64_t> send_time_us;
+    std::atomic<uint32_t> pending_seq;
 
     TopicPublisherContext()
         : ready(false)
@@ -492,6 +504,8 @@ static void* topicPublisherThread(void* arg) {
     while (!ctx->should_stop) {
         if (ctx->broadcast_pending.exchange(false)) {
             Buffer buf;
+            uint32_t seq = ctx->pending_seq.load();
+            buf.writeUint32(seq);
             if (!ctx->payload.empty()) {
                 buf.writeRaw(ctx->payload.data(), ctx->payload.size());
             }
@@ -516,10 +530,26 @@ static void* topicSubscriberThread(void* arg) {
     int ret = ctx->runtime.subscribeTopic("PerfTopic",
         [ctx](uint32_t tid, const Buffer& data) {
             (void)tid;
-            (void)data;
             if (ctx->bench) {
+                Buffer payload(data.data(), data.size());
+                if (payload.size() < sizeof(uint32_t)) {
+                    return;
+                }
+
+                uint32_t seq = payload.readUint32();
+                const int payload_size = static_cast<int>(payload.remaining());
+
+                std::unique_lock<std::mutex> lock(ctx->bench->mutex);
+                if (payload_size != ctx->bench->expected_payload_size) {
+                    return;
+                }
+                if (seq != ctx->bench->expected_seq) {
+                    return;
+                }
                 ctx->bench->recv_time_us = nowUs();
-                ctx->bench->received.store(true);
+                ctx->bench->received_seq = seq;
+                lock.unlock();
+                ctx->bench->cv.notify_one();
             }
         });
     if (ret != 0) {
@@ -545,6 +575,7 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     stats.name = oss.str();
     TopicPublisherContext pub_ctx;
     pub_ctx.payload.assign(static_cast<size_t>(payload_size), 0xCD);
+    pub_ctx.pending_seq.store(0);
     pthread_t pub_tid;
     if (pthread_create(&pub_tid, NULL, topicPublisherThread, &pub_ctx) != 0) {
         fprintf(stderr, "Topic publisher thread create failed\n");
@@ -559,6 +590,7 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     }
 
     TopicBenchContext ctx;
+    ctx.expected_payload_size = payload_size;
     TopicSubscriberContext sub_ctx;
     sub_ctx.bench = &ctx;
     pthread_t sub_tid;
@@ -579,14 +611,27 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     }
     for (int i = 0; i < 30; i++) usleep(5000);
 
+    const uint32_t topic_timeout_ms = 2000;
+    auto waitForSequence = [&ctx, topic_timeout_ms](uint32_t seq) -> bool {
+        std::unique_lock<std::mutex> lock(ctx.mutex);
+        ctx.expected_seq = seq;
+        return ctx.cv.wait_for(
+            lock,
+            std::chrono::milliseconds(topic_timeout_ms),
+            [&ctx, seq]() { return ctx.received_seq == seq; });
+    };
+
     bool subscriber_ready = false;
     for (int i = 0; i < 100 && !subscriber_ready; ++i) {
-        ctx.received.store(false);
-        pub_ctx.broadcast_pending.store(true);
-        for (int j = 0; j < 200 && !ctx.received.load(); ++j) {
-            usleep(500);
+        uint32_t seq = static_cast<uint32_t>(i + 1);
+        {
+            std::lock_guard<std::mutex> lock(ctx.mutex);
+            ctx.received_seq = 0;
+            ctx.expected_seq = seq;
         }
-        subscriber_ready = ctx.received.load();
+        pub_ctx.pending_seq.store(seq);
+        pub_ctx.broadcast_pending.store(true);
+        subscriber_ready = waitForSequence(seq);
     }
     if (!subscriber_ready) {
         fprintf(stderr, "Topic subscriber never received preflight broadcast\n");
@@ -597,21 +642,36 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
         return stats;
     }
     for (int i = 0; i < warmup; i++) {
-        ctx.received.store(false);
+        uint32_t seq = static_cast<uint32_t>(1000 + i + 1);
+        {
+            std::lock_guard<std::mutex> lock(ctx.mutex);
+            ctx.received_seq = 0;
+            ctx.expected_seq = seq;
+        }
+        pub_ctx.pending_seq.store(seq);
         pub_ctx.broadcast_pending.store(true);
-        for (int j = 0; j < 200 && !ctx.received.load(); j++) {
-            usleep(500);
+        if (!waitForSequence(seq)) {
+            fprintf(stderr, "Topic warmup timed out (payload=%d, seq=%u)\n", payload_size, seq);
+            sub_ctx.should_stop = true;
+            pthread_join(sub_tid, NULL);
+            pub_ctx.should_stop = true;
+            pthread_join(pub_tid, NULL);
+            return stats;
         }
     }
     for (int i = 0; i < rounds; i++) {
-        ctx.received.store(false);
-        pub_ctx.broadcast_pending.store(true);
-        for (int j = 0; j < 200 && !ctx.received.load(); j++) {
-            usleep(500);
+        uint32_t seq = static_cast<uint32_t>(2000 + i + 1);
+        {
+            std::lock_guard<std::mutex> lock(ctx.mutex);
+            ctx.received_seq = 0;
+            ctx.expected_seq = seq;
         }
-
-        if (ctx.received.load()) {
+        pub_ctx.pending_seq.store(seq);
+        pub_ctx.broadcast_pending.store(true);
+        if (waitForSequence(seq)) {
             stats.add(static_cast<double>(ctx.recv_time_us - pub_ctx.send_time_us.load()));
+        } else {
+            fprintf(stderr, "Topic benchmark timed out (payload=%d, seq=%u)\n", payload_size, seq);
         }
     }
 
@@ -650,7 +710,7 @@ static void generateReport(const std::vector<LatencyStats>& all_stats,
     ofs << "- 话题测试轮数: " << TOPIC_ROUNDS << "（每个用例）\n\n";
 
     ofs << "## 总览\n\n";
-    ofs << "| 测试用例 | 样本数 | 最小值 (us) | 最大值 (us) | 平均值 (us) | 中位数 (us) | P95 (us) | P99 (us) | 标准差 (us) |\n";
+    ofs << "| 测试用例 | 样本数 | 最小值 (us) | 最大值 (us) | 平均值 (us) | 中位数 (us) | 95% 情况 (us) | 99% 情况 (us) | 标准差 (us) |\n";
     ofs << "|----------|--------|-------------|-------------|-------------|-------------|----------|----------|-------------|\n";
 
     for (size_t i = 0; i < all_stats.size(); i++) {
@@ -672,8 +732,8 @@ static void generateReport(const std::vector<LatencyStats>& all_stats,
             ofs << "- 最大值: " << all_stats[i].max() << " us\n";
             ofs << "- 平均值: " << all_stats[i].avg() << " us\n";
             ofs << "- 中位数: " << all_stats[i].median() << " us\n";
-            ofs << "- P95: " << all_stats[i].percentile(95) << " us\n";
-            ofs << "- P99: " << all_stats[i].percentile(99) << " us\n\n";
+        ofs << "- 95% 情况: " << all_stats[i].percentile(95) << " us\n";
+        ofs << "- 99% 情况: " << all_stats[i].percentile(99) << " us\n\n";
         }
     }
 
@@ -688,8 +748,8 @@ static void generateReport(const std::vector<LatencyStats>& all_stats,
             ofs << "- 最大值: " << all_stats[i].max() << " us\n";
             ofs << "- 平均值: " << all_stats[i].avg() << " us\n";
             ofs << "- 中位数: " << all_stats[i].median() << " us\n";
-            ofs << "- P95: " << all_stats[i].percentile(95) << " us\n";
-            ofs << "- P99: " << all_stats[i].percentile(99) << " us\n\n";
+        ofs << "- 95% 情况: " << all_stats[i].percentile(95) << " us\n";
+        ofs << "- 99% 情况: " << all_stats[i].percentile(99) << " us\n\n";
         }
     }
     if (!has_topic_stats) {
