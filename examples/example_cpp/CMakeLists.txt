@@ -25,11 +25,4 @@ if(TARGET omni-idlc OR TARGET omnic)
             ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
-    if(TARGET omni-idlc)
-        add_dependencies(example_cpp_sensor_server omni-idlc)
-        add_dependencies(example_cpp_sensor_client omni-idlc)
-    else()
-        add_dependencies(example_cpp_sensor_server omnic)
-        add_dependencies(example_cpp_sensor_client omnic)
-    endif()
 endif()

@@ -30,6 +30,41 @@ std::string cTypeName(const TypeRef& type, const std::string& pkg) {
     }
 }
 
+static bool isCStringLike(const TypeRef& type) {
+    return type.primitive == TYPE_STRING || type.primitive == TYPE_BYTES;
+}
+
+static std::string idlTypeName(const TypeRef& type) {
+    switch (type.primitive) {
+    case TYPE_BOOL:    return "bool";
+    case TYPE_INT8:    return "int8_t";
+    case TYPE_UINT8:   return "uint8_t";
+    case TYPE_INT16:   return "int16_t";
+    case TYPE_UINT16:  return "uint16_t";
+    case TYPE_INT32:   return "int32_t";
+    case TYPE_UINT32:  return "uint32_t";
+    case TYPE_INT64:   return "int64_t";
+    case TYPE_UINT64:  return "uint64_t";
+    case TYPE_FLOAT32: return "float";
+    case TYPE_FLOAT64: return "double";
+    case TYPE_STRING:  return "std::string";
+    case TYPE_BYTES:   return "std::vector<uint8_t>";
+    case TYPE_VOID:    return "void";
+    case TYPE_CUSTOM:
+        if (!type.package_name.empty()) {
+            return type.package_name + "::" + type.custom_name;
+        }
+        return type.custom_name;
+    case TYPE_ARRAY:
+        if (type.element_type) {
+            return "std::vector<" + idlTypeName(*type.element_type) + ">";
+        }
+        return "std::vector<void*>";
+    default:
+        return "void";
+    }
+}
+
 // 获取自定义类型的 C 函数名前缀（跨包时用 package_name，本包时用 pkg）
 static std::string cTypePrefix(const TypeRef& type, const std::string& pkg) {
     if (!type.package_name.empty()) {
@@ -182,6 +217,12 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
     os << "typedef struct " << prefix << "_callbacks {\n";
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
+        if (m.has_param && isCStringLike(m.param.type)) {
+            os << "    /* " << m.name << ": for string/bytes parameters, pass pointer + length. */\n";
+        }
+        if (!m.return_type.isVoid() && isCStringLike(m.return_type)) {
+            os << "    /* " << m.name << ": allocate return buffer on heap, set *result_len, and the stub frees *result after reply serialization. */\n";
+        }
         os << "    ";
         if (m.return_type.isVoid()) {
             os << "void";
@@ -195,6 +236,8 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
         if (m.has_param) {
             if (m.param.type.isCustom()) {
                 os << "const " << cTypeName(m.param.type, pkg_) << "* " << m.param.name;
+            } else if (isCStringLike(m.param.type)) {
+                os << "const " << cTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
             } else {
                 os << cTypeName(m.param.type, pkg_) << " " << m.param.name;
             }
@@ -204,6 +247,8 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
             if (has_args) os << ", ";
             if (m.return_type.isCustom()) {
                 os << cTypeName(m.return_type, pkg_) << "* result";
+            } else if (isCStringLike(m.return_type)) {
+                os << cTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
             } else {
                 os << cTypeName(m.return_type, pkg_) << "* result";
             }
@@ -256,6 +301,8 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
         if (m.has_param) {
             if (m.param.type.isCustom()) {
                 os << ", const " << cTypeName(m.param.type, pkg_) << "* " << m.param.name;
+            } else if (isCStringLike(m.param.type)) {
+                os << ", const " << cTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
             } else {
                 os << ", " << cTypeName(m.param.type, pkg_) << " " << m.param.name;
             }
@@ -263,6 +310,8 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
         if (!m.return_type.isVoid()) {
             if (m.return_type.isCustom()) {
                 os << ", " << cTypeName(m.return_type, pkg_) << "* result";
+            } else if (isCStringLike(m.return_type)) {
+                os << ", " << cTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
             } else {
                 os << ", " << cTypeName(m.return_type, pkg_) << "* result";
             }
@@ -488,6 +537,15 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 os << "        " << ptype << " " << m.param.name << ";\n";
                 os << "        " << ppfx << "_init(&" << m.param.name << ");\n";
                 os << "        " << ppfx << "_deserialize(&" << m.param.name << ", req);\n";
+            } else if (isCStringLike(m.param.type)) {
+                std::string ptype = cTypeName(m.param.type, pkg_);
+                os << "        " << ptype << " " << m.param.name << " = NULL;\n";
+                os << "        uint32_t " << m.param.name << "_len = 0;\n";
+                if (m.param.type.primitive == TYPE_STRING) {
+                    os << "        " << m.param.name << " = omni_buffer_read_string(req, &" << m.param.name << "_len);\n";
+                } else {
+                    os << "        " << m.param.name << " = omni_buffer_read_bytes(req, &" << m.param.name << "_len);\n";
+                }
             } else {
                 std::string ptype = cTypeName(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << " = ";
@@ -516,6 +574,9 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 std::string rpfx = cTypePrefix(m.return_type, pkg_);
                 os << "        " << rtype << " result;\n";
                 os << "        " << rpfx << "_init(&result);\n";
+            } else if (isCStringLike(m.return_type)) {
+                os << "        " << cTypeName(m.return_type, pkg_) << " result = NULL;\n";
+                os << "        uint32_t result_len = 0;\n";
             } else {
                 os << "        " << cTypeName(m.return_type, pkg_) << " result = 0;\n";
             }
@@ -528,6 +589,8 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
         if (m.has_param) {
             if (m.param.type.isCustom()) {
                 os << "&" << m.param.name;
+            } else if (isCStringLike(m.param.type)) {
+                os << m.param.name << ", " << m.param.name << "_len";
             } else {
                 os << m.param.name;
             }
@@ -535,7 +598,11 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
         }
         if (!m.return_type.isVoid()) {
             if (has_args) os << ", ";
-            os << "&result";
+            if (isCStringLike(m.return_type)) {
+                os << "&result, &result_len";
+            } else {
+                os << "&result";
+            }
             has_args = true;
         }
         if (has_args) os << ", ";
@@ -548,6 +615,13 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 std::string rpfx2 = cTypePrefix(m.return_type, pkg_);
                 os << "        " << rpfx2 << "_serialize(&result, response);\n";
                 os << "        " << rpfx2 << "_destroy(&result);\n";
+            } else if (isCStringLike(m.return_type)) {
+                if (m.return_type.primitive == TYPE_STRING) {
+                    os << "        omni_buffer_write_string(response, result, result_len);\n";
+                } else {
+                    os << "        omni_buffer_write_bytes(response, result, result_len);\n";
+                }
+                os << "        if (result) free(result);\n";
             } else {
                 switch (m.return_type.primitive) {
                 case TYPE_BOOL:    os << "        omni_buffer_write_bool(response, result);\n"; break;
@@ -570,6 +644,8 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
         if (m.has_param && m.param.type.isCustom()) {
             std::string ppfx2 = cTypePrefix(m.param.type, pkg_);
             os << "        " << ppfx2 << "_destroy(&" << m.param.name << ");\n";
+        } else if (m.has_param && isCStringLike(m.param.type)) {
+            os << "        if (" << m.param.name << ") free(" << m.param.name << ");\n";
         }
     }
     if (!svc.methods.empty()) {
@@ -590,8 +666,11 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         std::string upper_name = toSnakeCase(svc.methods[i].name);
         for (size_t j = 0; j < upper_name.size(); ++j) upper_name[j] = toupper(upper_name[j]);
-        os << "    omni_service_add_method(svc, " << prefix << "_METHOD_" << upper_name
-           << ", \"" << svc.methods[i].name << "\");\n";
+        std::string param_type_str = svc.methods[i].has_param ? idlTypeName(svc.methods[i].param.type) : "";
+        std::string return_type_str = idlTypeName(svc.methods[i].return_type);
+        os << "    omni_service_add_method_ex(svc, " << prefix << "_METHOD_" << upper_name
+           << ", \"" << svc.methods[i].name << "\", \"" << param_type_str
+           << "\", \"" << return_type_str << "\");\n";
     }
     os << "    return svc;\n";
     os << "}\n\n";
@@ -656,6 +735,8 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
         if (m.has_param) {
             if (m.param.type.isCustom()) {
                 os << ", const " << cTypeName(m.param.type, pkg_) << "* " << m.param.name;
+            } else if (isCStringLike(m.param.type)) {
+                os << ", const " << cTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
             } else {
                 os << ", " << cTypeName(m.param.type, pkg_) << " " << m.param.name;
             }
@@ -663,6 +744,8 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
         if (!m.return_type.isVoid()) {
             if (m.return_type.isCustom()) {
                 os << ", " << cTypeName(m.return_type, pkg_) << "* result";
+            } else if (isCStringLike(m.return_type)) {
+                os << ", " << cTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
             } else {
                 os << ", " << cTypeName(m.return_type, pkg_) << "* result";
             }
@@ -677,6 +760,12 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
             if (m.param.type.isCustom()) {
                 std::string ppfx = cTypePrefix(m.param.type, pkg_);
                 os << "    " << ppfx << "_serialize(" << m.param.name << ", req);\n";
+            } else if (isCStringLike(m.param.type)) {
+                if (m.param.type.primitive == TYPE_STRING) {
+                    os << "    omni_buffer_write_string(req, " << m.param.name << ", " << m.param.name << "_len);\n";
+                } else {
+                    os << "    omni_buffer_write_bytes(req, " << m.param.name << ", " << m.param.name << "_len);\n";
+                }
             } else {
                 switch (m.param.type.primitive) {
                 case TYPE_BOOL:    os << "    omni_buffer_write_bool(req, " << m.param.name << ");\n"; break;
@@ -710,6 +799,12 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
             if (m.return_type.isCustom()) {
                 std::string rpfx = cTypePrefix(m.return_type, pkg_);
                 os << "        " << rpfx << "_deserialize(result, resp);\n";
+            } else if (isCStringLike(m.return_type)) {
+                if (m.return_type.primitive == TYPE_STRING) {
+                    os << "        *result = omni_buffer_read_string(resp, result_len);\n";
+                } else {
+                    os << "        *result = omni_buffer_read_bytes(resp, result_len);\n";
+                }
             } else {
                 switch (m.return_type.primitive) {
                 case TYPE_BOOL:    os << "        *result = omni_buffer_read_bool(resp);\n"; break;

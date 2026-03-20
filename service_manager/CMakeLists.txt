@@ -11,5 +11,5 @@ add_executable(service_manager
 target_link_libraries(service_manager PRIVATE omnibinder_static)
 
 install(TARGETS service_manager
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RUNTIME DESTINATION ${OMNIBINDER_INSTALL_RUNTIME_BINDIR}
 )

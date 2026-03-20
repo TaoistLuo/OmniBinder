@@ -132,13 +132,15 @@ cmake --build build -j4
 cmake --install build
 ```
 
-Make sure `omni-idlc` is discoverable:
+By default, after `find_package(OmniBinder REQUIRED)`, downstream builds prefer the installed `bin_host/omni-idlc`.
+
+If you also want to invoke it directly from the shell, add it to `PATH`:
 
 ```bash
-export PATH="$(pwd)/build/install/bin:$PATH"
+export PATH="$(pwd)/build/install/bin_host:$PATH"
 ```
 
-This matters because `omnic_generate()` in downstream projects finds `omni-idlc` through `PATH`.
+`omnic_generate()` only falls back to `PATH` when the installed package does not provide a host `omni-idlc` and `OMNIBINDER_HOST_IDLC` is not set explicitly.
 
 ---
 
@@ -165,16 +167,18 @@ The script will:
 
 ```bash
 cmake -S examples/artifact_sensor_hmi -B build/example_sensor_hmi \
-  -DOmniBinder_DIR="$(pwd)/build/install/lib/cmake/OmniBinder"
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
 
 cmake --build build/example_sensor_hmi -j4
 ```
 
 Key points:
 
-- `OmniBinder_DIR` points to the installed CMake package directory
+- `CMAKE_PREFIX_PATH` points to the OmniBinder install prefix, and `find_package()` discovers `lib/cmake/OmniBinder` from there
 - the downstream project gets exported library targets through `find_package(OmniBinder REQUIRED)`
-- `omnic_generate()` invokes `omni-idlc` to generate code
+- `omnic_generate()` invokes the host `omni-idlc` to generate code
+
+Note: this assumes a host-side install prefix. If you use the final dual-stage cross-compilation output, do not feed that merged release prefix directly into host-side downstream `find_package()` calls, because `lib/` may already have been replaced by target-architecture binaries.
 
 ---
 
@@ -183,6 +187,7 @@ Key points:
 Core idea:
 
 ```cmake
+set(CMAKE_PREFIX_PATH "/path/to/omnibinder/install")
 find_package(OmniBinder REQUIRED)
 
 add_executable(sensor_cpp sensor_cpp/sensor_service.cpp)

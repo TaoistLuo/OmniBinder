@@ -140,13 +140,113 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
+如果你只是普通主机构建，不需要交叉编译，直接继续安装即可：
+
+```bash
+cmake --install build
+```
+
+安装后目录为：
+
+```text
+install/
+├── bin_host/
+├── include/
+└── lib/
+```
+
+如果你要做交叉编译，推荐使用双阶段构建：先产出主机版 `omni-idlc`，再交叉编译目标板运行时，并合并安装到同一个前缀：
+
+```bash
+TOOLCHAIN_FILE=/path/to/toolchain.cmake ./scripts/build_dual_stage_install.sh
+```
+
+或者显式提供 cross stage 所需变量：
+
+```bash
+CROSS_CC=/path/to/target-gcc \
+CROSS_CXX=/path/to/target-g++ \
+CROSS_AR=/path/to/target-ar \
+CROSS_RANLIB=/path/to/target-ranlib \
+CROSS_STRIP=/path/to/target-strip \
+CROSS_LD=/path/to/target-ld \
+CROSS_PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot \
+CROSS_PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig \
+./scripts/build_dual_stage_install.sh
+```
+
+当前项目交叉编译的约束是：**cross stage 必须提供一组明确的交叉工具链变量**。项目契约只认这些变量和 CMake 工具链输入，不认任何特定的 `source xxx` 命令。
+
+```bash
+export TOOLCHAIN_ROOT=/usr/local/arm_linux_4.8/bin
+
+export PATH="${TOOLCHAIN_ROOT}:$PATH"
+export CC="${TOOLCHAIN_ROOT}/arm-linux-gcc"
+export CXX="${TOOLCHAIN_ROOT}/arm-linux-g++"
+
+# 强烈建议一并设置，避免归档/链接/符号工具落回主机版本
+export AR="${TOOLCHAIN_ROOT}/arm-linux-ar"
+export RANLIB="${TOOLCHAIN_ROOT}/arm-linux-ranlib"
+export STRIP="${TOOLCHAIN_ROOT}/arm-linux-strip"
+export LD="${TOOLCHAIN_ROOT}/arm-linux-ld"
+```
+
+原因是：
+
+- `PATH`：让 CMake 和编译过程能找到交叉工具链可执行文件
+- `CC` / `CXX`：明确告诉 CMake 使用哪一套 C / C++ 交叉编译器
+- `AR` / `RANLIB` / `STRIP` / `LD`：让静态库、链接与产物处理阶段也保持同一套交叉工具链
+
+如果你的 sysroot 和第三方 `.pc` 文件依赖 `pkg-config`，再补：
+
+```bash
+export PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot
+export PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig
+```
+
+
+如果你的交叉编译器本身已经内置 sysroot，上面的变量就够用了；如果你的工具链要求显式 sysroot，更推荐通过 `CMAKE_TOOLCHAIN_FILE` 或 `CMAKE_SYSROOT` 传给 CMake，而不是继续往环境里堆变量。
+
+双阶段安装的最终要求是：
+
+- host stage 产出 `install/bin_host/omni-idlc`
+- cross stage 产出 `install/bin_cross/service_manager` 与 `install/bin_cross/omni-cli`
+- 最终安装目录为统一前缀 `install/`
+
+注意：**host stage 必须在干净的主机环境中执行**，不能提前把 `CC` / `CXX` 指到交叉编译器，否则 host stage 会被错误识别成 cross context，从而无法产出 `bin_host/omni-idlc`。
+
+注意：这个双阶段安装前缀主要用于发布和部署。
+
+- `install/bin_host/` 里的工具可以在主机上直接执行
+- `install/bin_cross/` 里的程序用于目标板部署
+- `install/lib/` 和 `install/lib/cmake/OmniBinder` 最终会以交叉编译产物为准
+- 因此，不要把这个双阶段安装前缀直接当作“主机侧下游工程的 `find_package(OmniBinder)` 输入”
+
+如果你要在主机上编译下游工程，请使用“纯主机构建 + 安装”得到的安装前缀。
+
+最终目录结构类似：
+
+```text
+install/
+├── bin_cross/
+│   ├── omni-cli
+│   └── service_manager
+├── bin_host/
+│   ├── omni-idlc
+│   ├── omni-cli
+│   └── service_manager
+├── include/
+└── lib/
+```
+
 构建选项：
 
 | 选项 | 默认值 | 说明 |
 |------|--------|------|
 | `OMNIBINDER_BUILD_TESTS` | ON | 编译单元测试 |
 | `OMNIBINDER_BUILD_EXAMPLES` | ON | 编译示例程序 |
-| `OMNIBINDER_BUILD_TOOLS` | ON | 编译 omni-idlc 和 omni-cli |
+| `OMNIBINDER_BUILD_TOOLS` | ON | 编译工具目标 |
+| `OMNIBINDER_BUILD_HOST_IDLC` | Host 默认 ON / 交叉默认 OFF | 是否编译主机版 `omni-idlc` |
 
 ### 运行示例
 
@@ -167,7 +267,7 @@ cmake --build build -j$(nproc)
 # 先安装当前项目产物
 cmake --install build
 
-# 再构建下游 Sensor/HMI 示例（依赖 build/install 下的 lib + omni-idlc）
+# 再构建下游 Sensor/HMI 示例（依赖 build/install 下的 lib + bin_host/omni-idlc）
 ./examples/artifact_sensor_hmi/scripts/build_downstream_example.sh
 
 # 启动完整 C++ 示例栈

@@ -3,6 +3,7 @@
  * @brief       类型编解码器实现
  *************************************************************************************************/
 #include "type_codec.h"
+#include "type_resolver.h"
 #include <cstdio>
 #include <cstring>
 
@@ -27,39 +28,87 @@ const omnic::StructDef* TypeCodec::findStruct(const std::string& name, const std
 bool TypeCodec::encodePrimitive(const simple_json::Value& json, const omnic::TypeRef& type, omnibinder::Buffer& buf) {
     switch (type.primitive) {
     case omnic::TYPE_BOOL:
+        if (!json.isBool()) {
+            fprintf(stderr, "Error: Expected bool value\n");
+            return false;
+        }
         buf.writeBool(json.asBool());
         return true;
     case omnic::TYPE_INT8:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for int8\n");
+            return false;
+        }
         buf.writeInt8(static_cast<int8_t>(json.asInt64()));
         return true;
     case omnic::TYPE_UINT8:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for uint8\n");
+            return false;
+        }
         buf.writeUint8(static_cast<uint8_t>(json.asInt64()));
         return true;
     case omnic::TYPE_INT16:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for int16\n");
+            return false;
+        }
         buf.writeInt16(static_cast<int16_t>(json.asInt64()));
         return true;
     case omnic::TYPE_UINT16:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for uint16\n");
+            return false;
+        }
         buf.writeUint16(static_cast<uint16_t>(json.asInt64()));
         return true;
     case omnic::TYPE_INT32:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for int32\n");
+            return false;
+        }
         buf.writeInt32(static_cast<int32_t>(json.asInt64()));
         return true;
     case omnic::TYPE_UINT32:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for uint32\n");
+            return false;
+        }
         buf.writeUint32(static_cast<uint32_t>(json.asInt64()));
         return true;
     case omnic::TYPE_INT64:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for int64\n");
+            return false;
+        }
         buf.writeInt64(json.asInt64());
         return true;
     case omnic::TYPE_UINT64:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for uint64\n");
+            return false;
+        }
         buf.writeUint64(static_cast<uint64_t>(json.asInt64()));
         return true;
     case omnic::TYPE_FLOAT32:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for float32\n");
+            return false;
+        }
         buf.writeFloat32(static_cast<float>(json.asNumber()));
         return true;
     case omnic::TYPE_FLOAT64:
+        if (!json.isNumber()) {
+            fprintf(stderr, "Error: Expected numeric value for float64\n");
+            return false;
+        }
         buf.writeFloat64(json.asNumber());
         return true;
     case omnic::TYPE_STRING:
+        if (!json.isString()) {
+            fprintf(stderr, "Error: Expected string value\n");
+            return false;
+        }
         buf.writeString(json.asString());
         return true;
     case omnic::TYPE_BYTES:
@@ -283,25 +332,7 @@ simple_json::Value TypeCodec::generateSchema(const omnic::TypeRef& type, const s
         }
     } else {
         // 基础类型 - 返回类型名
-        std::string typeName;
-        switch (type.primitive) {
-        case omnic::TYPE_BOOL: typeName = "bool"; break;
-        case omnic::TYPE_INT8: typeName = "int8"; break;
-        case omnic::TYPE_UINT8: typeName = "uint8"; break;
-        case omnic::TYPE_INT16: typeName = "int16"; break;
-        case omnic::TYPE_UINT16: typeName = "uint16"; break;
-        case omnic::TYPE_INT32: typeName = "int32"; break;
-        case omnic::TYPE_UINT32: typeName = "uint32"; break;
-        case omnic::TYPE_INT64: typeName = "int64"; break;
-        case omnic::TYPE_UINT64: typeName = "uint64"; break;
-        case omnic::TYPE_FLOAT32: typeName = "float32"; break;
-        case omnic::TYPE_FLOAT64: typeName = "float64"; break;
-        case omnic::TYPE_STRING: typeName = "string"; break;
-        case omnic::TYPE_BYTES: typeName = "bytes"; break;
-        case omnic::TYPE_VOID: typeName = "void"; break;
-        default: typeName = "unknown"; break;
-        }
-        schema.set("type", simple_json::Value(typeName));
+        schema.set("type", simple_json::Value(omni_cli::primitiveTypeName(type.primitive)));
     }
     
     return schema;

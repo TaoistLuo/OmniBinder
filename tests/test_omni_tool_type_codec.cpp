@@ -1,7 +1,8 @@
-#include "../tools/omni_cli/simple_json.h"
-#include "../tools/omni_cli/type_codec.h"
-#include "../tools/omni_idlc/lexer.h"
-#include "../tools/omni_idlc/parser.h"
+#include "simple_json.h"
+#include "type_codec.h"
+#include "type_resolver.h"
+#include "lexer.h"
+#include "parser.h"
 
 #include <omnibinder/buffer.h>
 
@@ -21,21 +22,15 @@ using namespace omnic;
 
 static std::string writeTempFile(const std::string& prefix, const std::string& suffix,
                                  const std::string& contents) {
-    char tmpl[256];
-    std::snprintf(tmpl, sizeof(tmpl), "/tmp/%sXXXXXX%s", prefix.c_str(), suffix.c_str());
+    char dir_template[] = "/tmp/omnibinder_tmp_XXXXXX";
+    char* dir_path = mkdtemp(dir_template);
+    assert(dir_path != NULL);
 
-    std::string pattern(tmpl);
-    size_t suffix_len = suffix.size();
-    std::vector<char> writable(pattern.begin(), pattern.end());
-    writable.push_back('\0');
-    int fd = mkstemps(writable.data(), static_cast<int>(suffix_len));
-    assert(fd >= 0);
-
-    std::ofstream out(writable.data());
+    std::string file_path = std::string(dir_path) + "/" + prefix + suffix;
+    std::ofstream out(file_path.c_str());
     out << contents;
     out.close();
-    close(fd);
-    return std::string(writable.data());
+    return file_path;
 }
 
 static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
@@ -166,6 +161,121 @@ int main() {
         unlink(common_path.c_str());
         unlink(main_path.c_str());
         rmdir(dir.c_str());
+        PASS();
+    }
+
+    TEST(type_resolver_primitives_and_cross_package);
+    {
+        const std::string common =
+            "package common;\n"
+            "struct StatusResponse {\n"
+            "    int32 code;\n"
+            "    string message;\n"
+            "}\n";
+        const std::string main =
+            "package demo;\n"
+            "import \"common_types.bidl\";\n"
+            "struct Wrapper {\n"
+            "    common.StatusResponse status;\n"
+            "}\n";
+
+        char dir_template[] = "/tmp/omnibinder_resolver_XXXXXX";
+        char* dir_path = mkdtemp(dir_template);
+        assert(dir_path != NULL);
+        std::string dir(dir_path);
+        std::string common_path = dir + "/common_types.bidl";
+        std::string main_path = dir + "/wrapper.bidl";
+
+        {
+            std::ofstream out(common_path.c_str());
+            out << common;
+        }
+        {
+            std::ofstream out(main_path.c_str());
+            out << main;
+        }
+
+        AstFile ast;
+        ParseContext ctx = parseFile(main_path, ast);
+
+        omnic::TypeRef type_ref;
+        assert(omni_cli::fillPrimitiveTypeRef("std::string", type_ref));
+        assert(type_ref.primitive == omnic::TYPE_STRING);
+
+        assert(omni_cli::fillPrimitiveTypeRef("std::vector<uint8_t>", type_ref));
+        assert(type_ref.primitive == omnic::TYPE_BYTES);
+
+        assert(omni_cli::fillPrimitiveTypeRef("int32_t", type_ref));
+        assert(type_ref.primitive == omnic::TYPE_INT32);
+
+        assert(omni_cli::findTypeRef(&ctx, "common::StatusResponse", "demo", type_ref));
+        assert(type_ref.primitive == omnic::TYPE_CUSTOM);
+        assert(type_ref.package_name == "common");
+        assert(type_ref.custom_name == "StatusResponse");
+
+        assert(omni_cli::findTypeRef(&ctx, "Wrapper", "demo", type_ref));
+        assert(type_ref.primitive == omnic::TYPE_CUSTOM);
+        assert(type_ref.package_name.empty());
+        assert(type_ref.custom_name == "Wrapper");
+
+        assert(!omni_cli::findTypeRef(&ctx, "common::Missing", "demo", type_ref));
+
+        unlink(common_path.c_str());
+        unlink(main_path.c_str());
+        rmdir(dir.c_str());
+        PASS();
+    }
+
+    TEST(type_codec_scalar_cli_friendly_values);
+    {
+        omnic::TypeRef intType;
+        assert(omni_cli::fillPrimitiveTypeRef("int32_t", intType));
+        assert(omni_cli::isScalarCliType(intType));
+
+        omnic::TypeRef stringType;
+        assert(omni_cli::fillPrimitiveTypeRef("std::string", stringType));
+        assert(omni_cli::isScalarCliType(stringType));
+
+        omnic::TypeRef bytesType;
+        assert(omni_cli::fillPrimitiveTypeRef("std::vector<uint8_t>", bytesType));
+        assert(!omni_cli::isScalarCliType(bytesType));
+
+        omnic::TypeRef structType;
+        structType.primitive = omnic::TYPE_CUSTOM;
+        structType.custom_name = "Wrapper";
+        assert(!omni_cli::isScalarCliType(structType));
+
+        assert(std::string(omni_cli::primitiveTypeName(omnic::TYPE_INT32)) == "int32");
+        assert(std::string(omni_cli::primitiveTypeName(omnic::TYPE_STRING)) == "string");
+        assert(std::string(omni_cli::primitiveTypeName(omnic::TYPE_BYTES)) == "bytes");
+
+        simple_json::Value scalar;
+        assert(omni_cli::parseScalarCliValue("123", intType, scalar));
+        assert(scalar.isNumber());
+        assert(scalar.asInt64() == 123);
+
+        assert(omni_cli::parseScalarCliValue("hello", stringType, scalar));
+        assert(scalar.isString());
+        assert(scalar.asString() == "hello");
+
+        assert(!omni_cli::parseScalarCliValue("ff", bytesType, scalar));
+        assert(!omni_cli::parseScalarCliValue("123", structType, scalar));
+        PASS();
+    }
+
+    TEST(type_codec_rejects_object_for_scalar);
+    {
+        omnic::TypeRef intType;
+        assert(omni_cli::fillPrimitiveTypeRef("int32_t", intType));
+
+        simple_json::Value badJson;
+        badJson.setObject();
+        badJson.set("in", simple_json::Value(32.0));
+
+        ParseContext ctx;
+        type_codec::TypeCodec codec(ctx);
+        omnibinder::Buffer buf;
+        assert(!codec.encodeToBuffer(badJson, intType, "demo", buf));
         PASS();
     }
 

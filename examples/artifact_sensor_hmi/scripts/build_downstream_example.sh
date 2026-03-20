@@ -11,10 +11,10 @@ cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}" -j4
 cmake --install "${BUILD_DIR}"
 
-export PATH="${INSTALL_DIR}/bin:${PATH}"
+export PATH="${INSTALL_DIR}/bin_host:${PATH}"
 
 cmake -S "${EXAMPLE_SOURCE_DIR}" -B "${EXAMPLE_BUILD_DIR}" \
-  -DOmniBinder_DIR="${INSTALL_DIR}/lib/cmake/OmniBinder"
+  -DCMAKE_PREFIX_PATH="${INSTALL_DIR}"
 cmake --build "${EXAMPLE_BUILD_DIR}" -j4
 
 printf 'Downstream example build ready: %s\n' "${EXAMPLE_BUILD_DIR}"

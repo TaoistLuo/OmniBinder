@@ -39,6 +39,7 @@
 #include "omnibinder/message.h"
 #include "omnibinder/transport.h"
 #include "core/event_loop.h"
+#include "core/owner_thread_executor.h"
 #include "core/connection_manager.h"
 #include "core/sm_control_channel.h"
 #include "core/rpc_runtime.h"
@@ -54,7 +55,6 @@
 #include <cstring>
 #include <functional>
 #include <atomic>
-#include <future>
 #include <mutex>
 #include <memory>
 #include <type_traits>
@@ -128,12 +128,18 @@ public:
     // --- 服务注册 ---
     int registerService(Service* service);
     int unregisterService(Service* service);
+    int registerServiceLocked(Service* service);
+    int unregisterServiceLocked(Service* service);
 
     // --- 服务发现 ---
     int lookupService(const std::string& service_name, ServiceInfo& info);
     int listServices(std::vector<ServiceInfo>& services);
     int queryInterfaces(const std::string& service_name,
                         std::vector<InterfaceInfo>& interfaces);
+    int lookupServiceLocked(const std::string& service_name, ServiceInfo& info);
+    int listServicesLocked(std::vector<ServiceInfo>& services);
+    int queryInterfacesLocked(const std::string& service_name,
+                              std::vector<InterfaceInfo>& interfaces);
 
     // --- 远程调用 ---
     int invoke(const std::string& service_name, uint32_t interface_id,
@@ -141,11 +147,19 @@ public:
                uint32_t timeout_ms);
     int invokeOneWay(const std::string& service_name, uint32_t interface_id,
                      uint32_t method_id, const Buffer& request);
+    int invokeLocked(const std::string& service_name, uint32_t interface_id,
+                     uint32_t method_id, const Buffer& request, Buffer& response,
+                     uint32_t timeout_ms);
+    int invokeOneWayLocked(const std::string& service_name, uint32_t interface_id,
+                           uint32_t method_id, const Buffer& request);
 
     // --- 死亡通知 ---
     int subscribeServiceDeath(const std::string& service_name,
                               const DeathCallback& callback);
     int unsubscribeServiceDeath(const std::string& service_name);
+    int subscribeServiceDeathLocked(const std::string& service_name,
+                                    const DeathCallback& callback);
+    int unsubscribeServiceDeathLocked(const std::string& service_name);
 
     // --- 话题 ---
     int publishTopic(const std::string& topic_name);
@@ -153,6 +167,11 @@ public:
     int subscribeTopic(const std::string& topic_name,
                        const TopicCallback& callback);
     int unsubscribeTopic(const std::string& topic_name);
+    int publishTopicLocked(const std::string& topic_name);
+    int broadcastLocked(uint32_t topic_id, const Buffer& data);
+    int subscribeTopicLocked(const std::string& topic_name,
+                             const TopicCallback& callback);
+    int unsubscribeTopicLocked(const std::string& topic_name);
 
     // --- 配置 ---
     void setHeartbeatInterval(uint32_t interval_ms);
@@ -160,6 +179,8 @@ public:
     const std::string& hostId() const;
     int getStats(RuntimeStats& stats);
     void resetStats();
+    int getStatsLocked(RuntimeStats& stats);
+    void resetStatsLocked();
     void setOwner(OmniRuntime* owner) { owner_ = owner; }
 
 private:
@@ -207,12 +228,26 @@ private:
     void captureOwnerThread();
     template<typename F>
     typename std::result_of<F()>::type callSerialized(F func);
-    template<typename F, typename Result>
-    Result callSerializedImpl(F func, std::false_type);
-    template<typename F, typename Result>
-    void callSerializedImpl(F func, std::true_type);
     bool sendOnFd(ITransport* transport, const Message& msg);
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
+    int initializeServiceListener(LocalServiceEntry* entry, Service* service,
+                                  std::string& advertise_host);
+    void initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
+                              size_t req_ring_capacity, size_t resp_ring_capacity);
+    int registerServiceWithManager(const std::string& name, Service* service,
+                                   LocalServiceEntry* entry, const std::string& advertise_host,
+                                   size_t req_ring_capacity, size_t resp_ring_capacity);
+    void cleanupPendingServiceRegistration(LocalServiceEntry* entry);
+    void removeServiceListenerFromLoop(LocalServiceEntry* entry);
+    void removeServiceShmFromLoop(LocalServiceEntry* entry);
+    bool acquireInvokeConnection(const std::string& service_name, ServiceInfo& info,
+                                 int attempt, ServiceConnection*& conn);
+    void populateInvokeMessage(Message& msg, uint32_t interface_id, uint32_t method_id,
+                               const Buffer& request) const;
+    bool sendInvokeMessage(const std::string& service_name, const Message& msg,
+                           const ServiceInfo& info, ServiceConnection*& conn,
+                           int attempt, bool log_failure, uint32_t interface_id,
+                           uint32_t method_id);
     int lookupServiceUnlocked(const std::string& service_name, ServiceInfo& info);
     std::string topicPublisherServiceName(const std::string& topic_name) const;
     bool ensureTopicPublisherConnection(const std::string& topic_name, const ServiceInfo& pub_info);
@@ -256,52 +291,21 @@ private:
     std::atomic<bool> running_;
     bool            initialized_;
     OmniRuntime* owner_;
-    std::thread::id owner_thread_id_;
     std::mutex      lifecycle_mutex_;
     std::mutex      api_mutex_;
     std::atomic<bool> loop_driver_active_;
     std::atomic<bool> sm_reconnect_needed_;
     RuntimeStats stats_;
-    std::atomic<bool> run_loop_owned_;
+    OwnerThreadExecutor owner_executor_;
 };
 
 template<typename F>
 typename std::result_of<F()>::type OmniRuntime::Impl::callSerialized(F func) {
-    typedef typename std::result_of<F()>::type Result;
-    return callSerializedImpl<F, Result>(func, typename std::is_void<Result>::type());
-}
-
-template<typename F, typename Result>
-Result OmniRuntime::Impl::callSerializedImpl(F func, std::false_type) {
-    if (!loop_ || !run_loop_owned_.load() || isOwnerThread()) {
+    if (owner_executor_.canRunInline()) {
         std::lock_guard<std::mutex> lock(api_mutex_);
         return func();
     }
-
-    std::shared_ptr<std::packaged_task<Result()> > task(
-        new std::packaged_task<Result()>(func));
-    std::future<Result> future = task->get_future();
-    loop_->post([task]() {
-        (*task)();
-    });
-    return future.get();
-}
-
-template<typename F, typename Result>
-void OmniRuntime::Impl::callSerializedImpl(F func, std::true_type) {
-    if (!loop_ || !run_loop_owned_.load() || isOwnerThread()) {
-        std::lock_guard<std::mutex> lock(api_mutex_);
-        func();
-        return;
-    }
-
-    std::shared_ptr<std::packaged_task<void()> > task(
-        new std::packaged_task<void()>(func));
-    std::future<void> future = task->get_future();
-    loop_->post([task]() {
-        (*task)();
-    });
-    future.get();
+    return owner_executor_.invoke(func);
 }
 
 } // namespace omnibinder

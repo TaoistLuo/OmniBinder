@@ -370,8 +370,8 @@ export OMNIBINDER_DIR=/path/to/omnibinder/build/install
 Define your `.bidl` file first, then generate code:
 
 ```bash
-$OMNIBINDER_DIR/bin/omni-idlc --lang=cpp --output=generated/ my_service.bidl
-$OMNIBINDER_DIR/bin/omni-idlc --lang=c   --output=generated/ my_service.bidl
+$OMNIBINDER_DIR/bin_host/omni-idlc --lang=cpp --output=generated/ my_service.bidl
+$OMNIBINDER_DIR/bin_host/omni-idlc --lang=c   --output=generated/ my_service.bidl
 ```
 
 ### 10.3 C++ project layout

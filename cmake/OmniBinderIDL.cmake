@@ -27,10 +27,23 @@ function(omnic_generate)
     # 确保输出目录存在
     file(MAKE_DIRECTORY ${BIDL_OUTPUT_DIR})
 
-    if(TARGET omni-idlc)
+    set(OMNIC_GENERATOR_TARGET "")
+
+    if(OMNIBINDER_HOST_IDLC)
+        set(BINDERC_EXECUTABLE "${OMNIBINDER_HOST_IDLC}")
+    elseif(CMAKE_CROSSCOMPILING OR OMNIBINDER_BUILD_CONTEXT STREQUAL "cross")
+        find_program(BINDERC_EXECUTABLE NAMES omni-idlc omnic)
+        if(NOT BINDERC_EXECUTABLE)
+            message(FATAL_ERROR
+                "Cross-compiling requires a host omni-idlc. "
+                "Set OMNIBINDER_HOST_IDLC to a runnable host executable path.")
+        endif()
+    elseif(TARGET omni-idlc)
         set(BINDERC_EXECUTABLE $<TARGET_FILE:omni-idlc>)
+        set(OMNIC_GENERATOR_TARGET omni-idlc)
     elseif(TARGET omnic)
         set(BINDERC_EXECUTABLE $<TARGET_FILE:omnic>)
+        set(OMNIC_GENERATOR_TARGET omnic)
     else()
         find_program(BINDERC_EXECUTABLE NAMES omni-idlc omnic)
         if(NOT BINDERC_EXECUTABLE)
@@ -92,4 +105,8 @@ function(omnic_generate)
     # 将生成的源文件添加到目标
     target_sources(${BIDL_TARGET} PRIVATE ${GENERATED_SOURCES} ${GENERATED_HEADERS})
     target_include_directories(${BIDL_TARGET} PRIVATE ${BIDL_OUTPUT_DIR})
+
+    if(OMNIC_GENERATOR_TARGET)
+        add_dependencies(${BIDL_TARGET} ${OMNIC_GENERATOR_TARGET})
+    endif()
 endfunction()

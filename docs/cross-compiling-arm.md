@@ -112,6 +112,41 @@ set(TOOLCHAIN_PREFIX ...)
 set(CMAKE_SYSROOT /path/to/sysroot)
 ```
 
+## 5.1 交叉编译真正需要哪些变量
+
+最小建议集如下：
+
+```bash
+export TOOLCHAIN_ROOT=/usr/local/arm_linux_4.8/bin
+
+export PATH="${TOOLCHAIN_ROOT}:$PATH"
+export CC="${TOOLCHAIN_ROOT}/arm-linux-gcc"
+export CXX="${TOOLCHAIN_ROOT}/arm-linux-g++"
+
+# 强烈建议补齐，避免静态库/链接/符号工具误用主机版本
+export AR="${TOOLCHAIN_ROOT}/arm-linux-ar"
+export RANLIB="${TOOLCHAIN_ROOT}/arm-linux-ranlib"
+export STRIP="${TOOLCHAIN_ROOT}/arm-linux-strip"
+export LD="${TOOLCHAIN_ROOT}/arm-linux-ld"
+```
+
+如果你的 sysroot 与第三方依赖通过 `pkg-config` 暴露，还应补：
+
+```bash
+export PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot
+export PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig
+```
+
+如果工具链本身已经把 `--sysroot` 编进 `CC/CXX`，上面的变量通常已经够用；如果没有，更推荐通过 `CMAKE_TOOLCHAIN_FILE` 或 `CMAKE_SYSROOT` 传给 CMake。
+
+对当前项目而言，交叉编译的最终约束是：
+
+- host stage 使用主机编译器，并产出 `bin_host/omni-idlc`
+- cross stage 使用交叉编译器，并产出 `bin_cross/*` 运行时程序
+- cross stage 至少要明确提供 `CC`、`CXX`
+- 为避免工具落回主机版本，建议同时提供 `AR`、`RANLIB`、`STRIP`、`LD`
+- 如果依赖 sysroot 下的 `.pc` 文件，再提供 `PKG_CONFIG_SYSROOT_DIR` 与 `PKG_CONFIG_PATH`
+- 若工具链约束较复杂，优先使用 `CMAKE_TOOLCHAIN_FILE`
 ## 6. 主机构建 omni-idlc
 
 如果只在开发机生成 IDL 代码，推荐这样构建：
@@ -122,16 +157,19 @@ cd build-host
 
 cmake .. \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=../install \
   -DOMNIBINDER_BUILD_TESTS=OFF \
   -DOMNIBINDER_BUILD_EXAMPLES=OFF
 
 cmake --build . -j$(nproc)
+cmake --install .
 ```
 
 构建完成后，主机版 `omni-idlc` 通常位于：
 
 ```bash
 build-host/target/bin/omni-idlc
+# 安装后位于 build-host/install/bin_host/omni-idlc
 ```
 
 使用示例：
@@ -143,7 +181,12 @@ cd examples
 
 ## 7. ARM 交叉编译运行时
 
-推荐构建命令：
+ARM 运行时阶段的有效输入是：
+
+- 一组有效的交叉工具链变量，或
+- 一个有效的 `CMAKE_TOOLCHAIN_FILE`
+
+典型命令形式如下：
 
 ```bash
 mkdir -p build-arm
@@ -152,9 +195,11 @@ cd build-arm
 cmake .. \
   -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/arm-linux-gnueabihf.cmake \
   -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=../install \
   -DOMNIBINDER_BUILD_TESTS=OFF
 
 cmake --build . -j$(nproc)
+cmake --install .
 ```
 
 构建完成后，ARM 目标产物通常位于：
@@ -164,6 +209,12 @@ cmake --build . -j$(nproc)
 - `build-arm/target/bin/service_manager`
 - `build-arm/target/example/...`
 - 可选：`build-arm/target/bin/omni-cli`
+
+安装后目录建议理解为：
+
+- `install/bin_host/`：主机可执行工具，至少包含 `omni-idlc`
+- `install/bin_cross/`：目标板可执行文件，如 `service_manager`、`omni-cli`
+- `install/lib/`：库与 CMake package
 
 ## 8. 只构建最小运行时的建议
 
@@ -187,13 +238,72 @@ cmake .. \
 
 ## 9. 交叉编译推荐流程
 
-推荐完整流程如下：
+双阶段构建的最终状态如下：
+
+### 方案 A：手工双阶段构建
+
+```bash
+mkdir -p build-host build-arm
+
+cd build-host
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=../install \
+  -DOMNIBINDER_BUILD_TESTS=OFF \
+  -DOMNIBINDER_BUILD_EXAMPLES=OFF
+cmake --build . -j$(nproc)
+cmake --install .
+
+cd ../build-arm
+cmake .. \
+  -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/arm-linux-gnueabihf.cmake \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=../install \
+  -DOMNIBINDER_BUILD_TESTS=OFF \
+  -DOMNIBINDER_HOST_IDLC=../install/bin_host/omni-idlc
+cmake --build . -j$(nproc)
+cmake --install .
+```
+
+### 方案 B：使用仓库内置脚本
+
+```bash
+TOOLCHAIN_FILE=/path/to/toolchain.cmake ./scripts/build_dual_stage_install.sh
+```
+
+或者：
+
+```bash
+CROSS_CC=/path/to/target-gcc \
+CROSS_CXX=/path/to/target-g++ \
+CROSS_AR=/path/to/target-ar \
+CROSS_RANLIB=/path/to/target-ranlib \
+CROSS_STRIP=/path/to/target-strip \
+CROSS_LD=/path/to/target-ld \
+CROSS_PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot \
+CROSS_PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig \
+./scripts/build_dual_stage_install.sh
+```
+
+这个脚本的最终产出要求是：
+
+- 产出一个同时包含 `bin_host/` 和 `bin_cross/` 的发布安装目录
+- `bin_host/` 中必须包含可在主机执行的 `omni-idlc`
+- `bin_cross/` 中包含目标板部署所需程序
+
+它不是“主机下游业务工程”的默认 `find_package()` 输入目录。
+
+注意：
+
+- host stage 必须在**干净的主机环境**里执行；
+- 如果一开始就把 `CC` / `CXX` 指到了交叉编译器，host stage 会被识别为 cross context；
+- 这种情况下不会生成 `install/bin_host/omni-idlc`，dual-stage 流程会直接失效。
 
 ### 步骤 1：在主机上生成 IDL 代码
 
 ```bash
 cd examples
-../build-host/target/bin/omni-idlc --lang=cpp --output=generated sensor_service.bidl
+../install/bin_host/omni-idlc --lang=cpp --output=generated sensor_service.bidl
 ```
 
 ### 步骤 2：将生成代码纳入业务工程
@@ -271,8 +381,8 @@ cmake --build . -j$(nproc)
 
 基于当前工程结构，推荐采用：
 
-- `build-host/`：主机构建 `omni-idlc`
-- `build-arm/`：目标板交叉编译 runtime 和服务
+- `build-host/`：主机构建并安装 `install/bin_host/`
+- `build-arm/`：目标板交叉编译并安装 `install/bin_cross/`
 
 也就是：
 
@@ -282,25 +392,24 @@ cmake --build . -j$(nproc)
 
 ## 14. 最推荐的一组命令
 
-### 14.1 主机构建 omni-idlc
+### 14.1 只构建主机版本
 
 ```bash
-mkdir -p build-host
-cd build-host
-cmake .. -DCMAKE_BUILD_TYPE=Release -DOMNIBINDER_BUILD_TESTS=OFF -DOMNIBINDER_BUILD_EXAMPLES=OFF
-cmake --build . -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+cmake --install build
 ```
 
-### 14.2 ARM 交叉编译 runtime
+此时不需要交叉编译，安装目录只需要关注：
+
+- `install/bin_host/`
+- `install/include/`
+- `install/lib/`
+
+### 14.2 做交叉编译时的推荐命令
 
 ```bash
-mkdir -p build-arm
-cd build-arm
-cmake .. \
-  -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/arm-linux-gnueabihf.cmake \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DOMNIBINDER_BUILD_TESTS=OFF
-cmake --build . -j$(nproc)
+./scripts/build_dual_stage_install.sh
 ```
 
 ## 15. 结论

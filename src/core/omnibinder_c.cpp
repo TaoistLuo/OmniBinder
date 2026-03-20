@@ -39,8 +39,13 @@ public:
     const char* serviceName() const override { return name().c_str(); }
     const omnibinder::InterfaceInfo& interfaceInfo() const override { return iface_; }
 
-    void addMethod(uint32_t method_id, const char* method_name) {
-        iface_.methods.push_back(omnibinder::MethodInfo(method_id, method_name));
+    void addMethod(uint32_t method_id, const char* method_name,
+                   const char* param_types, const char* return_type) {
+        iface_.methods.push_back(omnibinder::MethodInfo(
+            method_id,
+            method_name ? method_name : "",
+            param_types ? param_types : "",
+            return_type ? return_type : "void"));
     }
 
     omnibinder::InterfaceInfo iface_;
@@ -142,14 +147,20 @@ void omni_buffer_write_float64(omni_buffer_t* buf, double val) {
     if (buf) buf->buf.writeFloat64(val);
 }
 void omni_buffer_write_string(omni_buffer_t* buf, const char* val, uint32_t len) {
-    if (buf && val) {
-        std::string s(val, len);
+    if (buf) {
+        if (!val) {
+            len = 0;
+        }
+        std::string s(val ? val : "", len);
         buf->buf.writeString(s);
     }
 }
 void omni_buffer_write_bytes(omni_buffer_t* buf, const uint8_t* data, uint32_t len) {
-    if (buf && data) {
-        std::vector<uint8_t> v(data, data + len);
+    if (buf) {
+        std::vector<uint8_t> v;
+        if (data && len > 0) {
+            v.assign(data, data + len);
+        }
         buf->buf.writeBytes(v);
     }
 }
@@ -239,8 +250,14 @@ void omni_service_destroy(omni_service_t* svc) {
 }
 
 void omni_service_add_method(omni_service_t* svc, uint32_t method_id, const char* method_name) {
+    omni_service_add_method_ex(svc, method_id, method_name, "", "void");
+}
+
+void omni_service_add_method_ex(omni_service_t* svc, uint32_t method_id, const char* method_name,
+    const char* param_types, const char* return_type)
+{
     if (svc && svc->bridge) {
-        svc->bridge->addMethod(method_id, method_name);
+        svc->bridge->addMethod(method_id, method_name, param_types, return_type);
     }
 }
 

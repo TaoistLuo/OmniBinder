@@ -3,6 +3,7 @@
 add_executable(omni-cli
     main.cpp
     simple_json.cpp
+    type_resolver.cpp
     type_codec.cpp
 )
 
@@ -17,5 +18,5 @@ target_include_directories(omni-cli PRIVATE
 )
 
 install(TARGETS omni-cli
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RUNTIME DESTINATION ${OMNIBINDER_INSTALL_RUNTIME_BINDIR}
 )
