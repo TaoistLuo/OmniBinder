@@ -1040,9 +1040,10 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 make install
 # 安装目录: build/install/
-#   bin/     → service_manager, omni-cli, omni-idlc
-#   include/ → omnibinder/*.h
-#   lib/     → libomnibinder.so, libomnibinder.a, cmake/OmniBinder/
+#   bin_host/  → omni-idlc，以及主机版 omni-cli/service_manager（普通主机构建时）
+#   bin_cross/ → 交叉编译版 omni-cli/service_manager（交叉编译时）
+#   include/   → omnibinder/*.h
+#   lib/       → libomnibinder.so, libomnibinder.a, cmake/OmniBinder/
 ```
 
 下面示例中，将安装路径记为 `OMNIBINDER_DIR`：
@@ -1087,10 +1088,10 @@ service MyService {
 
 ```bash
 # 生成 C++ 代码
-$OMNIBINDER_DIR/bin/omni-idlc --lang=cpp --output=generated/ my_service.bidl
+$OMNIBINDER_DIR/bin_host/omni-idlc --lang=cpp --output=generated/ my_service.bidl
 
 # 生成 C 代码
-$OMNIBINDER_DIR/bin/omni-idlc --lang=c --output=generated/ my_service.bidl
+$OMNIBINDER_DIR/bin_host/omni-idlc --lang=c --output=generated/ my_service.bidl
 ```
 
 ### 10.3 C++ 项目

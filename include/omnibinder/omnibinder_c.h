@@ -145,6 +145,10 @@ void omni_service_destroy(omni_service_t* svc);
 /** 向服务添加方法信息（用于 omni-cli 查询） */
 void omni_service_add_method(omni_service_t* svc, uint32_t method_id, const char* method_name);
 
+/** 向服务添加完整方法签名信息（用于 omni-cli 的 JSON/IDL 展示） */
+void omni_service_add_method_ex(omni_service_t* svc, uint32_t method_id, const char* method_name,
+    const char* param_types, const char* return_type);
+
 /** 获取服务监听端口（注册后有效） */
 uint16_t omni_service_port(const omni_service_t* svc);
 

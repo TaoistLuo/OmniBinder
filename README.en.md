@@ -137,13 +137,104 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
+For a normal host-only build, no cross-compilation is needed:
+
+```bash
+cmake --install build
+```
+
+The install tree looks like:
+
+```text
+install/
+├── bin_host/
+├── include/
+└── lib/
+```
+
+For cross-compilation, the recommended workflow is a dual-stage build: build the host `omni-idlc` first, then cross-build the target runtime into the same install prefix:
+
+```bash
+TOOLCHAIN_FILE=/path/to/toolchain.cmake ./scripts/build_dual_stage_install.sh
+```
+
+Or provide the cross-stage variables explicitly:
+
+```bash
+CROSS_CC=/path/to/target-gcc \
+CROSS_CXX=/path/to/target-g++ \
+CROSS_AR=/path/to/target-ar \
+CROSS_RANLIB=/path/to/target-ranlib \
+CROSS_STRIP=/path/to/target-strip \
+CROSS_LD=/path/to/target-ld \
+CROSS_PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot \
+CROSS_PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig \
+./scripts/build_dual_stage_install.sh
+```
+
+The project contract is not tied to any `source xxx` command. The cross stage must provide a concrete cross-toolchain environment through explicit toolchain variables or an explicit CMake toolchain file.
+
+The minimum contract is:
+
+```bash
+export PATH=/path/to/toolchain/bin:$PATH
+export CC=/path/to/target-gcc
+export CXX=/path/to/target-g++
+
+# strongly recommended
+export AR=/path/to/target-ar
+export RANLIB=/path/to/target-ranlib
+export STRIP=/path/to/target-strip
+export LD=/path/to/target-ld
+```
+
+If your sysroot and third-party dependencies rely on `pkg-config`, also provide:
+
+```bash
+export PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot
+export PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig
+```
+
+The dual-stage install contract is:
+
+- the host stage produces `install/bin_host/omni-idlc`
+- the cross stage produces `install/bin_cross/service_manager` and `install/bin_cross/omni-cli`
+- both stages share the same final install prefix `install/`
+
+Important: the host stage must run in a clean host environment. If `CC` / `CXX` already point to cross compilers, the supposed host stage will be detected as cross and will fail to produce `bin_host/omni-idlc`.
+
+Note: this dual-stage install prefix is mainly for packaging and deployment.
+
+- tools under `install/bin_host/` are runnable on the host
+- programs under `install/bin_cross/` are for the target board
+- `install/lib/` and `install/lib/cmake/OmniBinder` end up matching the cross-built target artifacts
+- so this dual-stage install prefix should not be used directly as the `find_package(OmniBinder)` input for host-side downstream builds
+
+For host-side downstream builds, use the install prefix produced by a host-only build.
+
+The resulting layout looks like:
+
+```text
+install/
+├── bin_cross/
+│   ├── omni-cli
+│   └── service_manager
+├── bin_host/
+│   ├── omni-idlc
+│   ├── omni-cli
+│   └── service_manager
+├── include/
+└── lib/
+```
+
 Build options:
 
 | Option | Default | Description |
 |---|---|---|
 | `OMNIBINDER_BUILD_TESTS` | ON | Build unit and integration tests |
 | `OMNIBINDER_BUILD_EXAMPLES` | ON | Build example programs |
-| `OMNIBINDER_BUILD_TOOLS` | ON | Build `omni-idlc` and `omni-cli` |
+| `OMNIBINDER_BUILD_TOOLS` | ON | Build tool targets |
+| `OMNIBINDER_BUILD_HOST_IDLC` | ON on host / OFF when cross-compiling | Build the host-side `omni-idlc` |
 
 ### Run the built-in example
 

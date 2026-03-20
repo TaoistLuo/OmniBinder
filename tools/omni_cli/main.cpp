@@ -1,8 +1,9 @@
 #include <omnibinder/omnibinder.h>
 #include "simple_json.h"
 #include "type_codec.h"
-#include "../omni_idlc/lexer.h"
-#include "../omni_idlc/parser.h"
+#include "type_resolver.h"
+#include "lexer.h"
+#include "parser.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -50,35 +51,22 @@ static int cmdList(omnibinder::OmniRuntime& runtime) {
     return 0;
 }
 
-// 辅助函数：根据类型名查找 TypeRef
-static bool findTypeRef(const std::string& typeName, const std::string& package, omnic::TypeRef& typeRef) {
-    if (!g_parse_ctx) return false;
-    
-    // 查找包
-    std::map<std::string, omnic::AstFile>::const_iterator pkgIt = g_parse_ctx->loaded_packages.find(package);
-    if (pkgIt == g_parse_ctx->loaded_packages.end()) {
-        return false;
-    }
-    
-    const omnic::AstFile& ast = pkgIt->second;
-    
-    // 查找结构体
-    for (size_t i = 0; i < ast.structs.size(); ++i) {
-        if (ast.structs[i].name == typeName) {
-            typeRef.primitive = omnic::TYPE_CUSTOM;
-            typeRef.custom_name = typeName;
-            typeRef.package_name = "";
-            return true;
-        }
-    }
-    
-    return false;
-}
-
 // 辅助函数：打印字段定义（用于详细模式）
 static void printFieldSchema(const omnic::TypeRef& type, const std::string& package, int indent) {
     std::string indentStr(indent * 2, ' ');
-    
+
+    if (type.primitive == omnic::TYPE_ARRAY) {
+        printf("%sarray", indentStr.c_str());
+        if (type.element_type) {
+            printf("<\n");
+            printFieldSchema(*type.element_type, package, indent + 1);
+            printf("%s>\n", indentStr.c_str());
+        } else {
+            printf("<unknown>\n");
+        }
+        return;
+    }
+
     if (type.primitive == omnic::TYPE_CUSTOM && g_parse_ctx) {
         // 查找结构体定义
         std::string structPackage = type.package_name.empty() ? package : type.package_name;
@@ -98,25 +86,7 @@ static void printFieldSchema(const omnic::TypeRef& type, const std::string& pack
                         } else if (field.type.primitive == omnic::TYPE_ARRAY) {
                             printf("array<...>");
                         } else {
-                            // 基础类型
-                            const char* typeName = "unknown";
-                            switch (field.type.primitive) {
-                            case omnic::TYPE_BOOL: typeName = "bool"; break;
-                            case omnic::TYPE_INT8: typeName = "int8"; break;
-                            case omnic::TYPE_UINT8: typeName = "uint8"; break;
-                            case omnic::TYPE_INT16: typeName = "int16"; break;
-                            case omnic::TYPE_UINT16: typeName = "uint16"; break;
-                            case omnic::TYPE_INT32: typeName = "int32"; break;
-                            case omnic::TYPE_UINT32: typeName = "uint32"; break;
-                            case omnic::TYPE_INT64: typeName = "int64"; break;
-                            case omnic::TYPE_UINT64: typeName = "uint64"; break;
-                            case omnic::TYPE_FLOAT32: typeName = "float32"; break;
-                            case omnic::TYPE_FLOAT64: typeName = "float64"; break;
-                            case omnic::TYPE_STRING: typeName = "string"; break;
-                            case omnic::TYPE_BYTES: typeName = "bytes"; break;
-                            default: break;
-                            }
-                            printf("%s", typeName);
+                            printf("%s", omni_cli::primitiveTypeName(field.type.primitive));
                         }
                         printf("\n");
                     }
@@ -126,9 +96,20 @@ static void printFieldSchema(const omnic::TypeRef& type, const std::string& pack
             }
         }
     }
-    
-    // 如果找不到定义，只打印类型名
-    printf("%s%s\n", indentStr.c_str(), type.custom_name.c_str());
+
+    switch (type.primitive) {
+    case omnic::TYPE_CUSTOM:
+        if (!type.package_name.empty()) {
+            printf("%s%s::%s\n", indentStr.c_str(), type.package_name.c_str(), type.custom_name.c_str());
+        } else {
+            printf("%s%s\n", indentStr.c_str(), type.custom_name.c_str());
+        }
+        return;
+    default:
+        break;
+    }
+
+    printf("%s%s\n", indentStr.c_str(), omni_cli::primitiveTypeName(type.primitive));
 }
 
 static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
@@ -168,7 +149,7 @@ static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
                 // 打印参数详情
                 if (!method.param_types.empty()) {
                     omnic::TypeRef paramType;
-                    if (findTypeRef(method.param_types, g_idl_package, paramType)) {
+                    if (omni_cli::findTypeRef(g_parse_ctx, method.param_types, g_idl_package, paramType)) {
                         printf("          param: ");
                         printFieldSchema(paramType, g_idl_package, 5);
                     }
@@ -177,7 +158,7 @@ static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
                 // 打印返回值详情
                 if (method.return_type != "void") {
                     omnic::TypeRef returnType;
-                    if (findTypeRef(method.return_type, g_idl_package, returnType)) {
+                    if (omni_cli::findTypeRef(g_parse_ctx, method.return_type, g_idl_package, returnType)) {
                         printf("          return: ");
                         printFieldSchema(returnType, g_idl_package, 5);
                     }
@@ -253,27 +234,41 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     omnibinder::Buffer request;
     
     if (params && strlen(params) > 0) {
-        if (g_parse_ctx && params[0] == '{') {
-            // JSON 模式
-            try {
-                simple_json::Value jsonInput = simple_json::parse(params);
-                
-                // 查找参数类型
-                omnic::TypeRef paramType;
-                if (!findTypeRef(param_type_name, g_idl_package, paramType)) {
-                    fprintf(stderr, "Error: Cannot find type '%s' in IDL\n", param_type_name.c_str());
-                    return 1;
-                }
-                
-                // 编码为 Buffer
-                type_codec::TypeCodec codec(*g_parse_ctx);
-                if (!codec.encodeToBuffer(jsonInput, paramType, g_idl_package, request)) {
-                    fprintf(stderr, "Error: Failed to encode JSON to buffer\n");
-                    return 1;
-                }
-            } catch (const std::exception& e) {
-                fprintf(stderr, "Error: JSON parse failed: %s\n", e.what());
+        if (g_parse_ctx && !param_type_name.empty()) {
+            omnic::TypeRef paramType;
+            if (!omni_cli::findTypeRef(g_parse_ctx, param_type_name, g_idl_package, paramType)) {
+                fprintf(stderr, "Error: Cannot find type '%s' in IDL\n", param_type_name.c_str());
                 return 1;
+            }
+
+            type_codec::TypeCodec codec(*g_parse_ctx);
+            if (params[0] == '{' || params[0] == '[') {
+                try {
+                    simple_json::Value jsonInput = simple_json::parse(params);
+                    if (!codec.encodeToBuffer(jsonInput, paramType, g_idl_package, request)) {
+                        fprintf(stderr, "Error: Failed to encode JSON to buffer\n");
+                        return 1;
+                    }
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "Error: JSON parse failed: %s\n", e.what());
+                    return 1;
+                }
+            } else if (omni_cli::isScalarCliType(paramType)) {
+                simple_json::Value scalarInput;
+                if (!omni_cli::parseScalarCliValue(params, paramType, scalarInput)) {
+                    fprintf(stderr, "Error: Failed to parse scalar parameter '%s' for type '%s'\n",
+                            params, param_type_name.c_str());
+                    return 1;
+                }
+                if (!codec.encodeToBuffer(scalarInput, paramType, g_idl_package, request)) {
+                    fprintf(stderr, "Error: Failed to encode scalar parameter to buffer\n");
+                    return 1;
+                }
+            } else {
+                if (!hexToBytes(params, request)) {
+                    fprintf(stderr, "Error: Invalid hex parameter string: %s\n", params);
+                    return 1;
+                }
             }
         } else {
             // Hex 模式
@@ -318,7 +313,7 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
         if (g_parse_ctx && return_type_name != "void") {
             // JSON 模式 - 解码响应
             omnic::TypeRef returnType;
-            if (findTypeRef(return_type_name, g_idl_package, returnType)) {
+            if (omni_cli::findTypeRef(g_parse_ctx, return_type_name, g_idl_package, returnType)) {
                 type_codec::TypeCodec codec(*g_parse_ctx);
                 simple_json::Value jsonOutput;
                 

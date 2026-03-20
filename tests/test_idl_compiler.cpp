@@ -1,8 +1,10 @@
 // test_idl_compiler.cpp - Tests for the IDL compiler lexer and parser
 
-#include "../tools/omni_idlc/lexer.h"
-#include "../tools/omni_idlc/parser.h"
-#include "../tools/omni_idlc/ast.h"
+#include "lexer.h"
+#include "parser.h"
+#include "ast.h"
+#include "codegen_cpp.h"
+#include "codegen_c.h"
 
 #include <cstdio>
 #include <cstring>
@@ -28,6 +30,12 @@ static std::vector<Token> tokenize(const std::string& source) {
         if (tok.type == TOK_EOF || tok.type == TOK_ERROR) break;
     }
     return tokens;
+}
+
+static std::string readFile(const std::string& path) {
+    std::ifstream ifs(path.c_str());
+    return std::string((std::istreambuf_iterator<char>(ifs)),
+                       std::istreambuf_iterator<char>());
 }
 
 int main() {
@@ -920,6 +928,234 @@ int main() {
         assert(ast.services.size() == 1);
         assert(ast.services[0].methods.size() == 2);
         assert(ast.services[0].publishes.size() == 1);
+        PASS();
+    }
+
+    printf("\n--- Code Generation Regression Tests ---\n");
+
+    TEST(codegen_cpp_array_uses_buffer_suffix_methods) {
+        std::string src =
+            "package demo;\n"
+            "struct Arrays {\n"
+            "    array<int32> ids;\n"
+            "    array<string> names;\n"
+            "    array<bytes> blobs;\n"
+            "}";
+
+        Lexer lex(src);
+        Parser parser(lex);
+        AstFile ast;
+        bool ok = parser.parse(ast);
+        assert(ok);
+        assert(!parser.hasError());
+
+        const char* dir = "/tmp/omni-idlc_test_codegen_cpp_arrays";
+        std::string cmd = std::string("mkdir -p ") + dir;
+        system(cmd.c_str());
+
+        CppCodeGen gen;
+        bool generated = gen.generate(ast, dir, "arrays");
+        assert(generated);
+
+        std::string cpp = readFile(std::string(dir) + "/arrays.cpp");
+
+        assert(cpp.find("buf.writeInt32(ids[i]);") != std::string::npos);
+        assert(cpp.find("ids[i] = buf.readInt32();") != std::string::npos);
+        assert(cpp.find("buf.writeString(names[i]);") != std::string::npos);
+        assert(cpp.find("names[i] = buf.readString();") != std::string::npos);
+        assert(cpp.find("buf.writeBytes(blobs[i]);") != std::string::npos);
+        assert(cpp.find("blobs[i] = buf.readBytes();") != std::string::npos);
+
+        assert(cpp.find("writeint32_t") == std::string::npos);
+        assert(cpp.find("readint32_t") == std::string::npos);
+        assert(cpp.find("writestd::string") == std::string::npos);
+        assert(cpp.find("readstd::string") == std::string::npos);
+        assert(cpp.find("writestd::vector<uint8_t>") == std::string::npos);
+        assert(cpp.find("readstd::vector<uint8_t>") == std::string::npos);
+        PASS();
+    }
+
+    TEST(codegen_cpp_method_arrays_use_recursive_buffer_logic) {
+        std::string src =
+            "package demo;\n"
+            "service ArrayService {\n"
+            "    array<int32> getIds();\n"
+            "    array<string> getNames();\n"
+            "    array<bytes> echoBlobs(array<bytes> blobs);\n"
+            "}";
+
+        Lexer lex(src);
+        Parser parser(lex);
+        AstFile ast;
+        bool ok = parser.parse(ast);
+        assert(ok);
+        assert(!parser.hasError());
+
+        const char* dir = "/tmp/omni-idlc_test_codegen_cpp_method_arrays";
+        std::string cmd = std::string("mkdir -p ") + dir;
+        system(cmd.c_str());
+
+        CppCodeGen gen;
+        bool generated = gen.generate(ast, dir, "array_service");
+        assert(generated);
+
+        std::string cpp = readFile(std::string(dir) + "/array_service.cpp");
+
+        assert(cpp.find("{ uint32_t cnt0 = req.readUint32(); blobs.resize(cnt0);") != std::string::npos);
+        assert(cpp.find("blobs[i0] = req.readBytes();") != std::string::npos);
+        assert(cpp.find("response.writeUint32(static_cast<uint32_t>(result.size()));") != std::string::npos);
+        assert(cpp.find("response.writeInt32(result[i0]);") != std::string::npos);
+        assert(cpp.find("response.writeString(result[i0]);") != std::string::npos);
+        assert(cpp.find("req.writeUint32(static_cast<uint32_t>(blobs.size()));") != std::string::npos);
+        assert(cpp.find("req.writeBytes(blobs[i0]);") != std::string::npos);
+        assert(cpp.find("result[i0] = resp.readInt32();") != std::string::npos);
+        assert(cpp.find("result[i0] = resp.readString();") != std::string::npos);
+
+        assert(cpp.find("req.write(") == std::string::npos);
+        assert(cpp.find("resp.read()") == std::string::npos);
+        PASS();
+    }
+
+    TEST(codegen_cpp_custom_arrays_use_recursive_custom_logic) {
+        std::string src =
+            "package demo;\n"
+            "struct Item {\n"
+            "    int32 id;\n"
+            "}\n"
+            "struct ItemList {\n"
+            "    array<Item> items;\n"
+            "}\n"
+            "service CustomArrayService {\n"
+            "    array<Item> getItems();\n"
+            "    array<Item> echoItems(array<Item> items);\n"
+            "}";
+
+        Lexer lex(src);
+        Parser parser(lex);
+        AstFile ast;
+        bool ok = parser.parse(ast);
+        assert(ok);
+        assert(!parser.hasError());
+
+        const char* dir = "/tmp/omni-idlc_test_codegen_cpp_custom_arrays";
+        std::string cmd = std::string("mkdir -p ") + dir;
+        system(cmd.c_str());
+
+        CppCodeGen gen;
+        bool generated = gen.generate(ast, dir, "custom_arrays");
+        assert(generated);
+
+        std::string cpp = readFile(std::string(dir) + "/custom_arrays.cpp");
+
+        assert(cpp.find("items[i0].serialize(buf);") != std::string::npos);
+        assert(cpp.find("items[i0].deserialize(buf);") != std::string::npos);
+        assert(cpp.find("items[i0].deserialize(req);") != std::string::npos);
+        assert(cpp.find("response.writeUint32(static_cast<uint32_t>(result.size()));") != std::string::npos);
+        assert(cpp.find("result[i0].serialize(response);") != std::string::npos);
+        assert(cpp.find("req.writeUint32(static_cast<uint32_t>(items.size()));") != std::string::npos);
+        assert(cpp.find("items[i0].serialize(req);") != std::string::npos);
+        assert(cpp.find("result[i0].deserialize(resp);") != std::string::npos);
+
+        assert(cpp.find("req.write(items)") == std::string::npos);
+        assert(cpp.find("response.write(result)") == std::string::npos);
+        assert(cpp.find("result = resp.read()") == std::string::npos);
+        PASS();
+    }
+
+    TEST(codegen_cpp_nested_arrays_use_distinct_loop_depths) {
+        std::string src =
+            "package demo;\n"
+            "struct Nested {\n"
+            "    array<array<int32>> matrix;\n"
+            "}\n"
+            "service NestedService {\n"
+            "    array<array<int32>> getMatrix();\n"
+            "    array<array<int32>> echoMatrix(array<array<int32>> matrix);\n"
+            "}";
+
+        Lexer lex(src);
+        Parser parser(lex);
+        AstFile ast;
+        bool ok = parser.parse(ast);
+        assert(ok);
+        assert(!parser.hasError());
+
+        const char* dir = "/tmp/omni-idlc_test_codegen_cpp_nested_arrays";
+        std::string cmd = std::string("mkdir -p ") + dir;
+        system(cmd.c_str());
+
+        CppCodeGen gen;
+        bool generated = gen.generate(ast, dir, "nested_arrays");
+        assert(generated);
+
+        std::string cpp = readFile(std::string(dir) + "/nested_arrays.cpp");
+
+        assert(cpp.find("for (size_t i0 = 0; i0 < matrix.size(); ++i0) {") != std::string::npos);
+        assert(cpp.find("for (size_t i1 = 0; i1 < matrix[i0].size(); ++i1) {") != std::string::npos);
+        assert(cpp.find("buf.writeInt32(matrix[i0][i1]);") != std::string::npos);
+        assert(cpp.find("{ uint32_t cnt0 = buf.readUint32(); matrix.resize(cnt0);") != std::string::npos);
+        assert(cpp.find("{ uint32_t cnt1 = buf.readUint32(); matrix[i0].resize(cnt1);") != std::string::npos);
+        assert(cpp.find("matrix[i0][i1] = buf.readInt32();") != std::string::npos);
+        assert(cpp.find("req.writeUint32(static_cast<uint32_t>(matrix.size()));") != std::string::npos);
+        assert(cpp.find("req.writeInt32(matrix[i0][i1]);") != std::string::npos);
+        assert(cpp.find("result[i0][i1] = resp.readInt32();") != std::string::npos);
+
+        assert(cpp.find("req.write(matrix)") == std::string::npos);
+        assert(cpp.find("resp.read()") == std::string::npos);
+        PASS();
+    }
+
+    TEST(codegen_c_string_bytes_signatures_and_metadata) {
+        std::string src =
+            "package demo;\n"
+            "struct Payload {\n"
+            "    string name;\n"
+            "    bytes data;\n"
+            "}\n"
+            "service BlobService {\n"
+            "    string echoName(string name);\n"
+            "    bytes echoData(bytes data);\n"
+            "    Payload roundTrip(Payload payload);\n"
+            "}";
+
+        Lexer lex(src);
+        Parser parser(lex);
+        AstFile ast;
+        bool ok = parser.parse(ast);
+        assert(ok);
+        assert(!parser.hasError());
+
+        const char* dir = "/tmp/omni-idlc_test_codegen_c_strings";
+        std::string cmd = std::string("mkdir -p ") + dir;
+        system(cmd.c_str());
+
+        CCodeGen gen;
+        bool generated = gen.generate(ast, dir, "blob_service");
+        assert(generated);
+
+        std::string header = readFile(std::string(dir) + "/blob_service_c.h");
+        std::string source = readFile(std::string(dir) + "/blob_service.c");
+
+        assert(header.find("char* name;") != std::string::npos);
+        assert(header.find("uint32_t name_len;") != std::string::npos);
+        assert(header.find("uint8_t* data;") != std::string::npos);
+        assert(header.find("uint32_t data_len;") != std::string::npos);
+
+        assert(header.find("(*echoName)(const char* name, uint32_t name_len, char** result, uint32_t* result_len, void* user_data);") != std::string::npos);
+        assert(header.find("(*echoData)(const uint8_t* data, uint32_t data_len, uint8_t** result, uint32_t* result_len, void* user_data);") != std::string::npos);
+        assert(header.find("int demo_BlobService_proxy_echoName(demo_BlobService_proxy* p, const char* name, uint32_t name_len, char** result, uint32_t* result_len);") != std::string::npos);
+        assert(header.find("int demo_BlobService_proxy_echoData(demo_BlobService_proxy* p, const uint8_t* data, uint32_t data_len, uint8_t** result, uint32_t* result_len);") != std::string::npos);
+
+        assert(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_NAME, \"echoName\", \"std::string\", \"std::string\");") != std::string::npos);
+        assert(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_DATA, \"echoData\", \"std::vector<uint8_t>\", \"std::vector<uint8_t>\");") != std::string::npos);
+        assert(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ROUND_TRIP, \"roundTrip\", \"Payload\", \"Payload\");") != std::string::npos);
+
+        assert(source.find("name = omni_buffer_read_string(req, &name_len);") != std::string::npos);
+        assert(source.find("data = omni_buffer_read_bytes(req, &data_len);") != std::string::npos);
+        assert(source.find("omni_buffer_write_string(response, result, result_len);") != std::string::npos);
+        assert(source.find("omni_buffer_write_bytes(response, result, result_len);") != std::string::npos);
+        assert(source.find("*result = omni_buffer_read_string(resp, result_len);") != std::string::npos);
+        assert(source.find("*result = omni_buffer_read_bytes(resp, result_len);") != std::string::npos);
         PASS();
     }
 

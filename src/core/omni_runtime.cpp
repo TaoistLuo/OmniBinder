@@ -103,10 +103,8 @@ OmniRuntime::Impl::Impl()
     , running_(false)
     , initialized_(false)
     , owner_(NULL)
-    , owner_thread_id_()
     , loop_driver_active_(false)
     , sm_reconnect_needed_(false)
-    , run_loop_owned_(false)
 {
 }
 
@@ -160,6 +158,7 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     sm_port_ = sm_port;
     
     loop_ = new EventLoop();
+    owner_executor_.bindLoop(loop_);
     
     sm_channel_.transport = new TcpTransport();
     int ret = sm_channel_.transport->connect(sm_host, sm_port);
@@ -212,10 +211,10 @@ void OmniRuntime::Impl::run() {
     if (!initialized_) return;
     captureOwnerThread();
     loop_driver_active_ = true;
-    run_loop_owned_ = true;
+    owner_executor_.setLoopOwned(true);
     running_ = true;
     loop_->run();
-    run_loop_owned_ = false;
+    owner_executor_.setLoopOwned(false);
     loop_driver_active_ = false;
 }
 
@@ -350,6 +349,11 @@ uint32_t OmniRuntime::Impl::effectiveTimeout(uint32_t timeout_ms) const {
 
 int OmniRuntime::Impl::registerService(Service* service) {
     return callSerialized([this, service]() -> int {
+        return registerServiceLocked(service);
+    });
+}
+
+int OmniRuntime::Impl::registerServiceLocked(Service* service) {
     if (!initialized_ || !service) {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
@@ -362,20 +366,13 @@ int OmniRuntime::Impl::registerService(Service* service) {
     LocalServiceEntry* entry = new LocalServiceEntry();
     entry->service = service;
 
-    // 1. 创建 TCP 监听
-    entry->server = new TcpTransportServer();
-    int port = entry->server->listen("0.0.0.0", 0);
-    if (port < 0) {
+    std::string advertise_host;
+    int ret = initializeServiceListener(entry, service, advertise_host);
+    if (ret != 0) {
         delete entry;
-        return static_cast<int>(ErrorCode::ERR_LISTEN_FAILED);
+        return ret;
     }
-    entry->port = static_cast<uint16_t>(port);
-    service->setPort(entry->port);
-    service->runtime_ = owner_;
-    std::string advertise_host = normalizeAdvertiseHost(platform::getSocketAddress(entry->server->fd()));
 
-    // 2. 创建共享内存（服务端侧，多客户端共享）
-    entry->shm_name = generateShmName(name);
     ShmConfig shm_config = service->shmConfig();
     size_t req_ring_capacity = shm_config.req_ring_capacity > 0
         ? shm_config.req_ring_capacity
@@ -383,6 +380,42 @@ int OmniRuntime::Impl::registerService(Service* service) {
     size_t resp_ring_capacity = shm_config.resp_ring_capacity > 0
         ? shm_config.resp_ring_capacity
         : SHM_DEFAULT_RESP_RING_CAPACITY;
+    initializeServiceShm(name, entry, req_ring_capacity, resp_ring_capacity);
+
+    ret = registerServiceWithManager(name, service, entry, advertise_host,
+                                     req_ring_capacity, resp_ring_capacity);
+    if (ret != 0) {
+        cleanupPendingServiceRegistration(entry);
+        delete entry;
+        return ret;
+    }
+
+    local_services_[name] = entry;
+    service->onStart();
+    OMNI_LOG_INFO(LOG_TAG, "Registered service %s on port %u (shm=%s)",
+                    name.c_str(), entry->port,
+                    entry->shm_name.empty() ? "none" : entry->shm_name.c_str());
+    return 0;
+}
+
+int OmniRuntime::Impl::initializeServiceListener(LocalServiceEntry* entry, Service* service,
+                                                 std::string& advertise_host) {
+    entry->server = new TcpTransportServer();
+    int port = entry->server->listen("0.0.0.0", 0);
+    if (port < 0) {
+        return static_cast<int>(ErrorCode::ERR_LISTEN_FAILED);
+    }
+
+    entry->port = static_cast<uint16_t>(port);
+    service->setPort(entry->port);
+    service->runtime_ = owner_;
+    advertise_host = normalizeAdvertiseHost(platform::getSocketAddress(entry->server->fd()));
+    return 0;
+}
+
+void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
+                                             size_t req_ring_capacity, size_t resp_ring_capacity) {
+    entry->shm_name = generateShmName(name);
     entry->shm_server = new ShmTransport(entry->shm_name, true,
                                          req_ring_capacity, resp_ring_capacity);
     if (entry->shm_server->state() != ConnectionState::CONNECTED) {
@@ -391,45 +424,49 @@ int OmniRuntime::Impl::registerService(Service* service) {
         delete entry->shm_server;
         entry->shm_server = NULL;
         entry->shm_name.clear();
-    } else {
-        OMNI_LOG_INFO(LOG_TAG, "Created SHM '%s' for service %s",
-                        entry->shm_name.c_str(), name.c_str());
-
-        // 注册 req_eventfd 到 EventLoop — 请求到达时触发回调
-        if (entry->shm_server->eventfdEnabled() && entry->shm_server->reqEventFd() >= 0) {
-            loop_->addFd(entry->shm_server->reqEventFd(), EventLoop::EVENT_READ,
-                [this, name](int fd, uint32_t events) {
-                    (void)events;
-                    platform::eventFdConsume(fd);
-                    // 处理该服务的所有 SHM 请求
-                    std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
-                    if (it == local_services_.end() || !it->second->shm_server) return;
-                    LocalServiceEntry* e = it->second;
-                    uint8_t buf[65536];
-                    uint32_t client_id = 0;
-                    while (true) {
-                        int ret = e->shm_server->serverRecv(buf, sizeof(buf), client_id);
-                        if (ret <= 0) break;
-                        handleShmRequest(name, e, client_id, buf, static_cast<size_t>(ret));
-                    }
-                });
-        }
-
-        // 注册 uds_listen_fd 到 EventLoop — 接受客户端 eventfd 交换
-        if (entry->shm_server->udsListenFd() >= 0) {
-            ShmTransport* shm = entry->shm_server;
-            loop_->addFd(entry->shm_server->udsListenFd(), EventLoop::EVENT_READ,
-                [shm](int fd, uint32_t events) {
-                    (void)fd; (void)events;
-                    shm->onUdsClientConnect();
-                });
-        }
+        return;
     }
-    
+
+    OMNI_LOG_INFO(LOG_TAG, "Created SHM '%s' for service %s",
+                    entry->shm_name.c_str(), name.c_str());
+
+    if (entry->shm_server->eventfdEnabled() && entry->shm_server->reqEventFd() >= 0) {
+        loop_->addFd(entry->shm_server->reqEventFd(), EventLoop::EVENT_READ,
+            [this, name](int fd, uint32_t events) {
+                (void)events;
+                platform::eventFdConsume(fd);
+                std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
+                if (it == local_services_.end() || !it->second->shm_server) return;
+                LocalServiceEntry* e = it->second;
+                uint8_t buf[65536];
+                uint32_t client_id = 0;
+                while (true) {
+                    int ret = e->shm_server->serverRecv(buf, sizeof(buf), client_id);
+                    if (ret <= 0) break;
+                    handleShmRequest(name, e, client_id, buf, static_cast<size_t>(ret));
+                }
+            });
+    }
+
+    if (entry->shm_server->udsListenFd() >= 0) {
+        ShmTransport* shm = entry->shm_server;
+        loop_->addFd(entry->shm_server->udsListenFd(), EventLoop::EVENT_READ,
+            [shm](int fd, uint32_t events) {
+                (void)fd; (void)events;
+                shm->onUdsClientConnect();
+            });
+    }
+}
+
+int OmniRuntime::Impl::registerServiceWithManager(const std::string& name, Service* service,
+                                                  LocalServiceEntry* entry,
+                                                  const std::string& advertise_host,
+                                                  size_t req_ring_capacity,
+                                                  size_t resp_ring_capacity) {
     loop_->addFd(entry->server->fd(), EventLoop::EVENT_READ,
         [this, name](int fd, uint32_t events) { this->onServiceAccept(name, fd, events); });
     listen_fd_to_service_[entry->server->fd()] = name;
-    
+
     Message msg(MessageType::MSG_REGISTER, allocSequence());
     ServiceInfo svc_info;
     svc_info.name = name;
@@ -440,43 +477,64 @@ int OmniRuntime::Impl::registerService(Service* service) {
     svc_info.shm_config = ShmConfig(req_ring_capacity, resp_ring_capacity);
     svc_info.interfaces.push_back(service->interfaceInfo());
     serializeServiceInfo(svc_info, msg.payload);
-    
+
     if (!sendToSM(msg)) {
-        loop_->removeFd(entry->server->fd());
-        listen_fd_to_service_.erase(entry->server->fd());
-        delete entry;
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
-    
+
     Message reply;
     int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
     if (ret != 0) {
-        loop_->removeFd(entry->server->fd());
-        listen_fd_to_service_.erase(entry->server->fd());
-        delete entry;
         return ret;
     }
-    
+
     Buffer rbuf(reply.payload.data(), reply.payload.size());
     uint32_t handle = rbuf.readUint32();
     if (handle == INVALID_HANDLE) {
-        loop_->removeFd(entry->server->fd());
-        listen_fd_to_service_.erase(entry->server->fd());
-        delete entry;
         return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
     }
-    
-    local_services_[name] = entry;
-    service->onStart();
-    OMNI_LOG_INFO(LOG_TAG, "Registered service %s on port %u (shm=%s)",
-                    name.c_str(), entry->port,
-                    entry->shm_name.empty() ? "none" : entry->shm_name.c_str());
+
     return 0;
-    });
+}
+
+void OmniRuntime::Impl::cleanupPendingServiceRegistration(LocalServiceEntry* entry) {
+    if (!entry || !entry->server) {
+        return;
+    }
+
+    removeServiceListenerFromLoop(entry);
+    removeServiceShmFromLoop(entry);
+}
+
+void OmniRuntime::Impl::removeServiceListenerFromLoop(LocalServiceEntry* entry) {
+    if (!entry || !entry->server) {
+        return;
+    }
+
+    loop_->removeFd(entry->server->fd());
+    listen_fd_to_service_.erase(entry->server->fd());
+}
+
+void OmniRuntime::Impl::removeServiceShmFromLoop(LocalServiceEntry* entry) {
+    if (!entry || !entry->shm_server) {
+        return;
+    }
+
+    if (entry->shm_server->reqEventFd() >= 0) {
+        loop_->removeFd(entry->shm_server->reqEventFd());
+    }
+    if (entry->shm_server->udsListenFd() >= 0) {
+        loop_->removeFd(entry->shm_server->udsListenFd());
+    }
 }
 
 int OmniRuntime::Impl::unregisterService(Service* service) {
     return callSerialized([this, service]() -> int {
+        return unregisterServiceLocked(service);
+    });
+}
+
+int OmniRuntime::Impl::unregisterServiceLocked(Service* service) {
     if (!service) return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
     
     const std::string& name = service->name();
@@ -490,18 +548,8 @@ int OmniRuntime::Impl::unregisterService(Service* service) {
     sendToSM(msg);
     
     LocalServiceEntry* entry = it->second;
-    loop_->removeFd(entry->server->fd());
-    listen_fd_to_service_.erase(entry->server->fd());
-
-    // Remove SHM eventfd/UDS fds from EventLoop
-    if (entry->shm_server) {
-        if (entry->shm_server->reqEventFd() >= 0) {
-            loop_->removeFd(entry->shm_server->reqEventFd());
-        }
-        if (entry->shm_server->udsListenFd() >= 0) {
-            loop_->removeFd(entry->shm_server->udsListenFd());
-        }
-    }
+    removeServiceListenerFromLoop(entry);
+    removeServiceShmFromLoop(entry);
     
     for (std::map<int, ITransport*>::iterator cit = entry->client_transports.begin();
          cit != entry->client_transports.end(); ++cit) {
@@ -519,7 +567,6 @@ int OmniRuntime::Impl::unregisterService(Service* service) {
     
     OMNI_LOG_INFO(LOG_TAG, "Unregistered service %s", name.c_str());
     return 0;
-    });
 }
 
 // ============================================================
@@ -528,8 +575,12 @@ int OmniRuntime::Impl::unregisterService(Service* service) {
 
 int OmniRuntime::Impl::lookupService(const std::string& service_name, ServiceInfo& info) {
     return callSerialized([this, &service_name, &info]() -> int {
-    return lookupServiceUnlocked(service_name, info);
+        return lookupServiceLocked(service_name, info);
     });
+}
+
+int OmniRuntime::Impl::lookupServiceLocked(const std::string& service_name, ServiceInfo& info) {
+    return lookupServiceUnlocked(service_name, info);
 }
 
 int OmniRuntime::Impl::lookupServiceUnlocked(const std::string& service_name, ServiceInfo& info) {
@@ -566,6 +617,11 @@ int OmniRuntime::Impl::lookupServiceUnlocked(const std::string& service_name, Se
 
 int OmniRuntime::Impl::listServices(std::vector<ServiceInfo>& services) {
     return callSerialized([this, &services]() -> int {
+        return listServicesLocked(services);
+    });
+}
+
+int OmniRuntime::Impl::listServicesLocked(std::vector<ServiceInfo>& services) {
     Message msg(MessageType::MSG_LIST_SERVICES, allocSequence());
     
     if (!sendToSM(msg)) {
@@ -589,12 +645,17 @@ int OmniRuntime::Impl::listServices(std::vector<ServiceInfo>& services) {
         services.push_back(info);
     }
     return 0;
-    });
 }
 
 int OmniRuntime::Impl::queryInterfaces(const std::string& service_name,
                                         std::vector<InterfaceInfo>& interfaces) {
     return callSerialized([this, &service_name, &interfaces]() -> int {
+        return queryInterfacesLocked(service_name, interfaces);
+    });
+}
+
+int OmniRuntime::Impl::queryInterfacesLocked(const std::string& service_name,
+                                             std::vector<InterfaceInfo>& interfaces) {
     Message msg(MessageType::MSG_QUERY_INTERFACES, allocSequence());
     msg.payload.writeString(service_name);
     
@@ -624,7 +685,6 @@ int OmniRuntime::Impl::queryInterfaces(const std::string& service_name,
         interfaces.push_back(info);
     }
     return 0;
-    });
 }
 
 // ============================================================
@@ -635,6 +695,13 @@ int OmniRuntime::Impl::invoke(const std::string& service_name, uint32_t interfac
                                uint32_t method_id, const Buffer& request, Buffer& response,
                                uint32_t timeout_ms) {
     return callSerialized([this, &service_name, interface_id, method_id, &request, &response, timeout_ms]() -> int {
+        return invokeLocked(service_name, interface_id, method_id, request, response, timeout_ms);
+    });
+}
+
+int OmniRuntime::Impl::invokeLocked(const std::string& service_name, uint32_t interface_id,
+                                    uint32_t method_id, const Buffer& request, Buffer& response,
+                                    uint32_t timeout_ms) {
     stats_.total_rpc_calls++;
     ServiceInfo info;
     int ret = lookupServiceUnlocked(service_name, info);
@@ -644,12 +711,8 @@ int OmniRuntime::Impl::invoke(const std::string& service_name, uint32_t interfac
     }
 
     for (int attempt = 0; attempt < 2; ++attempt) {
-        ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-            service_name, info.host, info.port, info.host_id, info.shm_name, info.shm_config);
-        if (!conn) {
-            if (attempt == 0 && refreshServiceConnectionUnlocked(service_name, info, conn)) {
-                continue;
-            }
+        ServiceConnection* conn = NULL;
+        if (!acquireInvokeConnection(service_name, info, attempt, conn)) {
             stats_.connection_errors++;
             stats_.total_rpc_failures++;
             return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
@@ -657,22 +720,10 @@ int OmniRuntime::Impl::invoke(const std::string& service_name, uint32_t interfac
 
         uint32_t seq = allocSequence();
         Message msg(MessageType::MSG_INVOKE, seq);
-        msg.payload.writeUint32(interface_id);
-        msg.payload.writeUint32(method_id);
-        msg.payload.writeUint32(static_cast<uint32_t>(request.size()));
-        if (request.size() > 0) {
-            msg.payload.writeRaw(request.data(), request.size());
-        }
+        populateInvokeMessage(msg, interface_id, method_id, request);
 
-        if (!conn_mgr_->sendMessage(service_name, msg)) {
-            stats_.connection_errors++;
-            OMNI_LOG_ERROR(LOG_TAG,
-                           "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d attempt=%d",
-                           service_name.c_str(), interface_id, method_id,
-                           static_cast<int>(ErrorCode::ERR_SEND_FAILED), attempt + 1);
-            if (attempt == 0 && refreshServiceConnectionUnlocked(service_name, info, conn)) {
-                continue;
-            }
+        if (!sendInvokeMessage(service_name, msg, info, conn, attempt, true,
+                               interface_id, method_id)) {
             stats_.total_rpc_failures++;
             return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
         }
@@ -709,12 +760,17 @@ int OmniRuntime::Impl::invoke(const std::string& service_name, uint32_t interfac
 
     stats_.total_rpc_failures++;
     return static_cast<int>(ErrorCode::ERR_INVOKE_FAILED);
-    });
 }
 
 int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t interface_id,
                                      uint32_t method_id, const Buffer& request) {
     return callSerialized([this, &service_name, interface_id, method_id, &request]() -> int {
+        return invokeOneWayLocked(service_name, interface_id, method_id, request);
+    });
+}
+
+int OmniRuntime::Impl::invokeOneWayLocked(const std::string& service_name, uint32_t interface_id,
+                                          uint32_t method_id, const Buffer& request) {
     stats_.total_rpc_calls++;
     ServiceInfo info;
     int ret = lookupServiceUnlocked(service_name, info);
@@ -724,30 +780,18 @@ int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t in
     }
 
     for (int attempt = 0; attempt < 2; ++attempt) {
-        ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-            service_name, info.host, info.port, info.host_id, info.shm_name, info.shm_config);
-        if (!conn) {
-            if (attempt == 0 && refreshServiceConnectionUnlocked(service_name, info, conn)) {
-                continue;
-            }
+        ServiceConnection* conn = NULL;
+        if (!acquireInvokeConnection(service_name, info, attempt, conn)) {
             stats_.connection_errors++;
             stats_.total_rpc_failures++;
             return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
         }
 
         Message msg(MessageType::MSG_INVOKE_ONEWAY, allocSequence());
-        msg.payload.writeUint32(interface_id);
-        msg.payload.writeUint32(method_id);
-        msg.payload.writeUint32(static_cast<uint32_t>(request.size()));
-        if (request.size() > 0) {
-            msg.payload.writeRaw(request.data(), request.size());
-        }
+        populateInvokeMessage(msg, interface_id, method_id, request);
 
-        if (!conn_mgr_->sendMessage(service_name, msg)) {
-            stats_.connection_errors++;
-            if (attempt == 0 && refreshServiceConnectionUnlocked(service_name, info, conn)) {
-                continue;
-            }
+        if (!sendInvokeMessage(service_name, msg, info, conn, attempt, false,
+                               interface_id, method_id)) {
             stats_.total_rpc_failures++;
             return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
         }
@@ -757,7 +801,6 @@ int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t in
 
     stats_.total_rpc_failures++;
     return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    });
 }
 
 // ============================================================
@@ -767,6 +810,12 @@ int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t in
 int OmniRuntime::Impl::subscribeServiceDeath(const std::string& service_name,
                                                const DeathCallback& callback) {
     return callSerialized([this, &service_name, &callback]() -> int {
+        return subscribeServiceDeathLocked(service_name, callback);
+    });
+}
+
+int OmniRuntime::Impl::subscribeServiceDeathLocked(const std::string& service_name,
+                                                   const DeathCallback& callback) {
     Message msg(MessageType::MSG_SUBSCRIBE_SERVICE, allocSequence());
     msg.payload.writeString(service_name);
     
@@ -787,17 +836,20 @@ int OmniRuntime::Impl::subscribeServiceDeath(const std::string& service_name,
 
     death_callbacks_[service_name] = callback;
     return 0;
-    });
 }
 
 int OmniRuntime::Impl::unsubscribeServiceDeath(const std::string& service_name) {
     return callSerialized([this, &service_name]() -> int {
+        return unsubscribeServiceDeathLocked(service_name);
+    });
+}
+
+int OmniRuntime::Impl::unsubscribeServiceDeathLocked(const std::string& service_name) {
     Message msg(MessageType::MSG_UNSUBSCRIBE_SERVICE, allocSequence());
     msg.payload.writeString(service_name);
     sendToSM(msg);
     death_callbacks_.erase(service_name);
     return 0;
-    });
 }
 
 // ============================================================
@@ -806,6 +858,11 @@ int OmniRuntime::Impl::unsubscribeServiceDeath(const std::string& service_name) 
 
 int OmniRuntime::Impl::publishTopic(const std::string& topic_name) {
     return callSerialized([this, &topic_name]() -> int {
+        return publishTopicLocked(topic_name);
+    });
+}
+
+int OmniRuntime::Impl::publishTopicLocked(const std::string& topic_name) {
     if (!initialized_) {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
@@ -856,11 +913,15 @@ int OmniRuntime::Impl::publishTopic(const std::string& topic_name) {
     uint32_t topic_id = fnv1a_32(topic_name);
     topic_runtime_.rememberPublishedTopic(topic_name, topic_id, pub_info.name);
     return 0;
-    });
 }
 
 int OmniRuntime::Impl::broadcast(uint32_t topic_id, const Buffer& data) {
     return callSerialized([this, topic_id, &data]() -> int {
+        return broadcastLocked(topic_id, data);
+    });
+}
+
+int OmniRuntime::Impl::broadcastLocked(uint32_t topic_id, const Buffer& data) {
     Message msg(MessageType::MSG_BROADCAST, 0);
     msg.payload.writeUint32(topic_id);
     msg.payload.writeUint32(static_cast<uint32_t>(data.size()));
@@ -916,7 +977,6 @@ int OmniRuntime::Impl::broadcast(uint32_t topic_id, const Buffer& data) {
     }
 
     return 0;
-    });
 }
 
 void OmniRuntime::Impl::handleTopicBroadcastMessage(const Message& msg) {
@@ -940,6 +1000,12 @@ void OmniRuntime::Impl::handleTopicBroadcastMessage(const Message& msg) {
 int OmniRuntime::Impl::subscribeTopic(const std::string& topic_name,
                                        const TopicCallback& callback) {
     return callSerialized([this, &topic_name, &callback]() -> int {
+        return subscribeTopicLocked(topic_name, callback);
+    });
+}
+
+int OmniRuntime::Impl::subscribeTopicLocked(const std::string& topic_name,
+                                            const TopicCallback& callback) {
     Message msg(MessageType::MSG_SUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic_name);
     
@@ -960,17 +1026,20 @@ int OmniRuntime::Impl::subscribeTopic(const std::string& topic_name,
 
     topic_runtime_.rememberSubscription(topic_name, callback);
     return 0;
-    });
 }
 
 int OmniRuntime::Impl::unsubscribeTopic(const std::string& topic_name) {
     return callSerialized([this, &topic_name]() -> int {
+        return unsubscribeTopicLocked(topic_name);
+    });
+}
+
+int OmniRuntime::Impl::unsubscribeTopicLocked(const std::string& topic_name) {
     Message msg(MessageType::MSG_UNSUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic_name);
     sendToSM(msg);
     topic_runtime_.forgetSubscription(topic_name);
     return 0;
-    });
 }
 
 // ============================================================
@@ -1292,6 +1361,47 @@ bool OmniRuntime::Impl::sendOnFd(ITransport* transport, const Message& msg) {
     return true;
 }
 
+bool OmniRuntime::Impl::acquireInvokeConnection(const std::string& service_name, ServiceInfo& info,
+                                                int attempt, ServiceConnection*& conn) {
+    conn = conn_mgr_->getOrCreateConnection(
+        service_name, info.host, info.port, info.host_id, info.shm_name, info.shm_config);
+    if (conn) {
+        return true;
+    }
+
+    return attempt == 0 && refreshServiceConnectionUnlocked(service_name, info, conn);
+}
+
+void OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_id,
+                                              uint32_t method_id, const Buffer& request) const {
+    msg.payload.writeUint32(interface_id);
+    msg.payload.writeUint32(method_id);
+    msg.payload.writeUint32(static_cast<uint32_t>(request.size()));
+    if (request.size() > 0) {
+        msg.payload.writeRaw(request.data(), request.size());
+    }
+}
+
+bool OmniRuntime::Impl::sendInvokeMessage(const std::string& service_name, const Message& msg,
+                                          const ServiceInfo& info, ServiceConnection*& conn,
+                                          int attempt, bool log_failure,
+                                          uint32_t interface_id, uint32_t method_id) {
+    if (conn_mgr_->sendMessage(service_name, msg)) {
+        return true;
+    }
+
+    stats_.connection_errors++;
+    if (log_failure) {
+        OMNI_LOG_ERROR(LOG_TAG,
+                       "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d attempt=%d",
+                       service_name.c_str(), interface_id, method_id,
+                       static_cast<int>(ErrorCode::ERR_SEND_FAILED), attempt + 1);
+    }
+
+    return attempt == 0 && refreshServiceConnectionUnlocked(service_name,
+                                                            const_cast<ServiceInfo&>(info), conn);
+}
+
 std::string OmniRuntime::Impl::topicPublisherServiceName(const std::string& topic_name) const {
     return "topic_pub_" + topic_name;
 }
@@ -1354,12 +1464,12 @@ const std::string& OmniRuntime::Impl::hostId() const {
 }
 
 bool OmniRuntime::Impl::isOwnerThread() const {
-    return owner_thread_id_ != std::thread::id() && owner_thread_id_ == std::this_thread::get_id();
+    return owner_executor_.isOwnerThread();
 }
 
 void OmniRuntime::Impl::captureOwnerThread() {
-    if (owner_thread_id_ == std::thread::id()) {
-        owner_thread_id_ = std::this_thread::get_id();
+    if (!owner_executor_.hasOwnerThread()) {
+        owner_executor_.setOwnerThread(std::this_thread::get_id());
     }
 }
 
@@ -1534,16 +1644,24 @@ void OmniRuntime::Impl::updateConnectionStats(RuntimeStats& stats) const {
 
 int OmniRuntime::Impl::getStats(RuntimeStats& stats) {
     return callSerialized([this, &stats]() -> int {
-        stats = stats_;
-        updateConnectionStats(stats);
-        return 0;
+        return getStatsLocked(stats);
     });
+}
+
+int OmniRuntime::Impl::getStatsLocked(RuntimeStats& stats) {
+    stats = stats_;
+    updateConnectionStats(stats);
+    return 0;
 }
 
 void OmniRuntime::Impl::resetStats() {
     callSerialized([this]() {
-        stats_ = RuntimeStats();
+        resetStatsLocked();
     });
+}
+
+void OmniRuntime::Impl::resetStatsLocked() {
+    stats_ = RuntimeStats();
 }
 
 

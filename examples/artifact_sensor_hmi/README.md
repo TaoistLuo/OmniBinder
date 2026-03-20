@@ -129,13 +129,15 @@ cmake --build build -j4
 cmake --install build
 ```
 
-确保安装后的 `omni-idlc` 可被找到：
+默认情况下，下游工程在 `find_package(OmniBinder REQUIRED)` 后，会优先使用安装目录中的 `bin_host/omni-idlc`。
+
+如果你希望在命令行里直接手动调用它，也可以把它加入 `PATH`：
 
 ```bash
-export PATH="$(pwd)/build/install/bin:$PATH"
+export PATH="$(pwd)/build/install/bin_host:$PATH"
 ```
 
-这一步很重要，因为下游工程中的 `omnic_generate()` 会通过 `PATH` 查找 `omni-idlc`。
+只有当安装包里没有主机版 `omni-idlc`，且你又没有显式传入 `OMNIBINDER_HOST_IDLC` 时，`omnic_generate()` 才会回退到通过 `PATH` 查找。
 
 ---
 
@@ -162,16 +164,18 @@ export PATH="$(pwd)/build/install/bin:$PATH"
 
 ```bash
 cmake -S examples/artifact_sensor_hmi -B build/example_sensor_hmi \
-  -DOmniBinder_DIR="$(pwd)/build/install/lib/cmake/OmniBinder"
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
 
 cmake --build build/example_sensor_hmi -j4
 ```
 
 这里的关键点：
 
-- `OmniBinder_DIR` 指向当前项目安装后的 CMake package 目录
+- `CMAKE_PREFIX_PATH` 指向 OmniBinder 安装前缀，`find_package()` 会自动在其中找到 `lib/cmake/OmniBinder`
 - 下游工程通过 `find_package(OmniBinder REQUIRED)` 获取导出的库 target
-- 通过 `omnic_generate()` 调用 `omni-idlc` 生成代码
+- 通过 `omnic_generate()` 调用主机版 `omni-idlc` 生成代码
+
+注意：这里默认针对“主机侧安装前缀”。如果你使用的是双阶段交叉编译产物，请不要直接把最终发布目录传给主机侧下游工程做 `find_package()`，因为其中的 `lib/` 很可能已经被目标架构库覆盖。
 
 ---
 
@@ -184,6 +188,7 @@ cmake --build build/example_sensor_hmi -j4
 关键思路如下：
 
 ```cmake
+set(CMAKE_PREFIX_PATH "/path/to/omnibinder/install")
 find_package(OmniBinder REQUIRED)
 
 add_executable(sensor_cpp sensor_cpp/sensor_service.cpp)

@@ -16,6 +16,14 @@ add_executable(test_event_loop test_event_loop.cpp)
 target_link_libraries(test_event_loop PRIVATE omnibinder_static)
 add_test(NAME test_event_loop COMMAND test_event_loop)
 
+add_executable(test_owner_thread_executor test_owner_thread_executor.cpp)
+target_include_directories(test_owner_thread_executor PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(test_owner_thread_executor PRIVATE omnibinder_static pthread)
+add_test(NAME test_owner_thread_executor COMMAND test_owner_thread_executor)
+
 add_executable(test_transport test_transport.cpp)
 target_link_libraries(test_transport PRIVATE omnibinder_static)
 add_test(NAME test_transport COMMAND test_transport)
@@ -53,6 +61,8 @@ add_executable(test_idl_compiler
     test_idl_compiler.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c.cpp
 )
 target_include_directories(test_idl_compiler PRIVATE
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc
@@ -63,6 +73,7 @@ add_test(NAME test_idl_compiler COMMAND test_idl_compiler)
 add_executable(test_omni_cli_type_codec
     test_omni_tool_type_codec.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_cli/simple_json.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_cli/type_resolver.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_cli/type_codec.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp

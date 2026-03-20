@@ -22,6 +22,8 @@
 static const uint16_t SM_PORT = 19941;
 static const uint32_t IFACE_ID = 0x11223344u;
 static const uint32_t METHOD_ECHO = 0x55667788u;
+static const uint32_t METHOD_GET_NAME = 0x55667789u;
+static const uint32_t METHOD_ECHO_BYTES = 0x5566778au;
 
 struct ServerContext {
     omni_runtime_t* runtime;
@@ -35,6 +37,14 @@ static void cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
                           omni_buffer_t* response, void* user_data) {
     (void)user_data;
     if (method_id != METHOD_ECHO) {
+        if (method_id == METHOD_GET_NAME) {
+            omni_buffer_write_string(response, "c-api-service", 13);
+        } else if (method_id == METHOD_ECHO_BYTES) {
+            uint32_t bytes_len = 0;
+            uint8_t* bytes = omni_buffer_read_bytes(const_cast<omni_buffer_t*>(request), &bytes_len);
+            omni_buffer_write_bytes(response, bytes, bytes_len);
+            free(bytes);
+        }
         return;
     }
     uint32_t len = 0;
@@ -147,6 +157,19 @@ int main() {
         REQUIRE(len == 11, "buffer string length mismatch");
         REQUIRE(std::strcmp(text, "hello-c-api") == 0, "buffer string content mismatch");
         free(text);
+
+        omni_buffer_t* empty = omni_buffer_create();
+        REQUIRE(empty != NULL, "empty buffer create failed");
+        omni_buffer_write_string(empty, NULL, 0);
+        omni_buffer_reset(empty);
+        uint32_t empty_len = 99;
+        char* empty_text = omni_buffer_read_string(empty, &empty_len);
+        REQUIRE(empty_text != NULL, "empty string read returned null");
+        REQUIRE(empty_len == 0, "empty string length mismatch");
+        REQUIRE(std::strcmp(empty_text, "") == 0, "empty string content mismatch");
+        free(empty_text);
+        omni_buffer_destroy(empty);
+
         REQUIRE(omni_fnv1a_32("Echo") != 0, "fnv hash returned zero");
         omni_buffer_destroy(buf);
         PASS();
@@ -161,7 +184,9 @@ int main() {
     server_ctx.service = omni_service_create("CService", IFACE_ID, cEchoCallback, NULL);
     REQUIRE(server_ctx.runtime != NULL, "server runtime create failed");
     REQUIRE(server_ctx.service != NULL, "server service create failed");
-    omni_service_add_method(server_ctx.service, METHOD_ECHO, "Echo");
+    omni_service_add_method_ex(server_ctx.service, METHOD_ECHO, "Echo", "std::string", "std::string");
+    omni_service_add_method_ex(server_ctx.service, METHOD_GET_NAME, "GetName", "", "std::string");
+    omni_service_add_method_ex(server_ctx.service, METHOD_ECHO_BYTES, "EchoBytes", "std::vector<uint8_t>", "std::vector<uint8_t>");
 
     pthread_t server_tid = 0;
     int pthread_ret = pthread_create(&server_tid, NULL, serverThread, &server_ctx);
@@ -205,6 +230,46 @@ int main() {
         stats_ret = omni_runtime_get_stats(runtime, &stats);
         REQUIRE(stats_ret == 0, "get stats after reset failed");
         REQUIRE(stats.total_rpc_calls == 0, "stats reset did not clear rpc calls");
+
+        omni_buffer_destroy(req);
+        omni_buffer_destroy(resp);
+        omni_runtime_stop(runtime);
+        omni_runtime_destroy(runtime);
+        PASS();
+    }
+
+    TEST(c_api_string_and_bytes_methods);
+    {
+        omni_runtime_t* runtime = omni_runtime_create();
+        REQUIRE(runtime != NULL, "runtime create failed");
+        int init_ret = omni_runtime_init(runtime, "127.0.0.1", SM_PORT);
+        REQUIRE(init_ret == 0, "runtime init failed");
+
+        omni_buffer_t* req = omni_buffer_create();
+        omni_buffer_t* resp = omni_buffer_create();
+        REQUIRE(req != NULL && resp != NULL, "buffer create failed");
+
+        int ret = omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_GET_NAME, req, resp, 3000);
+        REQUIRE(ret == 0, "get-name invoke failed");
+        uint32_t name_len = 0;
+        char* name = omni_buffer_read_string(resp, &name_len);
+        REQUIRE(name != NULL, "get-name response null");
+        REQUIRE(name_len == 13, "get-name length mismatch");
+        REQUIRE(std::strcmp(name, "c-api-service") == 0, "get-name content mismatch");
+        free(name);
+
+        omni_buffer_reset(req);
+        omni_buffer_reset(resp);
+        const uint8_t payload[] = {0x00, 0x11, 0x22, 0x33, 0xfe, 0xff};
+        omni_buffer_write_bytes(req, payload, sizeof(payload));
+        ret = omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO_BYTES, req, resp, 3000);
+        REQUIRE(ret == 0, "echo-bytes invoke failed");
+        uint32_t out_len = 0;
+        uint8_t* out = omni_buffer_read_bytes(resp, &out_len);
+        REQUIRE(out != NULL || out_len == 0, "echo-bytes response invalid");
+        REQUIRE(out_len == sizeof(payload), "echo-bytes length mismatch");
+        REQUIRE(std::memcmp(out, payload, sizeof(payload)) == 0, "echo-bytes content mismatch");
+        free(out);
 
         omni_buffer_destroy(req);
         omni_buffer_destroy(resp);

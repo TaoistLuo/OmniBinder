@@ -59,6 +59,85 @@ std::string bufferMethodSuffix(const TypeRef& type) {
     }
 }
 
+void emitSerializeValue(const TypeRef& type, const std::string& expr,
+                        const std::string& buffer_name, const std::string& indent,
+                        int depth, std::ostream& os) {
+    switch (type.primitive) {
+    case TYPE_BOOL:
+    case TYPE_INT8:
+    case TYPE_UINT8:
+    case TYPE_INT16:
+    case TYPE_UINT16:
+    case TYPE_INT32:
+    case TYPE_UINT32:
+    case TYPE_INT64:
+    case TYPE_UINT64:
+    case TYPE_FLOAT32:
+    case TYPE_FLOAT64:
+    case TYPE_STRING:
+    case TYPE_BYTES:
+        os << indent << buffer_name << ".write" << bufferMethodSuffix(type)
+           << "(" << expr << ");\n";
+        break;
+    case TYPE_CUSTOM:
+        os << indent << expr << ".serialize(" << buffer_name << ");\n";
+        break;
+    case TYPE_ARRAY: {
+        std::string idx = "i" + std::to_string(depth);
+        os << indent << buffer_name << ".writeUint32(static_cast<uint32_t>("
+           << expr << ".size()));\n";
+        os << indent << "for (size_t " << idx << " = 0; " << idx << " < "
+           << expr << ".size(); ++" << idx << ") {\n";
+        emitSerializeValue(*type.element_type, expr + "[" + idx + "]", buffer_name,
+                           indent + "    ", depth + 1, os);
+        os << indent << "}\n";
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+void emitDeserializeValue(const TypeRef& type, const std::string& target,
+                          const std::string& buffer_name, const std::string& indent,
+                          int depth, std::ostream& os) {
+    switch (type.primitive) {
+    case TYPE_BOOL:
+    case TYPE_INT8:
+    case TYPE_UINT8:
+    case TYPE_INT16:
+    case TYPE_UINT16:
+    case TYPE_INT32:
+    case TYPE_UINT32:
+    case TYPE_INT64:
+    case TYPE_UINT64:
+    case TYPE_FLOAT32:
+    case TYPE_FLOAT64:
+    case TYPE_STRING:
+    case TYPE_BYTES:
+        os << indent << target << " = " << buffer_name << ".read"
+           << bufferMethodSuffix(type) << "();\n";
+        break;
+    case TYPE_CUSTOM:
+        os << indent << target << ".deserialize(" << buffer_name << ");\n";
+        break;
+    case TYPE_ARRAY: {
+        std::string count = "cnt" + std::to_string(depth);
+        std::string idx = "i" + std::to_string(depth);
+        os << indent << "{ uint32_t " << count << " = " << buffer_name
+           << ".readUint32(); " << target << ".resize(" << count << ");\n";
+        os << indent << "  for (uint32_t " << idx << " = 0; " << idx << " < "
+           << count << "; ++" << idx << ") {\n";
+        emitDeserializeValue(*type.element_type, target + "[" + idx + "]", buffer_name,
+                             indent + "    ", depth + 1, os);
+        os << indent << "  }}\n";
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 bool CppCodeGen::generate(const AstFile& ast, const std::string& output_dir,
                           const std::string& filename) {
     pkg_ = ast.package_name;
@@ -269,19 +348,15 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "    }\n    return s_" << svc.name << "_info;\n}\n\n";
         
         os << "void " << svc.name << "Stub::onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) {\n";
-        os << "    omnibinder::Buffer req(request.data(), request.size());\n";
-        os << "    switch (method_id) {\n";
+            os << "    omnibinder::Buffer req(request.data(), request.size());\n";
+            os << "    switch (method_id) {\n";
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
             os << "    case 0x" << std::hex << mid << std::dec << "u: {\n";
             if (m.has_param) {
                 os << "        " << cppTypeName(m.param.type) << " " << m.param.name << ";\n";
-                if (m.param.type.primitive == TYPE_CUSTOM) {
-                    os << "        " << m.param.name << ".deserialize(req);\n";
-                } else {
-                    os << "        " << m.param.name << " = req.read" << bufferMethodSuffix(m.param.type) << "();\n";
-                }
+                emitDeserializeValue(m.param.type, m.param.name, "req", "        ", 0, os);
             }
             if (!m.return_type.isVoid()) {
                 os << "        " << cppTypeName(m.return_type) << " result = " << m.name << "(";
@@ -291,11 +366,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             if (m.has_param) os << m.param.name;
             os << ");\n";
             if (!m.return_type.isVoid()) {
-                if (m.return_type.primitive == TYPE_CUSTOM) {
-                    os << "        result.serialize(response);\n";
-                } else {
-                    os << "        response.write" << bufferMethodSuffix(m.return_type) << "(result);\n";
-                }
+                emitSerializeValue(m.return_type, "result", "response", "        ", 0, os);
             }
             os << "        break;\n    }\n";
         }
@@ -337,20 +408,12 @@ os << svc.name << "Proxy::" << svc.name << "Proxy(omnibinder::OmniRuntime& runti
             os << ") {\n";
             os << "    omnibinder::Buffer req, resp;\n";
             if (m.has_param) {
-                if (m.param.type.primitive == TYPE_CUSTOM) {
-                    os << "    " << m.param.name << ".serialize(req);\n";
-                } else {
-                    os << "    req.write" << bufferMethodSuffix(m.param.type) << "(" << m.param.name << ");\n";
-                }
+                emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0, os);
             }
             os << "    runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, req, resp, 0);\n";
             if (!m.return_type.isVoid()) {
                 os << "    " << cppTypeName(m.return_type) << " result;\n";
-                if (m.return_type.primitive == TYPE_CUSTOM) {
-                    os << "    result.deserialize(resp);\n";
-                } else {
-                    os << "    result = resp.read" << bufferMethodSuffix(m.return_type) << "();\n";
-                }
+                emitDeserializeValue(m.return_type, "result", "resp", "    ", 0, os);
                 os << "    return result;\n";
             }
             os << "}\n\n";
@@ -382,33 +445,7 @@ void CppCodeGen::genSerialize(const std::vector<FieldDef>& fields, const std::st
     for (size_t i = 0; i < fields.size(); ++i) {
         const FieldDef& f = fields[i];
         std::string name = obj.empty() ? f.name : obj + "." + f.name;
-        switch (f.type.primitive) {
-        case TYPE_BOOL:    os << "    buf.writeBool(" << name << ");\n"; break;
-        case TYPE_INT8:    os << "    buf.writeInt8(" << name << ");\n"; break;
-        case TYPE_UINT8:   os << "    buf.writeUint8(" << name << ");\n"; break;
-        case TYPE_INT16:   os << "    buf.writeInt16(" << name << ");\n"; break;
-        case TYPE_UINT16:  os << "    buf.writeUint16(" << name << ");\n"; break;
-        case TYPE_INT32:   os << "    buf.writeInt32(" << name << ");\n"; break;
-        case TYPE_UINT32:  os << "    buf.writeUint32(" << name << ");\n"; break;
-        case TYPE_INT64:   os << "    buf.writeInt64(" << name << ");\n"; break;
-        case TYPE_UINT64:  os << "    buf.writeUint64(" << name << ");\n"; break;
-        case TYPE_FLOAT32: os << "    buf.writeFloat32(" << name << ");\n"; break;
-        case TYPE_FLOAT64: os << "    buf.writeFloat64(" << name << ");\n"; break;
-        case TYPE_STRING:  os << "    buf.writeString(" << name << ");\n"; break;
-        case TYPE_BYTES:   os << "    buf.writeBytes(" << name << ");\n"; break;
-        case TYPE_CUSTOM:  os << "    " << name << ".serialize(buf);\n"; break;
-        case TYPE_ARRAY:
-            os << "    buf.writeUint32(static_cast<uint32_t>(" << name << ".size()));\n";
-            os << "    for (size_t i = 0; i < " << name << ".size(); ++i) {\n";
-            if (f.type.element_type && f.type.element_type->primitive == TYPE_CUSTOM) {
-                os << "        " << name << "[i].serialize(buf);\n";
-            } else {
-                os << "        buf.write" << cppTypeName(*f.type.element_type) << "(" << name << "[i]);\n";
-            }
-            os << "    }\n";
-            break;
-        default: break;
-        }
+        emitSerializeValue(f.type, name, "buf", "    ", 0, os);
     }
 }
 
@@ -416,33 +453,7 @@ void CppCodeGen::genDeserialize(const std::vector<FieldDef>& fields, const std::
     for (size_t i = 0; i < fields.size(); ++i) {
         const FieldDef& f = fields[i];
         std::string name = obj.empty() ? f.name : obj + "." + f.name;
-        switch (f.type.primitive) {
-        case TYPE_BOOL:    os << "        " << name << " = buf.readBool();\n"; break;
-        case TYPE_INT8:    os << "        " << name << " = buf.readInt8();\n"; break;
-        case TYPE_UINT8:   os << "        " << name << " = buf.readUint8();\n"; break;
-        case TYPE_INT16:   os << "        " << name << " = buf.readInt16();\n"; break;
-        case TYPE_UINT16:  os << "        " << name << " = buf.readUint16();\n"; break;
-        case TYPE_INT32:   os << "        " << name << " = buf.readInt32();\n"; break;
-        case TYPE_UINT32:  os << "        " << name << " = buf.readUint32();\n"; break;
-        case TYPE_INT64:   os << "        " << name << " = buf.readInt64();\n"; break;
-        case TYPE_UINT64:  os << "        " << name << " = buf.readUint64();\n"; break;
-        case TYPE_FLOAT32: os << "        " << name << " = buf.readFloat32();\n"; break;
-        case TYPE_FLOAT64: os << "        " << name << " = buf.readFloat64();\n"; break;
-        case TYPE_STRING:  os << "        " << name << " = buf.readString();\n"; break;
-        case TYPE_BYTES:   os << "        " << name << " = buf.readBytes();\n"; break;
-        case TYPE_CUSTOM:  os << "        " << name << ".deserialize(buf);\n"; break;
-        case TYPE_ARRAY:
-            os << "        { uint32_t cnt = buf.readUint32(); " << name << ".resize(cnt);\n";
-            os << "          for (uint32_t i = 0; i < cnt; ++i) {\n";
-            if (f.type.element_type && f.type.element_type->primitive == TYPE_CUSTOM) {
-                os << "            " << name << "[i].deserialize(buf);\n";
-            } else {
-                os << "            " << name << "[i] = buf.read" << cppTypeName(*f.type.element_type) << "();\n";
-            }
-            os << "          }}\n";
-            break;
-        default: break;
-        }
+        emitDeserializeValue(f.type, name, "buf", "        ", 0, os);
     }
 }
 

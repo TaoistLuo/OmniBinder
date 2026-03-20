@@ -11,8 +11,8 @@
 #define TYPE_CODEC_H
 
 #include "simple_json.h"
-#include "../omni_idlc/ast.h"
-#include "../omni_idlc/parser.h"
+#include "ast.h"
+#include "parser.h"
 #include <omnibinder/buffer.h>
 #include <string>
 #include <map>

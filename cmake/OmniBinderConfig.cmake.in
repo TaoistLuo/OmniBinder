@@ -3,6 +3,12 @@
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 
+set(OMNIBINDER_PACKAGE_PREFIX_DIR "${PACKAGE_PREFIX_DIR}")
+set(OMNIBINDER_HOST_IDLC "${PACKAGE_PREFIX_DIR}/bin_host/omni-idlc")
+if(NOT EXISTS "${OMNIBINDER_HOST_IDLC}")
+    unset(OMNIBINDER_HOST_IDLC)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/OmniBinderTargets.cmake" OPTIONAL)
 include("${CMAKE_CURRENT_LIST_DIR}/OmniBinderIDL.cmake" OPTIONAL)
 

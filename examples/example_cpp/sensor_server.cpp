@@ -7,6 +7,7 @@
 #include <ctime>
 #include <csignal>
 #include <cstring>
+#include <string>
 
 static volatile bool g_running = true;
 void signalHandler(int) { g_running = false; }
