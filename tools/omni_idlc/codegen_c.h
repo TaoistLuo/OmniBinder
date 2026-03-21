@@ -43,6 +43,11 @@ public:
     bool generate(const AstFile& ast, const std::string& output_dir,
                   const std::string& filename);
 private:
+    bool validateAst(const AstFile& ast);
+    bool validateTypeSupported(const TypeRef& type, const std::string& context,
+                               bool allow_void);
+    void reportError(const std::string& message);
+
     void generateHeader(const AstFile& ast, std::ostream& os, const std::string& filename);
     void generateSource(const AstFile& ast, std::ostream& os, const std::string& filename);
 
@@ -66,6 +71,7 @@ private:
     std::string toSnakeCase(const std::string& name);
 
     std::string pkg_;
+    bool has_error_;
 };
 
 } // namespace omnic
