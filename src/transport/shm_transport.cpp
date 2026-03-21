@@ -577,6 +577,7 @@ int ShmTransport::send(const uint8_t* data, size_t length)
     // Acquire spinlock for multi-writer safety
     ctrl_->req_lock.acquire();
 
+    bool was_empty = (ringAvailableRead(req_ring) == 0);
     uint32_t avail = ringAvailableWrite(req_ring);
     if (avail < total_needed) {
         ctrl_->req_lock.release();
@@ -585,21 +586,16 @@ int ShmTransport::send(const uint8_t* data, size_t length)
         return 0;  // Would block
     }
 
-    // Write client_id
     uint32_t cid = client_id_;
-    ringWrite(req_ring, req_data, reinterpret_cast<const uint8_t*>(&cid), sizeof(uint32_t));
-
-    // Write length
     uint32_t len32 = static_cast<uint32_t>(length);
+    ringWrite(req_ring, req_data, reinterpret_cast<const uint8_t*>(&cid), sizeof(uint32_t));
     ringWrite(req_ring, req_data, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-
-    // Write payload
     ringWrite(req_ring, req_data, data, static_cast<uint32_t>(length));
 
     ctrl_->req_lock.release();
 
     // Notify server via eventfd
-    if (eventfd_enabled_ && peer_req_eventfd_ >= 0) {
+    if (was_empty && eventfd_enabled_ && peer_req_eventfd_ >= 0) {
         platform::eventFdNotify(peer_req_eventfd_);
     }
 
@@ -659,11 +655,9 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
         return -1;
     }
 
-    // Consume length prefix
     resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
     __sync_synchronize();
 
-    // Read payload
     uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len);
     if (read_bytes != msg_len) {
         OMNI_LOG_ERROR(LOG_TAG, "recv() failed to read payload (%u of %u)",
@@ -789,17 +783,16 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
         return -1;
     }
 
-    // Consume client_id + length prefix
     req_ring->read_pos = (r + sizeof(uint32_t) * 2) % cap;
     __sync_synchronize();
 
     out_client_id = client_id;
 
     if (msg_len == 0) {
+        ctrl_->req_lock.release();
         return 0;
     }
 
-    // Read payload
     uint32_t read_bytes = ringRead(req_ring, req_data, buf, msg_len);
     ctrl_->req_lock.release();
     if (read_bytes != msg_len) {
@@ -809,7 +802,7 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
     }
 
     OMNI_LOG_DEBUG(LOG_TAG, "Server received %u bytes from client[%u] on shm '%s'",
-                     msg_len, client_id, shm_name_.c_str());
+                     msg_len, out_client_id, shm_name_.c_str());
     return static_cast<int>(msg_len);
 }
 
@@ -842,6 +835,7 @@ int ShmTransport::serverSend(uint32_t client_id, const uint8_t* data, size_t len
 
     // Length-prefixed: [length(4B)] [payload(NB)]
     uint32_t total_needed = static_cast<uint32_t>(sizeof(uint32_t) + length);
+    bool was_empty = (ringAvailableRead(resp_ring) == 0);
     uint32_t avail = ringAvailableWrite(resp_ring);
 
     if (avail < total_needed) {
@@ -850,15 +844,12 @@ int ShmTransport::serverSend(uint32_t client_id, const uint8_t* data, size_t len
         return 0;  // Would block
     }
 
-    // Write length prefix
     uint32_t len32 = static_cast<uint32_t>(length);
     ringWrite(resp_ring, resp_data, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-
-    // Write payload
     ringWrite(resp_ring, resp_data, data, static_cast<uint32_t>(length));
 
     // Notify the client via eventfd
-    if (eventfd_enabled_ && resp_eventfds_[client_id] >= 0) {
+    if (was_empty && eventfd_enabled_ && resp_eventfds_[client_id] >= 0) {
         platform::eventFdNotify(resp_eventfds_[client_id]);
     }
 
