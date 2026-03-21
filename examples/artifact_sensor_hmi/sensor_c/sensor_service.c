@@ -101,6 +101,19 @@ static void on_measure_rpc_latency(int64_t request_time_us,
     printf("[sensor_c] MeasureRpcLatency -> request_age=%lld us\n",
            (long long)(result->server_handle_time_us - request_time_us));
 }
+static void on_get_sensor_count(int32_t in, int32_t* result, void* user_data) {
+    (void)user_data;
+    *result = in+1;
+}
+void on_get_sensor_name(const char* sensor_id, uint32_t sensor_id_len, char** result, uint32_t* result_len, void* user_data) {
+    (void)user_data;
+    *result = dup_text(sensor_id);
+    if (*result != NULL) {
+        *result_len = (uint32_t)strlen(*result);
+    }
+    printf("[sensor_c] GetSensorName -> sensor_id=%s\n", sensor_id);
+}
+
 
 static void tick_value(void) {
     if (!g_enabled) {
@@ -145,6 +158,8 @@ int main(int argc, char* argv[]) {
     callbacks.ApplyControl = on_apply_control;
     callbacks.TriggerCalibration = on_trigger_calibration;
     callbacks.MeasureRpcLatency = on_measure_rpc_latency;
+    callbacks.GetSensorCount = on_get_sensor_count;
+    callbacks.GetSensorName = on_get_sensor_name;
     callbacks.user_data = NULL;
 
     omni_service_t* service = sensor_hmi_SensorControlService_stub_create(&callbacks);

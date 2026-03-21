@@ -12,3 +12,8 @@ struct StatusResponse {
     int32   code;
     string  message;
 }
+
+struct NameValue {
+    string name;
+    int32  value;
+}

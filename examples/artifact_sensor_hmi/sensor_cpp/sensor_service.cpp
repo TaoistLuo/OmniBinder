@@ -71,6 +71,13 @@ public:
                     static_cast<long long>(result.server_handle_time_us - request_time_us));
         return result;
     }
+    int32_t GetSensorCount(int32_t in){
+        return in+1;
+    }
+    std::string GetSensorName(const std::string& sensor_id){
+        return sensor_id+"_sever";
+    }
+
 
     void tick() {
         if (!enabled_) {

@@ -1,10 +1,3 @@
-/**
- * sensor_server.c - 纯 C 语言传感器服务端示例
- *
- * 演示如何使用 omni-idlc 生成的 C 代码实现一个 OmniBinder 服务端。
- * 编译前需要 omni-idlc 从 sensor_service.bidl 生成 C 代码。
- */
-
 #include "sensor_service.bidl_c.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,19 +14,169 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
-/* ---- 服务方法实现 ---- */
+static char* dup_cstr(const char* s, uint32_t* len_out) {
+    size_t len = strlen(s);
+    char* out = (char*)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, s, len + 1);
+    if (len_out) *len_out = (uint32_t)len;
+    return out;
+}
+
+static void fill_sensor_data(demo_SensorData* data, int32_t id, const char* location) {
+    data->sensor_id = id;
+    data->temperature = g_temp;
+    data->humidity = g_hum;
+    data->timestamp = (int64_t)time(NULL);
+    data->location = dup_cstr(location, &data->location_len);
+}
+
+static void fill_status(common_StatusResponse* resp, int32_t code, const char* msg) {
+    resp->code = code;
+    resp->message = dup_cstr(msg, &resp->message_len);
+}
+
+static void fill_config(demo_SensorConfig* cfg, uint8_t enabled, int32_t rate, const char* label) {
+    cfg->enabled = enabled;
+    cfg->sample_rate_hz = rate;
+    cfg->label = dup_cstr(label, &cfg->label_len);
+}
+
+static void fill_sensor_data_array(demo_demo_SensorData_array* arr) {
+    demo_demo_SensorData_array_init(arr);
+    arr->count = 1;
+    arr->data = (struct demo_SensorData*)malloc(sizeof(struct demo_SensorData));
+    demo_SensorData_init(&arr->data[0]);
+    fill_sensor_data(&arr->data[0], 77, "bundle");
+}
+
+static void fill_bundle(demo_SensorArrayBundle* bundle) {
+    demo_SensorArrayBundle_init(bundle);
+
+    bundle->ids.count = 2;
+    bundle->ids.data = (int32_t*)malloc(sizeof(int32_t) * 2);
+    bundle->ids.data[0] = 1;
+    bundle->ids.data[1] = 2;
+
+    bundle->labels.count = 2;
+    bundle->labels.data = (char**)malloc(sizeof(char*) * 2);
+    bundle->labels.lens = (uint32_t*)malloc(sizeof(uint32_t) * 2);
+    bundle->labels.data[0] = dup_cstr("alpha", &bundle->labels.lens[0]);
+    bundle->labels.data[1] = dup_cstr("beta", &bundle->labels.lens[1]);
+
+    bundle->blobs.count = 2;
+    bundle->blobs.data = (uint8_t**)malloc(sizeof(uint8_t*) * 2);
+    bundle->blobs.lens = (uint32_t*)malloc(sizeof(uint32_t) * 2);
+    bundle->blobs.lens[0] = 3;
+    bundle->blobs.data[0] = (uint8_t*)malloc(3);
+    memset(bundle->blobs.data[0], 0xAA, 3);
+    bundle->blobs.lens[1] = 2;
+    bundle->blobs.data[1] = (uint8_t*)malloc(2);
+    memset(bundle->blobs.data[1], 0xBB, 2);
+
+    fill_sensor_data_array(&bundle->samples);
+}
+
+static void on_echo_bool(uint8_t value, uint8_t* result, void* user_data) {
+    (void)user_data;
+    *result = value ? 0 : 1;
+}
+
+static void on_echo_int8(int8_t value, int8_t* result, void* user_data) { (void)user_data; *result = (int8_t)(value + 1); }
+static void on_echo_uint8(uint8_t value, uint8_t* result, void* user_data) { (void)user_data; *result = (uint8_t)(value + 1); }
+static void on_echo_int16(int16_t value, int16_t* result, void* user_data) { (void)user_data; *result = (int16_t)(value + 2); }
+static void on_echo_uint16(uint16_t value, uint16_t* result, void* user_data) { (void)user_data; *result = (uint16_t)(value + 2); }
+static void on_echo_int32(int32_t value, int32_t* result, void* user_data) { (void)user_data; *result = value + 3; }
+static void on_echo_uint32(uint32_t value, uint32_t* result, void* user_data) { (void)user_data; *result = value + 3; }
+static void on_echo_int64(int64_t value, int64_t* result, void* user_data) { (void)user_data; *result = value + 4; }
+static void on_echo_uint64(uint64_t value, uint64_t* result, void* user_data) { (void)user_data; *result = value + 4; }
+static void on_echo_float32(float value, float* result, void* user_data) { (void)user_data; *result = value + 0.5f; }
+static void on_echo_float64(double value, double* result, void* user_data) { (void)user_data; *result = value + 0.25; }
+
+static void on_echo_string(const char* value, uint32_t value_len, char** result, uint32_t* result_len, void* user_data) {
+    (void)user_data;
+    const char* suffix = "_echo";
+    uint32_t suffix_len = 5;
+    *result = (char*)malloc(value_len + suffix_len + 1);
+    memcpy(*result, value, value_len);
+    memcpy(*result + value_len, suffix, suffix_len + 1);
+    *result_len = value_len + suffix_len;
+}
+
+static void on_echo_bytes(const uint8_t* value, uint32_t value_len, uint8_t** result, uint32_t* result_len, void* user_data) {
+    (void)user_data;
+    *result = (uint8_t*)malloc(value_len + 1);
+    memcpy(*result, value, value_len);
+    (*result)[value_len] = (uint8_t)(value_len & 0xFF);
+    *result_len = value_len + 1;
+}
+
+static void on_echo_status(const common_StatusResponse* value, common_StatusResponse* result, void* user_data) {
+    (void)user_data;
+    fill_status(result, value->code + 100, "demo_echo");
+}
+
+static void on_echo_config(const demo_SensorConfig* value, demo_SensorConfig* result, void* user_data) {
+    (void)user_data;
+    fill_config(result, value->enabled ? 0 : 1, value->sample_rate_hz + 5, "sensor-main_server");
+}
+
+static void on_echo_envelope(const demo_SensorEnvelope* value, demo_SensorEnvelope* result, void* user_data) {
+    (void)user_data;
+    demo_SensorEnvelope_init(result);
+    fill_sensor_data(&result->data, value->data.sensor_id, "Lab-1");
+    result->data.temperature = value->data.temperature + 1.0;
+    result->data.humidity = value->data.humidity + 2.0;
+    fill_config(&result->config, value->config.enabled ? 0 : 1, value->config.sample_rate_hz + 5, "sensor-main_nested");
+    result->captured_at.seconds = value->captured_at.seconds;
+    result->captured_at.nanos = value->captured_at.nanos + 1;
+}
+
+static void on_echo_id_array(const demo_int32_t_array* value, demo_int32_t_array* result, void* user_data) {
+    (void)user_data;
+    demo_int32_t_array_init(result);
+    result->count = value->count + 1;
+    result->data = (int32_t*)malloc(sizeof(int32_t) * result->count);
+    memcpy(result->data, value->data, sizeof(int32_t) * value->count);
+    result->data[value->count] = (int32_t)value->count;
+}
+
+static void on_echo_label_array(const demo_string_array* value, demo_string_array* result, void* user_data) {
+    uint32_t i;
+    (void)user_data;
+    demo_string_array_init(result);
+    result->count = value->count + 1;
+    result->data = (char**)malloc(sizeof(char*) * result->count);
+    result->lens = (uint32_t*)malloc(sizeof(uint32_t) * result->count);
+    for (i = 0; i < value->count; ++i) {
+        result->data[i] = dup_cstr(value->data[i], &result->lens[i]);
+    }
+    result->data[value->count] = dup_cstr("tail", &result->lens[value->count]);
+}
+
+static void on_echo_sensor_array(const demo_demo_SensorData_array* value, demo_demo_SensorData_array* result, void* user_data) {
+    uint32_t i;
+    (void)user_data;
+    demo_demo_SensorData_array_init(result);
+    result->count = value->count;
+    result->data = (struct demo_SensorData*)malloc(sizeof(struct demo_SensorData) * result->count);
+    for (i = 0; i < result->count; ++i) {
+        demo_SensorData_init(&result->data[i]);
+        fill_sensor_data(&result->data[i], value->data[i].sensor_id, "echo_location");
+    }
+}
+
+static void on_echo_bundle(const demo_SensorArrayBundle* value, demo_SensorArrayBundle* result, void* user_data) {
+    (void)user_data;
+    fill_bundle(result);
+    if (value->ids.count > 0) {
+        result->ids.data[0] = value->ids.data[0];
+    }
+}
 
 static void on_get_latest_data(demo_SensorData* result, void* user_data) {
     (void)user_data;
-    result->sensor_id = 1;
-    result->temperature = g_temp;
-    result->humidity = g_hum;
-    result->timestamp = (int64_t)time(NULL);
-    result->location = (char*)malloc(7);
-    if (result->location) {
-        memcpy(result->location, "Room-A", 7);
-        result->location_len = 6;
-    }
+    fill_sensor_data(result, 1, "Room-A");
     printf("[SensorService] GetLatestData: temp=%.1f humidity=%.1f\n", g_temp, g_hum);
 }
 
@@ -42,12 +185,7 @@ static void on_set_threshold(const demo_ControlCommand* cmd,
     (void)user_data;
     printf("[SensorService] SetThreshold: type=%d target=%.*s value=%d\n",
            cmd->command_type, cmd->target_len, cmd->target, cmd->value);
-    result->code = 0;
-    result->message = (char*)malloc(3);
-    if (result->message) {
-        memcpy(result->message, "OK", 3);
-        result->message_len = 2;
-    }
+    fill_status(result, 0, "OK");
 }
 
 static void on_reset_sensor(int32_t sensor_id, void* user_data) {
@@ -55,6 +193,26 @@ static void on_reset_sensor(int32_t sensor_id, void* user_data) {
     g_temp = 25.0;
     g_hum = 60.0;
     printf("[SensorService] ResetSensor: id=%d\n", sensor_id);
+}
+
+static void on_get_sensor_count(int32_t* result, void* user_data) {
+    (void)user_data;
+    *result = 3;
+}
+
+static void on_request_latest_data_async(const demo_AsyncRequest* request,
+                                         common_StatusResponse* result, void* user_data) {
+    omni_runtime_t* runtime = (omni_runtime_t*)user_data;
+    demo_AsyncResultReady ready;
+    demo_AsyncResultReady_init(&ready);
+    ready.result.request_id = request->request_id;
+    ready.result.client_tag = dup_cstr(request->client_tag, &ready.result.client_tag_len);
+    fill_status(&ready.result.status, 0, "async_ok");
+    fill_sensor_data(&ready.result.data, request->request_id, "AsyncRoom");
+    ready.publish_time = (int64_t)time(NULL);
+    demo_SensorService_broadcast_async_result_ready(runtime, &ready);
+    demo_AsyncResultReady_destroy(&ready);
+    fill_status(result, 0, "accepted");
 }
 
 int main(int argc, char* argv[]) {
@@ -74,22 +232,41 @@ int main(int argc, char* argv[]) {
     printf("=== SensorService (C Server) Starting ===\n");
     printf("ServiceManager: %s:%u\n", sm_host, sm_port);
 
-    /* 创建客户端连接 */
     omni_runtime_t* runtime = omni_runtime_create();
     if (omni_runtime_init(runtime, sm_host, sm_port) != 0) {
         fprintf(stderr, "Failed to connect to ServiceManager\n");
         omni_runtime_destroy(runtime);
         return 1;
     }
-    printf("Connected to ServiceManager\n");
 
-    /* 创建服务（使用生成的回调表） */
     demo_SensorService_callbacks cbs;
     memset(&cbs, 0, sizeof(cbs));
+    cbs.EchoBool = on_echo_bool;
+    cbs.EchoInt8 = on_echo_int8;
+    cbs.EchoUInt8 = on_echo_uint8;
+    cbs.EchoInt16 = on_echo_int16;
+    cbs.EchoUInt16 = on_echo_uint16;
+    cbs.EchoInt32 = on_echo_int32;
+    cbs.EchoUInt32 = on_echo_uint32;
+    cbs.EchoInt64 = on_echo_int64;
+    cbs.EchoUInt64 = on_echo_uint64;
+    cbs.EchoFloat32 = on_echo_float32;
+    cbs.EchoFloat64 = on_echo_float64;
+    cbs.EchoString = on_echo_string;
+    cbs.EchoBytes = on_echo_bytes;
+    cbs.EchoStatus = on_echo_status;
+    cbs.EchoConfig = on_echo_config;
+    cbs.EchoEnvelope = on_echo_envelope;
+    cbs.EchoIdArray = on_echo_id_array;
+    cbs.EchoLabelArray = on_echo_label_array;
+    cbs.EchoSensorArray = on_echo_sensor_array;
+    cbs.EchoBundle = on_echo_bundle;
     cbs.GetLatestData = on_get_latest_data;
     cbs.SetThreshold = on_set_threshold;
     cbs.ResetSensor = on_reset_sensor;
-    cbs.user_data = NULL;
+    cbs.GetSensorCount = on_get_sensor_count;
+    cbs.RequestLatestDataAsync = on_request_latest_data_async;
+    cbs.user_data = runtime;
 
     omni_service_t* svc = demo_SensorService_stub_create(&cbs);
     if (omni_runtime_register_service(runtime, svc) != 0) {
@@ -98,46 +275,29 @@ int main(int argc, char* argv[]) {
         omni_runtime_destroy(runtime);
         return 1;
     }
-    printf("SensorService registered on port %u\n\n", omni_service_port(svc));
 
-    /* 发布话题 */
     omni_runtime_publish_topic(runtime, "SensorUpdate");
+    omni_runtime_publish_topic(runtime, "AsyncResultReady");
 
-    printf("Broadcasting sensor data (Ctrl+C to stop)...\n\n");
+    printf("SensorService registered on port %u\n\n", omni_service_port(svc));
 
     int counter = 0;
     while (g_running) {
         omni_runtime_poll_once(runtime, 100);
-
         if (++counter >= 10) {
             counter = 0;
-
-            /* 更新模拟数据 */
             g_temp += (rand() % 100 - 50) / 100.0;
             g_hum += (rand() % 100 - 50) / 100.0;
 
-            /* 使用生成的广播辅助函数 */
             demo_SensorUpdate msg;
             demo_SensorUpdate_init(&msg);
-            msg.data.sensor_id = 1;
-            msg.data.temperature = g_temp;
-            msg.data.humidity = g_hum;
-            msg.data.timestamp = (int64_t)time(NULL);
-            msg.data.location = (char*)malloc(7);
-            if (msg.data.location) {
-                memcpy(msg.data.location, "Room-A", 7);
-                msg.data.location_len = 6;
-            }
+            fill_sensor_data(&msg.data, 1, "Room-A");
             msg.publish_time = (int64_t)time(NULL);
-
             demo_SensorService_broadcast_sensor_update(runtime, &msg);
-            printf("[Broadcast] temp=%.2f humidity=%.2f\n", g_temp, g_hum);
-
             demo_SensorUpdate_destroy(&msg);
         }
     }
 
-    printf("\nShutting down...\n");
     omni_runtime_unregister_service(runtime, svc);
     demo_SensorService_stub_destroy(svc);
     omni_runtime_stop(runtime);

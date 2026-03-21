@@ -189,8 +189,12 @@ static void emitArrayTypeDeclaration(std::ostream& os, const TypeRef& type,
                                      const std::string& pkg) {
     std::string type_name = cArrayTypeName(type, pkg);
     const TypeRef& element = *type.element_type;
+    std::string element_decl_type = cTypeName(element, pkg);
+    if (element.isCustom() && element.package_name.empty()) {
+        element_decl_type = "struct " + pkg + "_" + element.custom_name;
+    }
     os << "typedef struct " << type_name << " {\n";
-    os << "    " << cTypeName(element, pkg) << "* data;\n";
+    os << "    " << element_decl_type << "* data;\n";
     if (arrayElementNeedsLengths(element)) {
         os << "    uint32_t* lens;\n";
     }

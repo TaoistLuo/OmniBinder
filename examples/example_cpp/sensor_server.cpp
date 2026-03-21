@@ -1,6 +1,3 @@
-// C++ 传感器服务端示例（使用 bidl 生成的 Stub）
-// 编译前需要 omni-idlc 从 sensor_service.bidl 生成 C++ 代码
-
 #include "sensor_service.bidl.h"
 #include <cstdio>
 #include <cstdlib>
@@ -8,29 +5,98 @@
 #include <csignal>
 #include <cstring>
 #include <string>
+#include <vector>
 
 static volatile bool g_running = true;
-void signalHandler(int) { g_running = false; }
+static void signalHandler(int) { g_running = false; }
 
-// 继承生成的 Stub，只需实现业务逻辑
 class MySensorService : public demo::SensorServiceStub {
 public:
-    MySensorService() : temp_(25.0), hum_(60.0) {}
+    MySensorService() : temp_(25.0), hum_(60.0), config_enabled_(true), sample_rate_hz_(10) {}
+
+    bool EchoBool(bool value) override { return !value; }
+    int8_t EchoInt8(int8_t value) override { return static_cast<int8_t>(value + 1); }
+    uint8_t EchoUInt8(uint8_t value) override { return static_cast<uint8_t>(value + 1); }
+    int16_t EchoInt16(int16_t value) override { return static_cast<int16_t>(value + 2); }
+    uint16_t EchoUInt16(uint16_t value) override { return static_cast<uint16_t>(value + 2); }
+    int32_t EchoInt32(int32_t value) override { return value + 3; }
+    uint32_t EchoUInt32(uint32_t value) override { return value + 3; }
+    int64_t EchoInt64(int64_t value) override { return value + 4; }
+    uint64_t EchoUInt64(uint64_t value) override { return value + 4; }
+    float EchoFloat32(float value) override { return value + 0.5f; }
+    double EchoFloat64(double value) override { return value + 0.25; }
+    std::string EchoString(const std::string& value) override { return value + "_echo"; }
+
+    std::vector<uint8_t> EchoBytes(const std::vector<uint8_t>& value) override {
+        std::vector<uint8_t> out = value;
+        out.push_back(static_cast<uint8_t>(value.size() & 0xFF));
+        return out;
+    }
+
+    common::StatusResponse EchoStatus(const common::StatusResponse& value) override {
+        common::StatusResponse out = value;
+        out.code += 100;
+        out.message += "_echo";
+        return out;
+    }
+
+    demo::SensorConfig EchoConfig(const demo::SensorConfig& value) override {
+        demo::SensorConfig out = value;
+        out.enabled = !value.enabled;
+        out.sample_rate_hz += 5;
+        out.label += "_server";
+        return out;
+    }
+
+    demo::SensorEnvelope EchoEnvelope(const demo::SensorEnvelope& value) override {
+        demo::SensorEnvelope out = value;
+        out.data.temperature += 1.0;
+        out.data.humidity += 2.0;
+        out.config.label += "_nested";
+        out.captured_at.nanos += 1;
+        return out;
+    }
+
+    std::vector<int32_t> EchoIdArray(const std::vector<int32_t>& value) override {
+        std::vector<int32_t> out = value;
+        out.push_back(static_cast<int32_t>(value.size()));
+        return out;
+    }
+
+    std::vector<std::string> EchoLabelArray(const std::vector<std::string>& value) override {
+        std::vector<std::string> out = value;
+        out.push_back("tail");
+        return out;
+    }
+
+    std::vector<demo::SensorData> EchoSensorArray(const std::vector<demo::SensorData>& value) override {
+        std::vector<demo::SensorData> out = value;
+        if (!out.empty()) {
+            out[0].location += "_echo";
+        }
+        return out;
+    }
+
+    demo::SensorArrayBundle EchoBundle(const demo::SensorArrayBundle& value) override {
+        demo::SensorArrayBundle out = value;
+        out.ids.push_back(999);
+        out.labels.push_back("bundle_tail");
+        out.blobs.push_back(std::vector<uint8_t>(1, 0xEE));
+        out.samples.push_back(makeSensorData(77, "bundle"));
+        return out;
+    }
 
     demo::SensorData GetLatestData() override {
-        demo::SensorData data;
-        data.sensor_id = 1;
+        demo::SensorData data = makeSensorData(1, "Room-A");
         data.temperature = temp_;
         data.humidity = hum_;
-        data.timestamp = static_cast<int64_t>(time(NULL));
-        data.location = "Room-A";
-        printf("[SensorService] GetLatestData: temp=%.1f humidity=%.1f\n", temp_, hum_);
+        std::printf("[SensorService] GetLatestData: temp=%.1f humidity=%.1f\n", temp_, hum_);
         return data;
     }
 
     common::StatusResponse SetThreshold(const demo::ControlCommand& cmd) override {
-        printf("[SensorService] SetThreshold: type=%d target=%s value=%d\n",
-               cmd.command_type, cmd.target.c_str(), cmd.value);
+        std::printf("[SensorService] SetThreshold: type=%d target=%s value=%d\n",
+                   cmd.command_type, cmd.target.c_str(), cmd.value);
         common::StatusResponse resp;
         resp.code = 0;
         resp.message = "OK";
@@ -40,7 +106,27 @@ public:
     void ResetSensor(int32_t sensor_id) override {
         temp_ = 25.0;
         hum_ = 60.0;
-        printf("[SensorService] ResetSensor: id=%d\n", sensor_id);
+        std::printf("[SensorService] ResetSensor: id=%d\n", sensor_id);
+    }
+
+    int32_t GetSensorCount() override {
+        return 3;
+    }
+
+    common::StatusResponse RequestLatestDataAsync(const demo::AsyncRequest& request) override {
+        demo::AsyncResultReady ready;
+        ready.result.request_id = request.request_id;
+        ready.result.client_tag = request.client_tag;
+        ready.result.status.code = 0;
+        ready.result.status.message = "async_ok";
+        ready.result.data = makeSensorData(request.request_id, "AsyncRoom");
+        ready.publish_time = static_cast<int64_t>(time(NULL));
+        BroadcastAsyncResultReady(ready);
+
+        common::StatusResponse ack;
+        ack.code = 0;
+        ack.message = "accepted";
+        return ack;
     }
 
     void updateData() {
@@ -48,7 +134,21 @@ public:
         hum_ += (rand() % 100 - 50) / 100.0;
     }
 
-    double temp_, hum_;
+private:
+    demo::SensorData makeSensorData(int32_t id, const std::string& location) const {
+        demo::SensorData data;
+        data.sensor_id = id;
+        data.temperature = temp_;
+        data.humidity = hum_;
+        data.timestamp = static_cast<int64_t>(time(NULL));
+        data.location = location;
+        return data;
+    }
+
+    double temp_;
+    double hum_;
+    bool config_enabled_;
+    int32_t sample_rate_hz_;
 };
 
 int main(int argc, char* argv[]) {
@@ -63,27 +163,27 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signalHandler);
     srand((unsigned)time(NULL));
 
-    printf("=== SensorService (C++ Server) Starting ===\n");
-    printf("ServiceManager: %s:%u\n", sm_host, sm_port);
+    std::printf("=== SensorService (C++ Server) Starting ===\n");
+    std::printf("ServiceManager: %s:%u\n", sm_host, sm_port);
 
     omnibinder::OmniRuntime runtime;
     if (runtime.init(sm_host, sm_port) != 0) {
-        fprintf(stderr, "Failed to connect to ServiceManager\n");
+        std::fprintf(stderr, "Failed to connect to ServiceManager\n");
         return 1;
     }
-    printf("Connected to ServiceManager\n");
 
     MySensorService service;
     if (runtime.registerService(&service) != 0) {
-        fprintf(stderr, "Failed to register service\n");
+        std::fprintf(stderr, "Failed to register service\n");
         return 1;
     }
-    printf("SensorService registered on port %u\n\n", service.port());
 
-    // 发布话题
     runtime.publishTopic("SensorUpdate");
+    runtime.publishTopic("AsyncResultReady");
 
-    printf("Broadcasting sensor data (Ctrl+C to stop)...\n\n");
+    std::printf("SensorService registered on port %u\n", service.port());
+    std::printf("Demo service is ready. Press Ctrl+C to stop.\n\n");
+
     int counter = 0;
     while (g_running) {
         runtime.pollOnce(100);
@@ -91,21 +191,17 @@ int main(int argc, char* argv[]) {
             counter = 0;
             service.updateData();
 
-            // 使用生成的 BroadcastSensorUpdate 方法
             demo::SensorUpdate msg;
-            msg.data.sensor_id = 1;
-            msg.data.temperature = service.temp_;
-            msg.data.humidity = service.hum_;
-            msg.data.timestamp = static_cast<int64_t>(time(NULL));
-            msg.data.location = "Room-A";
+            msg.data = service.GetLatestData();
             msg.publish_time = static_cast<int64_t>(time(NULL));
             service.BroadcastSensorUpdate(msg);
 
-            printf("[Broadcast] temp=%.2f humidity=%.2f\n", service.temp_, service.hum_);
+            std::printf("[Broadcast] temp=%.2f humidity=%.2f\n",
+                       msg.data.temperature, msg.data.humidity);
         }
     }
 
-    printf("\nShutting down...\n");
+    std::printf("\nShutting down...\n");
     runtime.unregisterService(&service);
     runtime.stop();
     return 0;
