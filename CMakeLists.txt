@@ -65,7 +65,7 @@ get_filename_component(_omnibinder_c_compiler_name "${CMAKE_C_COMPILER}" NAME)
 set(_omnibinder_is_cross_env OFF)
 if(CMAKE_CROSSCOMPILING)
     set(_omnibinder_is_cross_env ON)
-elseif(_omnibinder_c_compiler_name MATCHES "^(arm|aarch64|riscv|mips).*-g..$")
+elseif(_omnibinder_c_compiler_name MATCHES "^(arm|aarch64|riscv|mips)[^/]*(gcc|g\\+\\+|clang)")
     set(_omnibinder_is_cross_env ON)
 endif()
 

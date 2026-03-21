@@ -29,8 +29,7 @@ int main() {
 
     TEST(add_basic) {
         ServiceRegistry reg;
-        ServiceHandle h = reg.addService(makeInfo("svc.audio"), 10);
-        assert(h != INVALID_HANDLE);
+        assert(reg.addService(makeInfo("svc.audio"), 10) != INVALID_HANDLE);
         assert(reg.count() == 1);
         assert(reg.exists("svc.audio"));
         PASS();
@@ -38,18 +37,15 @@ int main() {
 
     TEST(add_duplicate_name_rejected) {
         ServiceRegistry reg;
-        ServiceHandle h1 = reg.addService(makeInfo("svc.dup"), 10);
-        ServiceHandle h2 = reg.addService(makeInfo("svc.dup"), 11);
-        assert(h1 != INVALID_HANDLE);
-        assert(h2 == INVALID_HANDLE);
+        assert(reg.addService(makeInfo("svc.dup"), 10) != INVALID_HANDLE);
+        assert(reg.addService(makeInfo("svc.dup"), 11) == INVALID_HANDLE);
         assert(reg.count() == 1);
         PASS();
     }
 
     TEST(add_empty_name_rejected) {
         ServiceRegistry reg;
-        ServiceHandle h = reg.addService(makeInfo(""), 10);
-        assert(h == INVALID_HANDLE);
+        assert(reg.addService(makeInfo(""), 10) == INVALID_HANDLE);
         assert(reg.count() == 0);
         PASS();
     }
@@ -57,8 +53,7 @@ int main() {
     TEST(add_name_too_long_rejected) {
         ServiceRegistry reg;
         std::string long_name(MAX_SERVICE_NAME_LENGTH + 1, 'x');
-        ServiceHandle h = reg.addService(makeInfo(long_name), 10);
-        assert(h == INVALID_HANDLE);
+        assert(reg.addService(makeInfo(long_name), 10) == INVALID_HANDLE);
         assert(reg.count() == 0);
         PASS();
     }
@@ -66,8 +61,7 @@ int main() {
     TEST(add_name_at_max_length_accepted) {
         ServiceRegistry reg;
         std::string max_name(MAX_SERVICE_NAME_LENGTH, 'a');
-        ServiceHandle h = reg.addService(makeInfo(max_name), 10);
-        assert(h != INVALID_HANDLE);
+        assert(reg.addService(makeInfo(max_name), 10) != INVALID_HANDLE);
         assert(reg.count() == 1);
         assert(reg.exists(max_name));
         PASS();
@@ -81,29 +75,24 @@ int main() {
         info.port = 9999;
         info.host_id = "node-42";
 
-        ServiceHandle h = reg.addService(info, 7);
-        assert(h != INVALID_HANDLE);
+        assert(reg.addService(info, 7) != INVALID_HANDLE);
 
         ServiceEntry entry;
-        bool found = reg.findService("svc.camera", entry);
-        assert(found);
+        assert(reg.findService("svc.camera", entry));
         assert(entry.info.name == "svc.camera");
         assert(entry.info.host == "192.168.1.5");
         assert(entry.info.port == 9999);
         assert(entry.info.host_id == "node-42");
-        assert(entry.handle == h);
+        assert(entry.handle != INVALID_HANDLE);
         assert(entry.control_fd == 7);
         PASS();
     }
 
     TEST(add_multiple_services_same_fd) {
         ServiceRegistry reg;
-        ServiceHandle h1 = reg.addService(makeInfo("svc.a"), 10);
-        ServiceHandle h2 = reg.addService(makeInfo("svc.b"), 10);
-        ServiceHandle h3 = reg.addService(makeInfo("svc.c"), 10);
-        assert(h1 != INVALID_HANDLE);
-        assert(h2 != INVALID_HANDLE);
-        assert(h3 != INVALID_HANDLE);
+        assert(reg.addService(makeInfo("svc.a"), 10) != INVALID_HANDLE);
+        assert(reg.addService(makeInfo("svc.b"), 10) != INVALID_HANDLE);
+        assert(reg.addService(makeInfo("svc.c"), 10) != INVALID_HANDLE);
         assert(reg.count() == 3);
         PASS();
     }
@@ -116,8 +105,7 @@ int main() {
         ServiceRegistry reg;
         reg.addService(makeInfo("svc.rm"), 10);
         assert(reg.count() == 1);
-        bool ok = reg.removeService("svc.rm");
-        assert(ok);
+        assert(reg.removeService("svc.rm"));
         assert(reg.count() == 0);
         assert(!reg.exists("svc.rm"));
         PASS();
@@ -125,8 +113,7 @@ int main() {
 
     TEST(remove_nonexistent) {
         ServiceRegistry reg;
-        bool ok = reg.removeService("no.such.service");
-        assert(!ok);
+        assert(!reg.removeService("no.such.service"));
         PASS();
     }
 
@@ -144,10 +131,7 @@ int main() {
 
     TEST(remove_by_handle) {
         ServiceRegistry reg;
-        ServiceHandle h = reg.addService(makeInfo("svc.byhandle"), 10);
-        assert(h != INVALID_HANDLE);
-        bool ok = reg.removeServiceByHandle(h);
-        assert(ok);
+        assert(reg.removeServiceByHandle(reg.addService(makeInfo("svc.byhandle"), 10)));
         assert(reg.count() == 0);
         assert(!reg.exists("svc.byhandle"));
         PASS();
@@ -155,8 +139,7 @@ int main() {
 
     TEST(remove_by_handle_nonexistent) {
         ServiceRegistry reg;
-        bool ok = reg.removeServiceByHandle(999);
-        assert(!ok);
+        assert(!reg.removeServiceByHandle(999));
         PASS();
     }
 
@@ -198,12 +181,11 @@ int main() {
 
     TEST(remove_by_fd_clears_handle_lookup) {
         ServiceRegistry reg;
-        ServiceHandle h = reg.addService(makeInfo("svc.fdh"), 40);
+        const ServiceHandle handle = reg.addService(makeInfo("svc.fdh"), 40);
         reg.removeByFd(40);
 
         ServiceEntry entry;
-        bool found = reg.findServiceByHandle(h, entry);
-        assert(!found);
+        assert(!reg.findServiceByHandle(handle, entry));
         PASS();
     }
 
@@ -213,15 +195,14 @@ int main() {
 
     TEST(find_existing) {
         ServiceRegistry reg;
-        ServiceHandle h = reg.addService(makeInfo("svc.find", "10.0.0.1", 5555), 50);
+        assert(reg.addService(makeInfo("svc.find", "10.0.0.1", 5555), 50) != INVALID_HANDLE);
 
         ServiceEntry entry;
-        bool found = reg.findService("svc.find", entry);
-        assert(found);
+        assert(reg.findService("svc.find", entry));
         assert(entry.info.name == "svc.find");
         assert(entry.info.host == "10.0.0.1");
         assert(entry.info.port == 5555);
-        assert(entry.handle == h);
+        assert(entry.handle != INVALID_HANDLE);
         assert(entry.control_fd == 50);
         PASS();
     }
@@ -229,28 +210,25 @@ int main() {
     TEST(find_nonexistent) {
         ServiceRegistry reg;
         ServiceEntry entry;
-        bool found = reg.findService("ghost", entry);
-        assert(!found);
+        assert(!reg.findService("ghost", entry));
         PASS();
     }
 
     TEST(find_by_handle) {
         ServiceRegistry reg;
-        ServiceHandle h = reg.addService(makeInfo("svc.hfind"), 60);
+        const ServiceHandle handle = reg.addService(makeInfo("svc.hfind"), 60);
 
         ServiceEntry entry;
-        bool found = reg.findServiceByHandle(h, entry);
-        assert(found);
+        assert(reg.findServiceByHandle(handle, entry));
         assert(entry.info.name == "svc.hfind");
-        assert(entry.handle == h);
+        assert(entry.handle == handle);
         PASS();
     }
 
     TEST(find_by_handle_nonexistent) {
         ServiceRegistry reg;
         ServiceEntry entry;
-        bool found = reg.findServiceByHandle(12345, entry);
-        assert(!found);
+        assert(!reg.findServiceByHandle(12345, entry));
         PASS();
     }
 
@@ -335,15 +313,13 @@ int main() {
     TEST(get_control_fd_found) {
         ServiceRegistry reg;
         reg.addService(makeInfo("svc.fd"), 77);
-        int fd = reg.getControlFd("svc.fd");
-        assert(fd == 77);
+        assert(reg.getControlFd("svc.fd") == 77);
         PASS();
     }
 
     TEST(get_control_fd_not_found) {
         ServiceRegistry reg;
-        int fd = reg.getControlFd("missing");
-        assert(fd == -1);
+        assert(reg.getControlFd("missing") == -1);
         PASS();
     }
 
@@ -427,8 +403,7 @@ int main() {
         reg.removeByFd(10);
         assert(!reg.exists("svc.rfr"));
 
-        ServiceHandle h = reg.addService(makeInfo("svc.rfr"), 20);
-        assert(h != INVALID_HANDLE);
+        assert(reg.addService(makeInfo("svc.rfr"), 20) != INVALID_HANDLE);
         assert(reg.exists("svc.rfr"));
         PASS();
     }

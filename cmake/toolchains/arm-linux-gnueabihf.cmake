@@ -1,16 +1,40 @@
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR arm)
 
-# Adjust these to match your cross compiler prefix.
-set(TOOLCHAIN_PREFIX arm-linux-gnueabihf)
+# Use explicit CC/CXX from the current environment when available.
+# Otherwise fall back to a compiler prefix.
+if(NOT DEFINED TOOLCHAIN_PREFIX OR TOOLCHAIN_PREFIX STREQUAL "")
+    if(DEFINED ENV{CROSS_COMPILE} AND NOT "$ENV{CROSS_COMPILE}" STREQUAL "")
+        set(TOOLCHAIN_PREFIX "$ENV{CROSS_COMPILE}")
+        string(REGEX REPLACE "-$" "" TOOLCHAIN_PREFIX "${TOOLCHAIN_PREFIX}")
+    else()
+        set(TOOLCHAIN_PREFIX arm-linux-gnueabihf)
+    endif()
+endif()
 
-set(CMAKE_C_COMPILER   ${TOOLCHAIN_PREFIX}-gcc)
-set(CMAKE_CXX_COMPILER ${TOOLCHAIN_PREFIX}-g++)
-set(CMAKE_ASM_COMPILER ${TOOLCHAIN_PREFIX}-gcc)
+if(NOT DEFINED CMAKE_C_COMPILER AND NOT (DEFINED ENV{CC} AND NOT "$ENV{CC}" STREQUAL ""))
+    set(CMAKE_C_COMPILER ${TOOLCHAIN_PREFIX}-gcc)
+endif()
 
-# Optional: point this to your target sysroot if you have one.
-# Example:
-# set(CMAKE_SYSROOT /opt/arm-sysroot)
+if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT (DEFINED ENV{CXX} AND NOT "$ENV{CXX}" STREQUAL ""))
+    set(CMAKE_CXX_COMPILER ${TOOLCHAIN_PREFIX}-g++)
+endif()
+
+if(NOT DEFINED CMAKE_ASM_COMPILER AND DEFINED CMAKE_C_COMPILER)
+    set(CMAKE_ASM_COMPILER ${CMAKE_C_COMPILER})
+endif()
+
+# Sysroot priority:
+# 1. Explicit CMAKE_SYSROOT
+# 2. SDKTARGETSYSROOT
+# 3. OECORE_TARGET_SYSROOT
+if(NOT CMAKE_SYSROOT)
+    if(DEFINED ENV{SDKTARGETSYSROOT} AND NOT "$ENV{SDKTARGETSYSROOT}" STREQUAL "")
+        set(CMAKE_SYSROOT "$ENV{SDKTARGETSYSROOT}")
+    elseif(DEFINED ENV{OECORE_TARGET_SYSROOT} AND NOT "$ENV{OECORE_TARGET_SYSROOT}" STREQUAL "")
+        set(CMAKE_SYSROOT "$ENV{OECORE_TARGET_SYSROOT}")
+    endif()
+endif()
 
 if(CMAKE_SYSROOT)
     set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
