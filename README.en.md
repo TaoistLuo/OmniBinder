@@ -91,22 +91,22 @@ The following data highlights typical OmniBinder latency on the **same-host SHM 
 
 | Test case | Samples | Average | 95% case | 99% case | Notes |
 |---|---:|---:|---:|---:|---|
-| RPC Echo (0 bytes) | 1000 | 67.0 us | 99 us | 123 us | Empty payload, mostly protocol and scheduling overhead |
-| RPC Echo (256 bytes) | 1000 | 66.4 us | 96 us | 130 us | Common small-payload RPC |
-| RPC Echo (1024 bytes) | 1000 | 67.1 us | 94 us | 121 us | 1 KB payload |
-| RPC Echo (4096 bytes) | 1000 | 81.1 us | 107 us | 126 us | 4 KB payload, measured with enlarged SHM ring |
-| RPC Echo (8192 bytes) | 1000 | 93.3 us | 127 us | 168 us | 8 KB payload, measured with enlarged SHM ring |
-| RPC Add (2 x int32) | 1000 | 68.8 us | 95 us | 127 us | Small compute-style RPC |
-| Topic pub/sub (64 bytes) | 1000 | 58.0 us | 91 us | 113 us | Small broadcast payload |
-| Topic pub/sub (256 bytes) | 1000 | 53.4 us | 83 us | 107 us | Common small broadcast payload |
-| Topic pub/sub (1024 bytes) | 1000 | 56.2 us | 87 us | 103 us | 1 KB broadcast payload |
-| Topic pub/sub (8192 bytes) | 1000 | 74.3 us | 109 us | 134 us | 8 KB broadcast payload |
+| RPC Echo (0 bytes) | 1000 | 68.8 us | 96 us | 130 us | Empty payload, mostly protocol and scheduling overhead |
+| RPC Echo (256 bytes) | 1000 | 69.1 us | 97 us | 133 us | Common small-payload RPC |
+| RPC Echo (1024 bytes) | 1000 | 69.1 us | 102 us | 143 us | 1 KB payload |
+| RPC Echo (4096 bytes) | 1000 | 73.9 us | 107 us | 137 us | 4 KB payload, measured with enlarged SHM ring |
+| RPC Echo (8192 bytes) | 1000 | 91.9 us | 125 us | 169 us | 8 KB payload, measured with enlarged SHM ring |
+| RPC Add (2 x int32) | 1000 | 66.5 us | 101 us | 133 us | Small compute-style RPC |
+| Topic pub/sub (64 bytes) | 1000 | 42.4 us | 76 us | 104 us | Small broadcast payload |
+| Topic pub/sub (256 bytes) | 1000 | 41.8 us | 74 us | 93 us | Common small broadcast payload |
+| Topic pub/sub (1024 bytes) | 1000 | 38.4 us | 71 us | 89 us | 1 KB broadcast payload |
+| Topic pub/sub (8192 bytes) | 1000 | 54.8 us | 89 us | 114 us | 8 KB broadcast payload |
 
 Based on the full report:
 
-- **Common 0~1024 byte RPC** averages around **65.9~67.1 us**
-- **4096~8192 byte RPC payloads** average around **81.1~93.3 us** under enlarged SHM-ring configuration
-- **Topic pub/sub** averages around **53.4~74.3 us**
+- **Common 0~1024 byte RPC** averages around **66.5~69.1 us**
+- **4096~8192 byte RPC payloads** average around **73.9~91.9 us** under enlarged SHM-ring configuration
+- **Topic pub/sub** averages around **38.4~54.8 us**
 
 > **Performance note:** the current SHM path uses an `eventfd + EventLoop` event-driven model.
 > The latency numbers mainly reflect serialization, shared-memory copies, eventfd wakeups, epoll scheduling, and application-side handling.
@@ -152,80 +152,23 @@ install/
 └── lib/
 ```
 
-For cross-compilation, the recommended workflow is a dual-stage build: build the host `omni-idlc` first, then cross-build the target runtime into the same install prefix:
+For cross-compilation, the recommended workflow is a dual-stage build script that produces both host tools and target runtime in one step:
 
 ```bash
-TOOLCHAIN_FILE=/path/to/toolchain.cmake ./scripts/build_dual_stage_install.sh
+CC=/path/to/target-gcc CXX=/path/to/target-g++ ./scripts/build_dual_stage_install.sh
 ```
 
-Or provide the cross-stage variables explicitly:
+If the toolchain requires an explicit toolchain file or sysroot, add:
 
 ```bash
-CROSS_CC=/path/to/target-gcc \
-CROSS_CXX=/path/to/target-g++ \
-CROSS_AR=/path/to/target-ar \
-CROSS_RANLIB=/path/to/target-ranlib \
-CROSS_STRIP=/path/to/target-strip \
-CROSS_LD=/path/to/target-ld \
-CROSS_PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot \
-CROSS_PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig \
+CC=/path/to/target-gcc CXX=/path/to/target-g++ \
+TOOLCHAIN_FILE=/path/to/toolchain.cmake \
 ./scripts/build_dual_stage_install.sh
 ```
 
-The project contract is not tied to any `source xxx` command. The cross stage must provide a concrete cross-toolchain environment through explicit toolchain variables or an explicit CMake toolchain file.
-
-The minimum contract is:
-
-```bash
-export PATH=/path/to/toolchain/bin:$PATH
-export CC=/path/to/target-gcc
-export CXX=/path/to/target-g++
-
-# strongly recommended
-export AR=/path/to/target-ar
-export RANLIB=/path/to/target-ranlib
-export STRIP=/path/to/target-strip
-export LD=/path/to/target-ld
-```
-
-If your sysroot and third-party dependencies rely on `pkg-config`, also provide:
-
-```bash
-export PKG_CONFIG_SYSROOT_DIR=/path/to/sysroot
-export PKG_CONFIG_PATH=/path/to/sysroot/usr/lib/pkgconfig:/path/to/sysroot/usr/share/pkgconfig
-```
-
-The dual-stage install contract is:
-
-- the host stage produces `install/bin_host/omni-idlc`
-- the cross stage produces `install/bin_cross/service_manager` and `install/bin_cross/omni-cli`
-- both stages share the same final install prefix `install/`
-
-Important: the host stage must run in a clean host environment. If `CC` / `CXX` already point to cross compilers, the supposed host stage will be detected as cross and will fail to produce `bin_host/omni-idlc`.
-
-Note: this dual-stage install prefix is mainly for packaging and deployment.
-
-- tools under `install/bin_host/` are runnable on the host
-- programs under `install/bin_cross/` are for the target board
-- `install/lib/` and `install/lib/cmake/OmniBinder` end up matching the cross-built target artifacts
-- so this dual-stage install prefix should not be used directly as the `find_package(OmniBinder)` input for host-side downstream builds
-
-For host-side downstream builds, use the install prefix produced by a host-only build.
-
-The resulting layout looks like:
-
-```text
-install/
-├── bin_cross/
-│   ├── omni-cli
-│   └── service_manager
-├── bin_host/
-│   ├── omni-idlc
-│   ├── omni-cli
-│   └── service_manager
-├── include/
-└── lib/
-```
+> **Important**: the host stage must run in a clean host environment. If `CC/CXX` already point to cross compilers, the host stage will fail to produce `bin_host/omni-idlc`.
+>
+> For detailed toolchain configuration, environment variables, install layout, and manual build steps, see the [ARM Cross-Compilation Guide](docs/cross-compiling-arm.md).
 
 Build options:
 

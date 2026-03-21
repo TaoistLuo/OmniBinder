@@ -25,6 +25,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <random>
 #include <mutex>
 #include <condition_variable>
 
@@ -138,6 +139,7 @@ static const int RPC_ROUNDS      = 1000;
 static const int TOPIC_WARMUP_ROUNDS = 10;
 static const int TOPIC_ROUNDS    = 1000;
 static const bool RUN_TOPIC_BENCH = true;
+static const int RPC_INTERLEAVED_GROUPS = 20;
 
 // ============================================================
 // 测试服务: PerfService
@@ -440,12 +442,10 @@ static LatencyStats benchRpcAdd(OmniRuntime& runtime, int warmup, int rounds) {
 // 性能测试: 话题发布到接收延迟
 // ============================================================
 struct TopicBenchContext {
-    std::mutex mutex;
-    std::condition_variable cv;
-    uint32_t expected_seq;
-    uint32_t received_seq;
-    int64_t recv_time_us;
-    int expected_payload_size;
+    std::atomic<uint32_t> expected_seq;
+    std::atomic<uint32_t> received_seq;
+    std::atomic<int64_t> recv_time_us;
+    std::atomic<int> expected_payload_size;
 
     TopicBenchContext()
         : expected_seq(0)
@@ -531,25 +531,22 @@ static void* topicSubscriberThread(void* arg) {
         [ctx](uint32_t tid, const Buffer& data) {
             (void)tid;
             if (ctx->bench) {
-                Buffer payload(data.data(), data.size());
-                if (payload.size() < sizeof(uint32_t)) {
+                if (data.size() < sizeof(uint32_t)) {
                     return;
                 }
 
-                uint32_t seq = payload.readUint32();
-                const int payload_size = static_cast<int>(payload.remaining());
+                Buffer view(data.data(), data.size());
+                uint32_t seq = view.readUint32();
+                const int payload_size = static_cast<int>(view.remaining());
 
-                std::unique_lock<std::mutex> lock(ctx->bench->mutex);
-                if (payload_size != ctx->bench->expected_payload_size) {
+                if (payload_size != ctx->bench->expected_payload_size.load(std::memory_order_acquire)) {
                     return;
                 }
-                if (seq != ctx->bench->expected_seq) {
+                if (seq != ctx->bench->expected_seq.load(std::memory_order_acquire)) {
                     return;
                 }
-                ctx->bench->recv_time_us = nowUs();
-                ctx->bench->received_seq = seq;
-                lock.unlock();
-                ctx->bench->cv.notify_one();
+                ctx->bench->recv_time_us.store(nowUs(), std::memory_order_release);
+                ctx->bench->received_seq.store(seq, std::memory_order_release);
             }
         });
     if (ret != 0) {
@@ -613,22 +610,21 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
 
     const uint32_t topic_timeout_ms = 2000;
     auto waitForSequence = [&ctx, topic_timeout_ms](uint32_t seq) -> bool {
-        std::unique_lock<std::mutex> lock(ctx.mutex);
-        ctx.expected_seq = seq;
-        return ctx.cv.wait_for(
-            lock,
-            std::chrono::milliseconds(topic_timeout_ms),
-            [&ctx, seq]() { return ctx.received_seq == seq; });
+        ctx.expected_seq.store(seq, std::memory_order_release);
+        const int64_t deadline = nowUs() + static_cast<int64_t>(topic_timeout_ms) * 1000;
+        while (nowUs() < deadline) {
+            if (ctx.received_seq.load(std::memory_order_acquire) == seq) {
+                return true;
+            }
+            usleep(50);
+        }
+        return ctx.received_seq.load(std::memory_order_acquire) == seq;
     };
 
     bool subscriber_ready = false;
     for (int i = 0; i < 100 && !subscriber_ready; ++i) {
         uint32_t seq = static_cast<uint32_t>(i + 1);
-        {
-            std::lock_guard<std::mutex> lock(ctx.mutex);
-            ctx.received_seq = 0;
-            ctx.expected_seq = seq;
-        }
+        ctx.received_seq.store(0, std::memory_order_release);
         pub_ctx.pending_seq.store(seq);
         pub_ctx.broadcast_pending.store(true);
         subscriber_ready = waitForSequence(seq);
@@ -643,11 +639,7 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     }
     for (int i = 0; i < warmup; i++) {
         uint32_t seq = static_cast<uint32_t>(1000 + i + 1);
-        {
-            std::lock_guard<std::mutex> lock(ctx.mutex);
-            ctx.received_seq = 0;
-            ctx.expected_seq = seq;
-        }
+        ctx.received_seq.store(0, std::memory_order_release);
         pub_ctx.pending_seq.store(seq);
         pub_ctx.broadcast_pending.store(true);
         if (!waitForSequence(seq)) {
@@ -661,15 +653,12 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     }
     for (int i = 0; i < rounds; i++) {
         uint32_t seq = static_cast<uint32_t>(2000 + i + 1);
-        {
-            std::lock_guard<std::mutex> lock(ctx.mutex);
-            ctx.received_seq = 0;
-            ctx.expected_seq = seq;
-        }
+        ctx.received_seq.store(0, std::memory_order_release);
         pub_ctx.pending_seq.store(seq);
         pub_ctx.broadcast_pending.store(true);
         if (waitForSequence(seq)) {
-            stats.add(static_cast<double>(ctx.recv_time_us - pub_ctx.send_time_us.load()));
+            stats.add(static_cast<double>(ctx.recv_time_us.load(std::memory_order_acquire)
+                                        - pub_ctx.send_time_us.load(std::memory_order_acquire)));
         } else {
             fprintf(stderr, "Topic benchmark timed out (payload=%d, seq=%u)\n", payload_size, seq);
         }
@@ -900,12 +889,39 @@ int main(int argc, char* argv[]) {
 
         // 不同 payload 大小的 Echo 测试
         int payload_sizes[] = {0, 64, 256, 1024, 4096, 8192};
-        for (int k = 0; k < 6; k++) {
+        const int payload_count = 6;
+        const int rounds_per_group = RPC_ROUNDS / RPC_INTERLEAVED_GROUPS;
+        const int remainder_rounds = RPC_ROUNDS % RPC_INTERLEAVED_GROUPS;
+        std::vector<LatencyStats> rpc_echo_stats(payload_count);
+        for (int k = 0; k < payload_count; ++k) {
+            std::ostringstream oss;
+            oss << "RPC Echo (payload=" << payload_sizes[k] << " bytes)";
+            rpc_echo_stats[k].name = oss.str();
+        }
+
+        std::mt19937 rng(42);
+        std::vector<int> order(payload_count);
+        for (int i = 0; i < payload_count; ++i) {
+            order[i] = i;
+        }
+
+        for (int group = 0; group < RPC_INTERLEAVED_GROUPS; ++group) {
+            std::shuffle(order.begin(), order.end(), rng);
+            for (int oi = 0; oi < payload_count; ++oi) {
+                int k = order[oi];
+                int rounds_this_group = rounds_per_group + (group < remainder_rounds ? 1 : 0);
+                LatencyStats s = benchRpcEcho(runtime, payload_sizes[k],
+                                              group == 0 ? WARMUP_ROUNDS : 0,
+                                              rounds_this_group);
+                rpc_echo_stats[k].samples_us.insert(rpc_echo_stats[k].samples_us.end(),
+                                                    s.samples_us.begin(), s.samples_us.end());
+            }
+        }
+
+        for (int k = 0; k < payload_count; ++k) {
             printf("  Testing Echo (payload=%d bytes)...\n", payload_sizes[k]);
-            LatencyStats s = benchRpcEcho(runtime, payload_sizes[k],
-                                          WARMUP_ROUNDS, RPC_ROUNDS);
-            s.printReport();
-            all_stats.push_back(s);
+            rpc_echo_stats[k].printReport();
+            all_stats.push_back(rpc_echo_stats[k]);
         }
 
         // Add 测试

@@ -246,13 +246,11 @@ int main() {
     TEST(lexer_error_on_invalid_char) {
         std::string src = "struct Foo { @invalid; }";
         Lexer lexer(src);
-        bool found_error = false;
         while (true) {
             Token tok = lexer.nextToken();
-            if (tok.type == TOK_ERROR) { found_error = true; break; }
+            if (tok.type == TOK_ERROR) { break; }
             if (tok.type == TOK_EOF) break;
         }
-        assert(found_error);
         assert(lexer.hasError());
         PASS();
     }
@@ -273,9 +271,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
         assert(ast.package_name == "myapp");
         assert(ast.structs.size() == 1);
@@ -313,13 +309,11 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.structs.size() == 1);
         assert(ast.structs[0].fields.size() == 13);
 
-        PrimitiveType expected[] = {
+        static const PrimitiveType expected[] = {
             TYPE_BOOL, TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16,
             TYPE_INT32, TYPE_UINT32, TYPE_INT64, TYPE_UINT64,
             TYPE_FLOAT32, TYPE_FLOAT64, TYPE_STRING, TYPE_BYTES
@@ -339,9 +333,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.structs.size() == 1);
         assert(ast.structs[0].fields.size() == 2);
         assert(ast.structs[0].fields[0].type.primitive == TYPE_CUSTOM);
@@ -359,9 +351,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.structs.size() == 1);
         assert(ast.structs[0].fields.size() == 2);
 
@@ -385,9 +375,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
         assert(ast.services.size() == 1);
         assert(ast.services[0].name == "Calculator");
@@ -424,9 +412,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.services.size() == 1);
         assert(ast.services[0].name == "Sensor");
         assert(ast.services[0].methods.size() == 1);
@@ -447,9 +433,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
         assert(ast.topics.size() == 1);
         assert(ast.topics[0].name == "SensorData");
@@ -490,9 +474,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
         assert(ast.package_name == "sensors");
         assert(ast.structs.size() == 1);
@@ -532,9 +514,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.structs.size() == 2);
         assert(ast.structs[0].name == "A");
         assert(ast.structs[0].fields.size() == 1);
@@ -548,9 +528,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.structs.size() == 1);
         assert(ast.structs[0].name == "Empty");
         assert(ast.structs[0].fields.size() == 0);
@@ -565,9 +543,7 @@ int main() {
         Lexer lexer(src);
         Parser parser(lexer);
         AstFile ast;
-        bool ok = parser.parse(ast);
-
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.services.size() == 1);
         assert(ast.services[0].methods.size() == 1);
         assert(ast.services[0].methods[0].return_type.primitive == TYPE_CUSTOM);
@@ -631,7 +607,7 @@ int main() {
         // Write temp files
         const char* dir = "/tmp/omni-idlc_test_import";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
         
         {
             std::ofstream f(std::string(dir) + "/common.bidl");
@@ -659,9 +635,7 @@ int main() {
         Lexer lex(source);
         Parser parser(lex, ctx, std::string(dir) + "/main.bidl");
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.package_name == "demo");
         assert(ast.imports.size() == 2);
         assert(ast.imports[0] == "common.bidl");
@@ -723,9 +697,7 @@ int main() {
         Lexer lex(source);
         Parser parser(lex, ctx, std::string(dir) + "/svc.bidl");
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.services.size() == 1);
         assert(ast.services[0].methods.size() == 1);
         assert(ast.services[0].methods[0].return_type.primitive == TYPE_CUSTOM);
@@ -739,7 +711,7 @@ int main() {
     TEST(parser_circular_import_detection) {
         const char* dir = "/tmp/omni-idlc_test_circular";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
         
         {
             std::ofstream f(std::string(dir) + "/a.bidl");
@@ -759,9 +731,7 @@ int main() {
         Lexer lex(source);
         Parser parser(lex, ctx, std::string(dir) + "/a.bidl");
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(!ok);
+        assert(!parser.parse(ast));
         assert(parser.hasError());
         // Error message should mention circular import
         assert(parser.errorMessage().find("Circular import") != std::string::npos);
@@ -771,7 +741,7 @@ int main() {
     TEST(parser_duplicate_import_dedup) {
         const char* dir = "/tmp/omni-idlc_test_dedup";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
         
         {
             std::ofstream f(std::string(dir) + "/base.bidl");
@@ -794,9 +764,7 @@ int main() {
         Lexer lex(source);
         Parser parser(lex, ctx, std::string(dir) + "/main.bidl");
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(ok);
+        assert(parser.parse(ast));
         // base.bidl should only be loaded once
         assert(ctx.loaded_packages.size() == 2); // base + main
         assert(ctx.loaded_packages.find("base") != ctx.loaded_packages.end());
@@ -819,9 +787,7 @@ int main() {
         Lexer lex(src);
         Parser parser(lex, ctx, "/tmp/omni-idlc_test_missing/test.bidl");
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(!ok);
+        assert(!parser.parse(ast));
         assert(parser.hasError());
         assert(parser.errorMessage().find("Cannot open") != std::string::npos);
         PASS();
@@ -830,7 +796,7 @@ int main() {
     TEST(parser_relative_path_import) {
         const char* dir = "/tmp/omni-idlc_test_relpath";
         std::string cmd = std::string("mkdir -p ") + dir + "/sub";
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
         
         {
             std::ofstream f(std::string(dir) + "/shared.bidl");
@@ -852,9 +818,7 @@ int main() {
         Lexer lex(source);
         Parser parser(lex, ctx, std::string(dir) + "/sub/app.bidl");
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ctx.loaded_packages.find("shared") != ctx.loaded_packages.end());
         assert(ast.structs[0].fields[0].type.package_name == "shared");
         assert(ast.structs[0].fields[0].type.custom_name == "Config");
@@ -865,7 +829,7 @@ int main() {
         // a imports b, b imports c — a should have access to all types
         const char* dir = "/tmp/omni-idlc_test_transitive";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
         
         {
             std::ofstream f(std::string(dir) + "/c.bidl");
@@ -889,9 +853,7 @@ int main() {
         Lexer lex(source);
         Parser parser(lex, ctx, std::string(dir) + "/a.bidl");
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(ok);
+        assert(parser.parse(ast));
         // All three packages should be loaded
         assert(ctx.loaded_packages.find("cpkg") != ctx.loaded_packages.end());
         assert(ctx.loaded_packages.find("bpkg") != ctx.loaded_packages.end());
@@ -918,9 +880,7 @@ int main() {
         Lexer lex(src);
         Parser parser(lex);
         AstFile ast;
-        bool ok = parser.parse(ast);
-        
-        assert(ok);
+        assert(parser.parse(ast));
         assert(ast.package_name == "legacy");
         assert(ast.imports.empty());
         assert(ast.structs.size() == 1);
@@ -945,17 +905,15 @@ int main() {
         Lexer lex(src);
         Parser parser(lex);
         AstFile ast;
-        bool ok = parser.parse(ast);
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
 
         const char* dir = "/tmp/omni-idlc_test_codegen_cpp_arrays";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
 
         CppCodeGen gen;
-        bool generated = gen.generate(ast, dir, "arrays");
-        assert(generated);
+        assert(gen.generate(ast, dir, "arrays"));
 
         std::string cpp = readFile(std::string(dir) + "/arrays.cpp");
 
@@ -987,17 +945,15 @@ int main() {
         Lexer lex(src);
         Parser parser(lex);
         AstFile ast;
-        bool ok = parser.parse(ast);
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
 
         const char* dir = "/tmp/omni-idlc_test_codegen_cpp_method_arrays";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
 
         CppCodeGen gen;
-        bool generated = gen.generate(ast, dir, "array_service");
-        assert(generated);
+        assert(gen.generate(ast, dir, "array_service"));
 
         std::string cpp = readFile(std::string(dir) + "/array_service.cpp");
 
@@ -1033,17 +989,15 @@ int main() {
         Lexer lex(src);
         Parser parser(lex);
         AstFile ast;
-        bool ok = parser.parse(ast);
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
 
         const char* dir = "/tmp/omni-idlc_test_codegen_cpp_custom_arrays";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
 
         CppCodeGen gen;
-        bool generated = gen.generate(ast, dir, "custom_arrays");
-        assert(generated);
+        assert(gen.generate(ast, dir, "custom_arrays"));
 
         std::string cpp = readFile(std::string(dir) + "/custom_arrays.cpp");
 
@@ -1076,17 +1030,15 @@ int main() {
         Lexer lex(src);
         Parser parser(lex);
         AstFile ast;
-        bool ok = parser.parse(ast);
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
 
         const char* dir = "/tmp/omni-idlc_test_codegen_cpp_nested_arrays";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
 
         CppCodeGen gen;
-        bool generated = gen.generate(ast, dir, "nested_arrays");
-        assert(generated);
+        assert(gen.generate(ast, dir, "nested_arrays"));
 
         std::string cpp = readFile(std::string(dir) + "/nested_arrays.cpp");
 
@@ -1121,17 +1073,15 @@ int main() {
         Lexer lex(src);
         Parser parser(lex);
         AstFile ast;
-        bool ok = parser.parse(ast);
-        assert(ok);
+        assert(parser.parse(ast));
         assert(!parser.hasError());
 
         const char* dir = "/tmp/omni-idlc_test_codegen_c_strings";
         std::string cmd = std::string("mkdir -p ") + dir;
-        system(cmd.c_str());
+        assert(system(cmd.c_str()) == 0);
 
         CCodeGen gen;
-        bool generated = gen.generate(ast, dir, "blob_service");
-        assert(generated);
+        assert(gen.generate(ast, dir, "blob_service"));
 
         std::string header = readFile(std::string(dir) + "/blob_service_c.h");
         std::string source = readFile(std::string(dir) + "/blob_service.c");

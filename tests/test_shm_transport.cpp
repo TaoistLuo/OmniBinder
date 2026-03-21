@@ -26,14 +26,11 @@ int main() {
     printf("--- Utility Tests ---\n");
 
     TEST(calculate_shm_size) {
-        size_t req_cap = 1024;
-        size_t resp_cap = 512;
-        uint32_t max_clients = 4;
         // ControlBlock + RequestQueue(header+data) + 4 * ResponseSlot(header+data)
-        size_t expected = sizeof(ShmControlBlock)
-                        + sizeof(ShmRingHeader) + req_cap
-                        + (sizeof(ShmRingHeader) + resp_cap) * max_clients;
-        assert(calculateShmSize(req_cap, resp_cap, max_clients) == expected);
+        assert(calculateShmSize(1024, 512, 4)
+               == sizeof(ShmControlBlock)
+                + sizeof(ShmRingHeader) + 1024
+                + (sizeof(ShmRingHeader) + 512) * 4);
         PASS();
     }
 
@@ -76,8 +73,7 @@ int main() {
         ShmTransport client(shm_name, false);
         assert(client.state() == ConnectionState::DISCONNECTED);
 
-        int rc = client.connect("", 0);
-        assert(rc == 0);
+        assert(client.connect("", 0) == 0);
         assert(client.state() == ConnectionState::CONNECTED);
         assert(client.clientId() == 0);  // First client gets slot 0
 
@@ -93,18 +89,15 @@ int main() {
         ShmTransport server(shm_name, true);
 
         ShmTransport client0(shm_name, false);
-        int rc = client0.connect("", 0);
-        assert(rc == 0);
+        assert(client0.connect("", 0) == 0);
         assert(client0.clientId() == 0);
 
         ShmTransport client1(shm_name, false);
-        rc = client1.connect("", 0);
-        assert(rc == 0);
+        assert(client1.connect("", 0) == 0);
         assert(client1.clientId() == 1);
 
         ShmTransport client2(shm_name, false);
-        rc = client2.connect("", 0);
-        assert(rc == 0);
+        assert(client2.connect("", 0) == 0);
         assert(client2.clientId() == 2);
 
         assert(server.clientCount() == 3);
@@ -115,8 +108,7 @@ int main() {
         assert(server.responseSlotsInUse() == 2);
 
         ShmTransport client_reuse(shm_name, false);
-        rc = client_reuse.connect("", 0);
-        assert(rc == 0);
+        assert(client_reuse.connect("", 0) == 0);
         assert(client_reuse.clientId() == 0);
 
         client1.close();
@@ -136,14 +128,14 @@ int main() {
 
         ShmTransport client0(shm_name, false);
         assert(client0.connect("", 0) == 0);
-        size_t block_size = server.activeResponseArenaSize();
-        assert(block_size > 0);
+        const size_t per_client_block_size = server.activeResponseArenaSize();
+        assert(server.activeResponseArenaSize() > 0);
         assert(server.responseSlotsInUse() == 1);
 
         ShmTransport client1(shm_name, false);
         assert(client1.connect("", 0) == 0);
         assert(server.responseSlotsInUse() == 2);
-        assert(server.activeResponseArenaSize() == block_size * 2);
+        assert(server.activeResponseArenaSize() == per_client_block_size * 2);
 
         std::vector<uint32_t> ids = server.activeClientIds();
         std::sort(ids.begin(), ids.end());
@@ -153,7 +145,7 @@ int main() {
 
         client0.close();
         assert(server.responseSlotsInUse() == 1);
-        assert(server.activeResponseArenaSize() == block_size);
+        assert(server.activeResponseArenaSize() == per_client_block_size);
 
         client1.close();
         assert(server.responseSlotsInUse() == 0);
@@ -173,14 +165,11 @@ int main() {
         ShmTransport server(shm_name, true);
 
         ShmTransport client(shm_name, false);
-        int rc = client.connect("", 0);
-        assert(rc == 0);
+        assert(client.connect("", 0) == 0);
 
         // Client sends data (goes to RequestQueue)
-        const char* msg = "Hello from client!";
-        size_t msg_len = strlen(msg);
-        int sent = client.send(reinterpret_cast<const uint8_t*>(msg), msg_len);
-        assert(sent == static_cast<int>(msg_len));
+        assert(client.send(reinterpret_cast<const uint8_t*>("Hello from client!"), strlen("Hello from client!"))
+               == static_cast<int>(strlen("Hello from client!")));
 
         platform::sleepMs(10);
 
@@ -188,10 +177,10 @@ int main() {
         uint8_t recv_buf[256];
         memset(recv_buf, 0, sizeof(recv_buf));
         uint32_t from_client_id = 0;
-        int received = server.serverRecv(recv_buf, sizeof(recv_buf), from_client_id);
-        assert(received == static_cast<int>(msg_len));
+        assert(server.serverRecv(recv_buf, sizeof(recv_buf), from_client_id)
+               == static_cast<int>(strlen("Hello from client!")));
         assert(from_client_id == 0);  // From client slot 0
-        assert(memcmp(recv_buf, msg, msg_len) == 0);
+        assert(memcmp(recv_buf, "Hello from client!", strlen("Hello from client!")) == 0);
 
         client.close();
         server.close();
@@ -203,23 +192,19 @@ int main() {
         ShmTransport server(shm_name, true);
 
         ShmTransport client(shm_name, false);
-        int rc = client.connect("", 0);
-        assert(rc == 0);
+        assert(client.connect("", 0) == 0);
 
         // Server sends to client's ResponseSlot
-        const char* msg = "Hello from server!";
-        size_t msg_len = strlen(msg);
-        int sent = server.serverSend(0, reinterpret_cast<const uint8_t*>(msg), msg_len);
-        assert(sent == static_cast<int>(msg_len));
+        assert(server.serverSend(0, reinterpret_cast<const uint8_t*>("Hello from server!"), strlen("Hello from server!"))
+               == static_cast<int>(strlen("Hello from server!")));
 
         platform::sleepMs(10);
 
         // Client receives from its ResponseSlot
         uint8_t recv_buf[256];
         memset(recv_buf, 0, sizeof(recv_buf));
-        int received = client.recv(recv_buf, sizeof(recv_buf));
-        assert(received == static_cast<int>(msg_len));
-        assert(memcmp(recv_buf, msg, msg_len) == 0);
+        assert(client.recv(recv_buf, sizeof(recv_buf)) == static_cast<int>(strlen("Hello from server!")));
+        assert(memcmp(recv_buf, "Hello from server!", strlen("Hello from server!")) == 0);
 
         client.close();
         server.close();
@@ -231,36 +216,30 @@ int main() {
         ShmTransport server(shm_name, true);
 
         ShmTransport client(shm_name, false);
-        int rc = client.connect("", 0);
-        assert(rc == 0);
+        assert(client.connect("", 0) == 0);
 
         // Client sends request
-        const char* request = "GetData";
-        int sent = client.send(reinterpret_cast<const uint8_t*>(request), strlen(request));
-        assert(sent == static_cast<int>(strlen(request)));
+        assert(client.send(reinterpret_cast<const uint8_t*>("GetData"), strlen("GetData"))
+               == static_cast<int>(strlen("GetData")));
 
         platform::sleepMs(10);
 
         // Server receives request
         uint8_t buf[256];
         uint32_t from_id = 0;
-        int received = server.serverRecv(buf, sizeof(buf), from_id);
-        assert(received == static_cast<int>(strlen(request)));
+        assert(server.serverRecv(buf, sizeof(buf), from_id) == static_cast<int>(strlen("GetData")));
         assert(from_id == 0);
 
         // Server sends response to the requesting client
-        const char* response = "DataResult:42";
-        sent = server.serverSend(from_id, reinterpret_cast<const uint8_t*>(response),
-                                 strlen(response));
-        assert(sent == static_cast<int>(strlen(response)));
+        assert(server.serverSend(from_id, reinterpret_cast<const uint8_t*>("DataResult:42"),
+                                 strlen("DataResult:42")) == static_cast<int>(strlen("DataResult:42")));
 
         platform::sleepMs(10);
 
         // Client receives response
         memset(buf, 0, sizeof(buf));
-        received = client.recv(buf, sizeof(buf));
-        assert(received == static_cast<int>(strlen(response)));
-        assert(memcmp(buf, response, strlen(response)) == 0);
+        assert(client.recv(buf, sizeof(buf)) == static_cast<int>(strlen("DataResult:42")));
+        assert(memcmp(buf, "DataResult:42", strlen("DataResult:42")) == 0);
 
         client.close();
         server.close();
@@ -288,13 +267,11 @@ int main() {
         uint8_t buf[256];
         uint32_t from_id = 0;
 
-        int r = server.serverRecv(buf, sizeof(buf), from_id);
-        assert(r == static_cast<int>(strlen(req0)));
+        assert(server.serverRecv(buf, sizeof(buf), from_id) == static_cast<int>(strlen(req0)));
         assert(from_id == 0);
         assert(memcmp(buf, req0, strlen(req0)) == 0);
 
-        r = server.serverRecv(buf, sizeof(buf), from_id);
-        assert(r == static_cast<int>(strlen(req1)));
+        assert(server.serverRecv(buf, sizeof(buf), from_id) == static_cast<int>(strlen(req1)));
         assert(from_id == 1);
         assert(memcmp(buf, req1, strlen(req1)) == 0);
 
@@ -308,13 +285,11 @@ int main() {
 
         // Each client receives its own response
         memset(buf, 0, sizeof(buf));
-        r = client0.recv(buf, sizeof(buf));
-        assert(r == static_cast<int>(strlen(resp0)));
+        assert(client0.recv(buf, sizeof(buf)) == static_cast<int>(strlen(resp0)));
         assert(memcmp(buf, resp0, strlen(resp0)) == 0);
 
         memset(buf, 0, sizeof(buf));
-        r = client1.recv(buf, sizeof(buf));
-        assert(r == static_cast<int>(strlen(resp1)));
+        assert(client1.recv(buf, sizeof(buf)) == static_cast<int>(strlen(resp1)));
         assert(memcmp(buf, resp1, strlen(resp1)) == 0);
 
         client0.close();
@@ -333,24 +308,20 @@ int main() {
         client1.connect("", 0);
 
         // Server broadcasts to all clients
-        const char* broadcast_msg = "broadcast_data";
-        int count = server.serverBroadcast(
-            reinterpret_cast<const uint8_t*>(broadcast_msg), strlen(broadcast_msg));
-        assert(count == 2);
+        assert(server.serverBroadcast(
+            reinterpret_cast<const uint8_t*>("broadcast_data"), strlen("broadcast_data")) == 2);
 
         platform::sleepMs(10);
 
         // Both clients receive the broadcast
         uint8_t buf[256];
         memset(buf, 0, sizeof(buf));
-        int r = client0.recv(buf, sizeof(buf));
-        assert(r == static_cast<int>(strlen(broadcast_msg)));
-        assert(memcmp(buf, broadcast_msg, strlen(broadcast_msg)) == 0);
+        assert(client0.recv(buf, sizeof(buf)) == static_cast<int>(strlen("broadcast_data")));
+        assert(memcmp(buf, "broadcast_data", strlen("broadcast_data")) == 0);
 
         memset(buf, 0, sizeof(buf));
-        r = client1.recv(buf, sizeof(buf));
-        assert(r == static_cast<int>(strlen(broadcast_msg)));
-        assert(memcmp(buf, broadcast_msg, strlen(broadcast_msg)) == 0);
+        assert(client1.recv(buf, sizeof(buf)) == static_cast<int>(strlen("broadcast_data")));
+        assert(memcmp(buf, "broadcast_data", strlen("broadcast_data")) == 0);
 
         client0.close();
         client1.close();
@@ -373,15 +344,13 @@ int main() {
         }
 
         // Client -> Server
-        int sent = client.send(send_data.data(), data_size);
-        assert(sent == static_cast<int>(data_size));
+        assert(client.send(send_data.data(), data_size) == static_cast<int>(data_size));
 
         platform::sleepMs(20);
 
         std::vector<uint8_t> recv_data(data_size);
         uint32_t from_id = 0;
-        int received = server.serverRecv(recv_data.data(), data_size, from_id);
-        assert(received == static_cast<int>(data_size));
+        assert(server.serverRecv(recv_data.data(), data_size, from_id) == static_cast<int>(data_size));
         assert(from_id == 0);
         assert(memcmp(send_data.data(), recv_data.data(), data_size) == 0);
 
@@ -389,14 +358,12 @@ int main() {
         for (size_t i = 0; i < data_size; i++) {
             send_data[i] = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
         }
-        sent = server.serverSend(0, send_data.data(), data_size);
-        assert(sent == static_cast<int>(data_size));
+        assert(server.serverSend(0, send_data.data(), data_size) == static_cast<int>(data_size));
 
         platform::sleepMs(20);
 
         memset(recv_data.data(), 0, data_size);
-        received = client.recv(recv_data.data(), data_size);
-        assert(received == static_cast<int>(data_size));
+        assert(client.recv(recv_data.data(), data_size) == static_cast<int>(data_size));
         assert(memcmp(send_data.data(), recv_data.data(), data_size) == 0);
 
         client.close();
@@ -412,13 +379,10 @@ int main() {
         client.connect("", 0);
 
         // No data sent, recv should return 0
-        uint8_t buf[64];
+        uint8_t recv_buf[64];
         uint32_t from_id = 0;
-        int received = server.serverRecv(buf, sizeof(buf), from_id);
-        assert(received == 0);
-
-        received = client.recv(buf, sizeof(buf));
-        assert(received == 0);
+        assert(server.serverRecv(recv_buf, sizeof(recv_buf), from_id) == 0);
+        assert(client.recv(recv_buf, sizeof(recv_buf)) == 0);
 
         client.close();
         server.close();
