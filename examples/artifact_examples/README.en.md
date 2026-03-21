@@ -1,0 +1,48 @@
+# Artifact-consumer build mode for the current examples
+
+This directory provides the **second build mode** for the current examples:
+
+- `examples/`: in-tree build, directly using this repository's targets
+- `examples/artifact_examples/`: downstream/artifact-consumer build, using installed OmniBinder outputs
+
+It reuses the current `example_cpp/`, `example_c/`, and `examples/*.bidl` files, so there is only one set of example logic to maintain.
+
+## Build steps
+
+First build and install OmniBinder from the repository root:
+
+```bash
+cmake -S . -B build
+cmake --build build -j4
+cmake --install build
+```
+
+Then build the downstream-style examples:
+
+```bash
+cmake -S examples/artifact_examples -B build/example_artifacts \
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+
+cmake --build build/example_artifacts -j4
+```
+
+Generated executables will be placed under:
+
+```text
+build/example_artifacts/bin/
+```
+
+Including:
+
+- `example_cpp_sensor_server`
+- `example_cpp_sensor_client`
+- `example_c_sensor_server`
+- `example_c_sensor_client`
+
+## Purpose
+
+This mode validates that the current examples can also be built like a real downstream project using:
+
+- installed `find_package(OmniBinder)` metadata
+- installed `omnic_generate()` support
+- the current example sources and IDL files without maintaining a separate example implementation

@@ -41,13 +41,23 @@ struct StatusResponse {
 
 ### 2.2 sensor_service.bidl（服务接口定义）
 
+当前 demo 使用的 `examples/sensor_service.bidl` 已扩展为完整能力矩阵，包含：
+
+- 基础类型 RPC：`EchoBool` / `EchoInt8` / `EchoUInt8` / ... / `EchoFloat64` / `EchoString` / `EchoBytes`
+- 自定义结构体 RPC：`EchoStatus` / `EchoConfig`
+- 嵌套结构体 RPC：`EchoEnvelope`
+- 数组 RPC：`EchoIdArray` / `EchoLabelArray` / `EchoSensorArray` / `EchoBundle`
+- 普通服务接口：`GetLatestData` / `SetThreshold` / `ResetSensor` / `GetSensorCount`
+- callback-like 异步接口：`RequestLatestDataAsync`
+- 发布订阅：`SensorUpdate` / `AsyncResultReady`
+
+关键结构如下：
+
 ```protobuf
 // examples/sensor_service.bidl
-// 传感器服务接口定义
-
 package demo;
 
-import "common_types.bidl";  // 导入公共类型
+import "common_types.bidl";
 
 struct SensorData {
     int32   sensor_id;
@@ -57,10 +67,35 @@ struct SensorData {
     string  location;
 }
 
-struct ControlCommand {
-    int32   command_type;
-    string  target;
-    int32   value;
+struct SensorConfig {
+    bool    enabled;
+    int32   sample_rate_hz;
+    string  label;
+}
+
+struct SensorEnvelope {
+    SensorData        data;
+    SensorConfig      config;
+    common.Timestamp  captured_at;
+}
+
+struct SensorArrayBundle {
+    array<int32>      ids;
+    array<string>     labels;
+    array<bytes>      blobs;
+    array<SensorData> samples;
+}
+
+struct AsyncRequest {
+    int32   request_id;
+    string  client_tag;
+}
+
+struct AsyncResult {
+    int32                 request_id;
+    string                client_tag;
+    common.StatusResponse status;
+    SensorData            data;
 }
 
 topic SensorUpdate {
@@ -68,14 +103,13 @@ topic SensorUpdate {
     int64      publish_time;
 }
 
-service SensorService {
-    SensorData              GetLatestData();
-    common.StatusResponse   SetThreshold(ControlCommand cmd);  // 使用导入的类型
-    void                    ResetSensor(int32 sensor_id);
-
-    publishes SensorUpdate;
+topic AsyncResultReady {
+    AsyncResult result;
+    int64       publish_time;
 }
 ```
+
+完整方法列表请直接以仓库中的 `examples/sensor_service.bidl` 为准。
 
 **关键点**：
 - `import "common_types.bidl"` 导入公共类型定义
@@ -125,187 +159,52 @@ add_executable(example_cpp_sensor_server sensor_server.cpp)
 target_link_libraries(example_cpp_sensor_server omnibinder_static)
 ```
 
-### 3.2 sensor_server.cpp
+### 3.2 `sensor_server.cpp`
+
+当前 `examples/example_cpp/sensor_server.cpp` 已扩展为完整 demo 服务端。它实现了：
+
+- 所有基础类型 RPC（`EchoBool` ~ `EchoFloat64`、`EchoString`、`EchoBytes`）
+- 自定义结构体 RPC（`EchoStatus`、`EchoConfig`）
+- 嵌套结构体 RPC（`EchoEnvelope`）
+- 数组 RPC（`EchoIdArray`、`EchoLabelArray`、`EchoSensorArray`、`EchoBundle`）
+- 普通服务接口（`GetLatestData`、`SetThreshold`、`ResetSensor`、`GetSensorCount`）
+- callback-like 异步能力（`RequestLatestDataAsync` 通过 `AsyncResultReady` 话题回推结果）
+- 普通发布订阅（`SensorUpdate`）
+
+服务端核心形态如下：
 
 ```cpp
-// examples/example_cpp/sensor_server.cpp
-// C++ 传感器服务端 - 提供数据查询接口，定时广播传感器数据
-
-#include "sensor_service.bidl.h"
-
-#include <cstdio>
-#include <cstdlib>
-#include <ctime>
-#include <csignal>
-
-// 全局标志，用于优雅退出
-static volatile bool g_running = true;
-
-void signalHandler(int sig) {
-    (void)sig;
-    g_running = false;
-}
-
-// ============================================================
-// 实现传感器服务
-// 继承 IDL 生成的 SensorServiceStub，实现纯虚函数
-// ============================================================
 class MySensorService : public demo::SensorServiceStub {
 public:
-    MySensorService()
-        : current_temperature_(25.0)
-        , current_humidity_(60.0)
-        , threshold_value_(0)
-    {
+    bool EchoBool(bool value) override { return !value; }
+    int32_t EchoInt32(int32_t value) override { return value + 3; }
+    std::string EchoString(const std::string& value) override { return value + "_echo"; }
+    common::StatusResponse EchoStatus(const common::StatusResponse& value) override { ... }
+    demo::SensorEnvelope EchoEnvelope(const demo::SensorEnvelope& value) override { ... }
+    std::vector<int32_t> EchoIdArray(const std::vector<int32_t>& value) override { ... }
+    demo::SensorArrayBundle EchoBundle(const demo::SensorArrayBundle& value) override { ... }
+
+    demo::SensorData GetLatestData() override { ... }
+    common::StatusResponse SetThreshold(const demo::ControlCommand& cmd) override { ... }
+    void ResetSensor(int32_t sensor_id) override { ... }
+    int32_t GetSensorCount() override { return 3; }
+
+    common::StatusResponse RequestLatestDataAsync(const demo::AsyncRequest& request) override {
+        demo::AsyncResultReady ready;
+        ready.result.request_id = request.request_id;
+        ready.result.client_tag = request.client_tag;
+        ...
+        BroadcastAsyncResultReady(ready);
+
+        common::StatusResponse ack;
+        ack.code = 0;
+        ack.message = "accepted";
+        return ack;
     }
-
-    // 实现 GetLatestData 接口
-    demo::SensorData GetLatestData() override {
-        demo::SensorData data;
-        data.sensor_id = 1;
-        data.temperature = current_temperature_;
-        data.humidity = current_humidity_;
-        data.timestamp = static_cast<int64_t>(time(NULL));
-        data.location = "Room-A";
-
-        printf("[SensorService] GetLatestData called: temp=%.1f, humidity=%.1f\n",
-               data.temperature, data.humidity);
-        return data;
-    }
-
-    // 实现 SetThreshold 接口（返回 common.StatusResponse）
-    common::StatusResponse SetThreshold(const demo::ControlCommand& cmd) override {
-        printf("[SensorService] SetThreshold called: type=%d, target=%s, value=%d\n",
-               cmd.command_type, cmd.target.c_str(), cmd.value);
-
-        threshold_value_ = cmd.value;
-
-        common::StatusResponse resp;  // 使用 common 包中的类型
-        resp.code = 0;
-        resp.message = "Threshold set successfully";
-        return resp;
-    }
-
-    // 实现 ResetSensor 接口（单向调用，无返回值）
-    void ResetSensor(int32_t sensor_id) override {
-        printf("[SensorService] ResetSensor called: sensor_id=%d\n", sensor_id);
-        current_temperature_ = 25.0;
-        current_humidity_ = 60.0;
-    }
-
-    // 模拟传感器数据变化
-    void updateSensorData() {
-        // 模拟温度和湿度的随机波动
-        current_temperature_ += (rand() % 100 - 50) / 100.0;
-        current_humidity_ += (rand() % 100 - 50) / 100.0;
-
-        // 限制范围
-        if (current_temperature_ < -20.0) current_temperature_ = -20.0;
-        if (current_temperature_ > 50.0) current_temperature_ = 50.0;
-        if (current_humidity_ < 0.0) current_humidity_ = 0.0;
-        if (current_humidity_ > 100.0) current_humidity_ = 100.0;
-    }
-
-    double temperature() const { return current_temperature_; }
-    double humidity() const { return current_humidity_; }
-
-private:
-    double current_temperature_;
-    double current_humidity_;
-    int32_t threshold_value_;
 };
-
-// ============================================================
-// 主函数
-// ============================================================
-int main(int argc, char* argv[]) {
-    // 解析命令行参数
-    const char* sm_host = "127.0.0.1";
-    uint16_t sm_port = 9900;
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--sm-host") == 0 && i + 1 < argc) {
-            sm_host = argv[++i];
-        } else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) {
-            sm_port = static_cast<uint16_t>(atoi(argv[++i]));
-        }
-    }
-
-    // 注册信号处理
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
-    srand(static_cast<unsigned>(time(NULL)));
-
-    printf("=== SensorService Starting ===\n");
-    printf("ServiceManager: %s:%u\n", sm_host, sm_port);
-
-    // 1. 创建 OmniRuntime 并连接 ServiceManager
-    omnibinder::OmniRuntime runtime;
-    int ret = runtime.init(sm_host, sm_port);
-    if (ret != 0) {
-        printf("Failed to connect to ServiceManager: %s\n",
-               omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
-        return 1;
-    }
-    printf("Connected to ServiceManager\n");
-
-    // 2. 创建并注册服务
-    //    registerService() 内部会：
-    //    a) 创建 TCP 监听（端口自动分配）
-    //    b) 创建共享内存 "/binder_SensorService"（多客户端共享）
-    //    c) 创建 eventfd（1 个 req_eventfd + 32 个 resp_eventfd）
-    //    d) 创建 UDS 监听 "/tmp/binder_binder_SensorService.sock"（用于 eventfd 交换）
-    //    e) 将 {name, host, port, host_id, shm_name} 注册到 SM
-    MySensorService service;
-    ret = runtime.registerService(&service);
-    if (ret != 0) {
-        printf("Failed to register service: %s\n",
-               omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
-        return 1;
-    }
-    printf("SensorService registered successfully\n");
-
-    // 3. 主循环：定时广播传感器数据
-    printf("Starting broadcast loop (Ctrl+C to stop)...\n\n");
-
-    while (g_running) {
-        // 处理事件（非阻塞，100ms 超时）
-        runtime.pollOnce(100);
-
-        // 模拟传感器数据更新
-        service.updateSensorData();
-
-        // 构造广播消息
-        demo::SensorUpdate update;
-        update.data.sensor_id = 1;
-        update.data.temperature = service.temperature();
-        update.data.humidity = service.humidity();
-        update.data.timestamp = static_cast<int64_t>(time(NULL));
-        update.data.location = "Room-A";
-        update.publish_time = static_cast<int64_t>(time(NULL));
-
-        // 广播传感器数据
-        service.BroadcastSensorUpdate(update);
-
-        printf("[SensorService] Broadcast: temp=%.2f, humidity=%.2f\n",
-               update.data.temperature, update.data.humidity);
-
-        // 等待1秒
-        // 注意：实际项目中应使用 EventLoop 的定时器，这里简化处理
-        for (int i = 0; i < 9 && g_running; i++) {
-            runtime.pollOnce(100);
-        }
-    }
-
-    // 4. 清理退出
-    printf("\nShutting down...\n");
-    runtime.unregisterService(&service);
-    runtime.stop();
-    printf("SensorService stopped\n");
-
-    return 0;
-}
 ```
+
+完整代码请直接以 `examples/example_cpp/sensor_server.cpp` 为准。
 
 ## 4. C++ 客户端：SensorClient
 
@@ -328,133 +227,42 @@ target_link_libraries(example_cpp_sensor_client omnibinder_static)
 
 ### 4.2 sensor_client.cpp
 
+当前 `examples/example_cpp/sensor_client.cpp` 已扩展为完整 demo 客户端，覆盖：
+
+- 所有基础类型 RPC 调用
+- 自定义结构体 / 嵌套结构体 RPC 调用
+- 数组 RPC 调用
+- 普通服务接口（`GetLatestData`、`SetThreshold`、`ResetSensor`、`GetSensorCount`）
+- 话题订阅（`SensorUpdate`）
+- callback-like 异步结果接收（`AsyncResultReady`）
+- 死亡通知
+
+典型调用形态如下：
+
 ```cpp
-// examples/example_cpp/sensor_client.cpp
-// C++ 传感器客户端 - 调用 SensorService 接口，订阅广播，监听死亡通知
+omnibinder::OmniRuntime runtime;
+runtime.init("127.0.0.1", 9900);
 
-#include "sensor_service.bidl.h"
+demo::SensorServiceProxy proxy(runtime);
+proxy.connect();
 
-#include <cstdio>
-#include <cstdlib>
-#include <csignal>
+proxy.EchoBool(false);
+proxy.EchoInt32(32);
+proxy.EchoStatus(status);
+proxy.EchoEnvelope(envelope);
+proxy.EchoIdArray(ids);
+proxy.EchoBundle(bundle);
 
-static volatile bool g_running = true;
+proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
+proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
 
-void signalHandler(int sig) {
-    (void)sig;
-    g_running = false;
-}
-
-int main(int argc, char* argv[]) {
-    const char* sm_host = "127.0.0.1";
-    uint16_t sm_port = 9900;
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--sm-host") == 0 && i + 1 < argc) {
-            sm_host = argv[++i];
-        } else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) {
-            sm_port = static_cast<uint16_t>(atoi(argv[++i]));
-        }
-    }
-
-    signal(SIGINT, signalHandler);
-    signal(SIGTERM, signalHandler);
-
-    printf("=== SensorClient (C++ Client) Starting ===\n");
-    printf("ServiceManager: %s:%u\n", sm_host, sm_port);
-
-    // 1. 创建 OmniRuntime 并连接 ServiceManager
-    omnibinder::OmniRuntime runtime;
-    int ret = runtime.init(sm_host, sm_port);
-    if (ret != 0) {
-        printf("Failed to connect to ServiceManager: %s\n",
-               omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
-        return 1;
-    }
-    printf("Connected to ServiceManager\n");
-
-    // 2. 创建 SensorService 的远程代理
-    demo::SensorServiceProxy proxy(client);
-
-    // 连接到远程 SensorService
-    // 内部流程：
-    //   a) 通过 SM 查询 SensorService 的 {host, port, host_id, shm_name}
-    //   b) 比较 host_id：同机 -> 打开已有 SHM，获取 slot_id
-    //      -> 通过 UDS 连接交换 eventfd（SCM_RIGHTS）
-    //      -> 注册 resp_eventfd 到 EventLoop
-    //      跨机 -> TCP 连接
-    //   c) 同一个 SHM 可被多个客户端共享（最多 32 个）
-    ret = proxy.connect();
-    if (ret != 0) {
-        printf("Failed to connect to SensorService: %s\n",
-               omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
-        return 1;
-    }
-    printf("Connected to SensorService\n\n");
-
-    // 3. 调用远程接口：GetLatestData
-    printf("--- Calling GetLatestData ---\n");
-    demo::SensorData data = proxy.GetLatestData();
-    printf("Result: sensor_id=%d, temp=%.2f, humidity=%.2f, location=%s\n\n",
-           data.sensor_id, data.temperature, data.humidity,
-           data.location.c_str());
-
-    // 4. 调用远程接口：SetThreshold
-    printf("--- Calling SetThreshold ---\n");
-    demo::ControlCommand cmd;
-    cmd.command_type = 1;
-    cmd.target = "temperature";
-    cmd.value = 30;
-
-    common::StatusResponse resp = proxy.SetThreshold(cmd);  // 返回 common::StatusResponse
-    printf("Result: code=%d, message=%s\n\n", resp.code, resp.message.c_str());
-
-    // 5. 调用远程接口：ResetSensor（单向调用）
-    printf("--- Calling ResetSensor (one-way) ---\n");
-    proxy.ResetSensor(1);
-    printf("ResetSensor sent (no response expected)\n\n");
-
-    // 6. 订阅广播话题：SensorUpdate
-    printf("--- Subscribing to SensorUpdate topic ---\n");
-    proxy.SubscribeSensorUpdate(
-        [](const demo::SensorUpdate& update) {
-            printf("[Broadcast] SensorUpdate: sensor_id=%d, temp=%.2f, "
-                   "humidity=%.2f, time=%lld\n",
-                   update.data.sensor_id,
-                   update.data.temperature,
-                   update.data.humidity,
-                   (long long)update.publish_time);
-        }
-    );
-    printf("Subscribed to SensorUpdate\n\n");
-
-    // 7. 订阅死亡通知
-    printf("--- Subscribing to SensorService death notification ---\n");
-    proxy.OnServiceDied(
-        []() {
-            printf("\n!!! [DeathNotify] SensorService has DIED !!!\n");
-            printf("!!! Connection lost, need to reconnect when service restarts\n\n");
-        }
-    );
-    printf("Subscribed to death notification\n\n");
-
-    // 8. 进入事件循环，等待广播和通知
-    printf("Waiting for broadcasts and notifications (Ctrl+C to stop)...\n");
-    printf("============================================================\n\n");
-
-    while (g_running) {
-        runtime.pollOnce(100);
-    }
-
-    // 9. 清理退出
-    printf("\nShutting down...\n");
-    proxy.disconnect();
-    runtime.stop();
-    printf("SensorClient stopped\n");
-
-    return 0;
-}
+demo::AsyncRequest req;
+req.request_id = 42;
+req.client_tag = "cpp-client";
+proxy.RequestLatestDataAsync(req);
 ```
+
+完整代码请直接以 `examples/example_cpp/sensor_client.cpp` 为准。
 
 ## 5. C 服务端
 
@@ -480,131 +288,43 @@ if(TARGET omni-idlc)
 endif()
 ```
 
-### 5.2 sensor_server.c
+### 5.2 `sensor_server.c`
+
+当前 `examples/example_c/sensor_server.c` 已扩展为完整 demo 服务端。它实现了：
+
+- 所有基础类型 RPC
+- 自定义结构体 / 嵌套结构体 RPC
+- 数组 RPC
+- 普通服务接口
+- callback-like 异步接口（通过 `AsyncResultReady` 回推）
+- 普通发布订阅（`SensorUpdate`）
+
+它的关键形态是：
 
 ```c
-// examples/example_c/sensor_server.c
-// C 传感器服务端 - 使用 omni-idlc 生成的 C 代码实现 OmniBinder 服务
-
-#include "sensor_service.bidl_c.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <signal.h>
-#include <time.h>
-
-static volatile int g_running = 1;
-static double g_temp = 25.0;
-static double g_hum = 60.0;
-
-static void signal_handler(int sig) {
-    (void)sig;
-    g_running = 0;
-}
-
-/* ---- 服务方法实现 ---- */
-
-static void on_get_latest_data(demo_SensorData* result, void* user_data) {
+void demo_SensorService_impl_echo_int32(int32_t value, int32_t* result, void* user_data) {
     (void)user_data;
-    result->sensor_id = 1;
-    result->temperature = g_temp;
-    result->humidity = g_hum;
-    result->timestamp = (int64_t)time(NULL);
-    result->location = (char*)malloc(7);
-    if (result->location) {
-        memcpy(result->location, "Room-A", 7);
-        result->location_len = 6;
-    }
-    printf("[SensorService] GetLatestData: temp=%.1f humidity=%.1f\n", g_temp, g_hum);
+    *result = value + 3;
 }
 
-static void on_set_threshold(const demo_ControlCommand* cmd,
-                             common_StatusResponse* result, void* user_data) {  // 返回 common_StatusResponse
-    (void)user_data;
-    printf("[SensorService] SetThreshold: type=%d target=%.*s value=%d\n",
-           cmd->command_type, cmd->target_len, cmd->target, cmd->value);
-    result->code = 0;
-    result->message = (char*)malloc(3);
-    if (result->message) {
-        memcpy(result->message, "OK", 3);
-        result->message_len = 2;
-    }
+void demo_SensorService_impl_request_latest_data_async(
+    const demo_AsyncRequest* request,
+    common_StatusResponse* result,
+    void* user_data) {
+    omni_runtime_t* runtime = (omni_runtime_t*)user_data;
+    ...
+    demo_SensorService_broadcast_async_result_ready(runtime, &ready);
+    ...
 }
 
-static void on_reset_sensor(int32_t sensor_id, void* user_data) {
-    (void)user_data;
-    g_temp = 25.0;
-    g_hum = 60.0;
-    printf("[SensorService] ResetSensor: id=%d\n", sensor_id);
-}
-
-int main(int argc, char* argv[]) {
-    const char* sm_host = "127.0.0.1";
-    uint16_t sm_port = 9900;
-
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    srand((unsigned)time(NULL));
-
-    /* 创建客户端连接 */
-    omni_runtime_t* runtime = omni_runtime_create();
-    if (omni_runtime_init(runtime, sm_host, sm_port) != 0) {
-        fprintf(stderr, "Failed to connect to ServiceManager\n");
-        omni_runtime_destroy(runtime);
-        return 1;
-    }
-
-    /* 创建服务（使用生成的回调表） */
-    demo_SensorService_callbacks cbs;
-    memset(&cbs, 0, sizeof(cbs));
-    cbs.GetLatestData = on_get_latest_data;
-    cbs.SetThreshold = on_set_threshold;
-    cbs.ResetSensor = on_reset_sensor;
-    cbs.user_data = NULL;
-
-    omni_service_t* svc = demo_SensorService_stub_create(&cbs);
-    omni_runtime_register_service(runtime, svc);
-
-    /* 发布话题 */
-    omni_runtime_publish_topic(runtime, "SensorUpdate");
-
-    /* 主循环：定时广播 */
-    int counter = 0;
-    while (g_running) {
-        omni_runtime_poll_once(runtime, 100);
-        if (++counter >= 10) {
-            counter = 0;
-            g_temp += (rand() % 100 - 50) / 100.0;
-            g_hum += (rand() % 100 - 50) / 100.0;
-
-            demo_SensorUpdate msg;
-            demo_SensorUpdate_init(&msg);
-            msg.data.sensor_id = 1;
-            msg.data.temperature = g_temp;
-            msg.data.humidity = g_hum;
-            msg.data.timestamp = (int64_t)time(NULL);
-            msg.data.location = (char*)malloc(7);
-            if (msg.data.location) {
-                memcpy(msg.data.location, "Room-A", 7);
-                msg.data.location_len = 6;
-            }
-            msg.publish_time = (int64_t)time(NULL);
-
-            demo_SensorService_broadcast_sensor_update(runtime, &msg);
-            demo_SensorUpdate_destroy(&msg);
-        }
-    }
-
-    omni_runtime_unregister_service(runtime, svc);
-    demo_SensorService_stub_destroy(svc);
-    omni_runtime_stop(runtime);
-    omni_runtime_destroy(runtime);
-    return 0;
-}
+omni_service_t* svc = demo_SensorService_stub_create(runtime);
 ```
 
+完整代码请直接以 `examples/example_c/sensor_server.c` 为准。
+
 与 C++ 版本的关键区别：
-- 继承 Stub 基类 → 填充 `demo_SensorService_callbacks` 回调表
+- 继承 Stub 基类 → 直接实现生成的 `demo_SensorService_impl_xxx(...)` 接口
+- `demo_SensorService_stub_create(user_data)` 会自动绑定这些实现，不需要手动维护回调表
 - `service.BroadcastSensorUpdate(msg)` → `demo_SensorService_broadcast_sensor_update(client, &msg)`
 - `std::string` → `char*` + `_len` 字段，需要手动 `malloc/free`
 - 结构体需要 `_init()` / `_destroy()` 管理生命周期
@@ -613,103 +333,43 @@ int main(int argc, char* argv[]) {
 
 纯 C 语言实现的客户端，功能与 C++ 客户端等价。
 
-### 6.1 sensor_client.c
+### 6.1 `sensor_client.c`
+
+当前 `examples/example_c/sensor_client.c` 也已经扩展为完整 demo 客户端，覆盖：
+
+- 所有基础类型 RPC 调用
+- 自定义结构体 / 嵌套结构体 RPC 调用
+- 数组 RPC 调用
+- 普通 pub/sub（`SensorUpdate`）
+- callback-like 异步结果接收（`AsyncResultReady`）
+- 死亡通知回调
+
+典型调用形态如下：
 
 ```c
-// examples/example_c/sensor_client.c
-// C 传感器客户端 - 使用 omni-idlc 生成的 C 代码调用 OmniBinder 服务
+demo_SensorService_proxy proxy;
+demo_SensorService_proxy_init(&proxy, runtime);
+demo_SensorService_proxy_connect(&proxy);
 
-#include "sensor_service.bidl_c.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <signal.h>
+uint8_t b = 0;
+demo_SensorService_proxy_echo_bool(&proxy, 0, &b);
 
-static volatile int g_running = 1;
+demo_SensorEnvelope env_in;
+demo_SensorEnvelope env_out;
+demo_SensorService_proxy_echo_envelope(&proxy, &env_in, &env_out);
 
-static void signal_handler(int sig) {
-    (void)sig;
-    g_running = 0;
-}
+demo_int32_t_array ids_in;
+demo_int32_t_array ids_out;
+demo_SensorService_proxy_echo_id_array(&proxy, &ids_in, &ids_out);
 
-/* ---- 广播回调 ---- */
-static void on_sensor_update(const demo_SensorUpdate* msg, void* user_data) {
-    (void)user_data;
-    printf("[Broadcast] sensor_id=%d temp=%.2f humidity=%.2f\n",
-           msg->data.sensor_id, msg->data.temperature, msg->data.humidity);
-}
+demo_SensorService_proxy_subscribe_sensor_update(&proxy, on_sensor_update, NULL);
+demo_SensorService_proxy_subscribe_async_result_ready(&proxy, on_async_result, NULL);
 
-/* ---- 死亡通知回调 ---- */
-static void on_service_died(void* user_data) {
-    (void)user_data;
-    printf("\n!!! [DeathNotify] SensorService has DIED !!!\n\n");
-}
-
-int main(int argc, char* argv[]) {
-    const char* sm_host = "127.0.0.1";
-    uint16_t sm_port = 9900;
-
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-
-    /* 创建客户端连接 */
-    omni_runtime_t* runtime = omni_runtime_create();
-    if (omni_runtime_init(runtime, sm_host, sm_port) != 0) {
-        fprintf(stderr, "Failed to connect to ServiceManager\n");
-        omni_runtime_destroy(runtime);
-        return 1;
-    }
-
-    /* 初始化 Proxy */
-    demo_SensorService_proxy proxy;
-    demo_SensorService_proxy_init(&proxy, runtime);
-    demo_SensorService_proxy_connect(&proxy);
-
-    /* 调用 GetLatestData */
-    demo_SensorData data;
-    demo_SensorData_init(&data);
-    if (demo_SensorService_proxy_get_latest_data(&proxy, &data) == 0) {
-        printf("Result: sensor_id=%d temp=%.2f humidity=%.2f location=%.*s\n",
-               data.sensor_id, data.temperature, data.humidity,
-               data.location_len, data.location);
-    }
-    demo_SensorData_destroy(&data);
-
-    /* 调用 SetThreshold */
-    demo_ControlCommand cmd;
-    demo_ControlCommand_init(&cmd);
-    cmd.command_type = 1;
-    cmd.target = (char*)malloc(12);
-    if (cmd.target) {
-        memcpy(cmd.target, "temperature", 12);
-        cmd.target_len = 11;
-    }
-    cmd.value = 30;
-
-    common_StatusResponse resp;  // 使用 common_StatusResponse
-    common_StatusResponse_init(&resp);
-    if (demo_SensorService_proxy_set_threshold(&proxy, &cmd, &resp) == 0) {
-        printf("Result: code=%d message=%.*s\n", resp.code, resp.message_len, resp.message);
-    }
-    demo_ControlCommand_destroy(&cmd);
-    common_StatusResponse_destroy(&resp);
-
-    /* 订阅广播 */
-    demo_SensorService_proxy_subscribe_sensor_update(&proxy, on_sensor_update, NULL);
-
-    /* 订阅死亡通知 */
-    demo_SensorService_proxy_on_service_died(&proxy, on_service_died, NULL);
-
-    /* 事件循环 */
-    while (g_running) {
-        omni_runtime_poll_once(runtime, 100);
-    }
-
-    omni_runtime_stop(runtime);
-    omni_runtime_destroy(runtime);
-    return 0;
-}
+demo_AsyncRequest async_req;
+demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 ```
+
+完整代码请直接以 `examples/example_c/sensor_client.c` 为准。
 
 与 C++ 版本的关键区别：
 - `SensorServiceProxy proxy(client)` → `demo_SensorService_proxy proxy; demo_SensorService_proxy_init(&proxy, runtime)`
@@ -786,48 +446,94 @@ Service: SensorService
 
 ### 7.3 调用服务接口
 
-**Hex 模式（不指定 IDL）：**
+`omni-cli` 当前规则：
+
+- 带 `--idl` 时，`call` 的参数使用 **JSON 输入**
+- 不带 `--idl` 时，只能传原始十六进制请求体
+- 当前已经验证可正常工作的 JSON I/O 类型：
+  - 基础类型（bool/int/float/string）
+  - 普通 struct
+  - 嵌套 struct
+  - 无参返回 struct
+- 当前**尚未验证通过**的 JSON I/O 类型：
+  - `bytes`
+  - `array<...>`
+  - 含数组的复杂 struct
+
+#### 7.3.1 通用格式
+
 ```bash
-$ ./target/bin/omni-cli call SensorService GetLatestData
-Calling SensorService.GetLatestData() ...
-  interface_id = 0x1a2b3c4d
-  method_id    = 0x9c0d1e2f
-Response (status=OK, 42 bytes, 1.23 ms):
-  Hex: 01 00 00 00 00 00 00 00 80 39 40 ...
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <JSON参数>
 ```
 
-**JSON 模式（指定 IDL）：**
-```bash
-$ ./target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
-Calling SensorService.GetLatestData() ...
-  interface_id = 0x1a2b3c4d
-  method_id    = 0x9c0d1e2f
-Response (status=OK, 42 bytes, 0.85 ms):
-  {
-    "sensor_id": 1,
-    "temperature": 25.50,
-    "humidity": 60.20,
-    "timestamp": 1707321600,
-    "location": "Room-A"
-  }
+#### 7.3.2 每个接口的调用方式
 
-$ ./target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
-  '{"command_type":1,"target":"temperature","value":30}'
-Calling SensorService.SetThreshold() ...
-  interface_id = 0x1a2b3c4d
-  method_id    = 0x5e6f7a8b
-  request (19 bytes)
-Response (status=OK, 35 bytes, 0.89 ms):
-  {
-    "code": 0,
-    "message": "Threshold set successfully"
-  }
+**无参 RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
 ```
 
-**说明：**
-- 不带 `--idl` 参数时使用 hex 格式（向后兼容）
-- 带 `--idl` 参数时支持 JSON 输入输出
-- 所有调用都显示耗时统计
+**基础类型 RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString '"hello"'
+```
+
+> 注意：字符串参数要按 JSON 字符串传入，因此 shell 参数中需要保留内部双引号，例如 `EchoString '"hello"'`。
+
+**普通 struct RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
+```
+
+**嵌套 struct RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
+```
+
+**单向 RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
+```
+
+**当前不建议使用 `omni-cli` 调用的接口**
+
+以下接口在当前 `omni-cli` JSON I/O 路径上未验证通过，会编码失败或找不到对应类型：
+
+- `EchoBytes(bytes value)`
+- `EchoIdArray(array<int32> value)`
+- `EchoLabelArray(array<string> value)`
+- `EchoSensorArray(array<SensorData> value)`
+- `EchoBundle(SensorArrayBundle value)`
+
+这些接口请使用 `examples/example_cpp/sensor_client.cpp` 或 `examples/example_c/sensor_client.c` 验证。
+
+#### 7.3.3 查询服务信息
+
+```bash
+./build-host/target/bin/omni-cli list
+./build-host/target/bin/omni-cli info SensorService
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl info SensorService
+```
 
 详细使用说明见 [omni-cli 使用指南](omni-tool-usage.md)。
 
@@ -1344,14 +1050,8 @@ int main(void) {
         return 1;
     }
 
-    /* 填充回调表 */
-    myapp_MyService_callbacks cbs;
-    memset(&cbs, 0, sizeof(cbs));
-    cbs.HandleRequest = on_handle_request;
-    cbs.Notify = on_notify;
-    cbs.user_data = NULL;
-
-    omni_service_t* svc = myapp_MyService_stub_create(&cbs);
+    /* 直接绑定生成的 impl 接口 */
+    omni_service_t* svc = myapp_MyService_stub_create(NULL);
     omni_runtime_register_service(client, svc);
     omni_runtime_publish_topic(client, "StatusUpdate");
 
@@ -1498,7 +1198,7 @@ gcc -std=c99 -I$OMNIBINDER_DIR/include \
 |------|-----|---|
 | 头文件 | `#include "xxx.bidl.h"` | `#include "xxx.bidl_c.h"` |
 | 库链接 | `OmniBinder::omnibinder_static` | 同左（需声明 CXX 语言） |
-| 实现服务 | 继承 `XxxStub`，重写虚函数 | 填充 `xxx_callbacks` 回调表 |
+| 实现服务 | 继承 `XxxStub`，重写虚函数 | 实现生成的 `xxx_impl_*` 接口，并调用 `xxx_stub_create(user_data)` |
 | 调用服务 | `XxxProxy proxy(client)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
 | RPC 调用 | `auto resp = proxy.Method(req)` | `xxx_proxy_method(&proxy, &req, &resp)` |
 | 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(client, &msg)` |

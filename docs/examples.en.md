@@ -109,56 +109,62 @@ The compiler resolves `import` dependencies automatically and generates all requ
 
 ## 3. C++ server: `SensorService`
 
-Typical server flow:
+The current `examples/example_cpp/sensor_server.cpp` has been expanded into a comprehensive demo server. It covers:
 
-1. create `OmniRuntime`
-2. call `init()` to connect to ServiceManager
-3. implement the generated `SensorServiceStub`
-4. call `registerService()`
-5. call `publishTopic()`
-6. drive the event loop and broadcast updates
+- all primitive RPC methods (`EchoBool` ~ `EchoFloat64`, `EchoString`, `EchoBytes`)
+- custom struct RPC (`EchoStatus`, `EchoConfig`)
+- nested struct RPC (`EchoEnvelope`)
+- array RPC (`EchoIdArray`, `EchoLabelArray`, `EchoSensorArray`, `EchoBundle`)
+- regular service methods (`GetLatestData`, `SetThreshold`, `ResetSensor`, `GetSensorCount`)
+- callback-like asynchronous behavior (`RequestLatestDataAsync` followed by `AsyncResultReady` topic push)
+- regular pub/sub (`SensorUpdate`)
 
-Minimal shape:
+Core shape:
 
 ```cpp
 class MySensorService : public demo::SensorServiceStub {
 public:
+    bool EchoBool(bool value) override { return !value; }
+    int32_t EchoInt32(int32_t value) override { return value + 3; }
+    std::string EchoString(const std::string& value) override { return value + "_echo"; }
+    common::StatusResponse EchoStatus(const common::StatusResponse& value) override { ... }
+    demo::SensorEnvelope EchoEnvelope(const demo::SensorEnvelope& value) override { ... }
+    std::vector<int32_t> EchoIdArray(const std::vector<int32_t>& value) override { ... }
+    demo::SensorArrayBundle EchoBundle(const demo::SensorArrayBundle& value) override { ... }
+
     demo::SensorData GetLatestData() override { ... }
     common::StatusResponse SetThreshold(const demo::ControlCommand& cmd) override { ... }
     void ResetSensor(int32_t sensor_id) override { ... }
+    int32_t GetSensorCount() override { return 3; }
+
+    common::StatusResponse RequestLatestDataAsync(const demo::AsyncRequest& request) override {
+        demo::AsyncResultReady ready;
+        ready.result.request_id = request.request_id;
+        ready.result.client_tag = request.client_tag;
+        ...
+        BroadcastAsyncResultReady(ready);
+        ...
+    }
 };
-
-omnibinder::OmniRuntime runtime;
-runtime.init("127.0.0.1", 9900);
-
-MySensorService service;
-runtime.registerService(&service);
-runtime.publishTopic("SensorUpdate");
-
-while (running) {
-    runtime.pollOnce(100);
-    service.BroadcastSensorUpdate(update);
-}
 ```
 
-The actual example also simulates sensor value changes and prints broadcasts to the console.
+Use `examples/example_cpp/sensor_server.cpp` as the authoritative source for the full implementation.
 
 ---
 
 ## 4. C++ client: `SensorClient`
 
-Typical client flow:
+The current `examples/example_cpp/sensor_client.cpp` has also been expanded into a comprehensive demo client. It covers:
 
-1. create `OmniRuntime`
-2. connect to ServiceManager
-3. create the generated `SensorServiceProxy`
-4. call `connect()`
-5. invoke remote methods
-6. subscribe to topics
-7. register death-notification callbacks
-8. drive the event loop
+- all primitive RPC calls
+- custom and nested struct RPC calls
+- array RPC calls
+- regular service calls (`GetLatestData`, `SetThreshold`, `ResetSensor`, `GetSensorCount`)
+- topic subscriptions (`SensorUpdate`)
+- callback-like asynchronous result reception (`AsyncResultReady`)
+- death notification handling
 
-Minimal shape:
+Core shape:
 
 ```cpp
 omnibinder::OmniRuntime runtime;
@@ -167,26 +173,23 @@ runtime.init("127.0.0.1", 9900);
 demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
-auto data = proxy.GetLatestData();
+proxy.EchoBool(false);
+proxy.EchoInt32(32);
+proxy.EchoStatus(status);
+proxy.EchoEnvelope(envelope);
+proxy.EchoIdArray(ids);
+proxy.EchoBundle(bundle);
 
-demo::ControlCommand cmd;
-cmd.command_type = 1;
-cmd.target = "temperature";
-cmd.value = 30;
-proxy.SetThreshold(cmd);
+proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
+proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
 
-proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& update) {
-    // consume broadcast
-});
-
-proxy.OnServiceDied([]() {
-    // handle service death
-});
-
-while (running) {
-    runtime.pollOnce(100);
-}
+demo::AsyncRequest req;
+req.request_id = 42;
+req.client_tag = "cpp-client";
+proxy.RequestLatestDataAsync(req);
 ```
+
+Use `examples/example_cpp/sensor_client.cpp` as the authoritative source for the full implementation.
 
 ---
 
@@ -196,37 +199,68 @@ The C server is functionally equivalent to the C++ server and uses code generate
 
 Main differences from C++:
 
-- instead of inheriting a Stub base class, fill a callback table such as `demo_SensorService_callbacks`
+- instead of inheriting a Stub base class, implement the generated `demo_SensorService_impl_xxx(...)` functions directly
+- `demo_SensorService_stub_create(user_data)` automatically binds those generated implementations
 - use generated helper functions for broadcasting, for example `demo_SensorService_broadcast_sensor_update(...)`
 - strings and byte buffers are represented with pointer + length fields
 - generated structs require `_init()` / `_destroy()` lifecycle management
+
+This gives C users a stronger workflow: after the IDL changes, newly required service methods appear directly in the generated header, so missing implementations surface at compile/link time instead of being silently omitted from a manually filled callback table.
 
 ---
 
 ## 6. C client
 
-The C client is functionally equivalent to the C++ client.
+The current `examples/example_c/sensor_client.c` is also a comprehensive demo client. It covers:
 
-Typical shape:
+- all primitive RPC calls
+- custom and nested struct RPC calls
+- array RPC calls
+- regular pub/sub (`SensorUpdate`)
+- callback-like asynchronous result reception (`AsyncResultReady`)
+- death notification callbacks
+
+Core shape:
 
 ```c
 demo_SensorService_proxy proxy;
 demo_SensorService_proxy_init(&proxy, runtime);
 demo_SensorService_proxy_connect(&proxy);
 
-demo_SensorData data;
-demo_SensorData_init(&data);
-demo_SensorService_proxy_get_latest_data(&proxy, &data);
+uint8_t b = 0;
+demo_SensorService_proxy_echo_bool(&proxy, 0, &b);
+
+demo_SensorEnvelope env_in;
+demo_SensorEnvelope env_out;
+demo_SensorService_proxy_echo_envelope(&proxy, &env_in, &env_out);
+
+demo_int32_t_array ids_in;
+demo_int32_t_array ids_out;
+demo_SensorService_proxy_echo_id_array(&proxy, &ids_in, &ids_out);
 
 demo_SensorService_proxy_subscribe_sensor_update(&proxy, on_sensor_update, NULL);
-demo_SensorService_proxy_on_service_died(&proxy, on_service_died, NULL);
+demo_SensorService_proxy_subscribe_async_result_ready(&proxy, on_async_result, NULL);
+
+demo_AsyncRequest async_req;
+demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 ```
+
+Use `examples/example_c/sensor_client.c` as the authoritative source for the full implementation.
 
 Compared with C++:
 
 - methods return through output pointers rather than direct return values
 - all structs need explicit init/destroy calls
 - callbacks use function pointers and optional `user_data`
+
+This C client now demonstrates the same feature matrix as the C++ client:
+
+- primitive RPC calls
+- custom and nested struct RPC calls
+- array RPC calls
+- regular topic subscription
+- callback-like asynchronous result reception via `AsyncResultReady`
+- death notification handling
 
 ---
 
@@ -254,19 +288,95 @@ Compared with C++:
 
 ### 7.3 Invoke methods
 
-**Hex mode:**
+Current `omni-cli` rules:
+
+- with `--idl`, `call` uses **JSON input**
+- without `--idl`, parameters must be passed as raw hex payload
+- JSON I/O is currently verified to work for:
+  - primitive types
+  - string
+  - regular structs
+  - nested structs
+  - no-arg methods returning structs
+- JSON I/O is **not currently verified** for:
+  - `bytes`
+  - `array<...>`
+  - complex structs containing arrays
+
+#### 7.3.1 Generic form
 
 ```bash
-./target/bin/omni-cli call SensorService GetLatestData
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <JSON-param>
 ```
 
-**JSON mode:**
+#### 7.3.2 Methods that can be called directly with `omni-cli`
+
+**No-arg RPC**
 
 ```bash
-./target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
+```
 
-./target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
-  '{"command_type":1,"target":"temperature","value":30}'
+**Primitive RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString '"hello"'
+```
+
+> String parameters must be passed as JSON strings, so shell quoting must preserve the inner JSON quotes, for example `'
+"hello"'`.
+
+**Regular struct RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
+```
+
+**Nested struct RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
+```
+
+**Oneway RPC**
+
+```bash
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
+```
+
+#### 7.3.3 Methods not currently recommended through `omni-cli`
+
+The following methods are currently **not verified** through `omni-cli` JSON I/O and may fail with JSON encoding/type resolution errors:
+
+- `EchoBytes(bytes value)`
+- `EchoIdArray(array<int32> value)`
+- `EchoLabelArray(array<string> value)`
+- `EchoSensorArray(array<SensorData> value)`
+- `EchoBundle(SensorArrayBundle value)`
+
+Use `examples/example_cpp/sensor_client.cpp` or `examples/example_c/sensor_client.c` to validate those methods.
+
+#### 7.3.4 Service inspection
+
+```bash
+./build-host/target/bin/omni-cli list
+./build-host/target/bin/omni-cli info SensorService
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl info SensorService
 ```
 
 See the full guide in [omni-cli Usage Guide](omni-tool-usage.en.md).
@@ -294,6 +404,60 @@ Open four terminals:
 
 The client will keep waiting for broadcasts until you stop it manually.
 For automated verification you can use `timeout 10s ...`.
+
+Typical sequence:
+
+- Terminal 1 starts `service_manager`
+- Terminal 2 starts `example_cpp_sensor_server`
+- Terminal 3 starts `example_cpp_sensor_client`
+- Terminal 4 uses `omni-cli` to inspect the generated service contract
+
+With the current demos, the server side will:
+
+- expose the full RPC matrix
+- periodically publish `SensorUpdate`
+- publish `AsyncResultReady` when `RequestLatestDataAsync` is triggered
+
+The client side will:
+
+- call primitive / struct / nested / array RPCs
+- subscribe to `SensorUpdate`
+- subscribe to `AsyncResultReady`
+- wait for death notification callbacks until stopped
+
+Example commands:
+
+**Terminal 1: start ServiceManager**
+
+```bash
+./target/bin/service_manager --port 9900
+```
+
+**Terminal 2: start the C++ server**
+
+```bash
+./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900
+```
+
+**Terminal 3: start the C++ client**
+
+```bash
+./target/example/example_cpp_sensor_client --sm-host 127.0.0.1 --sm-port 9900
+```
+
+**Terminal 4: inspect with `omni-cli`**
+
+```bash
+./target/bin/omni-cli list
+./target/bin/omni-cli info SensorService
+./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
+```
+
+In steady state you should see:
+
+- the server broadcasting `SensorUpdate`
+- the client printing both synchronous RPC results and async topic deliveries
+- `AsyncResultReady` published after `RequestLatestDataAsync`
 
 ### 8.3 Run tests
 
@@ -328,6 +492,19 @@ Integration tests automatically fork a ServiceManager child process and clean it
 
 If you stop the C++ server with `Ctrl+C`, the client should print a death-notification message, and ServiceManager should log that the service timed out and subscribers were notified.
 
+Typical client-side output:
+
+```text
+!!! [DeathNotify] SensorService has DIED !!!
+```
+
+Typical ServiceManager-side output:
+
+```text
+[ServiceManager] Service 'SensorService' heartbeat timeout, marking as dead
+[ServiceManager] Sending death notification to 1 subscriber(s)
+```
+
 ---
 
 ## 9. Cross-board communication example
@@ -343,6 +520,26 @@ If both run on the same machine, the runtime will open the service-created SHM r
 
 The same SHM segment can be shared by multiple local clients. This is already covered in `test_full_integration`.
 
+Typical commands:
+
+**Machine 1 (ServiceManager + server)**
+
+```bash
+./target/bin/service_manager --host 0.0.0.0 --port 9900
+./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900
+```
+
+**Machine 2 (client)**
+
+```bash
+./target/example/example_cpp_sensor_client --sm-host 192.168.1.10 --sm-port 9900
+```
+
+Expected transport behavior:
+
+- different `host_id` values → TCP transport
+- same `host_id` values → SHM transport + UDS eventfd exchange
+
 ---
 
 ## 10. Building an independent project on top of OmniBinder
@@ -354,9 +551,20 @@ This section describes how to build an independent service/client project after 
 Assume OmniBinder has been installed to `build/install`:
 
 ```bash
+cd omnibinder
+mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 make install
+```
+
+Install layout typically includes:
+
+```text
+build/install/
+├── bin_host/
+├── include/
+└── lib/
 ```
 
 Then define:
@@ -369,9 +577,45 @@ export OMNIBINDER_DIR=/path/to/omnibinder/build/install
 
 Define your `.bidl` file first, then generate code:
 
+```protobuf
+package myapp;
+
+struct Request {
+    int32  id;
+    string name;
+}
+
+struct Response {
+    int32  code;
+    string message;
+}
+
+topic StatusUpdate {
+    int32  id;
+    string status;
+    int64  timestamp;
+}
+
+service MyService {
+    Response HandleRequest(Request req);
+    void     Notify(int32 event_id);
+
+    publishes StatusUpdate;
+}
+```
+
 ```bash
 $OMNIBINDER_DIR/bin_host/omni-idlc --lang=cpp --output=generated/ my_service.bidl
 $OMNIBINDER_DIR/bin_host/omni-idlc --lang=c   --output=generated/ my_service.bidl
+```
+
+The generated files will typically include:
+
+```text
+generated/my_service.bidl.h
+generated/my_service.bidl.cpp
+generated/my_service.bidl_c.h
+generated/my_service.bidl.c
 ```
 
 ### 10.3 C++ project layout
@@ -402,7 +646,19 @@ omnic_generate(
     FILES ${CMAKE_CURRENT_SOURCE_DIR}/my_service.bidl
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
+
+add_executable(my_client client.cpp)
+target_link_libraries(my_client PRIVATE OmniBinder::omnibinder_static)
+
+omnic_generate(
+    TARGET my_client
+    LANGUAGE cpp
+    FILES ${CMAKE_CURRENT_SOURCE_DIR}/my_service.bidl
+    OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
+)
 ```
+
+For C projects, the same pattern applies, but generated code will come from `--lang=c` and the service implementation style changes to generated `xxx_impl_*` functions plus `xxx_stub_create(user_data)`.
 
 ### 10.5 Practical guidance
 
@@ -414,6 +670,23 @@ For most projects, evolve the interface incrementally:
 4. expand only after the chain is proven stable
 
 This is the easiest way to validate your service path early.
+
+### 10.6 C++ vs C quick reference
+
+| Feature | C++ | C |
+|---|---|---|
+| Generated header | `xxx.bidl.h` | `xxx.bidl_c.h` |
+| Service implementation | inherit `XxxStub` and override methods | implement generated `xxx_impl_*` functions and call `xxx_stub_create(user_data)` |
+| Proxy creation | `XxxProxy proxy(runtime)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
+| RPC return style | direct return values | output pointers |
+| Topic subscription | lambdas / functors | function pointers + `user_data` |
+| Struct lifecycle | RAII | explicit `_init()` / `_destroy()` |
+
+Practical rule of thumb:
+
+- if you want the most ergonomic service implementation flow, use C++
+- if you need a pure C integration boundary, use the generated C API and implement the generated `xxx_impl_*` functions directly
+- for both languages, keep your first demo small and only expand after end-to-end service registration, RPC, and topic delivery are confirmed
 
 ---
 

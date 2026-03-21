@@ -531,7 +531,7 @@ void CCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::s
 
     os << "#ifndef " << guard << "\n#define " << guard << "\n\n";
     os << "#include <omnibinder/omnibinder_c.h>\n";
-    os << "#include <stdint.h>\n#include <stddef.h>\n\n";
+    os << "#include <stdint.h>\n#include <stddef.h>\n#include <string.h>\n\n";
     
     // 生成被导入文件的 #include
     for (size_t i = 0; i < ast.imports.size(); ++i) {
@@ -643,25 +643,12 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
     }
     os << "\n";
 
-    // Callbacks struct
-    os << "typedef struct " << prefix << "_callbacks {\n";
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
-        if (m.has_param && isCStringLike(m.param.type)) {
-            os << "    /* " << m.name << ": for string/bytes parameters, pass pointer + length. */\n";
-        }
-        if (!m.return_type.isVoid() && isCStringLike(m.return_type)) {
-            os << "    /* " << m.name << ": allocate return buffer on heap, set *result_len, and the stub frees *result after reply serialization. */\n";
-        }
-        os << "    ";
-        if (m.return_type.isVoid()) {
-            os << "void";
-        } else {
-            os << "void";
-        }
-        os << " (*" << m.name << ")(";
+        std::string handler_typedef = prefix + "_" + toSnakeCase(m.name) + "_handler_t";
+        std::string handler_decl = prefix + "_impl_" + toSnakeCase(m.name);
+        os << "typedef void (*" << handler_typedef << ")(";
 
-        // Parameters
         bool has_args = false;
         if (m.has_param) {
             if (isCompositePointerType(m.param.type)) {
@@ -686,11 +673,60 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
         }
         if (has_args) os << ", ";
         os << "void* user_data);\n";
+
+        os << "void " << handler_decl << "(";
+        has_args = false;
+        if (m.has_param) {
+            if (isCompositePointerType(m.param.type)) {
+                os << "const " << cTypeName(m.param.type, pkg_) << "* " << m.param.name;
+            } else if (isCStringLike(m.param.type)) {
+                os << "const " << cTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
+            } else {
+                os << cTypeName(m.param.type, pkg_) << " " << m.param.name;
+            }
+            has_args = true;
+        }
+        if (!m.return_type.isVoid()) {
+            if (has_args) os << ", ";
+            if (m.return_type.isArray() || m.return_type.isCustom()) {
+                os << cTypeName(m.return_type, pkg_) << "* result";
+            } else if (isCStringLike(m.return_type)) {
+                os << cTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
+            } else {
+                os << cTypeName(m.return_type, pkg_) << "* result";
+            }
+            has_args = true;
+        }
+        if (has_args) os << ", ";
+        os << "void* user_data);\n\n";
+    }
+
+    os << "typedef struct " << prefix << "_callbacks {\n";
+    for (size_t i = 0; i < svc.methods.size(); ++i) {
+        const MethodDef& m = svc.methods[i];
+        std::string handler_typedef = prefix + "_" + toSnakeCase(m.name) + "_handler_t";
+        if (m.has_param && isCStringLike(m.param.type)) {
+            os << "    /* " << m.name << ": for string/bytes parameters, pass pointer + length. */\n";
+        }
+        if (!m.return_type.isVoid() && isCStringLike(m.return_type)) {
+            os << "    /* " << m.name << ": allocate return buffer on heap, set *result_len, and the stub frees *result after reply serialization. */\n";
+        }
+        os << "    " << handler_typedef << " " << m.name << ";\n";
     }
     os << "    void* user_data;\n";
     os << "} " << prefix << "_callbacks;\n\n";
 
-    os << "omni_service_t* " << prefix << "_stub_create(const " << prefix << "_callbacks* cbs);\n";
+    os << "omni_service_t* " << prefix << "_stub_create_from_callbacks(const " << prefix << "_callbacks* cbs);\n";
+    os << "static inline omni_service_t* " << prefix << "_stub_create(void* user_data) {\n";
+    os << "    " << prefix << "_callbacks cbs;\n";
+    os << "    memset(&cbs, 0, sizeof(cbs));\n";
+    for (size_t i = 0; i < svc.methods.size(); ++i) {
+        const MethodDef& m = svc.methods[i];
+        os << "    cbs." << m.name << " = " << prefix << "_impl_" << toSnakeCase(m.name) << ";\n";
+    }
+    os << "    cbs.user_data = user_data;\n";
+    os << "    return " << prefix << "_stub_create_from_callbacks(&cbs);\n";
+    os << "}\n\n";
     os << "void " << prefix << "_stub_destroy(omni_service_t* svc);\n\n";
 
     // Broadcast helpers
@@ -1025,8 +1061,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
     os << "    omni_buffer_destroy(req);\n";
     os << "}\n\n";
 
-    // _stub_create
-    os << "omni_service_t* " << prefix << "_stub_create(const " << prefix << "_callbacks* cbs) {\n";
+    os << "omni_service_t* " << prefix << "_stub_create_from_callbacks(const " << prefix << "_callbacks* cbs) {\n";
     os << "    " << prefix << "_stub_data* data = (" << prefix << "_stub_data*)malloc(sizeof(" << prefix << "_stub_data));\n";
     os << "    if (!data) return NULL;\n";
     os << "    data->cbs = *cbs;\n";
