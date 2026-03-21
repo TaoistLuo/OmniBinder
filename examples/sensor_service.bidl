@@ -13,10 +13,41 @@ struct SensorData {
     string  location;
 }
 
+struct SensorConfig {
+    bool    enabled;
+    int32   sample_rate_hz;
+    string  label;
+}
+
+struct SensorEnvelope {
+    SensorData        data;
+    SensorConfig      config;
+    common.Timestamp  captured_at;
+}
+
+struct SensorArrayBundle {
+    array<int32>      ids;
+    array<string>     labels;
+    array<bytes>      blobs;
+    array<SensorData> samples;
+}
+
 struct ControlCommand {
     int32   command_type;
     string  target;
     int32   value;
+}
+
+struct AsyncRequest {
+    int32   request_id;
+    string  client_tag;
+}
+
+struct AsyncResult {
+    int32                 request_id;
+    string                client_tag;
+    common.StatusResponse status;
+    SensorData            data;
 }
 
 topic SensorUpdate {
@@ -24,10 +55,37 @@ topic SensorUpdate {
     int64      publish_time;
 }
 
+topic AsyncResultReady {
+    AsyncResult result;
+    int64       publish_time;
+}
+
 service SensorService {
+    bool                    EchoBool(bool value);
+    int8                    EchoInt8(int8 value);
+    uint8                   EchoUInt8(uint8 value);
+    int16                   EchoInt16(int16 value);
+    uint16                  EchoUInt16(uint16 value);
+    int32                   EchoInt32(int32 value);
+    uint32                  EchoUInt32(uint32 value);
+    int64                   EchoInt64(int64 value);
+    uint64                  EchoUInt64(uint64 value);
+    float32                 EchoFloat32(float32 value);
+    float64                 EchoFloat64(float64 value);
+    string                  EchoString(string value);
+    bytes                   EchoBytes(bytes value);
+    common.StatusResponse   EchoStatus(common.StatusResponse value);
+    SensorConfig            EchoConfig(SensorConfig value);
+    SensorEnvelope          EchoEnvelope(SensorEnvelope value);
+    array<int32>            EchoIdArray(array<int32> value);
+    array<string>           EchoLabelArray(array<string> value);
+    array<SensorData>       EchoSensorArray(array<SensorData> value);
+    SensorArrayBundle       EchoBundle(SensorArrayBundle value);
     SensorData              GetLatestData();
     common.StatusResponse   SetThreshold(ControlCommand cmd);
     void                    ResetSensor(int32 sensor_id);
-
+    int32                   GetSensorCount();
+    common.StatusResponse   RequestLatestDataAsync(AsyncRequest request);
     publishes SensorUpdate;
+    publishes AsyncResultReady;
 }
