@@ -1,6 +1,6 @@
 #include "codegen_cpp.h"
 #include <fstream>
-#include <iomanip>
+#include <cstdio>
 
 namespace omnic {
 
@@ -141,6 +141,11 @@ void emitDeserializeValue(const TypeRef& type, const std::string& target,
 bool CppCodeGen::generate(const AstFile& ast, const std::string& output_dir,
                           const std::string& filename) {
     pkg_ = ast.package_name;
+    has_error_ = false;
+
+    if (!validateAst(ast)) {
+        return false;
+    }
     
     std::string header_path = output_dir + "/" + filename + ".h";
     std::string source_path = output_dir + "/" + filename + ".cpp";
@@ -152,6 +157,90 @@ bool CppCodeGen::generate(const AstFile& ast, const std::string& output_dir,
     
     generateHeader(ast, hdr, filename);
     generateSource(ast, src, filename);
+    return true;
+}
+
+void CppCodeGen::reportError(const std::string& message) {
+    if (!has_error_) {
+        std::fprintf(stderr, "C++ codegen error: %s\n", message.c_str());
+        has_error_ = true;
+    }
+}
+
+bool CppCodeGen::validateTypeSupported(const TypeRef& type, const std::string& context,
+                                       bool allow_void) {
+    if (type.isVoid()) {
+        if (allow_void) {
+            return true;
+        }
+        reportError(context + " uses unsupported C++ codegen type '" + cppTypeName(type) + "'");
+        return false;
+    }
+
+    if (type.isArray()) {
+        if (type.element_type == NULL) {
+            reportError(context + " uses unsupported C++ codegen type '" + cppTypeName(type) +
+                        "' because array element type is missing");
+            return false;
+        }
+        return validateTypeSupported(*type.element_type, context + " element type", false);
+    }
+
+    if (type.isCustom()) {
+        return true;
+    }
+
+    if (!bufferMethodSuffix(type).empty()) {
+        return true;
+    }
+
+    reportError(context + " uses unsupported C++ codegen type '" + cppTypeName(type) + "'");
+    return false;
+}
+
+bool CppCodeGen::validateAst(const AstFile& ast) {
+    for (size_t i = 0; i < ast.structs.size(); ++i) {
+        const StructDef& s = ast.structs[i];
+        for (size_t j = 0; j < s.fields.size(); ++j) {
+            const FieldDef& f = s.fields[j];
+            if (!validateTypeSupported(f.type,
+                                       "struct '" + s.name + "' field '" + f.name + "'",
+                                       false)) {
+                return false;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < ast.topics.size(); ++i) {
+        const TopicDef& t = ast.topics[i];
+        for (size_t j = 0; j < t.fields.size(); ++j) {
+            const FieldDef& f = t.fields[j];
+            if (!validateTypeSupported(f.type,
+                                       "topic '" + t.name + "' field '" + f.name + "'",
+                                       false)) {
+                return false;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < ast.services.size(); ++i) {
+        const ServiceDef& svc = ast.services[i];
+        for (size_t j = 0; j < svc.methods.size(); ++j) {
+            const MethodDef& m = svc.methods[j];
+            if (!validateTypeSupported(m.return_type,
+                                       "service '" + svc.name + "' method '" + m.name + "' return type",
+                                       true)) {
+                return false;
+            }
+            if (m.has_param &&
+                !validateTypeSupported(m.param.type,
+                                       "service '" + svc.name + "' method '" + m.name + "' parameter '" + m.param.name + "'",
+                                       false)) {
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -183,8 +272,8 @@ void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std:
     for (size_t i = 0; i < ast.structs.size(); ++i) genStruct(ast.structs[i], os);
     for (size_t i = 0; i < ast.topics.size(); ++i) genTopic(ast.topics[i], os);
     for (size_t i = 0; i < ast.services.size(); ++i) {
-        genStub(ast.services[i], ast, os);
-        genProxy(ast.services[i], ast, os);
+        genStub(ast.services[i], os);
+        genProxy(ast.services[i], os);
     }
     
     os << "} // namespace " << pkg_ << "\n\n";
@@ -221,9 +310,7 @@ void CppCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
     os << "};\n\n";
 }
 
-void CppCodeGen::genStub(const ServiceDef& svc, const AstFile& ast, std::ostream& os) {
-    uint32_t iface_id = fnv1a_hash(pkg_ + "." + svc.name);
-    
+void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
     os << "class " << svc.name << "Stub : public omnibinder::Service {\n";
     os << "public:\n";
     os << "    " << svc.name << "Stub() : Service(\"" << svc.name << "\") {}\n";
@@ -253,7 +340,7 @@ void CppCodeGen::genStub(const ServiceDef& svc, const AstFile& ast, std::ostream
     os << "};\n\n";
 }
 
-void CppCodeGen::genProxy(const ServiceDef& svc, const AstFile& ast, std::ostream& os) {
+void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     os << "class " << svc.name << "Proxy {\n";
     os << "public:\n";
     os << "    explicit " << svc.name << "Proxy(omnibinder::OmniRuntime& runtime);\n";
