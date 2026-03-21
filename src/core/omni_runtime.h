@@ -59,7 +59,6 @@
 #include <memory>
 #include <type_traits>
 #include <thread>
-#include <sys/time.h>
 
 namespace omnibinder {
 
@@ -301,11 +300,11 @@ private:
 
 template<typename F>
 typename std::result_of<F()>::type OmniRuntime::Impl::callSerialized(F func) {
-    if (owner_executor_.canRunInline()) {
+    if (!owner_executor_.hasOwnerThread()) {
         std::lock_guard<std::mutex> lock(api_mutex_);
         return func();
     }
-    return owner_executor_.invoke(func);
+    return owner_executor_.invokeOnOwner(func);
 }
 
 } // namespace omnibinder

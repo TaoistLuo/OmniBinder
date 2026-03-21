@@ -236,6 +236,12 @@ public:
         return invokeImpl<F, Result>(func, typename std::is_void<Result>::type());
     }
 
+    template<typename F>
+    typename std::result_of<F()>::type invokeOnOwner(F func) {
+        typedef typename std::result_of<F()>::type Result;
+        return invokeOnOwnerImpl<F, Result>(func, typename std::is_void<Result>::type());
+    }
+
 private:
     template<typename F, typename Result>
     Result invokeImpl(F func, std::false_type) {
@@ -264,6 +270,55 @@ private:
     template<typename F, typename Result>
     void invokeImpl(F func, std::true_type) {
         if (canRunInline()) {
+            func();
+            return;
+        }
+
+        std::shared_ptr< SyncCallState<void> > state(new SyncCallState<void>());
+        loop_->post([func, state]() {
+            try {
+                func();
+                state->completeSuccess();
+            } catch (const std::exception& e) {
+                state->completeFailure(e.what());
+            } catch (...) {
+                state->completeFailure("unknown exception");
+            }
+        });
+
+        ExecutionResult<void> result = state->wait();
+        if (!result.ok()) {
+            throw std::runtime_error(result.error());
+        }
+    }
+
+    template<typename F, typename Result>
+    Result invokeOnOwnerImpl(F func, std::false_type) {
+        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
+            return func();
+        }
+
+        std::shared_ptr< SyncCallState<Result> > state(new SyncCallState<Result>());
+        loop_->post([func, state]() {
+            try {
+                state->completeSuccess(func());
+            } catch (const std::exception& e) {
+                state->completeFailure(e.what());
+            } catch (...) {
+                state->completeFailure("unknown exception");
+            }
+        });
+
+        ExecutionResult<Result> result = state->wait();
+        if (!result.ok()) {
+            throw std::runtime_error(result.error());
+        }
+        return result.value();
+    }
+
+    template<typename F, typename Result>
+    void invokeOnOwnerImpl(F func, std::true_type) {
+        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
             func();
             return;
         }

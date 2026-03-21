@@ -10,6 +10,13 @@ namespace omnibinder {
 
 class SmControlChannel {
 public:
+    struct PendingReplySlot {
+        bool ready;
+        Message message;
+
+        PendingReplySlot() : ready(false), message() {}
+    };
+
     SmControlChannel();
     ~SmControlChannel();
 
@@ -21,7 +28,8 @@ public:
     void clearReplies();
     void beginWait(uint32_t seq);
     bool isWaiting(uint32_t seq) const;
-    Message* pendingReply(uint32_t seq) const;
+    const Message* pendingReply(uint32_t seq) const;
+    bool takeReply(uint32_t seq, Message& out);
     void eraseWait(uint32_t seq);
     void storeReply(uint32_t seq, const Message& msg);
 
@@ -29,7 +37,7 @@ public:
     Buffer recv_buffer;
 
 private:
-    std::map<uint32_t, Message*> pending_replies_;
+    std::map<uint32_t, PendingReplySlot> pending_replies_;
 };
 
 } // namespace omnibinder

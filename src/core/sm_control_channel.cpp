@@ -1,4 +1,6 @@
 #include "core/sm_control_channel.h"
+#include "platform/platform.h"
+#include <chrono>
 #include <string.h>
 
 namespace omnibinder {
@@ -83,44 +85,64 @@ bool SmControlChannel::tryPopMessage(Message& msg) {
 }
 
 void SmControlChannel::clearReplies() {
-    for (std::map<uint32_t, Message*>::iterator it = pending_replies_.begin();
-         it != pending_replies_.end(); ++it) {
-        delete it->second;
-    }
     pending_replies_.clear();
 }
 
 void SmControlChannel::beginWait(uint32_t seq) {
-    pending_replies_[seq] = NULL;
+    std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
+    if (it == pending_replies_.end()) {
+        pending_replies_.emplace(std::piecewise_construct,
+                                 std::forward_as_tuple(seq),
+                                 std::forward_as_tuple());
+        return;
+    }
+    it->second.ready = false;
+    it->second.message.payload.clear();
 }
 
 bool SmControlChannel::isWaiting(uint32_t seq) const {
-    std::map<uint32_t, Message*>::const_iterator it = pending_replies_.find(seq);
-    return it != pending_replies_.end() && it->second == NULL;
+    std::map<uint32_t, PendingReplySlot>::const_iterator it = pending_replies_.find(seq);
+    return it != pending_replies_.end() && !it->second.ready;
 }
 
-Message* SmControlChannel::pendingReply(uint32_t seq) const {
-    std::map<uint32_t, Message*>::const_iterator it = pending_replies_.find(seq);
-    return it == pending_replies_.end() ? NULL : it->second;
+const Message* SmControlChannel::pendingReply(uint32_t seq) const {
+    std::map<uint32_t, PendingReplySlot>::const_iterator it = pending_replies_.find(seq);
+    if (it == pending_replies_.end()) {
+        return NULL;
+    }
+    if (!it->second.ready) {
+        return NULL;
+    }
+    return &it->second.message;
+}
+
+bool SmControlChannel::takeReply(uint32_t seq, Message& out) {
+    std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
+    if (it == pending_replies_.end()) {
+        return false;
+    }
+    if (!it->second.ready) {
+        return false;
+    }
+    out.header = it->second.message.header;
+    out.payload = std::move(it->second.message.payload);
+    pending_replies_.erase(it);
+    return true;
 }
 
 void SmControlChannel::eraseWait(uint32_t seq) {
-    std::map<uint32_t, Message*>::iterator it = pending_replies_.find(seq);
-    if (it != pending_replies_.end()) {
-        delete it->second;
-        pending_replies_.erase(it);
-    }
+    pending_replies_.erase(seq);
 }
 
 void SmControlChannel::storeReply(uint32_t seq, const Message& msg) {
-    std::map<uint32_t, Message*>::iterator it = pending_replies_.find(seq);
-    if (it == pending_replies_.end() || it->second != NULL) {
+    std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
+    if (it == pending_replies_.end() || it->second.ready) {
         return;
     }
 
-    it->second = new Message();
-    it->second->header = msg.header;
-    it->second->payload.assign(msg.payload.data(), msg.payload.size());
+    it->second.message.header = msg.header;
+    it->second.message.payload.assign(msg.payload.data(), msg.payload.size());
+    it->second.ready = true;
 }
 
 } // namespace omnibinder

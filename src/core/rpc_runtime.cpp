@@ -64,13 +64,13 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
         }
 
         int64_t remaining = remainingWaitMs();
-        poll_once(static_cast<int>(std::min<int64_t>(remaining, 100)));
+        poll_once(static_cast<int>(remaining));
     }
 
-    Message* pending = channel.pendingReply(seq);
-    reply.header = pending->header;
-    reply.payload.assign(pending->payload.data(), pending->payload.size());
-    channel.eraseWait(seq);
+    if (!channel.takeReply(seq, reply)) {
+        endWait();
+        return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
+    }
     endWait();
     return 0;
 }
