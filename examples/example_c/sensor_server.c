@@ -77,23 +77,23 @@ static void fill_bundle(demo_SensorArrayBundle* bundle) {
     fill_sensor_data_array(&bundle->samples);
 }
 
-static void on_echo_bool(uint8_t value, uint8_t* result, void* user_data) {
+void demo_SensorService_impl_echo_bool(uint8_t value, uint8_t* result, void* user_data) {
     (void)user_data;
     *result = value ? 0 : 1;
 }
 
-static void on_echo_int8(int8_t value, int8_t* result, void* user_data) { (void)user_data; *result = (int8_t)(value + 1); }
-static void on_echo_uint8(uint8_t value, uint8_t* result, void* user_data) { (void)user_data; *result = (uint8_t)(value + 1); }
-static void on_echo_int16(int16_t value, int16_t* result, void* user_data) { (void)user_data; *result = (int16_t)(value + 2); }
-static void on_echo_uint16(uint16_t value, uint16_t* result, void* user_data) { (void)user_data; *result = (uint16_t)(value + 2); }
-static void on_echo_int32(int32_t value, int32_t* result, void* user_data) { (void)user_data; *result = value + 3; }
-static void on_echo_uint32(uint32_t value, uint32_t* result, void* user_data) { (void)user_data; *result = value + 3; }
-static void on_echo_int64(int64_t value, int64_t* result, void* user_data) { (void)user_data; *result = value + 4; }
-static void on_echo_uint64(uint64_t value, uint64_t* result, void* user_data) { (void)user_data; *result = value + 4; }
-static void on_echo_float32(float value, float* result, void* user_data) { (void)user_data; *result = value + 0.5f; }
-static void on_echo_float64(double value, double* result, void* user_data) { (void)user_data; *result = value + 0.25; }
+void demo_SensorService_impl_echo_int8(int8_t value, int8_t* result, void* user_data) { (void)user_data; *result = (int8_t)(value + 1); }
+void demo_SensorService_impl_echo_uint8(uint8_t value, uint8_t* result, void* user_data) { (void)user_data; *result = (uint8_t)(value + 1); }
+void demo_SensorService_impl_echo_int16(int16_t value, int16_t* result, void* user_data) { (void)user_data; *result = (int16_t)(value + 2); }
+void demo_SensorService_impl_echo_uint16(uint16_t value, uint16_t* result, void* user_data) { (void)user_data; *result = (uint16_t)(value + 2); }
+void demo_SensorService_impl_echo_int32(int32_t value, int32_t* result, void* user_data) { (void)user_data; *result = value + 3; }
+void demo_SensorService_impl_echo_uint32(uint32_t value, uint32_t* result, void* user_data) { (void)user_data; *result = value + 3; }
+void demo_SensorService_impl_echo_int64(int64_t value, int64_t* result, void* user_data) { (void)user_data; *result = value + 4; }
+void demo_SensorService_impl_echo_uint64(uint64_t value, uint64_t* result, void* user_data) { (void)user_data; *result = value + 4; }
+void demo_SensorService_impl_echo_float32(float value, float* result, void* user_data) { (void)user_data; *result = value + 0.5f; }
+void demo_SensorService_impl_echo_float64(double value, double* result, void* user_data) { (void)user_data; *result = value + 0.25; }
 
-static void on_echo_string(const char* value, uint32_t value_len, char** result, uint32_t* result_len, void* user_data) {
+void demo_SensorService_impl_echo_string(const char* value, uint32_t value_len, char** result, uint32_t* result_len, void* user_data) {
     (void)user_data;
     const char* suffix = "_echo";
     uint32_t suffix_len = 5;
@@ -103,7 +103,7 @@ static void on_echo_string(const char* value, uint32_t value_len, char** result,
     *result_len = value_len + suffix_len;
 }
 
-static void on_echo_bytes(const uint8_t* value, uint32_t value_len, uint8_t** result, uint32_t* result_len, void* user_data) {
+void demo_SensorService_impl_echo_bytes(const uint8_t* value, uint32_t value_len, uint8_t** result, uint32_t* result_len, void* user_data) {
     (void)user_data;
     *result = (uint8_t*)malloc(value_len + 1);
     memcpy(*result, value, value_len);
@@ -111,17 +111,17 @@ static void on_echo_bytes(const uint8_t* value, uint32_t value_len, uint8_t** re
     *result_len = value_len + 1;
 }
 
-static void on_echo_status(const common_StatusResponse* value, common_StatusResponse* result, void* user_data) {
+void demo_SensorService_impl_echo_status(const common_StatusResponse* value, common_StatusResponse* result, void* user_data) {
     (void)user_data;
     fill_status(result, value->code + 100, "demo_echo");
 }
 
-static void on_echo_config(const demo_SensorConfig* value, demo_SensorConfig* result, void* user_data) {
+void demo_SensorService_impl_echo_config(const demo_SensorConfig* value, demo_SensorConfig* result, void* user_data) {
     (void)user_data;
     fill_config(result, value->enabled ? 0 : 1, value->sample_rate_hz + 5, "sensor-main_server");
 }
 
-static void on_echo_envelope(const demo_SensorEnvelope* value, demo_SensorEnvelope* result, void* user_data) {
+void demo_SensorService_impl_echo_envelope(const demo_SensorEnvelope* value, demo_SensorEnvelope* result, void* user_data) {
     (void)user_data;
     demo_SensorEnvelope_init(result);
     fill_sensor_data(&result->data, value->data.sensor_id, "Lab-1");
@@ -132,7 +132,7 @@ static void on_echo_envelope(const demo_SensorEnvelope* value, demo_SensorEnvelo
     result->captured_at.nanos = value->captured_at.nanos + 1;
 }
 
-static void on_echo_id_array(const demo_int32_t_array* value, demo_int32_t_array* result, void* user_data) {
+void demo_SensorService_impl_echo_id_array(const demo_int32_t_array* value, demo_int32_t_array* result, void* user_data) {
     (void)user_data;
     demo_int32_t_array_init(result);
     result->count = value->count + 1;
@@ -141,7 +141,7 @@ static void on_echo_id_array(const demo_int32_t_array* value, demo_int32_t_array
     result->data[value->count] = (int32_t)value->count;
 }
 
-static void on_echo_label_array(const demo_string_array* value, demo_string_array* result, void* user_data) {
+void demo_SensorService_impl_echo_label_array(const demo_string_array* value, demo_string_array* result, void* user_data) {
     uint32_t i;
     (void)user_data;
     demo_string_array_init(result);
@@ -154,7 +154,7 @@ static void on_echo_label_array(const demo_string_array* value, demo_string_arra
     result->data[value->count] = dup_cstr("tail", &result->lens[value->count]);
 }
 
-static void on_echo_sensor_array(const demo_demo_SensorData_array* value, demo_demo_SensorData_array* result, void* user_data) {
+void demo_SensorService_impl_echo_sensor_array(const demo_demo_SensorData_array* value, demo_demo_SensorData_array* result, void* user_data) {
     uint32_t i;
     (void)user_data;
     demo_demo_SensorData_array_init(result);
@@ -166,7 +166,7 @@ static void on_echo_sensor_array(const demo_demo_SensorData_array* value, demo_d
     }
 }
 
-static void on_echo_bundle(const demo_SensorArrayBundle* value, demo_SensorArrayBundle* result, void* user_data) {
+void demo_SensorService_impl_echo_bundle(const demo_SensorArrayBundle* value, demo_SensorArrayBundle* result, void* user_data) {
     (void)user_data;
     fill_bundle(result);
     if (value->ids.count > 0) {
@@ -174,34 +174,34 @@ static void on_echo_bundle(const demo_SensorArrayBundle* value, demo_SensorArray
     }
 }
 
-static void on_get_latest_data(demo_SensorData* result, void* user_data) {
+void demo_SensorService_impl_get_latest_data(demo_SensorData* result, void* user_data) {
     (void)user_data;
     fill_sensor_data(result, 1, "Room-A");
     printf("[SensorService] GetLatestData: temp=%.1f humidity=%.1f\n", g_temp, g_hum);
 }
 
-static void on_set_threshold(const demo_ControlCommand* cmd,
-                             common_StatusResponse* result, void* user_data) {
+void demo_SensorService_impl_set_threshold(const demo_ControlCommand* cmd,
+                                           common_StatusResponse* result, void* user_data) {
     (void)user_data;
     printf("[SensorService] SetThreshold: type=%d target=%.*s value=%d\n",
            cmd->command_type, cmd->target_len, cmd->target, cmd->value);
     fill_status(result, 0, "OK");
 }
 
-static void on_reset_sensor(int32_t sensor_id, void* user_data) {
+void demo_SensorService_impl_reset_sensor(int32_t sensor_id, void* user_data) {
     (void)user_data;
     g_temp = 25.0;
     g_hum = 60.0;
     printf("[SensorService] ResetSensor: id=%d\n", sensor_id);
 }
 
-static void on_get_sensor_count(int32_t* result, void* user_data) {
+void demo_SensorService_impl_get_sensor_count(int32_t* result, void* user_data) {
     (void)user_data;
     *result = 3;
 }
 
-static void on_request_latest_data_async(const demo_AsyncRequest* request,
-                                         common_StatusResponse* result, void* user_data) {
+void demo_SensorService_impl_request_latest_data_async(const demo_AsyncRequest* request,
+                                                       common_StatusResponse* result, void* user_data) {
     omni_runtime_t* runtime = (omni_runtime_t*)user_data;
     demo_AsyncResultReady ready;
     demo_AsyncResultReady_init(&ready);
@@ -239,36 +239,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    demo_SensorService_callbacks cbs;
-    memset(&cbs, 0, sizeof(cbs));
-    cbs.EchoBool = on_echo_bool;
-    cbs.EchoInt8 = on_echo_int8;
-    cbs.EchoUInt8 = on_echo_uint8;
-    cbs.EchoInt16 = on_echo_int16;
-    cbs.EchoUInt16 = on_echo_uint16;
-    cbs.EchoInt32 = on_echo_int32;
-    cbs.EchoUInt32 = on_echo_uint32;
-    cbs.EchoInt64 = on_echo_int64;
-    cbs.EchoUInt64 = on_echo_uint64;
-    cbs.EchoFloat32 = on_echo_float32;
-    cbs.EchoFloat64 = on_echo_float64;
-    cbs.EchoString = on_echo_string;
-    cbs.EchoBytes = on_echo_bytes;
-    cbs.EchoStatus = on_echo_status;
-    cbs.EchoConfig = on_echo_config;
-    cbs.EchoEnvelope = on_echo_envelope;
-    cbs.EchoIdArray = on_echo_id_array;
-    cbs.EchoLabelArray = on_echo_label_array;
-    cbs.EchoSensorArray = on_echo_sensor_array;
-    cbs.EchoBundle = on_echo_bundle;
-    cbs.GetLatestData = on_get_latest_data;
-    cbs.SetThreshold = on_set_threshold;
-    cbs.ResetSensor = on_reset_sensor;
-    cbs.GetSensorCount = on_get_sensor_count;
-    cbs.RequestLatestDataAsync = on_request_latest_data_async;
-    cbs.user_data = runtime;
-
-    omni_service_t* svc = demo_SensorService_stub_create(&cbs);
+    omni_service_t* svc = demo_SensorService_stub_create(runtime);
     if (omni_runtime_register_service(runtime, svc) != 0) {
         fprintf(stderr, "Failed to register service\n");
         demo_SensorService_stub_destroy(svc);
