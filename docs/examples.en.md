@@ -54,6 +54,18 @@ struct StatusResponse {
 
 ### 2.2 `sensor_service.bidl`
 
+The current demo `examples/sensor_service.bidl` has been expanded into a fuller capability matrix. It includes:
+
+- primitive RPC methods: `EchoBool` / `EchoInt8` / `EchoUInt8` / ... / `EchoFloat64` / `EchoString` / `EchoBytes`
+- custom-struct RPC: `EchoStatus` / `EchoConfig`
+- nested-struct RPC: `EchoEnvelope`
+- array RPC: `EchoIdArray` / `EchoLabelArray` / `EchoSensorArray` / `EchoBundle`
+- regular service methods: `GetLatestData` / `SetThreshold` / `ResetSensor` / `GetSensorCount`
+- callback-like asynchronous method: `RequestLatestDataAsync`
+- topics: `SensorUpdate` / `AsyncResultReady`
+
+Key shapes:
+
 ```protobuf
 package demo;
 
@@ -67,10 +79,35 @@ struct SensorData {
     string  location;
 }
 
-struct ControlCommand {
-    int32   command_type;
-    string  target;
-    int32   value;
+struct SensorConfig {
+    bool    enabled;
+    int32   sample_rate_hz;
+    string  label;
+}
+
+struct SensorEnvelope {
+    SensorData        data;
+    SensorConfig      config;
+    common.Timestamp  captured_at;
+}
+
+struct SensorArrayBundle {
+    array<int32>      ids;
+    array<string>     labels;
+    array<bytes>      blobs;
+    array<SensorData> samples;
+}
+
+struct AsyncRequest {
+    int32   request_id;
+    string  client_tag;
+}
+
+struct AsyncResult {
+    int32                 request_id;
+    string                client_tag;
+    common.StatusResponse status;
+    SensorData            data;
 }
 
 topic SensorUpdate {
@@ -78,14 +115,13 @@ topic SensorUpdate {
     int64      publish_time;
 }
 
-service SensorService {
-    SensorData            GetLatestData();
-    common.StatusResponse SetThreshold(ControlCommand cmd);
-    void                  ResetSensor(int32 sensor_id);
-
-    publishes SensorUpdate;
+topic AsyncResultReady {
+    AsyncResult result;
+    int64       publish_time;
 }
 ```
+
+Use the checked-in `examples/sensor_service.bidl` as the authoritative source for the complete method list.
 
 Key points:
 
@@ -104,6 +140,13 @@ omni-idlc --lang=c --output=generated/ sensor_service.bidl
 ```
 
 The compiler resolves `import` dependencies automatically and generates all required files.
+
+For `--lang=c`, the generated file names are:
+
+- `common_types.bidl_c.h`
+- `common_types.bidl.c`
+- `sensor_service.bidl_c.h`
+- `sensor_service.bidl.c`
 
 ---
 
@@ -173,12 +216,23 @@ runtime.init("127.0.0.1", 9900);
 demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
-proxy.EchoBool(false);
-proxy.EchoInt32(32);
-proxy.EchoStatus(status);
-proxy.EchoEnvelope(envelope);
-proxy.EchoIdArray(ids);
-proxy.EchoBundle(bundle);
+uint8_t bool_out = 0;
+proxy.EchoBool(false, &bool_out);
+
+int32_t int_out = 0;
+proxy.EchoInt32(32, &int_out);
+
+StatusResponse status_out;
+proxy.EchoStatus(status, &status_out);
+
+SensorEnvelope envelope_out;
+proxy.EchoEnvelope(envelope, &envelope_out);
+
+std::vector<int32_t> ids_out;
+proxy.EchoIdArray(ids, &ids_out);
+
+SensorArrayBundle bundle_out;
+proxy.EchoBundle(bundle, &bundle_out);
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
 proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
@@ -186,7 +240,8 @@ proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
 demo::AsyncRequest req;
 req.request_id = 42;
 req.client_tag = "cpp-client";
-proxy.RequestLatestDataAsync(req);
+common::StatusResponse ack;
+proxy.RequestLatestDataAsync(req, &ack);
 ```
 
 Use `examples/example_cpp/sensor_client.cpp` as the authoritative source for the full implementation.

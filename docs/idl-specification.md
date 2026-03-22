@@ -270,11 +270,11 @@ void demo_SensorData_destroy(demo_SensorData* self);
 
 /* 序列化 */
 int demo_SensorData_serialize(const demo_SensorData* self,
-                               omnibinder_buffer_t* buf);
+    omni_buffer_t* buf);
 
 /* 反序列化 */
 int demo_SensorData_deserialize(demo_SensorData* self,
-                                 omnibinder_buffer_t* buf);
+    omni_buffer_t* buf);
 ```
 
 ## 6. 话题定义（topic）
@@ -408,9 +408,9 @@ public:
     bool isConnected() const;
 
     // ---- 远程调用方法 ----
-    StatusResponse SetThreshold(const ControlCommand& cmd);
-    SensorData GetLatestData();
-    void ResetSensor(int32_t sensor_id);
+    int SetThreshold(const ControlCommand& cmd, StatusResponse* out);
+    int GetLatestData(SensorData* out);
+    int ResetSensor(int32_t sensor_id);
 
     // ---- 订阅广播话题 ----
     void SubscribeSensorUpdate(
@@ -441,37 +441,24 @@ typedef demo_SensorData (*demo_SensorService_GetLatestData_fn)(
 typedef void (*demo_SensorService_ResetSensor_fn)(
     void* user_data, int32_t sensor_id);
 
-/* Stub 回调表 */
-typedef struct demo_SensorService_callbacks {
-    demo_SensorService_SetThreshold_fn  on_set_threshold;
-    demo_SensorService_GetLatestData_fn on_get_latest_data;
-    demo_SensorService_ResetSensor_fn   on_reset_sensor;
-    void* user_data;
-} demo_SensorService_callbacks;
+/* ---- Proxy 结构与函数 ---- */
+typedef struct demo_SensorService_proxy {
+    omni_runtime_t* runtime;
+    uint8_t connected;
+} demo_SensorService_proxy;
 
-/* 注册服务 */
-int demo_SensorService_register(
-    omni_runtime_t* runtime,
-    const demo_SensorService_callbacks* callbacks);
-
-/* 广播 */
-int demo_SensorService_broadcast_SensorUpdate(
-    omni_runtime_t* runtime,
-    const demo_SensorUpdate* msg);
-
-/* ---- Proxy 函数 ---- */
-typedef struct demo_SensorService_proxy demo_SensorService_proxy;
-
-demo_SensorService_proxy* demo_SensorService_proxy_create(
+void demo_SensorService_proxy_init(
+    demo_SensorService_proxy* proxy,
     omni_runtime_t* runtime);
-void demo_SensorService_proxy_destroy(demo_SensorService_proxy* proxy);
-int demo_SensorService_proxy_connect(demo_SensorService_proxy* proxy);
+
+int demo_SensorService_proxy_connect(
+    demo_SensorService_proxy* proxy);
 
 /* 远程调用 */
 int demo_SensorService_proxy_SetThreshold(
     demo_SensorService_proxy* proxy,
     const demo_ControlCommand* cmd,
-    demo_StatusResponse* result);
+    common_StatusResponse* result);
 
 int demo_SensorService_proxy_GetLatestData(
     demo_SensorService_proxy* proxy,
@@ -594,12 +581,8 @@ topic SensorAlert {
 
 service SensorService {
     // 获取传感器数据
-    SensorData     GetSensorData(int32 sensor_id);
-    SensorList     GetAllSensors();
-
-    // 控制命令（使用跨包类型）
-    common.StatusResponse SetConfig(SensorConfig config);
-    common.StatusResponse SendCommand(ControlCommand cmd);
+    SensorData            GetLatestData();
+    common.StatusResponse SetThreshold(ControlCommand cmd);
 
     // 单向通知
     void ResetSensor(int32 sensor_id);
@@ -643,7 +626,7 @@ omni-idlc --lang=all --output=./generated sensor_service.bidl
 #   sensor_service.bidl.cpp
 #
 # --lang=c 输出:
-#   sensor_service.bidl.h
+#   sensor_service.bidl_c.h
 #   sensor_service.bidl.c
 ```
 

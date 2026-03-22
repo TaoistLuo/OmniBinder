@@ -87,7 +87,10 @@ int TcpTransport::connect(const std::string& host, uint16_t port)
 int TcpTransport::send(const uint8_t* data, size_t length)
 {
     if (state_ != ConnectionState::CONNECTED) {
-        OMNI_LOG_ERROR(LOG_TAG, "send() called in state %d", static_cast<int>(state_));
+        if (state_ == ConnectionState::ERROR) {
+            OMNI_LOG_WARN(LOG_TAG, "send() called in error state on fd=%d",
+                          static_cast<int>(fd_));
+        }
         return -1;
     }
 
@@ -125,7 +128,10 @@ int TcpTransport::send(const uint8_t* data, size_t length)
 int TcpTransport::recv(uint8_t* buf, size_t buf_size)
 {
     if (state_ != ConnectionState::CONNECTED) {
-        OMNI_LOG_ERROR(LOG_TAG, "recv() called in state %d", static_cast<int>(state_));
+        if (state_ == ConnectionState::ERROR) {
+            OMNI_LOG_WARN(LOG_TAG, "recv() called in error state on fd=%d",
+                          static_cast<int>(fd_));
+        }
         return -1;
     }
 

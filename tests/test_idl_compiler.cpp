@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <unistd.h>
 
 using namespace omnic;
 
@@ -36,6 +37,19 @@ static std::string readFile(const std::string& path) {
     std::ifstream ifs(path.c_str());
     return std::string((std::istreambuf_iterator<char>(ifs)),
                        std::istreambuf_iterator<char>());
+}
+
+static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
+    std::ifstream in(file_path.c_str());
+    assert(in.good());
+    std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    Lexer lexer(source);
+    ParseContext ctx;
+    Parser parser(lexer, ctx, file_path);
+    bool ok = parser.parse(ast);
+    assert(ok);
+    assert(!parser.hasError());
+    return ctx;
 }
 
 int main() {
@@ -1106,6 +1120,164 @@ int main() {
         assert(source.find("omni_buffer_write_bytes(response, result, result_len);") != std::string::npos);
         assert(source.find("*result = omni_buffer_read_string(resp, result_len);") != std::string::npos);
         assert(source.find("*result = omni_buffer_read_bytes(resp, result_len);") != std::string::npos);
+        PASS();
+    }
+
+    TEST(codegen_cpp_and_c_malformed_deserialize_guards_all_type_classes) {
+        std::string src =
+            "package demo;\n"
+            "struct Inner {\n"
+            "    int32 value;\n"
+            "}\n"
+            "struct AllTypes {\n"
+            "    bool flag;\n"
+            "    int8 i8;\n"
+            "    uint8 u8;\n"
+            "    int16 i16;\n"
+            "    uint16 u16;\n"
+            "    int32 i32;\n"
+            "    uint32 u32;\n"
+            "    int64 i64;\n"
+            "    uint64 u64;\n"
+            "    float32 f32;\n"
+            "    float64 f64;\n"
+            "    string name;\n"
+            "    bytes blob;\n"
+            "    Inner inner;\n"
+            "    array<int32> ids;\n"
+            "    array<string> names;\n"
+            "    array<bytes> blobs;\n"
+            "    array<Inner> inners;\n"
+            "    array<array<int32>> matrix;\n"
+            "}\n"
+            "topic AllTopic {\n"
+            "    AllTypes payload;\n"
+            "}\n"
+            "service GuardedService {\n"
+            "    AllTypes echo(AllTypes input);\n"
+            "    publish AllTopic;\n"
+            "}";
+
+        Lexer lex(src);
+        Parser parser(lex);
+        AstFile ast;
+        assert(parser.parse(ast));
+        assert(!parser.hasError());
+
+        const char* dir = "/tmp/omni-idlc_test_codegen_guards";
+        std::string cmd = std::string("mkdir -p ") + dir;
+        assert(system(cmd.c_str()) == 0);
+
+        CppCodeGen cpp_gen;
+        assert(cpp_gen.generate(ast, dir, "guarded"));
+        CCodeGen c_gen;
+        assert(c_gen.generate(ast, dir, "guarded"));
+
+        std::string cpp = readFile(std::string(dir) + "/guarded.cpp");
+        std::string c_header = readFile(std::string(dir) + "/guarded_c.h");
+        std::string c_source = readFile(std::string(dir) + "/guarded.c");
+
+        assert(cpp.find("if (!input.deserialize(req)) { throw std::runtime_error(\"deserialize failed\"); }") != std::string::npos);
+        assert(cpp.find("if (!payload.deserialize(buf)) { throw std::runtime_error(\"deserialize failed\"); }") != std::string::npos);
+        assert(cpp.find("if (!result.deserialize(resp)) { throw std::runtime_error(\"deserialize failed\"); }") != std::string::npos);
+        assert(cpp.find("if (!msg.deserialize(buf)) return;") != std::string::npos);
+        assert(cpp.find("if (!inners[i0].deserialize(buf)) { throw std::runtime_error(\"deserialize failed\"); }") != std::string::npos);
+        assert(cpp.find("int echo(const AllTypes& input, AllTypes* out);") != std::string::npos);
+        assert(cpp.find("int ret = runtime_.invoke(\"GuardedService\"") != std::string::npos);
+        assert(cpp.find("if (ret != 0) return ret;") != std::string::npos);
+        assert(cpp.find("if (!out) return static_cast<int>(omnibinder::ErrorCode::ERR_INVALID_PARAM);") != std::string::npos);
+        assert(cpp.find("return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+        assert(cpp.find("try {") != std::string::npos);
+        assert(cpp.find("} catch (...) {") != std::string::npos);
+
+        assert(c_header.find("int demo_Inner_deserialize(demo_Inner* self, omni_buffer_t* buf);") != std::string::npos);
+        assert(c_header.find("int demo_AllTypes_deserialize(demo_AllTypes* self, omni_buffer_t* buf);") != std::string::npos);
+        assert(c_header.find("int demo_AllTopic_deserialize(demo_AllTopic* self, omni_buffer_t* buf);") != std::string::npos);
+        assert(c_source.find("if (!demo_AllTypes_deserialize(&input, req)) { demo_AllTypes_destroy(&input); omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }") != std::string::npos);
+        assert(c_source.find("if (!omni_buffer_read_ok(req)) { if (name) free(name); omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }") == std::string::npos);
+        assert(c_source.find("if (!demo_AllTypes_deserialize(result, resp)) { demo_AllTypes_destroy(result); ret = -501; }") != std::string::npos);
+        assert(c_source.find("if (!demo_AllTopic_deserialize(&msg, buf)) {") != std::string::npos);
+        assert(c_source.find("if (!omni_buffer_read_ok(buf)) { goto fail; }") != std::string::npos);
+        assert(c_source.find("return 1;") != std::string::npos);
+        PASS();
+    }
+
+    TEST(codegen_c_custom_struct_naming_is_forward_decl_safe) {
+        char dir_template[] = "/tmp/omni-idlc_test_codegen_c_custom_XXXXXX";
+        char* dir_path = mkdtemp(dir_template);
+        assert(dir_path != NULL);
+        std::string dir(dir_path);
+
+        const std::string common_src =
+            "package common;\n"
+            "struct Shared {\n"
+            "    int32 code;\n"
+            "}\n";
+        const std::string main_src =
+            "package demo;\n"
+            "import \"common_types.bidl\";\n"
+            "struct Item {\n"
+            "    int32 id;\n"
+            "}\n"
+            "struct Wrapper {\n"
+            "    Item item;\n"
+            "    array<Item> items;\n"
+            "    common.Shared shared;\n"
+            "    array<common.Shared> shared_items;\n"
+            "}\n"
+            "topic ItemTopic {\n"
+            "    Item item;\n"
+            "    array<Item> items;\n"
+            "}\n"
+            "service ItemService {\n"
+            "    Item echoItem(Item item);\n"
+            "    array<Item> echoItems(array<Item> items);\n"
+            "    common.Shared echoShared(common.Shared shared);\n"
+            "    array<common.Shared> echoSharedItems(array<common.Shared> items);\n"
+            "    publish ItemTopic;\n"
+            "}";
+
+        std::string common_path = dir + "/common_types.bidl";
+        std::string main_path = dir + "/item_service.bidl";
+        {
+            std::ofstream out(common_path.c_str());
+            out << common_src;
+        }
+        {
+            std::ofstream out(main_path.c_str());
+            out << main_src;
+        }
+
+        AstFile common_ast;
+        ParseContext common_ctx = parseFile(common_path, common_ast);
+        assert(common_ctx.loaded_packages.count("common") == 1);
+        CCodeGen common_gen;
+        assert(common_gen.generate(common_ast, dir, "common_types.bidl"));
+
+        AstFile main_ast;
+        ParseContext main_ctx = parseFile(main_path, main_ast);
+        assert(main_ctx.loaded_packages.count("demo") == 1);
+        assert(main_ctx.loaded_packages.count("common") == 1);
+        CCodeGen main_gen;
+        assert(main_gen.generate(main_ast, dir, "item_service.bidl"));
+
+        std::string header = readFile(dir + "/item_service.bidl_c.h");
+
+        assert(header.find("struct demo_Item;") != std::string::npos);
+        assert(header.find("struct demo_Item item;") != std::string::npos);
+        assert(header.find("struct demo_Item* data;") != std::string::npos);
+        assert(header.find("common_Shared shared;") != std::string::npos);
+        assert(header.find("common_Shared* data;") != std::string::npos);
+        assert(header.find("const struct demo_Item* item") != std::string::npos);
+        assert(header.find("struct demo_Item* result") != std::string::npos);
+        assert(header.find("const demo_demo_Item_array* items") != std::string::npos);
+        assert(header.find("demo_demo_Item_array* result") != std::string::npos);
+        assert(header.find("const common_Shared* shared") != std::string::npos);
+        assert(header.find("common_Shared* result") != std::string::npos);
+        assert(header.find("demo_Item item;") == std::string::npos);
+
+        unlink(common_path.c_str());
+        unlink(main_path.c_str());
         PASS();
     }
 

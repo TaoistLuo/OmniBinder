@@ -86,6 +86,29 @@ target_include_directories(test_omni_cli_type_codec PRIVATE
 target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static)
 add_test(NAME test_omni_cli_type_codec COMMAND test_omni_cli_type_codec)
 
+add_executable(test_generated_runtime_integration
+    test_generated_runtime_integration.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c.cpp
+)
+target_include_directories(test_generated_runtime_integration PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+target_compile_definitions(test_generated_runtime_integration PRIVATE
+    OMNI_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    OMNI_BUILD_DIR="${CMAKE_BINARY_DIR}"
+)
+target_link_libraries(test_generated_runtime_integration PRIVATE omnibinder_static pthread)
+add_dependencies(test_generated_runtime_integration service_manager)
+add_test(NAME test_generated_runtime_integration COMMAND test_generated_runtime_integration
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_generated_runtime_integration PROPERTIES TIMEOUT 180)
+
 add_executable(test_c_api test_c_api.cpp)
 target_link_libraries(test_c_api PRIVATE omnibinder_static pthread)
 add_dependencies(test_c_api service_manager)

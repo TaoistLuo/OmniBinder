@@ -191,7 +191,13 @@ void EventLoop::pollOnce(int timeout_ms)
         if (it != fd_entries_.end()) {
             uint32_t translated_events = fromPlatformEvents(revents);
             if (it->second.callback) {
-                it->second.callback(fd, translated_events);
+                try {
+                    it->second.callback(fd, translated_events);
+                } catch (const std::exception& e) {
+                    OMNI_LOG_ERROR(LOG_TAG, "fd callback threw on fd %d: %s", fd, e.what());
+                } catch (...) {
+                    OMNI_LOG_ERROR(LOG_TAG, "fd callback threw on fd %d: unknown exception", fd);
+                }
             }
         }
     }
@@ -290,7 +296,15 @@ void EventLoop::pollOnce(int timeout_ms)
     for (size_t i = 0; i < ready_events.size(); ++i) {
         std::map<int, FdEntry>::iterator it = fd_entries_.find(ready_events[i].fd);
         if (it != fd_entries_.end() && it->second.callback) {
-            it->second.callback(ready_events[i].fd, ready_events[i].events);
+            try {
+                it->second.callback(ready_events[i].fd, ready_events[i].events);
+            } catch (const std::exception& e) {
+                OMNI_LOG_ERROR(LOG_TAG, "fd callback threw on fd %d: %s",
+                               ready_events[i].fd, e.what());
+            } catch (...) {
+                OMNI_LOG_ERROR(LOG_TAG, "fd callback threw on fd %d: unknown exception",
+                               ready_events[i].fd);
+            }
         }
     }
 
@@ -481,7 +495,13 @@ int EventLoop::processTimers()
     // 执行到期的回调
     for (size_t i = 0; i < expired_callbacks.size(); ++i) {
         if (expired_callbacks[i]) {
-            expired_callbacks[i]();
+            try {
+                expired_callbacks[i]();
+            } catch (const std::exception& e) {
+                OMNI_LOG_ERROR(LOG_TAG, "timer callback threw: %s", e.what());
+            } catch (...) {
+                OMNI_LOG_ERROR(LOG_TAG, "timer callback threw: unknown exception");
+            }
         }
     }
 
@@ -554,7 +574,13 @@ void EventLoop::processPendingFunctors()
 
     for (size_t i = 0; i < functors.size(); ++i) {
         if (functors[i]) {
-            functors[i]();
+            try {
+                functors[i]();
+            } catch (const std::exception& e) {
+                OMNI_LOG_ERROR(LOG_TAG, "posted functor threw: %s", e.what());
+            } catch (...) {
+                OMNI_LOG_ERROR(LOG_TAG, "posted functor threw: unknown exception");
+            }
         }
     }
 }

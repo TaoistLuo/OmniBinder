@@ -246,12 +246,23 @@ runtime.init("127.0.0.1", 9900);
 demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
-proxy.EchoBool(false);
-proxy.EchoInt32(32);
-proxy.EchoStatus(status);
-proxy.EchoEnvelope(envelope);
-proxy.EchoIdArray(ids);
-proxy.EchoBundle(bundle);
+uint8_t bool_out = 0;
+proxy.EchoBool(false, &bool_out);
+
+int32_t int_out = 0;
+proxy.EchoInt32(32, &int_out);
+
+StatusResponse status_out;
+proxy.EchoStatus(status, &status_out);
+
+SensorEnvelope envelope_out;
+proxy.EchoEnvelope(envelope, &envelope_out);
+
+std::vector<int32_t> ids_out;
+proxy.EchoIdArray(ids, &ids_out);
+
+SensorArrayBundle bundle_out;
+proxy.EchoBundle(bundle, &bundle_out);
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
 proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
@@ -259,7 +270,8 @@ proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
 demo::AsyncRequest req;
 req.request_id = 42;
 req.client_tag = "cpp-client";
-proxy.RequestLatestDataAsync(req);
+common::StatusResponse ack;
+proxy.RequestLatestDataAsync(req, &ack);
 ```
 
 完整代码请直接以 `examples/example_cpp/sensor_client.cpp` 为准。
@@ -373,7 +385,7 @@ demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 
 与 C++ 版本的关键区别：
 - `SensorServiceProxy proxy(client)` → `demo_SensorService_proxy proxy; demo_SensorService_proxy_init(&proxy, runtime)`
-- `proxy.GetLatestData()` 返回值 → `demo_SensorService_proxy_get_latest_data(&proxy, &data)` 通过指针输出
+- `proxy.GetLatestData(&data)` 显式输出参数 → `demo_SensorService_proxy_get_latest_data(&proxy, &data)`
 - `proxy.SubscribeSensorUpdate([](auto& msg){...})` → `demo_SensorService_proxy_subscribe_sensor_update(&proxy, callback, user_data)`
 - 所有结构体需要 `_init()` 初始化、`_destroy()` 释放
 
@@ -1200,7 +1212,7 @@ gcc -std=c99 -I$OMNIBINDER_DIR/include \
 | 库链接 | `OmniBinder::omnibinder_static` | 同左（需声明 CXX 语言） |
 | 实现服务 | 继承 `XxxStub`，重写虚函数 | 实现生成的 `xxx_impl_*` 接口，并调用 `xxx_stub_create(user_data)` |
 | 调用服务 | `XxxProxy proxy(client)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
-| RPC 调用 | `auto resp = proxy.Method(req)` | `xxx_proxy_method(&proxy, &req, &resp)` |
+| RPC 调用 | `proxy.Method(req, &resp)` | `xxx_proxy_method(&proxy, &req, &resp)` |
 | 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(client, &msg)` |
 | 订阅 | `proxy.SubscribeTopic(lambda)` | `xxx_proxy_subscribe_topic(&proxy, callback, ud)` |
 | 死亡通知 | `proxy.OnServiceDied(lambda)` | `xxx_proxy_on_service_died(&proxy, callback, ud)` |

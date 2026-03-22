@@ -204,6 +204,18 @@ cmake --install build
 That example provides both `sensor_cpp` / `hmi_cpp` and `sensor_c` / `hmi_c` stacks.
 It demonstrates HMI-side RPC calls, topic subscription, and death-notification handling when the sensor service exits.
 
+The built-in demo in `examples/sensor_service.bidl` / `examples/example_cpp/*` / `examples/example_c/*` has also been expanded into a fuller capability matrix covering:
+
+- primitive RPCs (`EchoBool` ~ `EchoFloat64`, `EchoString`, `EchoBytes`)
+- custom / nested struct RPCs (`EchoStatus`, `EchoConfig`, `EchoEnvelope`)
+- array RPCs (`EchoIdArray`, `EchoLabelArray`, `EchoSensorArray`, `EchoBundle`)
+- regular service methods (`GetLatestData`, `SetThreshold`, `ResetSensor`, `GetSensorCount`)
+- topic broadcast (`SensorUpdate`)
+- async request + topic result push (`RequestLatestDataAsync` + `AsyncResultReady`)
+- client-side death notification
+
+For the full example flow, refer to [examples/](examples/) and the [Examples Guide](docs/examples.en.md).
+
 ### Use omni-cli for inspection and debugging
 
 **Basic mode (hex I/O):**
@@ -238,16 +250,42 @@ struct SensorData {
     int32   sensor_id;
     float64 temperature;
     float64 humidity;
+    int64   timestamp;
     string  location;
+}
+
+struct ControlCommand {
+    int32   command_type;
+    string  target;
+    int32   value;
+}
+
+struct AsyncRequest {
+    int32   request_id;
+    string  client_tag;
 }
 
 topic SensorUpdate {
     SensorData data;
+    int64      publish_time;
+}
+
+topic AsyncResultReady {
+    AsyncResult result;
+    int64       publish_time;
 }
 
 service SensorService {
-    SensorData GetLatestData();
-    void       ResetSensor();
+    bool                  EchoBool(bool value);
+    int32                 EchoInt32(int32 value);
+    string                EchoString(string value);
+    SensorData            GetLatestData();
+    common.StatusResponse SetThreshold(ControlCommand cmd);
+    int32                 GetSensorCount();
+    common.StatusResponse RequestLatestDataAsync(AsyncRequest request);
+
+    publishes SensorUpdate;
+    publishes AsyncResultReady;
 }
 ```
 
@@ -255,6 +293,111 @@ Generate C++ Stub/Proxy code with `omni-idlc`:
 
 ```bash
 ./build/target/bin/omni-idlc sensor_service.bidl --lang cpp --outdir generated/
+```
+
+### Server
+
+```cpp
+#include "sensor_service.bidl.h"
+
+class MySensorService : public demo::SensorServiceStub {
+public:
+    bool EchoBool(bool value) override { return !value; }
+    int32_t EchoInt32(int32_t value) override { return value + 3; }
+    std::string EchoString(const std::string& value) override { return value + "_echo"; }
+
+    demo::SensorData GetLatestData() override { ... }
+    common::StatusResponse SetThreshold(const demo::ControlCommand& cmd) override { ... }
+    int32_t GetSensorCount() override { return 3; }
+
+    common::StatusResponse RequestLatestDataAsync(const demo::AsyncRequest& request) override {
+        demo::AsyncResultReady ready;
+        ready.result.request_id = request.request_id;
+        ready.result.client_tag = request.client_tag;
+        ...
+        BroadcastAsyncResultReady(ready);
+
+        common::StatusResponse ack;
+        ack.code = 0;
+        ack.message = "accepted";
+        return ack;
+    }
+};
+
+int main() {
+    omnibinder::OmniRuntime runtime;
+    runtime.init("127.0.0.1", 9900);
+
+    MySensorService service;
+    runtime.registerService(&service);
+    runtime.publishTopic("SensorUpdate");
+    runtime.publishTopic("AsyncResultReady");
+
+    while (running) {
+        runtime.pollOnce(100);
+        demo::SensorUpdate msg;
+        ...
+        service.BroadcastSensorUpdate(msg);
+    }
+}
+```
+
+### Client
+
+```cpp
+#include "sensor_service.bidl.h"
+
+int main() {
+    omnibinder::OmniRuntime runtime;
+    runtime.init("127.0.0.1", 9900);
+
+    demo::SensorServiceProxy proxy(runtime);
+    proxy.connect();
+
+    bool echo_bool = false;
+    proxy.EchoBool(false, &echo_bool);
+
+    int32_t echo_i32 = 0;
+    proxy.EchoInt32(32, &echo_i32);
+
+    std::string echo_string;
+    proxy.EchoString("hello", &echo_string);
+
+    demo::SensorData latest;
+    proxy.GetLatestData(&latest);
+
+    demo::ControlCommand cmd;
+    cmd.command_type = 1;
+    cmd.target = "temperature";
+    cmd.value = 30;
+    common::StatusResponse resp;
+    proxy.SetThreshold(cmd, &resp);
+
+    int32_t sensor_count = 0;
+    proxy.GetSensorCount(&sensor_count);
+
+    proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) {
+        // regular topic broadcast
+    });
+
+    proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) {
+        // async result pushed back through topic
+    });
+
+    demo::AsyncRequest req;
+    req.request_id = 42;
+    req.client_tag = "cpp-client";
+    common::StatusResponse ack;
+    proxy.RequestLatestDataAsync(req, &ack);
+
+    proxy.OnServiceDied([]() {
+        // service death notification
+    });
+
+    while (running) {
+        runtime.pollOnce(100);
+    }
+}
 ```
 
 See the complete syntax in [IDL Specification](docs/idl-specification.en.md) and the full examples in [Examples Guide](docs/examples.en.md).

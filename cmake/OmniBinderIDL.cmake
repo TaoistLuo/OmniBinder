@@ -28,6 +28,7 @@ function(omnic_generate)
     file(MAKE_DIRECTORY ${BIDL_OUTPUT_DIR})
 
     set(OMNIC_GENERATOR_TARGET "")
+    set(OMNIC_GENERATOR_DEPENDS "")
 
     if(OMNIBINDER_HOST_IDLC)
         set(BINDERC_EXECUTABLE "${OMNIBINDER_HOST_IDLC}")
@@ -41,9 +42,11 @@ function(omnic_generate)
     elseif(TARGET omni-idlc)
         set(BINDERC_EXECUTABLE $<TARGET_FILE:omni-idlc>)
         set(OMNIC_GENERATOR_TARGET omni-idlc)
+        set(OMNIC_GENERATOR_DEPENDS omni-idlc)
     elseif(TARGET omnic)
         set(BINDERC_EXECUTABLE $<TARGET_FILE:omnic>)
         set(OMNIC_GENERATOR_TARGET omnic)
+        set(OMNIC_GENERATOR_DEPENDS omnic)
     else()
         find_program(BINDERC_EXECUTABLE NAMES omni-idlc omnic)
         if(NOT BINDERC_EXECUTABLE)
@@ -73,7 +76,7 @@ function(omnic_generate)
                     --output=${BIDL_OUTPUT_DIR}
                     --dep-file=${DEP_FILE}
                     ${BIDL_ABS}
-                DEPENDS ${BIDL_ABS}
+                DEPENDS ${BIDL_ABS} ${OMNIC_GENERATOR_DEPENDS}
                 DEPFILE ${DEP_FILE}
                 COMMENT "Generating C++ code from ${BIDL_NAME}"
                 VERBATIM
@@ -94,7 +97,7 @@ function(omnic_generate)
                     --output=${BIDL_OUTPUT_DIR}
                     --dep-file=${DEP_C_FILE}
                     ${BIDL_ABS}
-                DEPENDS ${BIDL_ABS}
+                DEPENDS ${BIDL_ABS} ${OMNIC_GENERATOR_DEPENDS}
                 DEPFILE ${DEP_C_FILE}
                 COMMENT "Generating C code from ${BIDL_NAME}"
                 VERBATIM

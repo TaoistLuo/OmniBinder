@@ -1,8 +1,45 @@
 #include "codegen_cpp.h"
 #include <fstream>
 #include <cstdio>
+#include <stdexcept>
 
 namespace omnic {
+
+static void emitGeneratedFileBanner(std::ostream& os,
+                                    const std::string& generated_name,
+                                    const std::string& source_idl,
+                                    const char* brief,
+                                    const char* details) {
+    os << "/**************************************************************************************************\n";
+    os << " * @file        " << generated_name << "\n";
+    os << " * @brief       " << brief << "\n";
+    os << " * @details     " << details << "\n";
+    os << " *              Source IDL: " << source_idl << ".bidl\n";
+    os << " *              This file is auto-generated. DO NOT EDIT MANUALLY.\n";
+    os << " *\n";
+    os << " * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)\n";
+    os << " *\n";
+    os << " * MIT License\n";
+    os << " *\n";
+    os << " * Permission is hereby granted, free of charge, to any person obtaining a copy\n";
+    os << " * of this software and associated documentation files (the \"Software\"), to deal\n";
+    os << " * in the Software without restriction, including without limitation the rights\n";
+    os << " * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n";
+    os << " * copies of the Software, and to permit persons to whom the Software is\n";
+    os << " * furnished to do so, subject to the following conditions:\n";
+    os << " *\n";
+    os << " * The above copyright notice and this permission notice shall be included in all\n";
+    os << " * copies or substantial portions of the Software.\n";
+    os << " *\n";
+    os << " * THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n";
+    os << " * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n";
+    os << " * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n";
+    os << " * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n";
+    os << " * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n";
+    os << " * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n";
+    os << " * SOFTWARE.\n";
+    os << " *************************************************************************************************/\n";
+}
 
 std::string cppTypeName(const TypeRef& type) {
     switch (type.primitive) {
@@ -119,7 +156,8 @@ void emitDeserializeValue(const TypeRef& type, const std::string& target,
            << bufferMethodSuffix(type) << "();\n";
         break;
     case TYPE_CUSTOM:
-        os << indent << target << ".deserialize(" << buffer_name << ");\n";
+        os << indent << "if (!" << target << ".deserialize(" << buffer_name
+           << ")) { throw std::runtime_error(\"deserialize failed\"); }\n";
         break;
     case TYPE_ARRAY: {
         std::string count = "cnt" + std::to_string(depth);
@@ -251,6 +289,12 @@ void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std:
         guard[i] = toupper(guard[i]);
     }
     guard += "_H";
+
+    emitGeneratedFileBanner(os,
+                            filename + ".h",
+                            filename,
+                            "Auto-generated OmniBinder C++ declarations",
+                            "Generated from OmniBinder IDL for C++ declarations and client/server bindings.");
     
     os << "#ifndef " << guard << "\n";
     os << "#define " << guard << "\n\n";
@@ -351,13 +395,19 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
-        os << "    " << cppTypeName(m.return_type) << " " << m.name << "(";
+        os << "    int " << m.name << "(";
         if (m.has_param) {
             if (isReferenceType(m.param.type)) {
                 os << "const " << cppTypeName(m.param.type) << "& " << m.param.name;
             } else {
                 os << cppTypeName(m.param.type) << " " << m.param.name;
             }
+        }
+        if (!m.return_type.isVoid()) {
+            if (m.has_param) {
+                os << ", ";
+            }
+            os << cppTypeName(m.return_type) << "* out";
         }
         os << ");\n";
     }
@@ -375,7 +425,13 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
 }
 
 void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::string& filename) {
-    os << "#include \"" << filename << ".h\"\n\n";
+    emitGeneratedFileBanner(os,
+                            filename + ".cpp",
+                            filename,
+                            "Auto-generated OmniBinder C++ definitions",
+                            "Generated from OmniBinder IDL for C++ serialization and proxy/stub implementation glue.");
+    os << "#include \"" << filename << ".h\"\n";
+    os << "#include <stdexcept>\n\n";
     os << "namespace " << pkg_ << " {\n\n";
     
     // Struct serialize/deserialize
@@ -484,7 +540,7 @@ os << svc.name << "Proxy::" << svc.name << "Proxy(omnibinder::OmniRuntime& runti
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
-            os << cppTypeName(m.return_type) << " " << svc.name << "Proxy::" << m.name << "(";
+            os << "int " << svc.name << "Proxy::" << m.name << "(";
             if (m.has_param) {
                 if (isReferenceType(m.param.type)) {
                     os << "const " << cppTypeName(m.param.type) << "& " << m.param.name;
@@ -492,17 +548,28 @@ os << svc.name << "Proxy::" << svc.name << "Proxy(omnibinder::OmniRuntime& runti
                     os << cppTypeName(m.param.type) << " " << m.param.name;
                 }
             }
+            if (!m.return_type.isVoid()) {
+                if (m.has_param) {
+                    os << ", ";
+                }
+                os << cppTypeName(m.return_type) << "* out";
+            }
             os << ") {\n";
             os << "    omnibinder::Buffer req, resp;\n";
             if (m.has_param) {
                 emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0, os);
             }
-            os << "    runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, req, resp, 0);\n";
+            os << "    int ret = runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, req, resp, 0);\n";
+            os << "    if (ret != 0) return ret;\n";
             if (!m.return_type.isVoid()) {
-                os << "    " << cppTypeName(m.return_type) << " result;\n";
-                emitDeserializeValue(m.return_type, "result", "resp", "    ", 0, os);
-                os << "    return result;\n";
+                os << "    if (!out) return static_cast<int>(omnibinder::ErrorCode::ERR_INVALID_PARAM);\n";
+                os << "    try {\n";
+                emitDeserializeValue(m.return_type, "(*out)", "resp", "        ", 0, os);
+                os << "    } catch (...) {\n";
+                os << "        return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);\n";
+                os << "    }\n";
             }
+            os << "    return 0;\n";
             os << "}\n\n";
         }
         
@@ -512,7 +579,7 @@ os << svc.name << "Proxy::" << svc.name << "Proxy(omnibinder::OmniRuntime& runti
             os << "    runtime_.subscribeTopic(\"" << topic << "\", [callback](uint32_t, const omnibinder::Buffer& data) {\n";
             os << "        " << topic << " msg;\n";
             os << "        omnibinder::Buffer buf(data.data(), data.size());\n";
-            os << "        msg.deserialize(buf);\n";
+            os << "        if (!msg.deserialize(buf)) return;\n";
             os << "        callback(msg);\n";
             os << "    });\n}\n\n";
         }

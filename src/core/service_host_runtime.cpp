@@ -4,7 +4,34 @@
 
 #include <string.h>
 
+#include "omnibinder/log.h"
+
+#define LOG_TAG "ServiceHostRuntime"
+
 namespace omnibinder {
+
+namespace {
+
+bool decodeBroadcastPayload(const Message& msg, uint32_t& topic_id, Buffer& payload) {
+    try {
+        Buffer buf(msg.payload.data(), msg.payload.size());
+        topic_id = buf.readUint32();
+        uint32_t data_len = buf.readUint32();
+        if (buf.remaining() < data_len) {
+            return false;
+        }
+
+        payload.clear();
+        if (data_len > 0) {
+            payload.writeRaw(buf.data() + buf.readPosition(), data_len);
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+}
 
 void ServiceHostRuntime::onServiceAccept(const std::string& service_name,
                                          LocalServiceEntry* entry,
@@ -126,12 +153,10 @@ void ServiceHostRuntime::processServiceClientMessages(const std::string& service
         } else if (msg.getType() == MessageType::MSG_SUBSCRIBE_BROADCAST) {
             on_subscribe_broadcast(client_fd, msg);
         } else if (msg.getType() == MessageType::MSG_BROADCAST) {
-            Buffer buf2(msg.payload.data(), msg.payload.size());
-            uint32_t topic_id = buf2.readUint32();
-            uint32_t data_len = buf2.readUint32();
+            uint32_t topic_id = 0;
             Buffer data;
-            if (data_len > 0 && buf2.remaining() >= data_len) {
-                data.writeRaw(buf2.data() + buf2.readPosition(), data_len);
+            if (!decodeBroadcastPayload(msg, topic_id, data)) {
+                continue;
             }
             topic_runtime.dispatch(topic_id, data);
         }
@@ -176,12 +201,10 @@ void ServiceHostRuntime::onShmRequest(const std::string& service_name,
     } else if (type == MessageType::MSG_SUBSCRIBE_BROADCAST) {
         on_subscribe_broadcast(service_name, client_id, msg);
     } else if (type == MessageType::MSG_BROADCAST) {
-        Buffer buf2(msg.payload.data(), msg.payload.size());
-        uint32_t topic_id = buf2.readUint32();
-        uint32_t data_len = buf2.readUint32();
+        uint32_t topic_id = 0;
         Buffer payload;
-        if (data_len > 0 && buf2.remaining() >= data_len) {
-            payload.writeRaw(buf2.data() + buf2.readPosition(), data_len);
+        if (!decodeBroadcastPayload(msg, topic_id, payload)) {
+            return;
         }
         topic_runtime.dispatch(topic_id, payload);
     }

@@ -289,8 +289,8 @@ static pid_t startSM(uint16_t port) {
     if (sm_path.empty() || access(sm_path.c_str(), X_OK) != 0) {
         // 回退到相对路径
         const char* fallbacks[] = {
-            "./target/bin/service_manager",
             "./build/target/bin/service_manager",
+            "./target/bin/service_manager",
             "./service_manager/service_manager",
             "../service_manager/service_manager",
             NULL

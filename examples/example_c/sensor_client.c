@@ -138,16 +138,27 @@ int main(int argc, char* argv[]) {
     uint64_t u64 = 0;
     float f32 = 0.0f;
     double f64 = 0.0;
+    /* 调用布尔回显 RPC，确认基础 bool 参数与返回值传递正常。 */
     demo_SensorService_proxy_echo_bool(&proxy, 0, &b);
+    /* 调用 int8 回显 RPC，演示有符号 8 位整数的请求/响应。 */
     demo_SensorService_proxy_echo_int8(&proxy, 7, &i8);
+    /* 调用 int16 回显 RPC，演示有符号 16 位整数的请求/响应。 */
     demo_SensorService_proxy_echo_int16(&proxy, 16, &i16);
+    /* 调用 uint16 回显 RPC，演示无符号 16 位整数的请求/响应。 */
     demo_SensorService_proxy_echo_uint16(&proxy, 16, &u16);
+    /* 调用 uint8 回显 RPC，演示无符号 8 位整数的请求/响应。 */
     demo_SensorService_proxy_echo_uint8(&proxy, 7, &u8);
+    /* 调用 int32 回显 RPC，演示常见整型参数的调用方式。 */
     demo_SensorService_proxy_echo_int32(&proxy, 32, &i32);
+    /* 调用 uint32 回显 RPC，演示无符号 32 位整数的请求/响应。 */
     demo_SensorService_proxy_echo_uint32(&proxy, 32, &u32);
+    /* 调用 int64 回显 RPC，演示 64 位有符号整数的调用方式。 */
     demo_SensorService_proxy_echo_int64(&proxy, 64, &i64);
+    /* 调用 uint64 回显 RPC，演示 64 位无符号整数的调用方式。 */
     demo_SensorService_proxy_echo_uint64(&proxy, 64, &u64);
+    /* 调用 float32 回显 RPC，演示单精度浮点数的传输。 */
     demo_SensorService_proxy_echo_float32(&proxy, 1.5f, &f32);
+    /* 调用 float64 回显 RPC，演示双精度浮点数的传输。 */
     demo_SensorService_proxy_echo_float64(&proxy, 2.5, &f64);
     printf("EchoBool(false) => %u\n", b);
     printf("EchoInt8(7) => %d\n", (int)i8);
@@ -158,6 +169,7 @@ int main(int argc, char* argv[]) {
 
     char* out_str = NULL;
     uint32_t out_str_len = 0;
+    /* 调用字符串回显 RPC，演示 char* + length 形式的字符串传输。 */
     demo_SensorService_proxy_echo_string(&proxy, "hello", 5, &out_str, &out_str_len);
     printf("EchoString => %.*s\n", out_str_len, out_str);
     free(out_str);
@@ -165,6 +177,7 @@ int main(int argc, char* argv[]) {
     uint8_t in_bytes[3] = {0x11, 0x11, 0x11};
     uint8_t* out_bytes = NULL;
     uint32_t out_bytes_len = 0;
+    /* 调用字节数组回显 RPC，演示 bytes 的传输。 */
     demo_SensorService_proxy_echo_bytes(&proxy, in_bytes, 3, &out_bytes, &out_bytes_len);
     printf("EchoBytes => size=%u\n\n", out_bytes_len);
     free(out_bytes);
@@ -175,6 +188,7 @@ int main(int argc, char* argv[]) {
     common_StatusResponse_init(&status_in);
     common_StatusResponse_init(&status_out);
     fill_status(&status_in, 7, "demo");
+    /* 调用结构体回显 RPC，演示跨包结构体 common_StatusResponse 的传输。 */
     demo_SensorService_proxy_echo_status(&proxy, &status_in, &status_out);
     printf("EchoStatus => code=%d message=%.*s\n", status_out.code, status_out.message_len, status_out.message);
 
@@ -182,6 +196,7 @@ int main(int argc, char* argv[]) {
     demo_SensorConfig cfg_out;
     fill_config(&cfg_in);
     demo_SensorConfig_init(&cfg_out);
+    /* 调用自定义配置结构体回显 RPC，演示普通 struct 参数与返回值。 */
     demo_SensorService_proxy_echo_config(&proxy, &cfg_in, &cfg_out);
     printf("EchoConfig => enabled=%d rate=%d label=%.*s\n",
            cfg_out.enabled, cfg_out.sample_rate_hz, cfg_out.label_len, cfg_out.label);
@@ -190,6 +205,7 @@ int main(int argc, char* argv[]) {
     demo_SensorEnvelope env_out;
     fill_envelope(&env_in);
     demo_SensorEnvelope_init(&env_out);
+    /* 调用嵌套结构体回显 RPC，演示多层 struct 组合的序列化。 */
     demo_SensorService_proxy_echo_envelope(&proxy, &env_in, &env_out);
     printf("EchoEnvelope => location=%.*s nested_label=%.*s nanos=%d\n",
            env_out.data.location_len, env_out.data.location,
@@ -207,6 +223,7 @@ int main(int argc, char* argv[]) {
     ids_in.data = (int32_t*)malloc(sizeof(int32_t) * 2);
     ids_in.data[0] = 10;
     ids_in.data[1] = 20;
+    /* 调用整数数组回显 RPC，演示 array<int32> 的传输。 */
     demo_SensorService_proxy_echo_id_array(&proxy, &ids_in, &ids_out);
     printf("EchoIdArray => size=%u tail=%d\n", ids_out.count, ids_out.data[ids_out.count - 1]);
 
@@ -219,6 +236,7 @@ int main(int argc, char* argv[]) {
     labels_in.lens = (uint32_t*)malloc(sizeof(uint32_t) * 2);
     labels_in.data[0] = dup_cstr("l1", &labels_in.lens[0]);
     labels_in.data[1] = dup_cstr("l2", &labels_in.lens[1]);
+    /* 调用字符串数组回显 RPC，演示 array<string> 的传输。 */
     demo_SensorService_proxy_echo_label_array(&proxy, &labels_in, &labels_out);
     printf("EchoLabelArray => size=%u tail=%.*s\n",
            labels_out.count,
@@ -237,6 +255,7 @@ int main(int argc, char* argv[]) {
     sensor_arr_in.data[0].humidity = 31.5;
     sensor_arr_in.data[0].timestamp = 321;
     sensor_arr_in.data[0].location = dup_cstr("array-item", &sensor_arr_in.data[0].location_len);
+    /* 调用结构体数组回显 RPC，演示 array<struct> 的传输。 */
     demo_SensorService_proxy_echo_sensor_array(&proxy, &sensor_arr_in, &sensor_arr_out);
     printf("EchoSensorArray => first.location=%.*s\n",
            sensor_arr_out.data[0].location_len,
@@ -246,6 +265,7 @@ int main(int argc, char* argv[]) {
     demo_SensorArrayBundle bundle_out;
     fill_bundle(&bundle_in);
     demo_SensorArrayBundle_init(&bundle_out);
+    /* 调用组合结构体回显 RPC，演示结构体内部嵌套多个数组字段。 */
     demo_SensorService_proxy_echo_bundle(&proxy, &bundle_in, &bundle_out);
     printf("EchoBundle => ids=%u labels=%u blobs=%u samples=%u\n\n",
            bundle_out.ids.count, bundle_out.labels.count, bundle_out.blobs.count, bundle_out.samples.count);
@@ -261,6 +281,7 @@ int main(int argc, char* argv[]) {
     printf("--- Existing RPCs ---\n");
     demo_SensorData data;
     demo_SensorData_init(&data);
+    /* 调用查询类 RPC，获取服务端当前最新的传感器数据。 */
     demo_SensorService_proxy_get_latest_data(&proxy, &data);
     printf("GetLatestData => sensor_id=%d temp=%.2f humidity=%.2f location=%.*s\n",
            data.sensor_id, data.temperature, data.humidity, data.location_len, data.location);
@@ -273,16 +294,21 @@ int main(int argc, char* argv[]) {
     cmd.value = 30;
     common_StatusResponse resp;
     common_StatusResponse_init(&resp);
+    /* 调用控制类 RPC，请求服务端修改阈值配置。 */
     demo_SensorService_proxy_set_threshold(&proxy, &cmd, &resp);
     printf("SetThreshold => code=%d message=%.*s\n", resp.code, resp.message_len, resp.message);
     int32_t count = 0;
+    /* 调用统计类 RPC，获取服务端维护的传感器数量。 */
     demo_SensorService_proxy_get_sensor_count(&proxy, &count);
     printf("GetSensorCount => %d\n", count);
     demo_ControlCommand_destroy(&cmd);
     common_StatusResponse_destroy(&resp);
 
+    /* 订阅普通广播话题：这是客户端订阅服务发布的消息，不是向服务注册业务回调。 */
     demo_SensorService_proxy_subscribe_sensor_update(&proxy, on_sensor_update, NULL);
+    /* 订阅异步结果话题：服务端通过 topic 回推异步任务结果。 */
     demo_SensorService_proxy_subscribe_async_result_ready(&proxy, on_async_result, NULL);
+    /* 注册服务死亡通知：这是客户端侧连接状态通知，不是向服务注册业务回调。 */
     demo_SensorService_proxy_on_service_died(&proxy, on_service_died, NULL);
 
     demo_AsyncRequest async_req;
@@ -291,6 +317,7 @@ int main(int argc, char* argv[]) {
     async_req.client_tag = dup_cstr("c-client", &async_req.client_tag_len);
     common_StatusResponse ack;
     common_StatusResponse_init(&ack);
+    /* 调用异步请求 RPC，请求被接受后，真正结果会通过 AsyncResultReady 话题回推。 */
     demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
     printf("RequestLatestDataAsync => code=%d message=%.*s\n", ack.code, ack.message_len, ack.message);
     demo_AsyncRequest_destroy(&async_req);

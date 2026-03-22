@@ -90,8 +90,8 @@ static pid_t startSM(uint16_t port) {
         char port_str[16];
         std::snprintf(port_str, sizeof(port_str), "%u", port);
         const char* paths[] = {
-            "./build/target/bin/service_manager",
             "./target/bin/service_manager",
+            "./build/target/bin/service_manager",
             "./service_manager/service_manager",
             "../service_manager/service_manager",
             "service_manager",
@@ -172,6 +172,113 @@ int main() {
 
         REQUIRE(omni_fnv1a_32("Echo") != 0, "fnv hash returned zero");
         omni_buffer_destroy(buf);
+        PASS();
+    }
+
+    TEST(buffer_underflow_reads_fail_safe);
+    {
+        omni_buffer_t* short_bool = omni_buffer_create();
+        REQUIRE(short_bool != NULL, "short bool buffer create failed");
+        REQUIRE(omni_buffer_read_bool(short_bool) == 0, "underflow bool should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_bool) == 0, "underflow bool should mark read error");
+        omni_buffer_destroy(short_bool);
+
+        omni_buffer_t* short_i8 = omni_buffer_create();
+        REQUIRE(short_i8 != NULL, "short int8 buffer create failed");
+        REQUIRE(omni_buffer_read_int8(short_i8) == 0, "underflow int8 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_i8) == 0, "underflow int8 should mark read error");
+        omni_buffer_destroy(short_i8);
+
+        omni_buffer_t* short_u8 = omni_buffer_create();
+        REQUIRE(short_u8 != NULL, "short uint8 buffer create failed");
+        REQUIRE(omni_buffer_read_uint8(short_u8) == 0, "underflow uint8 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_u8) == 0, "underflow uint8 should mark read error");
+        omni_buffer_destroy(short_u8);
+
+        omni_buffer_t* short_i16 = omni_buffer_create();
+        REQUIRE(short_i16 != NULL, "short int16 buffer create failed");
+        REQUIRE(omni_buffer_read_int16(short_i16) == 0, "underflow int16 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_i16) == 0, "underflow int16 should mark read error");
+        omni_buffer_destroy(short_i16);
+
+        omni_buffer_t* short_u16 = omni_buffer_create();
+        REQUIRE(short_u16 != NULL, "short uint16 buffer create failed");
+        REQUIRE(omni_buffer_read_uint16(short_u16) == 0, "underflow uint16 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_u16) == 0, "underflow uint16 should mark read error");
+        omni_buffer_destroy(short_u16);
+
+        omni_buffer_t* short_string = omni_buffer_create();
+        REQUIRE(short_string != NULL, "short string buffer create failed");
+        omni_buffer_write_uint32(short_string, 8);
+        omni_buffer_reset(short_string);
+        uint32_t str_len = 123;
+        char* text = omni_buffer_read_string(short_string, &str_len);
+        REQUIRE(text != NULL, "underflow string returned null");
+        REQUIRE(str_len == 0, "underflow string length should be zero");
+        REQUIRE(std::strcmp(text, "") == 0, "underflow string should become empty sentinel");
+        REQUIRE(omni_buffer_read_ok(short_string) == 0, "underflow string should mark read error");
+        free(text);
+        omni_buffer_destroy(short_string);
+
+        omni_buffer_t* short_bytes = omni_buffer_create();
+        REQUIRE(short_bytes != NULL, "short bytes buffer create failed");
+        omni_buffer_write_uint32(short_bytes, 4);
+        omni_buffer_reset(short_bytes);
+        uint32_t bytes_len = 99;
+        uint8_t* bytes = omni_buffer_read_bytes(short_bytes, &bytes_len);
+        REQUIRE(bytes_len == 0, "underflow bytes length should be zero");
+        REQUIRE(bytes == NULL || bytes_len == 0, "underflow bytes should be empty sentinel");
+        REQUIRE(omni_buffer_read_ok(short_bytes) == 0, "underflow bytes should mark read error");
+        free(bytes);
+        omni_buffer_destroy(short_bytes);
+
+        omni_buffer_t* short_int = omni_buffer_create();
+        REQUIRE(short_int != NULL, "short int buffer create failed");
+        omni_buffer_write_uint16(short_int, 0x1234u);
+        omni_buffer_reset(short_int);
+        REQUIRE(omni_buffer_read_int32(short_int) == 0, "underflow int32 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_int) == 0, "underflow int32 should mark read error");
+        omni_buffer_destroy(short_int);
+
+        omni_buffer_t* short_u32 = omni_buffer_create();
+        REQUIRE(short_u32 != NULL, "short uint32 buffer create failed");
+        REQUIRE(omni_buffer_read_uint32(short_u32) == 0, "underflow uint32 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_u32) == 0, "underflow uint32 should mark read error");
+        omni_buffer_destroy(short_u32);
+
+        omni_buffer_t* short_i64 = omni_buffer_create();
+        REQUIRE(short_i64 != NULL, "short int64 buffer create failed");
+        REQUIRE(omni_buffer_read_int64(short_i64) == 0, "underflow int64 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_i64) == 0, "underflow int64 should mark read error");
+        omni_buffer_destroy(short_i64);
+
+        omni_buffer_t* short_u64 = omni_buffer_create();
+        REQUIRE(short_u64 != NULL, "short uint64 buffer create failed");
+        REQUIRE(omni_buffer_read_uint64(short_u64) == 0, "underflow uint64 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_u64) == 0, "underflow uint64 should mark read error");
+        omni_buffer_destroy(short_u64);
+
+        omni_buffer_t* short_f32 = omni_buffer_create();
+        REQUIRE(short_f32 != NULL, "short float32 buffer create failed");
+        REQUIRE(omni_buffer_read_float32(short_f32) == 0.0f, "underflow float32 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_f32) == 0, "underflow float32 should mark read error");
+        omni_buffer_destroy(short_f32);
+
+        omni_buffer_t* short_f64 = omni_buffer_create();
+        REQUIRE(short_f64 != NULL, "short float64 buffer create failed");
+        REQUIRE(omni_buffer_read_float64(short_f64) == 0.0, "underflow float64 should fall back to zero");
+        REQUIRE(omni_buffer_read_ok(short_f64) == 0, "underflow float64 should mark read error");
+        omni_buffer_destroy(short_f64);
+
+        omni_buffer_t* marked = omni_buffer_create();
+        REQUIRE(marked != NULL, "marked buffer create failed");
+        omni_buffer_mark_error(marked, -501);
+        REQUIRE(omni_buffer_error(marked) == -501, "marked error code mismatch");
+        REQUIRE(omni_buffer_read_ok(marked) == 0, "marked error should clear read-ok state");
+        omni_buffer_clear_error(marked);
+        REQUIRE(omni_buffer_error(marked) == 0, "clear error code mismatch");
+        REQUIRE(omni_buffer_read_ok(marked) == 1, "clear error should restore read-ok state");
+        omni_buffer_destroy(marked);
         PASS();
     }
 
