@@ -6,8 +6,45 @@
 
 namespace omnic {
 
+static void emitGeneratedFileBanner(std::ostream& os,
+                                    const std::string& generated_name,
+                                    const std::string& source_idl,
+                                    const char* brief,
+                                    const char* details) {
+    os << "/**************************************************************************************************\n";
+    os << " * @file        " << generated_name << "\n";
+    os << " * @brief       " << brief << "\n";
+    os << " * @details     " << details << "\n";
+    os << " *              Source IDL: " << source_idl << ".bidl\n";
+    os << " *              This file is auto-generated. DO NOT EDIT MANUALLY.\n";
+    os << " *\n";
+    os << " * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)\n";
+    os << " *\n";
+    os << " * MIT License\n";
+    os << " *\n";
+    os << " * Permission is hereby granted, free of charge, to any person obtaining a copy\n";
+    os << " * of this software and associated documentation files (the \"Software\"), to deal\n";
+    os << " * in the Software without restriction, including without limitation the rights\n";
+    os << " * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n";
+    os << " * copies of the Software, and to permit persons to whom the Software is\n";
+    os << " * furnished to do so, subject to the following conditions:\n";
+    os << " *\n";
+    os << " * The above copyright notice and this permission notice shall be included in all\n";
+    os << " * copies or substantial portions of the Software.\n";
+    os << " *\n";
+    os << " * THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n";
+    os << " * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n";
+    os << " * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n";
+    os << " * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n";
+    os << " * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n";
+    os << " * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n";
+    os << " * SOFTWARE.\n";
+    os << " *************************************************************************************************/\n";
+}
+
 static std::string cTypeToken(const TypeRef& type, const std::string& pkg);
 static std::string cTypePrefix(const TypeRef& type, const std::string& pkg);
+static std::string cDeclaredTypeName(const TypeRef& type, const std::string& pkg);
 static void emitPrimitiveRead(std::ostream& os, PrimitiveType p,
                               const std::string& var, const std::string& buf,
                               const std::string& indent);
@@ -165,34 +202,34 @@ static void emitValueSerialize(std::ostream& os, const TypeRef& type,
 static void emitValueDeserialize(std::ostream& os, const TypeRef& type,
                                  const std::string& expr, const std::string& len_expr,
                                  const std::string& buf, const std::string& pkg,
-                                 const std::string& indent) {
+                                 const std::string& indent, const std::string& fail_action) {
     if (type.isArray()) {
-        os << indent << cArrayTypeName(type, pkg) << "_deserialize(&" << expr << ", " << buf << ");\n";
+        os << indent << "if (!" << cArrayTypeName(type, pkg) << "_deserialize(&" << expr << ", " << buf << ")) { " << fail_action << "; }\n";
         return;
     }
     if (type.isCustom()) {
-        os << indent << cTypePrefix(type, pkg) << "_deserialize(&" << expr << ", " << buf << ");\n";
+        os << indent << "if (!" << cTypePrefix(type, pkg) << "_deserialize(&" << expr << ", " << buf << ")) { " << fail_action << "; }\n";
         return;
     }
     if (type.primitive == TYPE_STRING) {
         os << indent << expr << " = omni_buffer_read_string(" << buf << ", &" << len_expr << ");\n";
+        os << indent << "if (!omni_buffer_read_ok(" << buf << ")) { " << fail_action << "; }\n";
         return;
     }
     if (type.primitive == TYPE_BYTES) {
         os << indent << expr << " = omni_buffer_read_bytes(" << buf << ", &" << len_expr << ");\n";
+        os << indent << "if (!omni_buffer_read_ok(" << buf << ")) { " << fail_action << "; }\n";
         return;
     }
     emitPrimitiveRead(os, type.primitive, expr, buf, indent);
+    os << indent << "if (!omni_buffer_read_ok(" << buf << ")) { " << fail_action << "; }\n";
 }
 
 static void emitArrayTypeDeclaration(std::ostream& os, const TypeRef& type,
                                      const std::string& pkg) {
     std::string type_name = cArrayTypeName(type, pkg);
     const TypeRef& element = *type.element_type;
-    std::string element_decl_type = cTypeName(element, pkg);
-    if (element.isCustom() && element.package_name.empty()) {
-        element_decl_type = "struct " + pkg + "_" + element.custom_name;
-    }
+    std::string element_decl_type = cDeclaredTypeName(element, pkg);
     os << "typedef struct " << type_name << " {\n";
     os << "    " << element_decl_type << "* data;\n";
     if (arrayElementNeedsLengths(element)) {
@@ -203,7 +240,7 @@ static void emitArrayTypeDeclaration(std::ostream& os, const TypeRef& type,
     os << "void " << type_name << "_init(" << type_name << "* self);\n";
     os << "void " << type_name << "_destroy(" << type_name << "* self);\n";
     os << "void " << type_name << "_serialize(const " << type_name << "* self, omni_buffer_t* buf);\n";
-    os << "void " << type_name << "_deserialize(" << type_name << "* self, omni_buffer_t* buf);\n\n";
+    os << "int " << type_name << "_deserialize(" << type_name << "* self, omni_buffer_t* buf);\n\n";
 }
 
 static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
@@ -252,29 +289,37 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     os << "    }\n";
     os << "}\n\n";
 
-    os << "void " << type_name << "_deserialize(" << type_name << "* self, omni_buffer_t* buf) {\n";
+    os << "int " << type_name << "_deserialize(" << type_name << "* self, omni_buffer_t* buf) {\n";
     os << "    uint32_t i = 0;\n";
+    os << "    if (!self || !buf) { return 0; }\n";
+    os << "    omni_buffer_clear_error(buf);\n";
     os << "    self->count = omni_buffer_read_uint32(buf);\n";
+    os << "    if (!omni_buffer_read_ok(buf)) { goto fail; }\n";
     os << "    if (self->count == 0) {\n";
     os << "        self->data = NULL;\n";
     if (arrayElementNeedsLengths(element)) {
         os << "        self->lens = NULL;\n";
     }
-    os << "        return;\n";
+    os << "        return 1;\n";
     os << "    }\n";
     os << "    self->data = (" << element_type_name << "*)malloc(sizeof(" << element_type_name << ") * self->count);\n";
-    os << "    if (!self->data) { self->count = 0; return; }\n";
+    os << "    if (!self->data) { self->count = 0; return 0; }\n";
     if (arrayElementNeedsLengths(element)) {
         os << "    self->lens = (uint32_t*)malloc(sizeof(uint32_t) * self->count);\n";
-        os << "    if (!self->lens) { free(self->data); self->data = NULL; self->count = 0; return; }\n";
+        os << "    if (!self->lens) { free(self->data); self->data = NULL; self->count = 0; return 0; }\n";
     }
     os << "    for (i = 0; i < self->count; ++i) {\n";
     if (element.isCustom() || element.isArray()) {
         emitValueInit(os, element, "self->data[i]", pkg, "        ");
     }
     std::string read_len_expr = arrayElementNeedsLengths(element) ? "self->lens[i]" : "0";
-    emitValueDeserialize(os, element, "self->data[i]", read_len_expr, "buf", pkg, "        ");
+    emitValueDeserialize(os, element, "self->data[i]", read_len_expr, "buf", pkg, "        ", "goto fail");
     os << "    }\n";
+    os << "    return 1;\n";
+    os << "fail:\n";
+    os << "    " << type_name << "_destroy(self);\n";
+    os << "    " << type_name << "_init(self);\n";
+    os << "    return 0;\n";
     os << "}\n\n";
 }
 
@@ -303,6 +348,13 @@ std::string cTypeName(const TypeRef& type, const std::string& pkg) {
         return cArrayTypeName(type, pkg);
     default: return "void";
     }
+}
+
+static std::string cDeclaredTypeName(const TypeRef& type, const std::string& pkg) {
+    if (type.isCustom() && type.package_name.empty()) {
+        return "struct " + pkg + "_" + type.custom_name;
+    }
+    return cTypeName(type, pkg);
 }
 
 static const char* primitiveReadFunc(PrimitiveType p) {
@@ -529,6 +581,12 @@ void CCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::s
     }
     guard += "_C_H";
 
+    emitGeneratedFileBanner(os,
+                            filename + "_c.h",
+                            filename,
+                            "Auto-generated OmniBinder C declarations",
+                            "Generated from OmniBinder IDL for C declarations and runtime binding helpers.");
+
     os << "#ifndef " << guard << "\n#define " << guard << "\n\n";
     os << "#include <omnibinder/omnibinder_c.h>\n";
     os << "#include <stdint.h>\n#include <stddef.h>\n#include <string.h>\n\n";
@@ -584,7 +642,7 @@ void CCodeGen::genStruct(const StructDef& s, std::ostream& os) {
     os << "typedef struct " << tname << " {\n";
     for (size_t j = 0; j < s.fields.size(); ++j) {
         const FieldDef& f = s.fields[j];
-        os << "    " << cTypeName(f.type, pkg_) << " " << f.name << ";\n";
+        os << "    " << cDeclaredTypeName(f.type, pkg_) << " " << f.name << ";\n";
         if (f.type.primitive == TYPE_STRING) {
             os << "    uint32_t " << f.name << "_len;\n";
         } else if (f.type.primitive == TYPE_BYTES) {
@@ -596,7 +654,7 @@ void CCodeGen::genStruct(const StructDef& s, std::ostream& os) {
     os << "void " << tname << "_init(" << tname << "* self);\n";
     os << "void " << tname << "_destroy(" << tname << "* self);\n";
     os << "void " << tname << "_serialize(const " << tname << "* self, omni_buffer_t* buf);\n";
-    os << "void " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf);\n\n";
+    os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf);\n\n";
 }
 
 void CCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
@@ -606,7 +664,7 @@ void CCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
     os << "typedef struct " << tname << " {\n";
     for (size_t j = 0; j < t.fields.size(); ++j) {
         const FieldDef& f = t.fields[j];
-        os << "    " << cTypeName(f.type, pkg_) << " " << f.name << ";\n";
+        os << "    " << cDeclaredTypeName(f.type, pkg_) << " " << f.name << ";\n";
         if (f.type.primitive == TYPE_STRING) {
             os << "    uint32_t " << f.name << "_len;\n";
         } else if (f.type.primitive == TYPE_BYTES) {
@@ -621,7 +679,7 @@ void CCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
     os << "void " << tname << "_init(" << tname << "* self);\n";
     os << "void " << tname << "_destroy(" << tname << "* self);\n";
     os << "void " << tname << "_serialize(const " << tname << "* self, omni_buffer_t* buf);\n";
-    os << "void " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf);\n\n";
+    os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf);\n\n";
 }
 
 void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*/, std::ostream& os) {
@@ -652,22 +710,22 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
         bool has_args = false;
         if (m.has_param) {
             if (isCompositePointerType(m.param.type)) {
-                os << "const " << cTypeName(m.param.type, pkg_) << "* " << m.param.name;
+                os << "const " << cDeclaredTypeName(m.param.type, pkg_) << "* " << m.param.name;
             } else if (isCStringLike(m.param.type)) {
-                os << "const " << cTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
+                os << "const " << cDeclaredTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
             } else {
-                os << cTypeName(m.param.type, pkg_) << " " << m.param.name;
+                os << cDeclaredTypeName(m.param.type, pkg_) << " " << m.param.name;
             }
             has_args = true;
         }
         if (!m.return_type.isVoid()) {
             if (has_args) os << ", ";
             if (m.return_type.isArray() || m.return_type.isCustom()) {
-                os << cTypeName(m.return_type, pkg_) << "* result";
+                os << cDeclaredTypeName(m.return_type, pkg_) << "* result";
             } else if (isCStringLike(m.return_type)) {
-                os << cTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
+                os << cDeclaredTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
             } else {
-                os << cTypeName(m.return_type, pkg_) << "* result";
+                os << cDeclaredTypeName(m.return_type, pkg_) << "* result";
             }
             has_args = true;
         }
@@ -678,22 +736,22 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
         has_args = false;
         if (m.has_param) {
             if (isCompositePointerType(m.param.type)) {
-                os << "const " << cTypeName(m.param.type, pkg_) << "* " << m.param.name;
+                os << "const " << cDeclaredTypeName(m.param.type, pkg_) << "* " << m.param.name;
             } else if (isCStringLike(m.param.type)) {
-                os << "const " << cTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
+                os << "const " << cDeclaredTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
             } else {
-                os << cTypeName(m.param.type, pkg_) << " " << m.param.name;
+                os << cDeclaredTypeName(m.param.type, pkg_) << " " << m.param.name;
             }
             has_args = true;
         }
         if (!m.return_type.isVoid()) {
             if (has_args) os << ", ";
             if (m.return_type.isArray() || m.return_type.isCustom()) {
-                os << cTypeName(m.return_type, pkg_) << "* result";
+                os << cDeclaredTypeName(m.return_type, pkg_) << "* result";
             } else if (isCStringLike(m.return_type)) {
-                os << cTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
+                os << cDeclaredTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
             } else {
-                os << cTypeName(m.return_type, pkg_) << "* result";
+                os << cDeclaredTypeName(m.return_type, pkg_) << "* result";
             }
             has_args = true;
         }
@@ -766,20 +824,20 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
 
         if (m.has_param) {
             if (isCompositePointerType(m.param.type)) {
-                os << ", const " << cTypeName(m.param.type, pkg_) << "* " << m.param.name;
+                os << ", const " << cDeclaredTypeName(m.param.type, pkg_) << "* " << m.param.name;
             } else if (isCStringLike(m.param.type)) {
-                os << ", const " << cTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
+                os << ", const " << cDeclaredTypeName(m.param.type, pkg_) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
             } else {
-                os << ", " << cTypeName(m.param.type, pkg_) << " " << m.param.name;
+                os << ", " << cDeclaredTypeName(m.param.type, pkg_) << " " << m.param.name;
             }
         }
         if (!m.return_type.isVoid()) {
             if (m.return_type.isArray() || m.return_type.isCustom()) {
-                os << ", " << cTypeName(m.return_type, pkg_) << "* result";
+                os << ", " << cDeclaredTypeName(m.return_type, pkg_) << "* result";
             } else if (isCStringLike(m.return_type)) {
-                os << ", " << cTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
+                os << ", " << cDeclaredTypeName(m.return_type, pkg_) << "* result, uint32_t* result_len";
             } else {
-                os << ", " << cTypeName(m.return_type, pkg_) << "* result";
+                os << ", " << cDeclaredTypeName(m.return_type, pkg_) << "* result";
             }
         }
         os << ");\n";
@@ -807,6 +865,11 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
 
 void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::string& filename) {
     std::vector<TypeRef> array_types = collectArrayTypesFromAst(ast, pkg_);
+    emitGeneratedFileBanner(os,
+                            filename + ".c",
+                            filename,
+                            "Auto-generated OmniBinder C definitions",
+                            "Generated from OmniBinder IDL for C serialization, proxy, and stub implementation glue.");
     os << "#include \"" << filename << "_c.h\"\n";
     os << "#include <string.h>\n#include <stdlib.h>\n\n";
 
@@ -888,7 +951,7 @@ void CCodeGen::genFieldSerialize(const FieldDef& f, const std::string& obj, std:
 void CCodeGen::genFieldDeserialize(const FieldDef& f, const std::string& obj, std::ostream& os) {
     std::string name = obj + f.name;
     std::string len_name = isCStringLike(f.type) ? name + "_len" : "0";
-    emitValueDeserialize(os, f.type, name, len_name, "buf", pkg_, "    ");
+    emitValueDeserialize(os, f.type, name, len_name, "buf", pkg_, "    ", "goto fail");
 }
 
 void CCodeGen::genStructSerialize(const StructDef& s, std::ostream& os) {
@@ -902,10 +965,17 @@ void CCodeGen::genStructSerialize(const StructDef& s, std::ostream& os) {
 
 void CCodeGen::genStructDeserialize(const StructDef& s, std::ostream& os) {
     std::string tname = pkg_ + "_" + s.name;
-    os << "void " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
+    os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
+    os << "    if (!self || !buf) { return 0; }\n";
+    os << "    omni_buffer_clear_error(buf);\n";
     for (size_t i = 0; i < s.fields.size(); ++i) {
         genFieldDeserialize(s.fields[i], "self->", os);
     }
+    os << "    return 1;\n";
+    os << "fail:\n";
+    os << "    " << tname << "_destroy(self);\n";
+    os << "    " << tname << "_init(self);\n";
+    os << "    return 0;\n";
     os << "}\n\n";
 }
 
@@ -920,10 +990,17 @@ void CCodeGen::genTopicSerialize(const TopicDef& t, std::ostream& os) {
 
 void CCodeGen::genTopicDeserialize(const TopicDef& t, std::ostream& os) {
     std::string tname = pkg_ + "_" + t.name;
-    os << "void " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
+    os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
+    os << "    if (!self || !buf) { return 0; }\n";
+    os << "    omni_buffer_clear_error(buf);\n";
     for (size_t i = 0; i < t.fields.size(); ++i) {
         genFieldDeserialize(t.fields[i], "self->", os);
     }
+    os << "    return 1;\n";
+    os << "fail:\n";
+    os << "    " << tname << "_destroy(self);\n";
+    os << "    " << tname << "_init(self);\n";
+    os << "    return 0;\n";
     os << "}\n\n";
 }
 
@@ -965,7 +1042,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 std::string ppfx = cDestroyPrefix(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << ";\n";
                 os << "        " << ppfx << "_init(&" << m.param.name << ");\n";
-                os << "        " << ppfx << "_deserialize(&" << m.param.name << ", req);\n";
+                os << "        if (!" << ppfx << "_deserialize(&" << m.param.name << ", req)) { " << ppfx << "_destroy(&" << m.param.name << "); omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }\n";
             } else if (isCStringLike(m.param.type)) {
                 std::string ptype = cTypeName(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << " = NULL;\n";
@@ -975,6 +1052,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 } else {
                     os << "        " << m.param.name << " = omni_buffer_read_bytes(req, &" << m.param.name << "_len);\n";
                 }
+                os << "        if (!omni_buffer_read_ok(req)) { if (" << m.param.name << ") free(" << m.param.name << "); omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }\n";
             } else {
                 std::string ptype = cTypeName(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << " = ";
@@ -984,6 +1062,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 } else {
                     os << "0;\n";
                 }
+                os << "        if (!omni_buffer_read_ok(req)) { omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }\n";
             }
         }
 
@@ -1191,15 +1270,18 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
             os << "    if (ret == 0 && result) {\n";
             if (m.return_type.isArray() || m.return_type.isCustom()) {
                 std::string rpfx = cDestroyPrefix(m.return_type, pkg_);
-                os << "        " << rpfx << "_deserialize(result, resp);\n";
+                os << "        " << rpfx << "_init(result);\n";
+                os << "        if (!" << rpfx << "_deserialize(result, resp)) { " << rpfx << "_destroy(result); ret = -501; }\n";
             } else if (isCStringLike(m.return_type)) {
                 if (m.return_type.primitive == TYPE_STRING) {
                     os << "        *result = omni_buffer_read_string(resp, result_len);\n";
                 } else {
                     os << "        *result = omni_buffer_read_bytes(resp, result_len);\n";
                 }
+                os << "        if (!omni_buffer_read_ok(resp)) { if (*result) free(*result); *result = NULL; if (result_len) *result_len = 0; ret = -501; }\n";
             } else {
                 emitPrimitiveRead(os, m.return_type.primitive, "*result", "resp", "        ");
+                os << "        if (!omni_buffer_read_ok(resp)) { ret = -501; }\n";
             }
             os << "    }\n";
         }
@@ -1234,7 +1316,11 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
         os << "    " << topic_type << " msg;\n";
         os << "    " << topic_type << "_init(&msg);\n";
         os << "    omni_buffer_t* buf = omni_buffer_create_from(omni_buffer_data(data), omni_buffer_size(data));\n";
-        os << "    " << topic_type << "_deserialize(&msg, buf);\n";
+        os << "    if (!" << topic_type << "_deserialize(&msg, buf)) {\n";
+        os << "        omni_buffer_destroy(buf);\n";
+        os << "        " << topic_type << "_destroy(&msg);\n";
+        os << "        return;\n";
+        os << "    }\n";
         os << "    omni_buffer_destroy(buf);\n";
         os << "    if (ctx->callback) ctx->callback(&msg, ctx->user_data);\n";
         os << "    " << topic_type << "_destroy(&msg);\n";

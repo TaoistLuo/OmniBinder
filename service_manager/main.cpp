@@ -33,6 +33,20 @@
 
 namespace omnibinder {
 
+namespace {
+
+bool tryReadStringArg(const Message& msg, std::string& value) {
+    try {
+        Buffer payload(msg.payload.data(), msg.payload.size());
+        value = payload.readString();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+}
+
 // ============================================================
 // ClientConnection - Per-client state including receive buffer
 // ============================================================
@@ -391,8 +405,12 @@ private:
     // MSG_UNREGISTER: Unregister a service
     // ============================================================
     void handleUnregister(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string name = payload.readString();
+        std::string name;
+        if (!tryReadStringArg(msg, name)) {
+            OMNI_LOG_WARN(TAG, "Reject malformed unregister request from fd=%d", conn->fd);
+            sendUnregisterReply(conn, msg.header.sequence, false);
+            return;
+        }
 
         if (!registry_.ownsService(conn->fd, name)) {
             OMNI_LOG_WARN(TAG, "Reject unregister for %s from non-owner fd=%d",
@@ -429,8 +447,12 @@ private:
     // MSG_HEARTBEAT: Update heartbeat timestamp
     // ============================================================
     void handleHeartbeat(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string name = payload.readString();
+        std::string name;
+        if (!tryReadStringArg(msg, name)) {
+            OMNI_LOG_WARN(TAG, "Reject malformed heartbeat from fd=%d", conn->fd);
+            closeClient(conn->fd);
+            return;
+        }
 
         if (!registry_.ownsService(conn->fd, name)) {
             OMNI_LOG_WARN(TAG, "Reject heartbeat for %s from non-owner fd=%d",
@@ -452,8 +474,12 @@ private:
     // MSG_LOOKUP: Find a service by name
     // ============================================================
     void handleLookup(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string name = payload.readString();
+        std::string name;
+        if (!tryReadStringArg(msg, name)) {
+            OMNI_LOG_WARN(TAG, "Reject malformed lookup request from fd=%d", conn->fd);
+            sendLookupReply(conn, msg.header.sequence, false, ServiceInfo());
+            return;
+        }
 
         ServiceEntry entry;
         bool found = registry_.findService(name, entry);
@@ -492,8 +518,12 @@ private:
     // MSG_QUERY_INTERFACES: Query interfaces of a service
     // ============================================================
     void handleQueryInterfaces(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string name = payload.readString();
+        std::string name;
+        if (!tryReadStringArg(msg, name)) {
+            OMNI_LOG_WARN(TAG, "Reject malformed query interfaces request from fd=%d", conn->fd);
+            sendQueryInterfacesReply(conn, msg.header.sequence, false, std::vector<InterfaceInfo>());
+            return;
+        }
 
         ServiceEntry entry;
         bool found = registry_.findService(name, entry);
@@ -519,8 +549,12 @@ private:
     // MSG_SUBSCRIBE_SERVICE: Subscribe to death notifications
     // ============================================================
     void handleSubscribeService(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string target_service = payload.readString();
+        std::string target_service;
+        if (!tryReadStringArg(msg, target_service)) {
+            OMNI_LOG_WARN(TAG, "Reject malformed subscribe service request from fd=%d", conn->fd);
+            sendSubscribeServiceReply(conn, msg.header.sequence, false);
+            return;
+        }
 
         bool success = death_notifier_.subscribe(conn->fd, target_service);
         sendSubscribeServiceReply(conn, msg.header.sequence, success);
@@ -536,8 +570,11 @@ private:
     // MSG_UNSUBSCRIBE_SERVICE: Unsubscribe from death notifications
     // ============================================================
     void handleUnsubscribeService(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string target_service = payload.readString();
+        std::string target_service;
+        if (!tryReadStringArg(msg, target_service)) {
+            OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe service request from fd=%d", conn->fd);
+            return;
+        }
 
         death_notifier_.unsubscribe(conn->fd, target_service);
         // No reply needed for unsubscribe
@@ -548,7 +585,14 @@ private:
     // ============================================================
     void handlePublishTopic(ClientConnection* conn, const Message& msg) {
         Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string topic = payload.readString();
+        std::string topic;
+        try {
+            topic = payload.readString();
+        } catch (...) {
+            OMNI_LOG_WARN(TAG, "Reject malformed publish topic request from fd=%d", conn->fd);
+            sendPublishTopicReply(conn, msg.header.sequence, false);
+            return;
+        }
         ServiceInfo pub_info;
         if (!deserializeServiceInfo(payload, pub_info)) {
             OMNI_LOG_ERROR(TAG, "Failed to deserialize publisher info for topic %s", topic.c_str());
@@ -585,8 +629,11 @@ private:
     // MSG_UNPUBLISH_TOPIC: Unregister as a topic publisher
     // ============================================================
     void handleUnpublishTopic(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string topic = payload.readString();
+        std::string topic;
+        if (!tryReadStringArg(msg, topic)) {
+            OMNI_LOG_WARN(TAG, "Drop malformed unpublish topic request from fd=%d", conn->fd);
+            return;
+        }
 
         if (!topic_manager_.removePublisher(topic, conn->fd)) {
             OMNI_LOG_WARN(TAG, "Reject unpublish topic %s from non-owner fd=%d",
@@ -599,8 +646,12 @@ private:
     // MSG_SUBSCRIBE_TOPIC: Subscribe to a topic
     // ============================================================
     void handleSubscribeTopic(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string topic = payload.readString();
+        std::string topic;
+        if (!tryReadStringArg(msg, topic)) {
+            OMNI_LOG_WARN(TAG, "Reject malformed subscribe topic request from fd=%d", conn->fd);
+            sendSubscribeTopicReply(conn, msg.header.sequence, false);
+            return;
+        }
 
         bool added = topic_manager_.addSubscriber(topic, conn->fd);
         sendSubscribeTopicReply(conn, msg.header.sequence, added);
@@ -622,8 +673,11 @@ private:
     // MSG_UNSUBSCRIBE_TOPIC: Unsubscribe from a topic
     // ============================================================
     void handleUnsubscribeTopic(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string topic = payload.readString();
+        std::string topic;
+        if (!tryReadStringArg(msg, topic)) {
+            OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe topic request from fd=%d", conn->fd);
+            return;
+        }
 
         topic_manager_.removeSubscriber(topic, conn->fd);
         // No reply needed

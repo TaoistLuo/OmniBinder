@@ -229,8 +229,8 @@ typedef struct demo_SensorData {
 
 void demo_SensorData_init(demo_SensorData* self);
 void demo_SensorData_destroy(demo_SensorData* self);
-int demo_SensorData_serialize(const demo_SensorData* self, omnibinder_buffer_t* buf);
-int demo_SensorData_deserialize(demo_SensorData* self, omnibinder_buffer_t* buf);
+void demo_SensorData_serialize(const demo_SensorData* self, omni_buffer_t* buf);
+int demo_SensorData_deserialize(demo_SensorData* self, omni_buffer_t* buf);
 ```
 
 ---
@@ -327,9 +327,9 @@ public:
     void disconnect();
     bool isConnected() const;
 
-    StatusResponse SetThreshold(const ControlCommand& cmd);
-    SensorData GetLatestData();
-    void ResetSensor(int32_t sensor_id);
+    int SetThreshold(const ControlCommand& cmd, StatusResponse* out);
+    int GetLatestData(SensorData* out);
+    int ResetSensor(int32_t sensor_id);
 
     void SubscribeSensorUpdate(const std::function<void(const SensorUpdate&)>& callback);
     void OnServiceDied(const std::function<void()>& callback);
@@ -339,18 +339,16 @@ public:
 Generated C API shape:
 
 ```c
-typedef struct demo_SensorService_callbacks {
-    demo_SensorService_SetThreshold_fn  on_set_threshold;
-    demo_SensorService_GetLatestData_fn on_get_latest_data;
-    demo_SensorService_ResetSensor_fn   on_reset_sensor;
-    void* user_data;
-} demo_SensorService_callbacks;
+typedef struct demo_SensorService_proxy {
+    omni_runtime_t* runtime;
+    uint8_t connected;
+} demo_SensorService_proxy;
 
-int demo_SensorService_register(omni_runtime_t* runtime,
-                                const demo_SensorService_callbacks* callbacks);
-
-int demo_SensorService_broadcast_SensorUpdate(omni_runtime_t* runtime,
-                                              const demo_SensorUpdate* msg);
+void demo_SensorService_proxy_init(demo_SensorService_proxy* p, omni_runtime_t* runtime);
+int  demo_SensorService_proxy_connect(demo_SensorService_proxy* p);
+int  demo_SensorService_proxy_SetThreshold(demo_SensorService_proxy* p,
+                                           const demo_ControlCommand* cmd,
+                                           common_StatusResponse* result);
 ```
 
 ---
@@ -448,8 +446,8 @@ topic SensorAlert {
 }
 
 service SensorService {
-    SensorData            GetSensorData(int32 sensor_id);
-    common.StatusResponse SendCommand(ControlCommand cmd);
+    common.StatusResponse SetThreshold(ControlCommand cmd);
+    SensorData            GetLatestData();
     void                  ResetSensor(int32 sensor_id);
 
     publishes SensorUpdate;
@@ -488,7 +486,7 @@ Input: sensor_service.bidl
   sensor_service.bidl.cpp
 
 --lang=c:
-  sensor_service.bidl.h
+  sensor_service.bidl_c.h
   sensor_service.bidl.c
 ```
 

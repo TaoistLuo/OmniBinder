@@ -115,8 +115,8 @@ static pid_t startSM(uint16_t port) {
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%u", port);
         const char* paths[] = {
-            "./build/target/bin/service_manager",
             "./target/bin/service_manager",
+            "./build/target/bin/service_manager",
             "./service_manager/service_manager",
             "../service_manager/service_manager",
             "service_manager",

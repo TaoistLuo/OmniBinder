@@ -6,7 +6,7 @@
  *
  * @author      taoist.luo
  * @version     1.0.0
- * @date        2026-02-28
+ * @date        2025-02-28
  *
  * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)
  *
@@ -85,6 +85,10 @@ void           omni_buffer_destroy(omni_buffer_t* buf);
 void           omni_buffer_reset(omni_buffer_t* buf);
 const uint8_t* omni_buffer_data(const omni_buffer_t* buf);
 size_t         omni_buffer_size(const omni_buffer_t* buf);
+int            omni_buffer_read_ok(const omni_buffer_t* buf);
+void           omni_buffer_clear_error(omni_buffer_t* buf);
+void           omni_buffer_mark_error(omni_buffer_t* buf, int32_t error_code);
+int32_t        omni_buffer_error(const omni_buffer_t* buf);
 
 /* 写入 */
 void omni_buffer_write_bool(omni_buffer_t* buf, uint8_t val);

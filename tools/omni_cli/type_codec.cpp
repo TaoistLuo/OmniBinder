@@ -120,47 +120,50 @@ bool TypeCodec::encodePrimitive(const simple_json::Value& json, const omnic::Typ
 }
 
 bool TypeCodec::decodePrimitive(omnibinder::Buffer& buf, const omnic::TypeRef& type, simple_json::Value& json) {
-    switch (type.primitive) {
-    case omnic::TYPE_BOOL:
-        json = simple_json::Value(buf.readBool());
-        return true;
-    case omnic::TYPE_INT8:
-        json = simple_json::Value(static_cast<double>(buf.readInt8()));
-        return true;
-    case omnic::TYPE_UINT8:
-        json = simple_json::Value(static_cast<double>(buf.readUint8()));
-        return true;
-    case omnic::TYPE_INT16:
-        json = simple_json::Value(static_cast<double>(buf.readInt16()));
-        return true;
-    case omnic::TYPE_UINT16:
-        json = simple_json::Value(static_cast<double>(buf.readUint16()));
-        return true;
-    case omnic::TYPE_INT32:
-        json = simple_json::Value(static_cast<double>(buf.readInt32()));
-        return true;
-    case omnic::TYPE_UINT32:
-        json = simple_json::Value(static_cast<double>(buf.readUint32()));
-        return true;
-    case omnic::TYPE_INT64:
-        json = simple_json::Value(static_cast<double>(buf.readInt64()));
-        return true;
-    case omnic::TYPE_UINT64:
-        json = simple_json::Value(static_cast<double>(buf.readUint64()));
-        return true;
-    case omnic::TYPE_FLOAT32:
-        json = simple_json::Value(static_cast<double>(buf.readFloat32()));
-        return true;
-    case omnic::TYPE_FLOAT64:
-        json = simple_json::Value(buf.readFloat64());
-        return true;
-    case omnic::TYPE_STRING:
-        json = simple_json::Value(buf.readString());
-        return true;
-    case omnic::TYPE_BYTES:
-        // TODO: 支持 base64 编码的字节数组
-        return false;
-    default:
+    try {
+        switch (type.primitive) {
+        case omnic::TYPE_BOOL:
+            json = simple_json::Value(buf.readBool());
+            return true;
+        case omnic::TYPE_INT8:
+            json = simple_json::Value(static_cast<double>(buf.readInt8()));
+            return true;
+        case omnic::TYPE_UINT8:
+            json = simple_json::Value(static_cast<double>(buf.readUint8()));
+            return true;
+        case omnic::TYPE_INT16:
+            json = simple_json::Value(static_cast<double>(buf.readInt16()));
+            return true;
+        case omnic::TYPE_UINT16:
+            json = simple_json::Value(static_cast<double>(buf.readUint16()));
+            return true;
+        case omnic::TYPE_INT32:
+            json = simple_json::Value(static_cast<double>(buf.readInt32()));
+            return true;
+        case omnic::TYPE_UINT32:
+            json = simple_json::Value(static_cast<double>(buf.readUint32()));
+            return true;
+        case omnic::TYPE_INT64:
+            json = simple_json::Value(static_cast<double>(buf.readInt64()));
+            return true;
+        case omnic::TYPE_UINT64:
+            json = simple_json::Value(static_cast<double>(buf.readUint64()));
+            return true;
+        case omnic::TYPE_FLOAT32:
+            json = simple_json::Value(static_cast<double>(buf.readFloat32()));
+            return true;
+        case omnic::TYPE_FLOAT64:
+            json = simple_json::Value(buf.readFloat64());
+            return true;
+        case omnic::TYPE_STRING:
+            json = simple_json::Value(buf.readString());
+            return true;
+        case omnic::TYPE_BYTES:
+            return false;
+        default:
+            return false;
+        }
+    } catch (...) {
         return false;
     }
 }
@@ -241,22 +244,21 @@ bool TypeCodec::encodeArray(const simple_json::Value& json, const omnic::TypeRef
 }
 
 bool TypeCodec::decodeArray(omnibinder::Buffer& buf, const omnic::TypeRef& elementType,
-                            const std::string& package, simple_json::Value& json) {
-    json.setArray();
-    
-    // 读取数组长度
-    uint32_t count = buf.readUint32();
-    
-    // 解码每个元素
-    for (uint32_t i = 0; i < count; ++i) {
-        simple_json::Value element;
-        if (!decodeFromBuffer(buf, elementType, package, element)) {
-            return false;
+                             const std::string& package, simple_json::Value& json) {
+    try {
+        json.setArray();
+        uint32_t count = buf.readUint32();
+        for (uint32_t i = 0; i < count; ++i) {
+            simple_json::Value element;
+            if (!decodeFromBuffer(buf, elementType, package, element)) {
+                return false;
+            }
+            json.push(element);
         }
-        json.push(element);
+        return true;
+    } catch (...) {
+        return false;
     }
-    
-    return true;
 }
 
 bool TypeCodec::encodeToBuffer(const simple_json::Value& json, const omnic::TypeRef& type,

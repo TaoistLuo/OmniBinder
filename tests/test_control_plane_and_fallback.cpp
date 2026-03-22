@@ -22,22 +22,27 @@ static bool sendMessage(TcpTransport& transport, const Message& msg);
 
 class OwnedService : public Service {
 public:
-    OwnedService() : Service("OwnedService") {
+    OwnedService() : Service("OwnedService"), invoke_count_(0) {
         iface_.interface_id = IFACE_ID;
         iface_.name = "OwnedService";
         iface_.methods.push_back(MethodInfo(METHOD_ADD, "Add"));
     }
     const char* serviceName() const override { return "OwnedService"; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
+    int invokeCount() const { return invoke_count_; }
 protected:
     void onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
         if (method_id == METHOD_ADD) {
             Buffer req(request.data(), request.size());
-            response.writeInt32(req.readInt32() + req.readInt32());
+            int32_t a = req.readInt32();
+            int32_t b = req.readInt32();
+            invoke_count_++;
+            response.writeInt32(a + b);
         }
     }
 private:
     InterfaceInfo iface_;
+    int invoke_count_;
 };
 
 struct OwnedServerCtx {
@@ -154,8 +159,8 @@ static pid_t startSM(uint16_t port) {
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%u", port);
         const char* paths[] = {
-            "./build/target/bin/service_manager",
             "./target/bin/service_manager",
+            "./build/target/bin/service_manager",
             "./service_manager/service_manager",
             NULL
         };
@@ -302,6 +307,19 @@ static void stopSM(pid_t pid) {
     return transport.send(out.data(), out.size()) == static_cast<int>(out.size());
 }
 
+[[maybe_unused]] static bool invokeOwnedService(OmniRuntime& runtime, int32_t a, int32_t b, int32_t& sum) {
+    Buffer req;
+    req.writeInt32(a);
+    req.writeInt32(b);
+    Buffer resp;
+    int ret = runtime.invoke("OwnedService", IFACE_ID, METHOD_ADD, req, resp, 5000);
+    if (ret != 0 || resp.size() < sizeof(int32_t)) {
+        return false;
+    }
+    sum = resp.readInt32();
+    return true;
+}
+
 int main() {
     printf("=== Control Plane And Fallback Tests ===\n\n");
 
@@ -340,6 +358,42 @@ int main() {
         ServiceInfo info;
         assert(checker.lookupService("OwnedService", info) == 0);
         checker.stop();
+        rogue.close();
+        PASS();
+    }
+
+    TEST(malformed_lookup_and_subscribe_topic_do_not_crash_sm) {
+        TcpTransport rogue;
+        assert(connectTcp(rogue, "127.0.0.1", SM_PORT));
+
+        Message bad_lookup(MessageType::MSG_LOOKUP, 1004);
+        bad_lookup.payload.writeUint32(0x12345678u);
+        bool send_ok = sendMessage(rogue, bad_lookup);
+        assert(send_ok);
+        Message lookup_reply;
+        bool recv_ok = recvMessage(rogue, lookup_reply, 2000);
+        assert(recv_ok);
+        assert(lookup_reply.getType() == MessageType::MSG_LOOKUP_REPLY);
+        Buffer lookup_payload(lookup_reply.payload.data(), lookup_reply.payload.size());
+        assert(lookup_payload.readBool() == false);
+
+        Message bad_subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 1005);
+        bad_subscribe.payload.writeUint16(7);
+        send_ok = sendMessage(rogue, bad_subscribe);
+        assert(send_ok);
+        Message subscribe_reply;
+        recv_ok = recvMessage(rogue, subscribe_reply, 2000);
+        assert(recv_ok);
+        assert(subscribe_reply.getType() == MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
+        Buffer subscribe_payload(subscribe_reply.payload.data(), subscribe_reply.payload.size());
+        assert(subscribe_payload.readBool() == false);
+
+        OmniRuntime checker;
+        assert(checker.init("127.0.0.1", SM_PORT) == 0);
+        ServiceInfo info;
+        assert(checker.lookupService("OwnedService", info) == 0);
+        checker.stop();
+
         rogue.close();
         PASS();
     }
@@ -418,6 +472,83 @@ int main() {
         control.close();
         probe.stop();
         pthread_join(raw_tid, NULL);
+        PASS();
+    }
+
+    TEST(malformed_invoke_payload_returns_deserialize_without_crash) {
+        TcpTransport rogue;
+        assert(connectTcp(rogue, "127.0.0.1", owned_ctx.service.port()));
+
+        int before_count = owned_ctx.service.invokeCount();
+
+        Message short_header(MessageType::MSG_INVOKE, 2001);
+        short_header.payload.writeUint32(IFACE_ID);
+        short_header.payload.writeUint32(METHOD_ADD);
+        bool send_ok = sendMessage(rogue, short_header);
+        assert(send_ok);
+        (void)send_ok;
+
+        Message reply;
+        bool recv_ok = recvFullMessage(rogue, reply, 2000);
+        assert(recv_ok);
+        (void)recv_ok;
+        assert(reply.getType() == MessageType::MSG_INVOKE_REPLY);
+        Buffer payload(reply.payload.data(), reply.payload.size());
+        assert(payload.readInt32() == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
+        assert(payload.readUint32() == 0);
+        assert(owned_ctx.service.invokeCount() == before_count);
+
+        Message short_body(MessageType::MSG_INVOKE, 2002);
+        short_body.payload.writeUint32(IFACE_ID);
+        short_body.payload.writeUint32(METHOD_ADD);
+        short_body.payload.writeUint32(sizeof(int32_t));
+        short_body.payload.writeInt32(7);
+        send_ok = sendMessage(rogue, short_body);
+        assert(send_ok);
+        Message short_body_reply;
+        recv_ok = recvFullMessage(rogue, short_body_reply, 2000);
+        assert(recv_ok);
+        assert(short_body_reply.getType() == MessageType::MSG_INVOKE_REPLY);
+        Buffer short_body_payload(short_body_reply.payload.data(), short_body_reply.payload.size());
+        assert(short_body_payload.readInt32() == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
+        assert(short_body_payload.readUint32() == 0);
+        assert(owned_ctx.service.invokeCount() == before_count);
+
+        OmniRuntime checker;
+        assert(checker.init("127.0.0.1", SM_PORT) == 0);
+        int32_t sum = 0;
+        assert(invokeOwnedService(checker, 20, 22, sum));
+        assert(sum == 42);
+        checker.stop();
+
+        rogue.close();
+        PASS();
+    }
+
+    TEST(malformed_subscribe_broadcast_does_not_crash_service) {
+        TcpTransport rogue;
+        assert(connectTcp(rogue, "127.0.0.1", owned_ctx.service.port()));
+
+        Message bad_subscribe(MessageType::MSG_SUBSCRIBE_BROADCAST, 2003);
+        bad_subscribe.payload.writeUint32(0x99887766u);
+        bool send_ok = sendMessage(rogue, bad_subscribe);
+        assert(send_ok);
+
+        Message bad_broadcast(MessageType::MSG_BROADCAST, 2004);
+        bad_broadcast.payload.writeUint32(0x99887766u);
+        send_ok = sendMessage(rogue, bad_broadcast);
+        assert(send_ok);
+
+        usleep(100000);
+
+        OmniRuntime checker;
+        assert(checker.init("127.0.0.1", SM_PORT) == 0);
+        int32_t sum = 0;
+        assert(invokeOwnedService(checker, 1, 2, sum));
+        assert(sum == 3);
+        checker.stop();
+
+        rogue.close();
         PASS();
     }
 

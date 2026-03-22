@@ -10,7 +10,9 @@
 #include "omnibinder/omnibinder.h"
 #include <cstring>
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 /* ============================================================
  * 内部结构体定义
@@ -18,9 +20,11 @@
 
 struct omni_buffer_t {
     omnibinder::Buffer buf;
+    bool read_ok;
+    int32_t error_code;
 
-    omni_buffer_t() {}
-    omni_buffer_t(const uint8_t* data, size_t len) : buf(data, len) {}
+    omni_buffer_t() : read_ok(true), error_code(0) {}
+    omni_buffer_t(const uint8_t* data, size_t len) : buf(data, len), read_ok(true), error_code(0) {}
 };
 
 /* C 服务桥接：将 C++ Service 的 onInvoke 转发到 C 回调 */
@@ -63,6 +67,10 @@ protected:
             callback_(method_id, &req_wrap, &resp_wrap, user_data_);
         }
 
+        if (resp_wrap.error_code != 0) {
+            throw std::runtime_error("c_service_callback_error");
+        }
+
         /* 将 C 回调写入的响应数据拷贝回 C++ Buffer */
         if (resp_wrap.buf.size() > 0) {
             response.writeRaw(resp_wrap.buf.data(), resp_wrap.buf.size());
@@ -81,6 +89,24 @@ struct omni_service_t {
 struct omni_runtime_t {
     omnibinder::OmniRuntime runtime;
 };
+
+namespace {
+
+template <typename Fn, typename T>
+T catchBufferRead(omni_buffer_t* buf, Fn fn, T fallback) {
+    if (!buf) {
+        return fallback;
+    }
+    try {
+        return fn();
+    } catch (...) {
+        buf->read_ok = false;
+        buf->error_code = -501;
+        return fallback;
+    }
+}
+
+}
 
 /* ============================================================
  * Buffer API 实现
@@ -101,7 +127,11 @@ void omni_buffer_destroy(omni_buffer_t* buf) {
 }
 
 void omni_buffer_reset(omni_buffer_t* buf) {
-    if (buf) buf->buf.reset();
+    if (buf) {
+        buf->buf.reset();
+        buf->read_ok = true;
+        buf->error_code = 0;
+    }
 }
 
 const uint8_t* omni_buffer_data(const omni_buffer_t* buf) {
@@ -110,6 +140,28 @@ const uint8_t* omni_buffer_data(const omni_buffer_t* buf) {
 
 size_t omni_buffer_size(const omni_buffer_t* buf) {
     return buf ? buf->buf.size() : 0;
+}
+
+int omni_buffer_read_ok(const omni_buffer_t* buf) {
+    return (buf && buf->read_ok) ? 1 : 0;
+}
+
+void omni_buffer_clear_error(omni_buffer_t* buf) {
+    if (buf) {
+        buf->read_ok = true;
+        buf->error_code = 0;
+    }
+}
+
+void omni_buffer_mark_error(omni_buffer_t* buf, int32_t error_code) {
+    if (buf) {
+        buf->read_ok = false;
+        buf->error_code = error_code;
+    }
+}
+
+int32_t omni_buffer_error(const omni_buffer_t* buf) {
+    return buf ? buf->error_code : 0;
 }
 
 /* 写入 */
@@ -167,37 +219,59 @@ void omni_buffer_write_bytes(omni_buffer_t* buf, const uint8_t* data, uint32_t l
 
 /* 读取 */
 uint8_t omni_buffer_read_bool(omni_buffer_t* buf) {
-    return (buf && buf->buf.readBool()) ? 1 : 0;
+    return catchBufferRead(buf, [buf]() -> uint8_t {
+        return (buf && buf->buf.readBool()) ? 1 : 0;
+    }, static_cast<uint8_t>(0));
 }
 int8_t omni_buffer_read_int8(omni_buffer_t* buf) {
-    return buf ? buf->buf.readInt8() : 0;
+    return catchBufferRead(buf, [buf]() -> int8_t {
+        return buf ? buf->buf.readInt8() : 0;
+    }, static_cast<int8_t>(0));
 }
 uint8_t omni_buffer_read_uint8(omni_buffer_t* buf) {
-    return buf ? buf->buf.readUint8() : 0;
+    return catchBufferRead(buf, [buf]() -> uint8_t {
+        return buf ? buf->buf.readUint8() : 0;
+    }, static_cast<uint8_t>(0));
 }
 int16_t omni_buffer_read_int16(omni_buffer_t* buf) {
-    return buf ? buf->buf.readInt16() : 0;
+    return catchBufferRead(buf, [buf]() -> int16_t {
+        return buf ? buf->buf.readInt16() : 0;
+    }, static_cast<int16_t>(0));
 }
 uint16_t omni_buffer_read_uint16(omni_buffer_t* buf) {
-    return buf ? buf->buf.readUint16() : 0;
+    return catchBufferRead(buf, [buf]() -> uint16_t {
+        return buf ? buf->buf.readUint16() : 0;
+    }, static_cast<uint16_t>(0));
 }
 int32_t omni_buffer_read_int32(omni_buffer_t* buf) {
-    return buf ? buf->buf.readInt32() : 0;
+    return catchBufferRead(buf, [buf]() -> int32_t {
+        return buf ? buf->buf.readInt32() : 0;
+    }, static_cast<int32_t>(0));
 }
 uint32_t omni_buffer_read_uint32(omni_buffer_t* buf) {
-    return buf ? buf->buf.readUint32() : 0;
+    return catchBufferRead(buf, [buf]() -> uint32_t {
+        return buf ? buf->buf.readUint32() : 0;
+    }, static_cast<uint32_t>(0));
 }
 int64_t omni_buffer_read_int64(omni_buffer_t* buf) {
-    return buf ? buf->buf.readInt64() : 0;
+    return catchBufferRead(buf, [buf]() -> int64_t {
+        return buf ? buf->buf.readInt64() : 0;
+    }, static_cast<int64_t>(0));
 }
 uint64_t omni_buffer_read_uint64(omni_buffer_t* buf) {
-    return buf ? buf->buf.readUint64() : 0;
+    return catchBufferRead(buf, [buf]() -> uint64_t {
+        return buf ? buf->buf.readUint64() : 0;
+    }, static_cast<uint64_t>(0));
 }
 float omni_buffer_read_float32(omni_buffer_t* buf) {
-    return buf ? buf->buf.readFloat32() : 0.0f;
+    return catchBufferRead(buf, [buf]() -> float {
+        return buf ? buf->buf.readFloat32() : 0.0f;
+    }, 0.0f);
 }
 double omni_buffer_read_float64(omni_buffer_t* buf) {
-    return buf ? buf->buf.readFloat64() : 0.0;
+    return catchBufferRead(buf, [buf]() -> double {
+        return buf ? buf->buf.readFloat64() : 0.0;
+    }, 0.0);
 }
 
 char* omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len) {
@@ -205,7 +279,12 @@ char* omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len) {
         if (out_len) *out_len = 0;
         return NULL;
     }
-    std::string s = buf->buf.readString();
+    std::string s = catchBufferRead(buf, [buf]() -> std::string {
+        return buf->buf.readString();
+    }, std::string());
+    if (out_len && s.empty()) {
+        *out_len = 0;
+    }
     uint32_t len = static_cast<uint32_t>(s.size());
     char* result = (char*)malloc(len + 1);
     if (result) {
@@ -220,7 +299,9 @@ uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len) {
         if (out_len) *out_len = 0;
         return NULL;
     }
-    std::vector<uint8_t> v = buf->buf.readBytes();
+    std::vector<uint8_t> v = catchBufferRead(buf, [buf]() -> std::vector<uint8_t> {
+        return buf->buf.readBytes();
+    }, std::vector<uint8_t>());
     uint32_t len = static_cast<uint32_t>(v.size());
     uint8_t* result = (uint8_t*)malloc(len);
     if (result && len > 0) {

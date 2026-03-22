@@ -47,6 +47,13 @@ static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
     return ctx;
 }
 
+static void appendTruncatedBuffers(const std::vector<uint8_t>& full,
+                                   std::vector< std::vector<uint8_t> >& out) {
+    for (size_t i = 0; i < full.size(); ++i) {
+        out.push_back(std::vector<uint8_t>(full.begin(), full.begin() + i));
+    }
+}
+
 int main() {
     printf("=== omni-cli TypeCodec Tests ===\n\n");
 
@@ -276,6 +283,280 @@ int main() {
         type_codec::TypeCodec codec(ctx);
         omnibinder::Buffer buf;
         assert(!codec.encodeToBuffer(badJson, intType, "demo", buf));
+        PASS();
+    }
+
+    TEST(type_codec_decode_rejects_truncated_buffers_for_all_supported_type_classes);
+    {
+        const std::string common =
+            "package common;\n"
+            "struct External {\n"
+            "    int32 code;\n"
+            "    string note;\n"
+            "}\n";
+        const std::string main =
+            "package demo;\n"
+            "import \"common_types.bidl\";\n"
+            "struct Inner {\n"
+            "    int32 value;\n"
+            "}\n"
+            "struct Wrapper {\n"
+            "    bool flag;\n"
+            "    int8 i8;\n"
+            "    uint8 u8;\n"
+            "    int16 i16;\n"
+            "    uint16 u16;\n"
+            "    int32 i32;\n"
+            "    uint32 u32;\n"
+            "    int64 i64;\n"
+            "    uint64 u64;\n"
+            "    float32 f32;\n"
+            "    float64 f64;\n"
+            "    string name;\n"
+            "    Inner inner;\n"
+            "    array<int32> ids;\n"
+            "    array<string> names;\n"
+            "    array<Inner> inners;\n"
+            "    array<array<int32>> matrix;\n"
+            "    common.External ext;\n"
+            "}\n";
+
+        char dir_template[] = "/tmp/omnibinder_codec_matrix_XXXXXX";
+        char* dir_path = mkdtemp(dir_template);
+        assert(dir_path != NULL);
+        std::string dir(dir_path);
+        std::string common_path = dir + "/common_types.bidl";
+        std::string main_path = dir + "/matrix.bidl";
+        {
+            std::ofstream out(common_path.c_str());
+            out << common;
+        }
+        {
+            std::ofstream out(main_path.c_str());
+            out << main;
+        }
+
+        AstFile ast;
+        ParseContext ctx = parseFile(main_path, ast);
+        type_codec::TypeCodec codec(ctx);
+
+        auto runTruncationCase = [&codec](const omnic::TypeRef& type,
+                                          const std::string& package,
+                                          const simple_json::Value& value) {
+            omnibinder::Buffer full;
+            assert(codec.encodeToBuffer(value, type, package, full));
+            std::vector<uint8_t> bytes(full.data(), full.data() + full.size());
+            std::vector< std::vector<uint8_t> > truncated;
+            appendTruncatedBuffers(bytes, truncated);
+            for (size_t j = 0; j < truncated.size(); ++j) {
+                omnibinder::Buffer decode_buf(truncated[j].data(), truncated[j].size());
+                simple_json::Value decoded;
+                assert(!codec.decodeFromBuffer(decode_buf, type, package, decoded));
+            }
+        };
+
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_BOOL;
+            runTruncationCase(type, "demo", simple_json::Value(true));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_INT8;
+            runTruncationCase(type, "demo", simple_json::Value(-8.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_UINT8;
+            runTruncationCase(type, "demo", simple_json::Value(8.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_INT16;
+            runTruncationCase(type, "demo", simple_json::Value(-16.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_UINT16;
+            runTruncationCase(type, "demo", simple_json::Value(16.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_INT32;
+            runTruncationCase(type, "demo", simple_json::Value(-32.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_UINT32;
+            runTruncationCase(type, "demo", simple_json::Value(32.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_INT64;
+            runTruncationCase(type, "demo", simple_json::Value(-64.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_UINT64;
+            runTruncationCase(type, "demo", simple_json::Value(64.0));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_FLOAT32;
+            runTruncationCase(type, "demo", simple_json::Value(3.25));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_FLOAT64;
+            runTruncationCase(type, "demo", simple_json::Value(6.5));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_STRING;
+            runTruncationCase(type, "demo", simple_json::Value(std::string("hello")));
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_CUSTOM;
+            type.custom_name = "Inner";
+            simple_json::Value value;
+            value.setObject();
+            value.set("value", simple_json::Value(7.0));
+            runTruncationCase(type, "demo", value);
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_CUSTOM;
+            type.package_name = "common";
+            type.custom_name = "External";
+            simple_json::Value value;
+            value.setObject();
+            value.set("code", simple_json::Value(5.0));
+            value.set("note", simple_json::Value(std::string("ext")));
+            runTruncationCase(type, "demo", value);
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_ARRAY;
+            type.element_type = new omnic::TypeRef();
+            type.element_type->primitive = omnic::TYPE_INT32;
+            simple_json::Value value;
+            value.setArray();
+            value.push(simple_json::Value(1.0));
+            value.push(simple_json::Value(2.0));
+            runTruncationCase(type, "demo", value);
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_ARRAY;
+            type.element_type = new omnic::TypeRef();
+            type.element_type->primitive = omnic::TYPE_STRING;
+            simple_json::Value value;
+            value.setArray();
+            value.push(simple_json::Value(std::string("a")));
+            value.push(simple_json::Value(std::string("b")));
+            runTruncationCase(type, "demo", value);
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_ARRAY;
+            type.element_type = new omnic::TypeRef();
+            type.element_type->primitive = omnic::TYPE_CUSTOM;
+            type.element_type->custom_name = "Inner";
+            simple_json::Value value;
+            value.setArray();
+            simple_json::Value item;
+            item.setObject();
+            item.set("value", simple_json::Value(9.0));
+            value.push(item);
+            runTruncationCase(type, "demo", value);
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_ARRAY;
+            type.element_type = new omnic::TypeRef();
+            type.element_type->primitive = omnic::TYPE_ARRAY;
+            type.element_type->element_type = new omnic::TypeRef();
+            type.element_type->element_type->primitive = omnic::TYPE_INT32;
+            simple_json::Value value;
+            value.setArray();
+            simple_json::Value row;
+            row.setArray();
+            row.push(simple_json::Value(1.0));
+            row.push(simple_json::Value(2.0));
+            value.push(row);
+            runTruncationCase(type, "demo", value);
+        }
+        {
+            omnic::TypeRef type;
+            type.primitive = omnic::TYPE_CUSTOM;
+            type.custom_name = "Wrapper";
+            simple_json::Value value;
+            value.setObject();
+            value.set("flag", simple_json::Value(true));
+            value.set("i8", simple_json::Value(-8.0));
+            value.set("u8", simple_json::Value(8.0));
+            value.set("i16", simple_json::Value(-16.0));
+            value.set("u16", simple_json::Value(16.0));
+            value.set("i32", simple_json::Value(-32.0));
+            value.set("u32", simple_json::Value(32.0));
+            value.set("i64", simple_json::Value(-64.0));
+            value.set("u64", simple_json::Value(64.0));
+            value.set("f32", simple_json::Value(3.25));
+            value.set("f64", simple_json::Value(6.5));
+            value.set("name", simple_json::Value(std::string("wrapper")));
+            {
+                simple_json::Value inner;
+                inner.setObject();
+                inner.set("value", simple_json::Value(11.0));
+                value.set("inner", inner);
+            }
+            {
+                simple_json::Value ids;
+                ids.setArray();
+                ids.push(simple_json::Value(1.0));
+                ids.push(simple_json::Value(2.0));
+                value.set("ids", ids);
+            }
+            {
+                simple_json::Value names;
+                names.setArray();
+                names.push(simple_json::Value(std::string("x")));
+                names.push(simple_json::Value(std::string("y")));
+                value.set("names", names);
+            }
+            {
+                simple_json::Value inners;
+                inners.setArray();
+                simple_json::Value item;
+                item.setObject();
+                item.set("value", simple_json::Value(12.0));
+                inners.push(item);
+                value.set("inners", inners);
+            }
+            {
+                simple_json::Value matrix;
+                matrix.setArray();
+                simple_json::Value row;
+                row.setArray();
+                row.push(simple_json::Value(3.0));
+                row.push(simple_json::Value(4.0));
+                matrix.push(row);
+                value.set("matrix", matrix);
+            }
+            {
+                simple_json::Value ext;
+                ext.setObject();
+                ext.set("code", simple_json::Value(21.0));
+                ext.set("note", simple_json::Value(std::string("note")));
+                value.set("ext", ext);
+            }
+            runTruncationCase(type, "demo", value);
+        }
+
+        unlink(common_path.c_str());
+        unlink(main_path.c_str());
+        rmdir(dir.c_str());
         PASS();
     }
 
