@@ -5,6 +5,7 @@ namespace omnibinder {
 Service::Service(const std::string& name)
     : name_(name)
     , port_(0)
+    , register_host_()
     , shm_config_()
     , runtime_(NULL)
 {
@@ -23,6 +24,14 @@ uint16_t Service::port() const {
 
 void Service::setPort(uint16_t p) {
     port_ = p;
+}
+
+void Service::setRegisterHost(const std::string& host) {
+    register_host_ = host;
+}
+
+const std::string& Service::getRegisterHost() const {
+    return register_host_;
 }
 
 void Service::setShmConfig(const ShmConfig& config) {

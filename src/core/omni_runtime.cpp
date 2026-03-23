@@ -198,6 +198,8 @@ int OmniRuntime::unsubscribeTopic(const std::string& topic) {
     return impl_->unsubscribeTopic(topic);
 }
 
+void OmniRuntime::setRegisterHost(const std::string& host) { impl_->setRegisterHost(host); }
+const std::string& OmniRuntime::getRegisterHost() const { return impl_->getRegisterHost(); }
 void OmniRuntime::setHeartbeatInterval(uint32_t ms) { impl_->setHeartbeatInterval(ms); }
 void OmniRuntime::setDefaultTimeout(uint32_t ms) { impl_->setDefaultTimeout(ms); }
 const std::string& OmniRuntime::hostId() const { return impl_->hostId(); }
@@ -213,6 +215,7 @@ OmniRuntime::Impl::Impl()
     , sm_channel_()
     , rpc_runtime_()
     , conn_mgr_(NULL)
+    , register_host_()
     , sm_port_(0)
     , heartbeat_interval_ms_(DEFAULT_HEARTBEAT_INTERVAL)
     , heartbeat_timer_id_(0)
@@ -552,8 +555,20 @@ int OmniRuntime::Impl::initializeServiceListener(LocalServiceEntry* entry, Servi
     entry->port = static_cast<uint16_t>(port);
     service->setPort(entry->port);
     service->runtime_ = owner_;
-    advertise_host = normalizeAdvertiseHost(platform::getSocketAddress(entry->server->fd()));
+    advertise_host = resolveRegisterHost(service,
+                                         platform::getSocketAddress(entry->server->fd()));
     return 0;
+}
+
+std::string OmniRuntime::Impl::resolveRegisterHost(Service* service,
+                                                     const std::string& listener_host) const {
+    if (service && !service->getRegisterHost().empty()) {
+        return service->getRegisterHost();
+    }
+    if (!register_host_.empty()) {
+        return register_host_;
+    }
+    return normalizeAdvertiseHost(listener_host);
 }
 
 void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
@@ -1722,6 +1737,16 @@ void OmniRuntime::Impl::setHeartbeatInterval(uint32_t ms) {
     });
 }
 
+void OmniRuntime::Impl::setRegisterHost(const std::string& host) {
+    callSerialized([this, host]() {
+        register_host_ = host;
+    });
+}
+
+const std::string& OmniRuntime::Impl::getRegisterHost() const {
+    return register_host_;
+}
+
 void OmniRuntime::Impl::setDefaultTimeout(uint32_t ms) {
     callSerialized([this, ms]() {
         rpc_runtime_.setDefaultTimeout(ms);
@@ -1807,7 +1832,8 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         Message msg(MessageType::MSG_REGISTER, allocSequence());
         ServiceInfo svc_info;
         svc_info.name = it->first;
-        svc_info.host = normalizeAdvertiseHost(platform::getSocketAddress(entry->server->fd()));
+        svc_info.host = resolveRegisterHost(entry->service,
+                                            platform::getSocketAddress(entry->server->fd()));
         svc_info.port = entry->port;
         svc_info.host_id = host_id_;
         svc_info.shm_name = entry->shm_name;

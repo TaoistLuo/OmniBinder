@@ -173,6 +173,8 @@ public:
     int unsubscribeTopicLocked(const std::string& topic_name);
 
     // --- 配置 ---
+    void setRegisterHost(const std::string& host);
+    const std::string& getRegisterHost() const;
     void setHeartbeatInterval(uint32_t interval_ms);
     void setDefaultTimeout(uint32_t timeout_ms);
     const std::string& hostId() const;
@@ -231,6 +233,8 @@ private:
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
     int initializeServiceListener(LocalServiceEntry* entry, Service* service,
                                   std::string& advertise_host);
+    std::string resolveRegisterHost(Service* service,
+                                    const std::string& listener_host) const;
     void initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
                               size_t req_ring_capacity, size_t resp_ring_capacity);
     int registerServiceWithManager(const std::string& name, Service* service,
@@ -284,6 +288,7 @@ private:
 
     std::string     host_id_;
     std::string     sm_host_;
+    std::string     register_host_;
     uint16_t        sm_port_;
     uint32_t        heartbeat_interval_ms_;
     uint32_t        heartbeat_timer_id_;

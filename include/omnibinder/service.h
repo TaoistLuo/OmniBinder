@@ -50,6 +50,8 @@ public:
     const std::string& name() const;
     uint16_t port() const;
     void setPort(uint16_t p);
+    void setRegisterHost(const std::string& host);
+    const std::string& getRegisterHost() const;
     void setShmConfig(const ShmConfig& config);
     ShmConfig shmConfig() const;
 
@@ -73,6 +75,7 @@ private:
 
     std::string name_;
     uint16_t port_;
+    std::string register_host_;
     ShmConfig shm_config_;
     OmniRuntime* runtime_;
 };

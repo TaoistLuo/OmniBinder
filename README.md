@@ -261,6 +261,11 @@ Response (status=OK, 38 bytes, 0.81 ms):
 
 详细使用说明请参考：[omni-cli 使用指南](docs/omni-tool-usage.md)
 
+> `runtime.init(sm_host, sm_port)` 中的 `sm_host` 表示当前进程连接哪个 `ServiceManager`。
+> `runtime.setRegisterHost(...)` 或 `service.setRegisterHost(...)` 表示服务注册到 `ServiceManager`
+> 时写入 `ServiceInfo.host` 的地址，也就是其它机器后续直连该服务时使用的地址。
+> 在跨机部署场景中，这两个地址通常不同，不应混用。
+
 ---
 
 ## 编程示例
@@ -351,6 +356,7 @@ public:
 int main() {
     omnibinder::OmniRuntime runtime;
     runtime.init("127.0.0.1", 9900);
+    runtime.setRegisterHost("192.168.1.10");
 
     MySensorService service;
     runtime.registerService(&service);
