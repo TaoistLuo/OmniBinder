@@ -240,13 +240,17 @@ setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
 2. 建立 SHM（如果启用）
 3. 生成 `ServiceInfo`
 4. 向 `ServiceManager` 注册：
-   - name
-   - host
-   - port
-   - host_id
-   - shm_name
-   - shm_config
-   - interface metadata
+    - name
+    - host
+    - port
+    - host_id
+    - shm_name
+    - shm_config
+    - interface metadata
+
+其中 `host` 表示服务注册到 `ServiceManager` 的可达地址，后续会被其它节点用于直连该服务。
+它既不等同于 `ServiceManager` 地址，也不应直接等同于本地 TCP 监听的 bind 地址。
+跨机部署时，推荐显式通过 `OmniRuntime::setRegisterHost()` 或 `Service::setRegisterHost()` 指定。
 
 ### 6.2 服务发现
 

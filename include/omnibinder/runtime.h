@@ -89,6 +89,9 @@ public:
     int subscribeTopic(const std::string& topic_name, const TopicCallback& callback);
     int unsubscribeTopic(const std::string& topic_name);
 
+    void setRegisterHost(const std::string& host);
+    const std::string& getRegisterHost() const;
+
     void setHeartbeatInterval(uint32_t interval_ms);
     void setDefaultTimeout(uint32_t timeout_ms);
     const std::string& hostId() const;

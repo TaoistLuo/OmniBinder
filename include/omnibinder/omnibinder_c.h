@@ -156,6 +156,12 @@ void omni_service_add_method_ex(omni_service_t* svc, uint32_t method_id, const c
 /** 获取服务监听端口（注册后有效） */
 uint16_t omni_service_port(const omni_service_t* svc);
 
+/** 设置服务注册到 ServiceManager 的可达地址 */
+void omni_service_set_register_host(omni_service_t* svc, const char* host);
+
+/** 获取服务注册到 ServiceManager 的可达地址。返回内部字符串指针。 */
+const char* omni_service_get_register_host(const omni_service_t* svc);
+
 /* ============================================================
  * Runtime API
  * ============================================================ */
@@ -166,6 +172,12 @@ void           omni_runtime_destroy(omni_runtime_t* client);
 int  omni_runtime_init(omni_runtime_t* client, const char* sm_host, uint16_t sm_port);
 void omni_runtime_poll_once(omni_runtime_t* client, int timeout_ms);
 void omni_runtime_stop(omni_runtime_t* client);
+
+/** 设置当前 runtime 下服务默认注册到 ServiceManager 的可达地址 */
+void omni_runtime_set_register_host(omni_runtime_t* client, const char* host);
+
+/** 获取当前 runtime 默认注册到 ServiceManager 的可达地址。返回内部字符串指针。 */
+const char* omni_runtime_get_register_host(const omni_runtime_t* client);
 
 /* 服务注册/注销 */
 int  omni_runtime_register_service(omni_runtime_t* client, omni_service_t* svc);

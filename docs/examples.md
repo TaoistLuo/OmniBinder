@@ -706,15 +706,30 @@ ctest --output-on-failure
 
 ## 9. 跨板通信示例
 
-当服务端和客户端运行在不同机器上时，只需指定不同的 ServiceManager 地址：
+当服务端和客户端运行在不同机器上时，需要同时区分两类地址：
+
+- `--sm-host` / `runtime.init(sm_host, sm_port)`：当前进程连接哪个 `ServiceManager`
+- `setRegisterHost(...)`：服务注册到 `ServiceManager` 时写入的可达地址
+
+跨机调用时，客户端最终连接的是服务注册到 `ServiceManager` 的 `ServiceInfo.host`，
+而不是服务自己连接 `ServiceManager` 时使用的 `sm_host`。
 
 **机器1（192.168.1.10）：运行 ServiceManager 和服务端**
 ```bash
 # 启动 SM（监听所有接口）
 $ ./target/bin/service_manager --host 0.0.0.0 --port 9900
 
-# 启动服务端
+# 启动服务端（连接本机 SM，但显式把 192.168.1.10 注册给其它机器访问）
 $ ./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900
+```
+
+```cpp
+omnibinder::OmniRuntime runtime;
+runtime.init("127.0.0.1", 9900);
+runtime.setRegisterHost("192.168.1.10");
+
+MySensorService service;
+runtime.registerService(&service);
 ```
 
 **机器2（192.168.1.11）：运行客户端**
@@ -724,6 +739,7 @@ $ ./target/example/example_cpp_sensor_client --sm-host 192.168.1.10 --sm-port 99
 ```
 
 框架会自动检测到两个服务不在同一台机器上（host_id 不同），自动使用 TCP 传输而非共享内存。
+其中客户端拿到的目标地址来自服务注册时写入的 `registerHost`。
 日志中会显示：
 
 ```

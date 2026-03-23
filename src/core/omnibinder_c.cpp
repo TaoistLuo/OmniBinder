@@ -346,6 +346,19 @@ uint16_t omni_service_port(const omni_service_t* svc) {
     return (svc && svc->bridge) ? svc->bridge->port() : 0;
 }
 
+void omni_service_set_register_host(omni_service_t* svc, const char* host) {
+    if (svc && svc->bridge) {
+        svc->bridge->setRegisterHost(host ? host : "");
+    }
+}
+
+const char* omni_service_get_register_host(const omni_service_t* svc) {
+    if (!svc || !svc->bridge) {
+        return NULL;
+    }
+    return svc->bridge->getRegisterHost().c_str();
+}
+
 /* ============================================================
  * Runtime API 实现
  * ============================================================ */
@@ -361,6 +374,19 @@ void omni_runtime_destroy(omni_runtime_t* runtime) {
 int omni_runtime_init(omni_runtime_t* runtime, const char* sm_host, uint16_t sm_port) {
     if (!runtime) return -1;
     return runtime->runtime.init(sm_host, sm_port);
+}
+
+void omni_runtime_set_register_host(omni_runtime_t* runtime, const char* host) {
+    if (runtime) {
+        runtime->runtime.setRegisterHost(host ? host : "");
+    }
+}
+
+const char* omni_runtime_get_register_host(const omni_runtime_t* runtime) {
+    if (!runtime) {
+        return NULL;
+    }
+    return runtime->runtime.getRegisterHost().c_str();
 }
 
 void omni_runtime_poll_once(omni_runtime_t* runtime, int timeout_ms) {
