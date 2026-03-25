@@ -153,10 +153,12 @@ private:
 
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
+    const char* register_host = NULL;
     uint16_t sm_port = 9900;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--sm-host") == 0 && i + 1 < argc) sm_host = argv[++i];
         else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) sm_port = (uint16_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--register-host") == 0 && i + 1 < argc) register_host = argv[++i];
     }
 
     signal(SIGINT, signalHandler);
@@ -165,13 +167,18 @@ int main(int argc, char* argv[]) {
 
     std::printf("=== SensorService (C++ Server) Starting ===\n");
     std::printf("ServiceManager: %s:%u\n", sm_host, sm_port);
+    if (register_host) {
+        std::printf("RegisterHost: %s\n", register_host);
+    }
 
     omnibinder::OmniRuntime runtime;
+    if (register_host) {
+        runtime.setRegisterHost(register_host);
+    }
     if (runtime.init(sm_host, sm_port) != 0) {
         std::fprintf(stderr, "Failed to connect to ServiceManager\n");
         return 1;
     }
-
     MySensorService service;
     if (runtime.registerService(&service) != 0) {
         std::fprintf(stderr, "Failed to register service\n");

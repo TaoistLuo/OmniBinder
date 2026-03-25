@@ -217,12 +217,14 @@ void demo_SensorService_impl_request_latest_data_async(const demo_AsyncRequest* 
 
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
+    const char* register_host = NULL;
     uint16_t sm_port = 9900;
     int i;
 
     for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--sm-host") == 0 && i + 1 < argc) sm_host = argv[++i];
         else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) sm_port = (uint16_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--register-host") == 0 && i + 1 < argc) register_host = argv[++i];
     }
 
     signal(SIGINT, signal_handler);
@@ -231,8 +233,14 @@ int main(int argc, char* argv[]) {
 
     printf("=== SensorService (C Server) Starting ===\n");
     printf("ServiceManager: %s:%u\n", sm_host, sm_port);
+    if (register_host) {
+        printf("RegisterHost: %s\n", register_host);
+    }
 
     omni_runtime_t* runtime = omni_runtime_create();
+    if (register_host) {
+        omni_runtime_set_register_host(runtime, register_host);
+    }
     if (omni_runtime_init(runtime, sm_host, sm_port) != 0) {
         fprintf(stderr, "Failed to connect to ServiceManager\n");
         omni_runtime_destroy(runtime);

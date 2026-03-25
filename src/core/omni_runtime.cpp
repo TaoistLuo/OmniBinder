@@ -361,6 +361,17 @@ bool OmniRuntime::Impl::sendToSM(const Message& msg) {
     return sm_channel_.sendMessage(msg);
 }
 
+bool OmniRuntime::Impl::sendToSMWithinTimeout(const Message& msg, uint32_t timeout_ms,
+                                              uint32_t* elapsed_ms) {
+    if (reconnectServiceManagerIfNeeded() != 0) {
+        if (elapsed_ms) {
+            *elapsed_ms = 0;
+        }
+        return false;
+    }
+    return sm_channel_.sendMessageWithinTimeout(msg, timeout_ms, elapsed_ms);
+}
+
 void OmniRuntime::Impl::onSMData(int fd, uint32_t events) {
     (void)fd; (void)events;
     uint8_t buf[4096];
@@ -753,12 +764,17 @@ int OmniRuntime::Impl::lookupServiceUnlocked(const std::string& service_name, Se
     Message msg(MessageType::MSG_LOOKUP, allocSequence());
     msg.payload.writeString(service_name);
 
-    if (!sendToSM(msg)) {
+    uint32_t total_timeout_ms = effectiveTimeout(0);
+    uint32_t send_elapsed_ms = 0;
+    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
 
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms
+        : 0;
+    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
     if (ret != 0) return ret;
 
     bool found = false;
@@ -788,12 +804,17 @@ int OmniRuntime::Impl::listServices(std::vector<ServiceInfo>& services) {
 int OmniRuntime::Impl::listServicesLocked(std::vector<ServiceInfo>& services) {
     Message msg(MessageType::MSG_LIST_SERVICES, allocSequence());
     
-    if (!sendToSM(msg)) {
+    uint32_t total_timeout_ms = effectiveTimeout(0);
+    uint32_t send_elapsed_ms = 0;
+    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
     
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms
+        : 0;
+    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
     if (ret != 0) return ret;
     
     uint32_t count = 0;
@@ -828,12 +849,17 @@ int OmniRuntime::Impl::queryInterfacesLocked(const std::string& service_name,
     Message msg(MessageType::MSG_QUERY_INTERFACES, allocSequence());
     msg.payload.writeString(service_name);
     
-    if (!sendToSM(msg)) {
+    uint32_t total_timeout_ms = effectiveTimeout(0);
+    uint32_t send_elapsed_ms = 0;
+    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
     
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms
+        : 0;
+    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
     if (ret != 0) return ret;
     
     bool found = false;
@@ -881,6 +907,7 @@ int OmniRuntime::Impl::invokeLocked(const std::string& service_name, uint32_t in
                                     uint32_t method_id, const Buffer& request, Buffer& response,
                                     uint32_t timeout_ms) {
     stats_.total_rpc_calls++;
+    uint32_t total_timeout_ms = effectiveTimeout(timeout_ms);
     ServiceInfo info;
     int ret = lookupServiceUnlocked(service_name, info);
     if (ret != 0) {
@@ -900,21 +927,36 @@ int OmniRuntime::Impl::invokeLocked(const std::string& service_name, uint32_t in
         Message msg(MessageType::MSG_INVOKE, seq);
         populateInvokeMessage(msg, interface_id, method_id, request);
 
-        if (!sendInvokeMessage(service_name, msg, info, conn, attempt, true,
-                               interface_id, method_id)) {
+        uint32_t send_elapsed_ms = 0;
+
+        if (!sendInvokeMessageWithTimeout(service_name, msg, info, conn, attempt, true,
+                                          interface_id, method_id, total_timeout_ms,
+                                          &send_elapsed_ms)) {
+            if (send_elapsed_ms >= total_timeout_ms) {
+                stats_.total_rpc_timeouts++;
+                stats_.total_rpc_failures++;
+                OMNI_LOG_WARN(LOG_TAG,
+                              "rpc_send_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u",
+                              service_name.c_str(), interface_id, method_id, total_timeout_ms);
+                return static_cast<int>(ErrorCode::ERR_TIMEOUT);
+            }
             stats_.total_rpc_failures++;
             return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
         }
 
+        uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+            ? total_timeout_ms - send_elapsed_ms
+            : 0;
+
         Message reply;
-        ret = waitForReply(seq, effectiveTimeout(timeout_ms), reply);
+        ret = waitForReply(seq, reply_timeout_ms, reply);
         if (ret != 0) {
             if (ret == static_cast<int>(ErrorCode::ERR_TIMEOUT)) {
                 stats_.total_rpc_timeouts++;
                 OMNI_LOG_WARN(LOG_TAG,
                               "rpc_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u err=%d",
                               service_name.c_str(), interface_id, method_id,
-                              effectiveTimeout(timeout_ms), ret);
+                              total_timeout_ms, ret);
             }
             stats_.total_rpc_failures++;
             return ret;
@@ -994,12 +1036,17 @@ int OmniRuntime::Impl::subscribeServiceDeathLocked(const std::string& service_na
     Message msg(MessageType::MSG_SUBSCRIBE_SERVICE, allocSequence());
     msg.payload.writeString(service_name);
     
-    if (!sendToSM(msg)) {
+    uint32_t total_timeout_ms = effectiveTimeout(0);
+    uint32_t send_elapsed_ms = 0;
+    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
 
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms
+        : 0;
+    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
     if (ret != 0) {
         return ret;
     }
@@ -1073,12 +1120,17 @@ int OmniRuntime::Impl::publishTopicLocked(const std::string& topic_name) {
     }
     serializeServiceInfo(pub_info, msg.payload);
     
-    if (!sendToSM(msg)) {
+    uint32_t total_timeout_ms = effectiveTimeout(0);
+    uint32_t send_elapsed_ms = 0;
+    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
 
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms
+        : 0;
+    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
     if (ret != 0) {
         return ret;
     }
@@ -1184,12 +1236,17 @@ int OmniRuntime::Impl::subscribeTopicLocked(const std::string& topic_name,
     Message msg(MessageType::MSG_SUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic_name);
     
-    if (!sendToSM(msg)) {
+    uint32_t total_timeout_ms = effectiveTimeout(0);
+    uint32_t send_elapsed_ms = 0;
+    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
 
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms
+        : 0;
+    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
     if (ret != 0) {
         return ret;
     }
@@ -1320,7 +1377,12 @@ void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
         writeInvokeErrorReply(reply.payload, ErrorCode::ERR_INTERFACE_NOT_FOUND);
         std::map<int, ITransport*>::iterator tit = it->second->client_transports.find(client_fd);
         if (tit != it->second->client_transports.end()) {
-            sendOnFd(tit->second, reply);
+            if (!sendOnFd(tit->second, reply)) {
+                OMNI_LOG_WARN(LOG_TAG,
+                              "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
+                              service_name.c_str(), client_fd, msg.getSequence(),
+                              static_cast<int>(ErrorCode::ERR_INTERFACE_NOT_FOUND));
+            }
         }
         return;
     }
@@ -1336,7 +1398,12 @@ void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
         writeInvokeErrorReply(reply.payload, ErrorCode::ERR_DESERIALIZE);
         std::map<int, ITransport*>::iterator invoke_tit = it->second->client_transports.find(client_fd);
         if (invoke_tit != it->second->client_transports.end()) {
-            sendOnFd(invoke_tit->second, reply);
+            if (!sendOnFd(invoke_tit->second, reply)) {
+                OMNI_LOG_WARN(LOG_TAG,
+                              "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
+                              service_name.c_str(), client_fd, msg.getSequence(),
+                              static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+            }
         }
         return;
     }
@@ -1348,7 +1415,11 @@ void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
     }
     std::map<int, ITransport*>::iterator tit = it->second->client_transports.find(client_fd);
     if (tit != it->second->client_transports.end()) {
-        sendOnFd(tit->second, reply);
+        if (!sendOnFd(tit->second, reply)) {
+            OMNI_LOG_WARN(LOG_TAG,
+                          "invoke_reply_send_failed service=%s fd=%d seq=%u status=0",
+                          service_name.c_str(), client_fd, msg.getSequence());
+        }
     }
 }
 
@@ -1636,13 +1707,7 @@ bool OmniRuntime::Impl::sendOnFd(ITransport* transport, const Message& msg) {
     if (!transport) return false;
     Buffer buf;
     msg.serialize(buf);
-    size_t sent = 0;
-    while (sent < buf.size()) {
-        int ret = transport->send(buf.data() + sent, buf.size() - sent);
-        if (ret <= 0) return false;
-        sent += static_cast<size_t>(ret);
-    }
-    return true;
+    return platform::socketSendAll(transport->fd(), buf.data(), buf.size(), effectiveTimeout(0), NULL);
 }
 
 bool OmniRuntime::Impl::acquireInvokeConnection(const std::string& service_name, ServiceInfo& info,
@@ -1680,6 +1745,45 @@ bool OmniRuntime::Impl::sendInvokeMessage(const std::string& service_name, const
                        "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d attempt=%d",
                        service_name.c_str(), interface_id, method_id,
                        static_cast<int>(ErrorCode::ERR_SEND_FAILED), attempt + 1);
+    }
+
+    return attempt == 0 && refreshServiceConnectionUnlocked(service_name,
+                                                            const_cast<ServiceInfo&>(info), conn);
+}
+
+bool OmniRuntime::Impl::sendInvokeMessageWithTimeout(const std::string& service_name,
+                                                     const Message& msg,
+                                                     const ServiceInfo& info,
+                                                     ServiceConnection*& conn,
+                                                     int attempt,
+                                                     bool log_failure,
+                                                     uint32_t interface_id,
+                                                     uint32_t method_id,
+                                                     uint32_t timeout_ms,
+                                                     uint32_t* elapsed_ms) {
+    if (elapsed_ms) {
+        *elapsed_ms = 0;
+    }
+
+    if (conn_mgr_->sendMessageWithinTimeout(service_name, msg, timeout_ms, elapsed_ms)) {
+        return true;
+    }
+
+    stats_.connection_errors++;
+    if (log_failure) {
+        bool timed_out = elapsed_ms && *elapsed_ms >= timeout_ms;
+        OMNI_LOG_ERROR(LOG_TAG,
+                       timed_out
+                           ? "rpc_send_timeout service=%s iface=0x%08x method=0x%08x err=%d attempt=%d"
+                           : "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d attempt=%d",
+                       service_name.c_str(), interface_id, method_id,
+                       timed_out ? static_cast<int>(ErrorCode::ERR_TIMEOUT)
+                                 : static_cast<int>(ErrorCode::ERR_SEND_FAILED),
+                       attempt + 1);
+    }
+
+    if (elapsed_ms && *elapsed_ms >= timeout_ms) {
+        return false;
     }
 
     return attempt == 0 && refreshServiceConnectionUnlocked(service_name,

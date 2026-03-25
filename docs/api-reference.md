@@ -784,6 +784,9 @@ enum class LogLevel {
 void setLogLevel(LogLevel level);
 LogLevel& globalLogLevel();
 
+// 控制是否打印时间戳（默认开启）
+void enableTimestamp(bool enable);
+
 // 日志宏（tag 为模块标识字符串）
 OMNI_LOG_DEBUG(tag, fmt, ...)
 OMNI_LOG_INFO(tag, fmt, ...)
@@ -803,6 +806,7 @@ OMNI_LOG_ERROR(tag, fmt, ...)
 - `sm_reconnect_begin`
 - `sm_reconnect_success`
 - `rpc_send_failed`
+- `rpc_send_timeout`
 - `rpc_timeout`
 - `data_connect_failed`
 - `data_connect_timeout`

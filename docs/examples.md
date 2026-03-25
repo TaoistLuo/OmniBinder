@@ -740,6 +740,9 @@ $ ./target/example/example_cpp_sensor_client --sm-host 192.168.1.10 --sm-port 99
 
 框架会自动检测到两个服务不在同一台机器上（host_id 不同），自动使用 TCP 传输而非共享内存。
 其中客户端拿到的目标地址来自服务注册时写入的 `registerHost`。
+同步 `invoke()` 在 TCP 路径上会先把完整请求写入 socket，再开始等待 reply。
+因此如果跨机链路存在明显背压，大请求可能先在发送阶段触发 timeout，
+这时更应该检查链路带宽、对端读取速度和单次请求体积，而不是把问题理解为 reply timeout。
 日志中会显示：
 
 ```

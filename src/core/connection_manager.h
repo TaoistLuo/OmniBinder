@@ -110,6 +110,14 @@ public:
     // 通过连接发送原始数据
     bool sendRaw(ServiceConnection* conn, const uint8_t* data, size_t length);
 
+    // 在超时内将完整消息同步发送出去
+    bool sendMessageWithinTimeout(const std::string& service_name, const Message& msg,
+                                  uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
+
+    // 在超时内将完整原始数据同步发送出去
+    bool sendRawWithinTimeout(ServiceConnection* conn, const uint8_t* data, size_t length,
+                              uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
+
     // 设置消息回调
     void setMessageCallback(const MessageCallback& cb);
 

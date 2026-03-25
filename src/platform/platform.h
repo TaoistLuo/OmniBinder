@@ -44,6 +44,7 @@
     #include <sys/socket.h>
     #include <sys/epoll.h>
     #include <sys/eventfd.h>
+    #include <poll.h>
     #include <netinet/in.h>
     #include <netinet/tcp.h>
     #include <arpa/inet.h>
@@ -109,6 +110,8 @@ int connectSocket(SocketFd fd, const std::string& host, uint16_t port);
 
 // 发送数据
 int socketSend(SocketFd fd, const void* data, size_t length);
+bool socketSendAll(SocketFd fd, const void* data, size_t length,
+                   uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
 
 // 接收数据
 int socketRecv(SocketFd fd, void* buf, size_t buf_size);
@@ -130,6 +133,9 @@ bool isWouldBlock(int error_code);
 
 // 判断是否是连接中
 bool isInProgress(int error_code);
+
+// 等待 socket 可写
+bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms);
 
 // ============================================================
 // 事件通知（用于跨线程唤醒 EventLoop）
