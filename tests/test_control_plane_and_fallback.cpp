@@ -3,9 +3,11 @@
 #include <cstdio>
 #include <cassert>
 #include <cstring>
+#include <vector>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <pthread.h>
 
 using namespace omnibinder;
@@ -15,6 +17,7 @@ using namespace omnibinder;
 
 static const uint16_t SM_PORT = 19912;
 static const uint32_t METHOD_ADD = fnv1a_32("Add");
+static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
 static const uint32_t IFACE_ID = fnv1a_32("OwnedService");
 
 static bool recvMessage(TcpTransport& transport, Message& msg, int timeout_ms);
@@ -26,6 +29,7 @@ public:
         iface_.interface_id = IFACE_ID;
         iface_.name = "OwnedService";
         iface_.methods.push_back(MethodInfo(METHOD_ADD, "Add"));
+        iface_.methods.push_back(MethodInfo(METHOD_ECHO, "Echo"));
     }
     const char* serviceName() const override { return "OwnedService"; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
@@ -38,6 +42,11 @@ protected:
             int32_t b = req.readInt32();
             invoke_count_++;
             response.writeInt32(a + b);
+        } else if (method_id == METHOD_ECHO) {
+            invoke_count_++;
+            if (request.size() > 0) {
+                response.writeRaw(request.data(), request.size());
+            }
         }
     }
 private:
@@ -77,6 +86,14 @@ struct RawTcpServiceCtx {
     volatile bool ready;
     volatile bool done;
     RawTcpServiceCtx() : port(0), ready(false), done(false) {}
+};
+
+struct DelayedReadServiceCtx {
+    TcpTransportServer server;
+    uint16_t port;
+    volatile bool ready;
+    volatile bool done;
+    DelayedReadServiceCtx() : port(0), ready(false), done(false) {}
 };
 
 [[maybe_unused]] static void* rawTcpServiceThread(void* arg) {
@@ -138,6 +155,81 @@ struct RawTcpServiceCtx {
             break;
         }
         usleep(20000);
+    }
+
+    accepted->close();
+    delete accepted;
+    ctx->server.close();
+    ctx->done = true;
+    return NULL;
+}
+
+[[maybe_unused]] static void* delayedReadServiceThread(void* arg) {
+    DelayedReadServiceCtx* ctx = static_cast<DelayedReadServiceCtx*>(arg);
+    int port = ctx->server.listen("127.0.0.1", 0);
+    if (port <= 0) {
+        return NULL;
+    }
+    ctx->port = static_cast<uint16_t>(port);
+    ctx->ready = true;
+
+    ITransport* accepted = NULL;
+    for (int i = 0; i < 100 && !accepted; ++i) {
+        accepted = ctx->server.accept();
+        if (!accepted) {
+            usleep(50000);
+        }
+    }
+    if (!accepted) {
+        ctx->done = true;
+        return NULL;
+    }
+
+    int rcvbuf = 4096;
+    setsockopt(accepted->fd(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    usleep(300000);
+
+    Buffer input;
+    std::vector<uint8_t> buf(65536);
+    bool replied = false;
+    for (int i = 0; i < 400 && !replied; ++i) {
+        int ret = accepted->recv(buf.data(), buf.size());
+        if (ret > 0) {
+            input.writeRaw(buf.data(), static_cast<size_t>(ret));
+            if (input.size() >= MESSAGE_HEADER_SIZE) {
+                MessageHeader hdr;
+                if (Message::parseHeader(input.data(), input.size(), hdr)) {
+                    size_t total = MESSAGE_HEADER_SIZE + hdr.length;
+                    if (input.size() >= total) {
+                        Message reply(MessageType::MSG_INVOKE_REPLY, hdr.sequence);
+                        reply.payload.writeInt32(0);
+                        reply.payload.writeUint32(0);
+                        Buffer out;
+                        reply.serialize(out);
+                        size_t sent = 0;
+                        while (sent < out.size()) {
+                            int n = accepted->send(out.data() + sent, out.size() - sent);
+                            if (n < 0) {
+                                accepted->close();
+                                delete accepted;
+                                ctx->server.close();
+                                ctx->done = true;
+                                return NULL;
+                            }
+                            if (n == 0) {
+                                usleep(10000);
+                                continue;
+                            }
+                            sent += static_cast<size_t>(n);
+                        }
+                        replied = true;
+                    }
+                }
+            }
+        }
+        if (!replied) {
+            usleep(10000);
+        }
     }
 
     accepted->close();
@@ -244,12 +336,12 @@ static void stopSM(pid_t pid) {
 
 [[maybe_unused]] static bool recvFullMessage(TcpTransport& transport, Message& msg, int timeout_ms) {
     Buffer input;
-    uint8_t buf[2048];
-    int loops = timeout_ms / 20;
+    std::vector<uint8_t> buf(65536);
+    int loops = timeout_ms / 5;
     for (int i = 0; i < loops; ++i) {
-        int ret = transport.recv(buf, sizeof(buf));
+        int ret = transport.recv(buf.data(), buf.size());
         if (ret > 0) {
-            input.writeRaw(buf, static_cast<size_t>(ret));
+            input.writeRaw(buf.data(), static_cast<size_t>(ret));
             if (input.size() >= MESSAGE_HEADER_SIZE) {
                 MessageHeader hdr;
                 if (!Message::parseHeader(input.data(), input.size(), hdr)) {
@@ -265,9 +357,52 @@ static void stopSM(pid_t pid) {
                 }
             }
         }
-        usleep(20000);
+        usleep(5000);
     }
     return false;
+}
+
+[[maybe_unused]] static bool sendFullMessage(TcpTransport& transport, const Message& msg, int timeout_ms) {
+    Buffer out;
+    msg.serialize(out);
+    size_t sent = 0;
+    int loops = timeout_ms / 5;
+    for (int i = 0; i < loops && sent < out.size(); ++i) {
+        int ret = transport.send(out.data() + sent, out.size() - sent);
+        if (ret < 0) {
+            return false;
+        }
+        if (ret == 0) {
+            usleep(5000);
+            continue;
+        }
+        sent += static_cast<size_t>(ret);
+    }
+    return sent == out.size();
+}
+
+[[maybe_unused]] static bool decodeInvokeReplyForTest(const Message& msg, int32_t& status, Buffer& response) {
+    try {
+        Buffer payload(msg.payload.data(), msg.payload.size());
+        status = payload.readInt32();
+        if (status != 0) {
+            response.clear();
+            return true;
+        }
+
+        uint32_t payload_len = payload.readUint32();
+        if (payload.remaining() < payload_len) {
+            return false;
+        }
+
+        response.clear();
+        if (payload_len > 0) {
+            response.writeRaw(payload.data() + payload.readPosition(), payload_len);
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 [[maybe_unused]] static bool registerFakeService(TcpTransport& transport, uint32_t seq,
@@ -573,6 +708,64 @@ int main() {
 
         registrant.close();
         host_probe.stop();
+        PASS();
+    }
+
+    TEST(runtime_tcp_large_invoke_waits_for_full_request_send) {
+        DelayedReadServiceCtx delayed_ctx;
+        pthread_t delayed_tid = 0;
+        assert(pthread_create(&delayed_tid, NULL, delayedReadServiceThread, &delayed_ctx) == 0);
+        for (int i = 0; i < 50 && !delayed_ctx.ready; ++i) usleep(100000);
+        assert(delayed_ctx.ready);
+
+        TcpTransport registrant;
+        assert(connectTcp(registrant, "127.0.0.1", SM_PORT));
+        assert(registerFakeService(registrant, 3001, "SlowReadService", delayed_ctx.port, "remote-delayed-node"));
+
+        OmniRuntime probe;
+        assert(probe.init("127.0.0.1", SM_PORT) == 0);
+        Buffer req;
+        std::vector<uint8_t> payload(4 * 1024 * 1024, 0x5A);
+        req.writeRaw(payload.data(), payload.size());
+        Buffer resp;
+        int ret = probe.invoke("SlowReadService", IFACE_ID, METHOD_ADD, req, resp, 10000);
+        assert(ret == 0);
+        assert(resp.size() == 0);
+
+        probe.stop();
+        registrant.close();
+        pthread_join(delayed_tid, NULL);
+        PASS();
+    }
+
+    TEST(service_tcp_large_reply_handles_partial_send) {
+        TcpTransport rogue;
+        assert(connectTcp(rogue, "127.0.0.1", owned_ctx.service.port()));
+
+        int rcvbuf = 4096;
+        setsockopt(rogue.fd(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+        std::vector<uint8_t> payload(512 * 1024, 0x6B);
+        Message invoke(MessageType::MSG_INVOKE, 3002);
+        invoke.payload.writeUint32(IFACE_ID);
+        invoke.payload.writeUint32(METHOD_ECHO);
+        invoke.payload.writeUint32(static_cast<uint32_t>(payload.size()));
+        invoke.payload.writeRaw(payload.data(), payload.size());
+        assert(sendFullMessage(rogue, invoke, 10000));
+
+        usleep(300000);
+
+        Message reply;
+        assert(recvFullMessage(rogue, reply, 15000));
+        assert(reply.getType() == MessageType::MSG_INVOKE_REPLY);
+        int32_t status = -1;
+        Buffer response;
+        assert(decodeInvokeReplyForTest(reply, status, response));
+        assert(status == 0);
+        assert(response.size() == payload.size());
+        assert(memcmp(response.data(), payload.data(), payload.size()) == 0);
+
+        rogue.close();
         PASS();
     }
 

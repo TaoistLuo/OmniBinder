@@ -265,6 +265,11 @@ Response (status=OK, 38 bytes, 0.81 ms):
 > `runtime.setRegisterHost(...)` 或 `service.setRegisterHost(...)` 表示服务注册到 `ServiceManager`
 > 时写入 `ServiceInfo.host` 的地址，也就是其它机器后续直连该服务时使用的地址。
 > 在跨机部署场景中，这两个地址通常不同，不应混用。
+>
+> 当前同步 `invoke()` 在 TCP 路径上会先在 timeout 预算内把完整请求写入 socket，
+> 只有请求真正发完后才进入 reply 等待阶段。
+> 因此跨设备慢链路下如果请求发送本身耗时较长，会先体现为发送阶段 timeout，
+> 而不是“本地排队成功但 reply 提前超时”。
 
 ---
 

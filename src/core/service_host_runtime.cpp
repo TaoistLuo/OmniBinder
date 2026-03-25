@@ -53,7 +53,7 @@ void ServiceHostRuntime::onServiceAccept(const std::string& service_name,
     entry->client_recv_buffers[cfd] = new Buffer();
     client_fd_to_service[cfd] = service_name;
 
-    loop->addFd(cfd, EventLoop::EVENT_READ,
+    loop->addFd(cfd, EventLoop::EVENT_READ | EventLoop::EVENT_ERROR,
         [on_client_data, service_name, cfd](int fd, uint32_t ev) {
             (void)fd;
             on_client_data(service_name, cfd, ev);

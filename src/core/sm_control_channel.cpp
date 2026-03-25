@@ -18,21 +18,20 @@ bool SmControlChannel::isConnected() const {
 }
 
 bool SmControlChannel::sendMessage(const Message& msg) {
+    return sendMessageWithinTimeout(msg, DEFAULT_INVOKE_TIMEOUT, NULL);
+}
+
+bool SmControlChannel::sendMessageWithinTimeout(const Message& msg, uint32_t timeout_ms, uint32_t* elapsed_ms) {
     if (!isConnected()) {
+        if (elapsed_ms) {
+            *elapsed_ms = 0;
+        }
         return false;
     }
 
     Buffer buf;
     msg.serialize(buf);
-    size_t sent = 0;
-    while (sent < buf.size()) {
-        int ret = transport->send(buf.data() + sent, buf.size() - sent);
-        if (ret <= 0) {
-            return false;
-        }
-        sent += static_cast<size_t>(ret);
-    }
-    return true;
+    return platform::socketSendAll(transport->fd(), buf.data(), buf.size(), timeout_ms, elapsed_ms);
 }
 
 int SmControlChannel::recvSome(uint8_t* data, size_t capacity) {

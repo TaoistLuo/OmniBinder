@@ -165,6 +165,21 @@ bool ConnectionManager::sendMessage(const std::string& service_name, const Messa
     return sendRaw(conn, buf.data(), buf.size());
 }
 
+bool ConnectionManager::sendMessageWithinTimeout(const std::string& service_name,
+                                                const Message& msg,
+                                                uint32_t timeout_ms,
+                                                uint32_t* elapsed_ms) {
+    ServiceConnection* conn = getConnection(service_name);
+    if (!conn) {
+        OMNI_LOG_ERROR(LOG_TAG, "No connection to %s", service_name.c_str());
+        return false;
+    }
+
+    Buffer buf;
+    msg.serialize(buf);
+    return sendRawWithinTimeout(conn, buf.data(), buf.size(), timeout_ms, elapsed_ms);
+}
+
 bool ConnectionManager::sendRaw(ServiceConnection* conn, const uint8_t* data, size_t length) {
     if (!conn || !conn->transport || !conn->connected) {
         return false;
@@ -189,6 +204,47 @@ bool ConnectionManager::sendRaw(ServiceConnection* conn, const uint8_t* data, si
         sent += static_cast<size_t>(ret);
     }
     return sent == length;
+}
+
+bool ConnectionManager::sendRawWithinTimeout(ServiceConnection* conn,
+                                            const uint8_t* data,
+                                            size_t length,
+                                            uint32_t timeout_ms,
+                                            uint32_t* elapsed_ms) {
+    if (elapsed_ms) {
+        *elapsed_ms = 0;
+    }
+
+    if (!conn || !conn->transport || !conn->connected) {
+        return false;
+    }
+
+    if (conn->transport->type() != TransportType::TCP) {
+        bool ok = sendRaw(conn, data, length);
+        if (elapsed_ms) {
+            *elapsed_ms = 0;
+        }
+        return ok;
+    }
+
+    bool ok = platform::socketSendAll(conn->transport->fd(), data, length, timeout_ms, elapsed_ms);
+    if (!ok) {
+        int err = platform::getSocketError();
+        uint32_t spent_ms = elapsed_ms ? *elapsed_ms : 0;
+        OMNI_LOG_WARN(LOG_TAG,
+                      "data_send_incomplete service=%s fd=%d bytes=%zu timeout_ms=%u elapsed_ms=%u sock_err=%d",
+                      conn->service_name.c_str(), conn->transport->fd(), length, timeout_ms,
+                      spent_ms, err);
+        if (!platform::isWouldBlock(err)) {
+            OMNI_LOG_ERROR(LOG_TAG,
+                           "data_send_failed service=%s transport=%s err=%d",
+                           conn->service_name.c_str(),
+                           conn->transport->type() == TransportType::SHM ? "SHM" : "TCP",
+                           static_cast<int>(ErrorCode::ERR_SEND_FAILED));
+            conn->connected = false;
+        }
+    }
+    return ok;
 }
 
 void ConnectionManager::setMessageCallback(const MessageCallback& cb) {

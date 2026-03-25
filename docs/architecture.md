@@ -252,6 +252,14 @@ setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
 它既不等同于 `ServiceManager` 地址，也不应直接等同于本地 TCP 监听的 bind 地址。
 跨机部署时，推荐显式通过 `OmniRuntime::setRegisterHost()` 或 `Service::setRegisterHost()` 指定。
 
+当前同步 `invoke()` 的 TCP 发送语义是“写完或超时”：
+
+- 客户端先在本次调用的 timeout 预算内把完整请求写入 socket
+- 只有请求真正发送完成后，才开始等待 `MSG_INVOKE_REPLY`
+- 如果链路背压严重、请求在 deadline 内无法完整发出，则直接返回 `ERR_TIMEOUT`
+
+这样做的目的，是避免跨设备慢链路下把“请求仍在本地待发”错误地统计进 reply timeout。
+
 ### 6.2 服务发现
 
 客户端查询服务时，`ServiceManager` 返回 `ServiceInfo`，包括：
@@ -283,6 +291,13 @@ setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
 4. server 执行业务方法
 5. 返回 `MSG_INVOKE_REPLY`
 6. `RpcRuntime` 等待并交付结果
+
+对于 TCP 路径，这里的 timeout 预算实际分为两个阶段：
+
+1. send phase：在 deadline 内完整发送 `MSG_INVOKE`
+2. reply phase：使用剩余预算等待 `MSG_INVOKE_REPLY`
+
+因此一次超时可能发生在“请求未发完”阶段，也可能发生在“请求已发完但服务端未及时回复”阶段。
 
 ### 7.2 One-way 调用
 

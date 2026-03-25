@@ -190,6 +190,8 @@ private:
 
     // --- SM 连接 ---
     bool sendToSM(const Message& msg);
+    bool sendToSMWithinTimeout(const Message& msg, uint32_t timeout_ms,
+                               uint32_t* elapsed_ms);
     void onSMData(int fd, uint32_t events);
     void processSMMessages();
     void handleSMMessage(const Message& msg);
@@ -248,9 +250,14 @@ private:
     void populateInvokeMessage(Message& msg, uint32_t interface_id, uint32_t method_id,
                                const Buffer& request) const;
     bool sendInvokeMessage(const std::string& service_name, const Message& msg,
-                           const ServiceInfo& info, ServiceConnection*& conn,
-                           int attempt, bool log_failure, uint32_t interface_id,
-                           uint32_t method_id);
+                            const ServiceInfo& info, ServiceConnection*& conn,
+                            int attempt, bool log_failure, uint32_t interface_id,
+                            uint32_t method_id);
+    bool sendInvokeMessageWithTimeout(const std::string& service_name, const Message& msg,
+                                      const ServiceInfo& info, ServiceConnection*& conn,
+                                      int attempt, bool log_failure, uint32_t interface_id,
+                                      uint32_t method_id, uint32_t timeout_ms,
+                                      uint32_t* elapsed_ms);
     int lookupServiceUnlocked(const std::string& service_name, ServiceInfo& info);
     std::string topicPublisherServiceName(const std::string& topic_name) const;
     bool ensureTopicPublisherConnection(const std::string& topic_name, const ServiceInfo& pub_info);

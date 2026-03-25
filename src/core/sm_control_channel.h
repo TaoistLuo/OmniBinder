@@ -22,6 +22,7 @@ public:
 
     bool isConnected() const;
     bool sendMessage(const Message& msg);
+    bool sendMessageWithinTimeout(const Message& msg, uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
     int recvSome(uint8_t* data, size_t capacity);
     void appendReceived(const uint8_t* data, size_t length);
     bool tryPopMessage(Message& msg);

@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <cstdio>
+#include <climits>
 #include <fstream>
 #include <sstream>
 
@@ -157,6 +158,64 @@ int socketSend(SocketFd fd, const void* data, size_t length) {
     return ret;
 }
 
+bool socketSendAll(SocketFd fd, const void* data, size_t length,
+                   uint32_t timeout_ms, uint32_t* elapsed_ms) {
+    if (elapsed_ms) {
+        *elapsed_ms = 0;
+    }
+
+    const uint8_t* bytes = static_cast<const uint8_t*>(data);
+    int64_t start_ms = currentTimeMs();
+    int64_t deadline_ms = start_ms + static_cast<int64_t>(timeout_ms);
+    size_t sent = 0;
+    while (sent < length) {
+        int ret = socketSend(fd, bytes + sent, length - sent);
+        if (ret < 0) {
+            int err = getSocketError();
+            if (isWouldBlock(err)) {
+                int64_t now_ms = currentTimeMs();
+                if (now_ms >= deadline_ms) {
+                    break;
+                }
+
+                uint32_t remaining_ms = static_cast<uint32_t>(deadline_ms - now_ms);
+                if (!waitSocketWritable(fd, remaining_ms)) {
+                    break;
+                }
+                continue;
+            }
+
+            if (elapsed_ms) {
+                int64_t spent_ms = currentTimeMs() - start_ms;
+                *elapsed_ms = spent_ms > 0 ? static_cast<uint32_t>(spent_ms) : 0;
+            }
+            return false;
+        }
+
+        if (ret > 0) {
+            sent += static_cast<size_t>(ret);
+            continue;
+        }
+
+        int64_t now_ms = currentTimeMs();
+        if (now_ms >= deadline_ms) {
+            break;
+        }
+
+        uint32_t remaining_ms = static_cast<uint32_t>(deadline_ms - now_ms);
+        if (!waitSocketWritable(fd, remaining_ms)) {
+            break;
+        }
+    }
+
+    if (elapsed_ms) {
+        int64_t spent_ms = currentTimeMs() - start_ms;
+        *elapsed_ms = spent_ms > 0 ? static_cast<uint32_t>(spent_ms) : 0;
+    }
+
+    return sent == length;
+}
+
 int socketRecv(SocketFd fd, void* buf, size_t buf_size) {
     int ret;
     do {
@@ -204,6 +263,31 @@ bool isWouldBlock(int error_code) {
 
 bool isInProgress(int error_code) {
     return error_code == EINPROGRESS;
+}
+
+bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
+    struct pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+
+    int timeout = timeout_ms > static_cast<uint32_t>(INT_MAX)
+        ? INT_MAX
+        : static_cast<int>(timeout_ms);
+    int ret;
+    do {
+        ret = poll(&pfd, 1, timeout);
+    } while (ret < 0 && errno == EINTR);
+
+    if (ret <= 0) {
+        return false;
+    }
+
+    if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        return false;
+    }
+
+    return (pfd.revents & POLLOUT) != 0;
 }
 
 // ============================================================
@@ -754,6 +838,29 @@ bool isWouldBlock(int error_code) {
 
 bool isInProgress(int error_code) {
     return error_code == WSAEWOULDBLOCK;
+}
+
+bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
+    fd_set write_fds;
+    fd_set except_fds;
+    FD_ZERO(&write_fds);
+    FD_ZERO(&except_fds);
+    FD_SET(fd, &write_fds);
+    FD_SET(fd, &except_fds);
+
+    struct timeval tv;
+    tv.tv_sec = static_cast<long>(timeout_ms / 1000);
+    tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
+    int ret = select(static_cast<int>(fd) + 1, NULL, &write_fds, &except_fds, &tv);
+    if (ret <= 0) {
+        return false;
+    }
+
+    if (FD_ISSET(fd, &except_fds)) {
+        return false;
+    }
+
+    return FD_ISSET(fd, &write_fds) != 0;
 }
 
 // Windows eventfd 模拟（使用 pipe 或 socket pair）
