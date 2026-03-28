@@ -1323,13 +1323,13 @@ void OmniRuntime::Impl::onServiceClientData(const std::string& service_name,
         loop_,
         client_fd_to_service_,
         [this](const std::string& svc, int fd, const Message& msg) {
-            this->handleInvokeRequest(svc, fd, msg);
+            this->handleInvokeRequest(svc, fd, msg, "TCP");
         },
         [this](const std::string& svc, const Message& msg) {
-            this->handleInvokeOneWayRequest(svc, msg);
+            this->handleInvokeOneWayRequest(svc, msg, "TCP");
         },
         [this](int fd, const Message& msg) {
-            this->handleSubscribeBroadcast(fd, msg);
+            this->handleSubscribeBroadcast(fd, msg, "TCP");
         },
         [this](const std::string& svc, int fd) {
             this->removeServiceClient(svc, fd);
@@ -1350,7 +1350,8 @@ void OmniRuntime::Impl::onServiceClientData(const std::string& service_name,
 }
 
 void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
-                                               int client_fd, const Message& msg) {
+                                               int client_fd, const Message& msg,
+                                               const char* transport_label) {
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_name);
     if (it == local_services_.end()) return;
     
@@ -1361,8 +1362,8 @@ void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
     Buffer request;
     if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
         OMNI_LOG_WARN(LOG_TAG,
-                      "malformed_invoke_payload service=%s transport=TCP seq=%u err=%d",
-                      service_name.c_str(), msg.getSequence(),
+                      "malformed_invoke_payload service=%s transport=%s seq=%u err=%d",
+                      service_name.c_str(), transport_label, msg.getSequence(),
                       static_cast<int>(ErrorCode::ERR_DESERIALIZE));
         Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
         writeInvokeErrorReply(reply.payload, ErrorCode::ERR_DESERIALIZE);
@@ -1391,8 +1392,26 @@ void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
         service->onInvoke(method_id, request, response);
     } catch (...) {
         OMNI_LOG_WARN(LOG_TAG,
-                      "invoke_deserialize_failed service=%s transport=TCP seq=%u method=0x%08x err=%d",
-                      service_name.c_str(), msg.getSequence(), method_id,
+                      "invoke_deserialize_failed service=%s transport=%s seq=%u method=0x%08x err=%d",
+                      service_name.c_str(), transport_label, msg.getSequence(), method_id,
+                      static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+        Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
+        writeInvokeErrorReply(reply.payload, ErrorCode::ERR_DESERIALIZE);
+        std::map<int, ITransport*>::iterator invoke_tit = it->second->client_transports.find(client_fd);
+        if (invoke_tit != it->second->client_transports.end()) {
+            if (!sendOnFd(invoke_tit->second, reply)) {
+                OMNI_LOG_WARN(LOG_TAG,
+                              "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
+                              service_name.c_str(), client_fd, msg.getSequence(),
+                              static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+            }
+        }
+        return;
+    }
+    if (service->consumeInvokeError() != 0) {
+        OMNI_LOG_WARN(LOG_TAG,
+                      "invoke_deserialize_failed service=%s transport=%s seq=%u method=0x%08x err=%d",
+                      service_name.c_str(), transport_label, msg.getSequence(), method_id,
                       static_cast<int>(ErrorCode::ERR_DESERIALIZE));
         Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
         writeInvokeErrorReply(reply.payload, ErrorCode::ERR_DESERIALIZE);
@@ -1424,7 +1443,8 @@ void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
 }
 
 void OmniRuntime::Impl::handleInvokeOneWayRequest(const std::string& service_name,
-                                                     const Message& msg) {
+                                                     const Message& msg,
+                                                     const char* transport_label) {
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_name);
     if (it == local_services_.end()) return;
     Service* service = it->second->service;
@@ -1434,8 +1454,8 @@ void OmniRuntime::Impl::handleInvokeOneWayRequest(const std::string& service_nam
     Buffer request;
     if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
         OMNI_LOG_WARN(LOG_TAG,
-                      "malformed_invoke_payload service=%s transport=TCP seq=%u oneway=1 err=%d",
-                      service_name.c_str(), msg.getSequence(),
+                      "malformed_invoke_payload service=%s transport=%s seq=%u oneway=1 err=%d",
+                      service_name.c_str(), transport_label, msg.getSequence(),
                       static_cast<int>(ErrorCode::ERR_DESERIALIZE));
         return;
     }
@@ -1447,18 +1467,20 @@ void OmniRuntime::Impl::handleInvokeOneWayRequest(const std::string& service_nam
         service->onInvoke(method_id, request, response);
     } catch (...) {
         OMNI_LOG_WARN(LOG_TAG,
-                      "invoke_deserialize_failed service=%s transport=TCP seq=%u method=0x%08x oneway=1 err=%d",
-                      service_name.c_str(), msg.getSequence(), method_id,
+                      "invoke_deserialize_failed service=%s transport=%s seq=%u method=0x%08x oneway=1 err=%d",
+                      service_name.c_str(), transport_label, msg.getSequence(), method_id,
                       static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     }
 }
 
-void OmniRuntime::Impl::handleSubscribeBroadcast(int client_fd, const Message& msg) {
+void OmniRuntime::Impl::handleSubscribeBroadcast(int client_fd, const Message& msg,
+                                                 const char* transport_label) {
     uint32_t topic_id = 0;
     std::string topic_name;
     if (!decodeSubscribeBroadcastPayload(msg, topic_id, topic_name)) {
         OMNI_LOG_WARN(LOG_TAG,
-                      "malformed_subscribe_broadcast transport=TCP seq=%u err=%d",
+                      "malformed_subscribe_broadcast transport=%s seq=%u err=%d",
+                      transport_label,
                       msg.getSequence(), static_cast<int>(ErrorCode::ERR_DESERIALIZE));
         return;
     }
@@ -1610,6 +1632,24 @@ void OmniRuntime::Impl::handleShmRequest(const std::string& service_name,
             try {
                 entry->service->onInvoke(method_id, request, response);
             } catch (...) {
+                OMNI_LOG_WARN(LOG_TAG,
+                              "invoke_deserialize_failed service=%s transport=SHM seq=%u method=0x%08x err=%d",
+                              entry->service->serviceName(), msg.getSequence(), method_id,
+                              static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+                Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
+                writeInvokeErrorReply(reply.payload, ErrorCode::ERR_DESERIALIZE);
+                Buffer send_buf;
+                reply.serialize(send_buf);
+                int send_ret = entry->shm_server->serverSend(cid, send_buf.data(), send_buf.size());
+                if (send_ret <= 0) {
+                    OMNI_LOG_ERROR(LOG_TAG,
+                                   "shm_reply_send_failed service=%s client_id=%u seq=%u err=%d",
+                                   entry->service->serviceName(), cid, msg.getSequence(),
+                                   static_cast<int>(ErrorCode::ERR_SEND_FAILED));
+                }
+                return;
+            }
+            if (entry->service->consumeInvokeError() != 0) {
                 OMNI_LOG_WARN(LOG_TAG,
                               "invoke_deserialize_failed service=%s transport=SHM seq=%u method=0x%08x err=%d",
                               entry->service->serviceName(), msg.getSequence(), method_id,

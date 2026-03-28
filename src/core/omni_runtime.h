@@ -207,10 +207,11 @@ private:
     void onServiceClientData(const std::string& service_name, int client_fd,
                              uint32_t events);
     void handleInvokeRequest(const std::string& service_name, int client_fd,
-                             const Message& msg);
+                             const Message& msg, const char* transport_label);
     void handleInvokeOneWayRequest(const std::string& service_name,
-                                   const Message& msg);
-    void handleSubscribeBroadcast(int client_fd, const Message& msg);
+                                   const Message& msg, const char* transport_label);
+    void handleSubscribeBroadcast(int client_fd, const Message& msg,
+                                  const char* transport_label);
     void handleTopicBroadcastMessage(const Message& msg);
     void removeServiceClient(const std::string& service_name, int client_fd);
 

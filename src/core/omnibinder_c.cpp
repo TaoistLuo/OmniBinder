@@ -68,7 +68,8 @@ protected:
         }
 
         if (resp_wrap.error_code != 0) {
-            throw std::runtime_error("c_service_callback_error");
+            reportInvokeError(resp_wrap.error_code);
+            return;
         }
 
         /* 将 C 回调写入的响应数据拷贝回 C++ Buffer */
@@ -223,51 +224,61 @@ uint8_t omni_buffer_read_bool(omni_buffer_t* buf) {
         return (buf && buf->buf.readBool()) ? 1 : 0;
     }, static_cast<uint8_t>(0));
 }
+
 int8_t omni_buffer_read_int8(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> int8_t {
         return buf ? buf->buf.readInt8() : 0;
     }, static_cast<int8_t>(0));
 }
+
 uint8_t omni_buffer_read_uint8(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> uint8_t {
         return buf ? buf->buf.readUint8() : 0;
     }, static_cast<uint8_t>(0));
 }
+
 int16_t omni_buffer_read_int16(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> int16_t {
         return buf ? buf->buf.readInt16() : 0;
     }, static_cast<int16_t>(0));
 }
+
 uint16_t omni_buffer_read_uint16(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> uint16_t {
         return buf ? buf->buf.readUint16() : 0;
     }, static_cast<uint16_t>(0));
 }
+
 int32_t omni_buffer_read_int32(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> int32_t {
         return buf ? buf->buf.readInt32() : 0;
     }, static_cast<int32_t>(0));
 }
+
 uint32_t omni_buffer_read_uint32(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> uint32_t {
         return buf ? buf->buf.readUint32() : 0;
     }, static_cast<uint32_t>(0));
 }
+
 int64_t omni_buffer_read_int64(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> int64_t {
         return buf ? buf->buf.readInt64() : 0;
     }, static_cast<int64_t>(0));
 }
+
 uint64_t omni_buffer_read_uint64(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> uint64_t {
         return buf ? buf->buf.readUint64() : 0;
     }, static_cast<uint64_t>(0));
 }
+
 float omni_buffer_read_float32(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> float {
         return buf ? buf->buf.readFloat32() : 0.0f;
     }, 0.0f);
 }
+
 double omni_buffer_read_float64(omni_buffer_t* buf) {
     return catchBufferRead(buf, [buf]() -> double {
         return buf ? buf->buf.readFloat64() : 0.0;
