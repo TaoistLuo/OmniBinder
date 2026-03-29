@@ -7,7 +7,6 @@
 
 #include <atomic>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -240,6 +239,47 @@ public:
     typename std::result_of<F()>::type invokeOnOwner(F func) {
         typedef typename std::result_of<F()>::type Result;
         return invokeOnOwnerImpl<F, Result>(func, typename std::is_void<Result>::type());
+    }
+
+    template<typename F>
+    int invokeOnOwnerNoThrowInt(F func, int fallback) {
+        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
+            return func();
+        }
+
+        std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
+        loop_->post([func, state, fallback]() {
+            try {
+                state->completeSuccess(func());
+            } catch (...) {
+                state->completeSuccess(fallback);
+            }
+        });
+
+        ExecutionResult<int> result = state->wait();
+        if (!result.ok()) {
+            return fallback;
+        }
+        return result.value();
+    }
+
+    template<typename F>
+    void invokeOnOwnerNoThrowVoid(F func) {
+        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
+            func();
+            return;
+        }
+
+        std::shared_ptr< SyncCallState<void> > state(new SyncCallState<void>());
+        loop_->post([func, state]() {
+            try {
+                func();
+            } catch (...) {
+            }
+            state->completeSuccess();
+        });
+
+        (void)state->wait();
     }
 
 private:

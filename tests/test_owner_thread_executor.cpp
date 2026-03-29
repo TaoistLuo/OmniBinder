@@ -22,8 +22,8 @@ int main() {
             called.store(true);
             return 42;
         });
-        assert(called.load());
-        assert(value == 42);
+        if (!called.load()) return 1;
+        if (value != 42) return 1;
         PASS();
     }
 

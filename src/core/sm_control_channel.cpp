@@ -58,7 +58,7 @@ bool SmControlChannel::tryPopMessage(Message& msg) {
     }
     if (!Message::validateHeader(hdr)) {
         recv_buffer.setWritePosition(0);
-        recv_buffer.setReadPosition(0);
+        recv_buffer.trySetReadPosition(0);
         return false;
     }
 
@@ -72,14 +72,18 @@ bool SmControlChannel::tryPopMessage(Message& msg) {
     if (hdr.length > 0) {
         msg.payload.assign(recv_buffer.data() + pos + MESSAGE_HEADER_SIZE, hdr.length);
     }
-    recv_buffer.setReadPosition(pos + total);
+    if (!recv_buffer.trySetReadPosition(pos + total)) {
+        recv_buffer.setWritePosition(0);
+        recv_buffer.trySetReadPosition(0);
+        return false;
+    }
 
     size_t remaining = recv_buffer.size() - recv_buffer.readPosition();
     if (remaining > 0 && recv_buffer.readPosition() > 0) {
         memmove(recv_buffer.mutableData(), recv_buffer.data() + recv_buffer.readPosition(), remaining);
     }
     recv_buffer.setWritePosition(remaining);
-    recv_buffer.setReadPosition(0);
+    recv_buffer.trySetReadPosition(0);
     return true;
 }
 

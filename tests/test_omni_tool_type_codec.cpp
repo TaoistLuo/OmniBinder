@@ -41,8 +41,9 @@ static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
     Lexer lexer(source);
     ParseContext ctx;
     Parser parser(lexer, ctx, file_path);
-    bool ok = parser.parse(ast);
-    assert(ok);
+    if (!parser.parse(ast)) {
+        abort();
+    }
     assert(!parser.hasError());
     return ctx;
 }
@@ -88,13 +89,11 @@ int main() {
 
         type_codec::TypeCodec codec(ctx);
         omnibinder::Buffer buf;
-        bool encoded = codec.encodeToBuffer(json, parentType, "demo", buf);
-        assert(encoded);
+        assert(codec.encodeToBuffer(json, parentType, "demo", buf));
 
         omnibinder::Buffer decodeBuf(buf.data(), buf.size());
         simple_json::Value decoded;
-        bool decoded_ok = codec.decodeFromBuffer(decodeBuf, parentType, "demo", decoded);
-        assert(decoded_ok);
+        assert(codec.decodeFromBuffer(decodeBuf, parentType, "demo", decoded));
         assert(decoded.isObject());
         assert(decoded.get("label").asString() == "nested-ok");
         assert(decoded.get("child").isObject());
@@ -344,14 +343,18 @@ int main() {
                                           const std::string& package,
                                           const simple_json::Value& value) {
             omnibinder::Buffer full;
-            assert(codec.encodeToBuffer(value, type, package, full));
+            if (!codec.encodeToBuffer(value, type, package, full)) {
+                abort();
+            }
             std::vector<uint8_t> bytes(full.data(), full.data() + full.size());
             std::vector< std::vector<uint8_t> > truncated;
             appendTruncatedBuffers(bytes, truncated);
             for (size_t j = 0; j < truncated.size(); ++j) {
                 omnibinder::Buffer decode_buf(truncated[j].data(), truncated[j].size());
                 simple_json::Value decoded;
-                assert(!codec.decodeFromBuffer(decode_buf, type, package, decoded));
+                if (codec.decodeFromBuffer(decode_buf, type, package, decoded)) {
+                    abort();
+                }
             }
         };
 

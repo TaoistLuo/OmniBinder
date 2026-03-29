@@ -1,7 +1,6 @@
 #include "codegen_cpp.h"
 #include <fstream>
 #include <cstdio>
-#include <stdexcept>
 
 namespace omnic {
 
@@ -137,7 +136,7 @@ void emitSerializeValue(const TypeRef& type, const std::string& expr,
 
 void emitDeserializeValue(const TypeRef& type, const std::string& target,
                           const std::string& buffer_name, const std::string& indent,
-                          int depth, std::ostream& os) {
+                          int depth, const std::string& fail_stmt, std::ostream& os) {
     switch (type.primitive) {
     case TYPE_BOOL:
     case TYPE_INT8:
@@ -152,22 +151,22 @@ void emitDeserializeValue(const TypeRef& type, const std::string& target,
     case TYPE_FLOAT64:
     case TYPE_STRING:
     case TYPE_BYTES:
-        os << indent << target << " = " << buffer_name << ".read"
-           << bufferMethodSuffix(type) << "();\n";
+        os << indent << "if (!" << buffer_name << ".tryRead"
+           << bufferMethodSuffix(type) << "(" << target << ")) " << fail_stmt << "\n";
         break;
     case TYPE_CUSTOM:
         os << indent << "if (!" << target << ".deserialize(" << buffer_name
-           << ")) { throw std::runtime_error(\"deserialize failed\"); }\n";
+           << ")) " << fail_stmt << "\n";
         break;
     case TYPE_ARRAY: {
         std::string count = "cnt" + std::to_string(depth);
         std::string idx = "i" + std::to_string(depth);
-        os << indent << "{ uint32_t " << count << " = " << buffer_name
-           << ".readUint32(); " << target << ".resize(" << count << ");\n";
+        os << indent << "{ uint32_t " << count << " = 0; if (!" << buffer_name
+           << ".tryReadUint32(" << count << ")) " << fail_stmt << " " << target << ".resize(" << count << ");\n";
         os << indent << "  for (uint32_t " << idx << " = 0; " << idx << " < "
            << count << "; ++" << idx << ") {\n";
         emitDeserializeValue(*type.element_type, target + "[" + idx + "]", buffer_name,
-                             indent + "    ", depth + 1, os);
+                             indent + "    ", depth + 1, fail_stmt, os);
         os << indent << "  }}\n";
         break;
     }
@@ -442,10 +441,8 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "    return true;\n}\n\n";
         
         os << "bool " << s.name << "::deserialize(omnibinder::Buffer& buf) {\n";
-        os << "    try {\n";
         genDeserialize(s.fields, "", os);
-        os << "        return true;\n";
-        os << "    } catch (...) { return false; }\n}\n\n";
+        os << "    return true;\n}\n\n";
     }
     
     // Topic serialize/deserialize
@@ -456,10 +453,8 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "    return true;\n}\n\n";
         
         os << "bool " << t.name << "::deserialize(omnibinder::Buffer& buf) {\n";
-        os << "    try {\n";
         genDeserialize(t.fields, "", os);
-        os << "        return true;\n";
-        os << "    } catch (...) { return false; }\n}\n\n";
+        os << "    return true;\n}\n\n";
     }
     
     // Service Stub implementation
@@ -499,7 +494,9 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "    case 0x" << std::hex << mid << std::dec << "u: {\n";
             if (m.has_param) {
                 os << "        " << cppTypeName(m.param.type) << " " << m.param.name << ";\n";
-                emitDeserializeValue(m.param.type, m.param.name, "req", "        ", 0, os);
+                emitDeserializeValue(m.param.type, m.param.name, "req", "        ", 0,
+                                     "{ reportInvokeError(static_cast<int32_t>(omnibinder::ErrorCode::ERR_DESERIALIZE)); return; }",
+                                     os);
             }
             if (!m.return_type.isVoid()) {
                 os << "        " << cppTypeName(m.return_type) << " result = " << m.name << "(";
@@ -563,11 +560,9 @@ os << svc.name << "Proxy::" << svc.name << "Proxy(omnibinder::OmniRuntime& runti
             os << "    if (ret != 0) return ret;\n";
             if (!m.return_type.isVoid()) {
                 os << "    if (!out) return static_cast<int>(omnibinder::ErrorCode::ERR_INVALID_PARAM);\n";
-                os << "    try {\n";
-                emitDeserializeValue(m.return_type, "(*out)", "resp", "        ", 0, os);
-                os << "    } catch (...) {\n";
-                os << "        return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);\n";
-                os << "    }\n";
+                emitDeserializeValue(m.return_type, "(*out)", "resp", "    ", 0,
+                                     "return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);",
+                                     os);
             }
             os << "    return 0;\n";
             os << "}\n\n";
@@ -607,7 +602,7 @@ void CppCodeGen::genDeserialize(const std::vector<FieldDef>& fields, const std::
     for (size_t i = 0; i < fields.size(); ++i) {
         const FieldDef& f = fields[i];
         std::string name = obj.empty() ? f.name : obj + "." + f.name;
-        emitDeserializeValue(f.type, name, "buf", "        ", 0, os);
+        emitDeserializeValue(f.type, name, "buf", "    ", 0, "return false;", os);
     }
 }
 

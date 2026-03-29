@@ -36,13 +36,11 @@ namespace omnibinder {
 namespace {
 
 bool tryReadStringArg(const Message& msg, std::string& value) {
-    try {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        value = payload.readString();
-        return true;
-    } catch (...) {
+    Buffer payload(msg.payload.data(), msg.payload.size());
+    if (!payload.tryReadString(value)) {
         return false;
     }
+    return true;
 }
 
 }
@@ -586,9 +584,7 @@ private:
     void handlePublishTopic(ClientConnection* conn, const Message& msg) {
         Buffer payload(msg.payload.data(), msg.payload.size());
         std::string topic;
-        try {
-            topic = payload.readString();
-        } catch (...) {
+        if (!payload.tryReadString(topic)) {
             OMNI_LOG_WARN(TAG, "Reject malformed publish topic request from fd=%d", conn->fd);
             sendPublishTopicReply(conn, msg.header.sequence, false);
             return;

@@ -77,21 +77,19 @@ public:
     void writeBytes(const std::vector<uint8_t>& data);
     void writeRaw(const void* data, size_t length);
 
-    // ---- 读取（反序列化）----
-    bool readBool();
-    int8_t readInt8();
-    uint8_t readUint8();
-    int16_t readInt16();
-    uint16_t readUint16();
-    int32_t readInt32();
-    uint32_t readUint32();
-    int64_t readInt64();
-    uint64_t readUint64();
-    float readFloat32();
-    double readFloat64();
-    std::string readString();
-    std::vector<uint8_t> readBytes();
-    bool readRaw(void* buf, size_t length);
+    bool tryReadBool(bool& value);
+    bool tryReadInt8(int8_t& value);
+    bool tryReadUint8(uint8_t& value);
+    bool tryReadInt16(int16_t& value);
+    bool tryReadUint16(uint16_t& value);
+    bool tryReadInt32(int32_t& value);
+    bool tryReadUint32(uint32_t& value);
+    bool tryReadInt64(int64_t& value);
+    bool tryReadUint64(uint64_t& value);
+    bool tryReadFloat32(float& value);
+    bool tryReadFloat64(double& value);
+    bool tryReadString(std::string& value);
+    bool tryReadBytes(std::vector<uint8_t>& value);
 
     // ---- 缓冲区管理 ----
     const uint8_t* data() const;
@@ -101,7 +99,7 @@ public:
     void reset();
     void clear();
     size_t readPosition() const;
-    void setReadPosition(size_t pos);
+    bool trySetReadPosition(size_t pos);
     size_t writePosition() const;
     void setWritePosition(size_t pos);
     bool hasRemaining() const;

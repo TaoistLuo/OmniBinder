@@ -25,111 +25,100 @@ bool decodeInvokePayload(const Message& msg,
                          uint32_t& interface_id,
                          uint32_t& method_id,
                          Buffer& request) {
-    try {
-        Buffer req_buf(msg.payload.data(), msg.payload.size());
-        interface_id = req_buf.readUint32();
-        method_id = req_buf.readUint32();
-        uint32_t payload_len = req_buf.readUint32();
-        if (req_buf.remaining() < payload_len) {
-            return false;
-        }
-
-        request.clear();
-        if (payload_len > 0) {
-            request.writeRaw(req_buf.data() + req_buf.readPosition(), payload_len);
-        }
-        return true;
-    } catch (...) {
+    Buffer req_buf(msg.payload.data(), msg.payload.size());
+    uint32_t payload_len = 0;
+    if (!req_buf.tryReadUint32(interface_id)
+        || !req_buf.tryReadUint32(method_id)
+        || !req_buf.tryReadUint32(payload_len)) {
         return false;
     }
+    if (req_buf.remaining() < payload_len) {
+        return false;
+    }
+
+    request.clear();
+    if (payload_len > 0) {
+        request.writeRaw(req_buf.data() + req_buf.readPosition(), payload_len);
+    }
+    return true;
 }
 
 bool decodeSubscribeBroadcastPayload(const Message& msg,
                                      uint32_t& topic_id,
                                      std::string& topic_name) {
-    try {
-        Buffer buf(msg.payload.data(), msg.payload.size());
-        topic_id = buf.readUint32();
-        topic_name = buf.readString();
-        return true;
-    } catch (...) {
+    Buffer buf(msg.payload.data(), msg.payload.size());
+    if (!buf.tryReadUint32(topic_id) || !buf.tryReadString(topic_name)) {
         return false;
     }
+    return true;
 }
 
 bool decodeBroadcastPayload(const Message& msg,
                             uint32_t& topic_id,
                             Buffer& payload) {
-    try {
-        Buffer buf(msg.payload.data(), msg.payload.size());
-        topic_id = buf.readUint32();
-        uint32_t payload_len = buf.readUint32();
-        if (buf.remaining() < payload_len) {
-            return false;
-        }
-
-        payload.clear();
-        if (payload_len > 0) {
-            payload.writeRaw(buf.data() + buf.readPosition(), payload_len);
-        }
-        return true;
-    } catch (...) {
+    Buffer buf(msg.payload.data(), msg.payload.size());
+    uint32_t payload_len = 0;
+    if (!buf.tryReadUint32(topic_id) || !buf.tryReadUint32(payload_len)) {
         return false;
     }
+    if (buf.remaining() < payload_len) {
+        return false;
+    }
+
+    payload.clear();
+    if (payload_len > 0) {
+        payload.writeRaw(buf.data() + buf.readPosition(), payload_len);
+    }
+    return true;
 }
 
 bool decodeSingleStringPayload(const Message& msg, std::string& value) {
-    try {
-        Buffer buf(msg.payload.data(), msg.payload.size());
-        value = buf.readString();
-        return true;
-    } catch (...) {
+    Buffer buf(msg.payload.data(), msg.payload.size());
+    if (!buf.tryReadString(value)) {
         return false;
     }
+    return true;
 }
 
 bool decodeBoolReplyPayload(const Message& msg, bool& value) {
-    try {
-        Buffer buf(msg.payload.data(), msg.payload.size());
-        value = buf.readBool();
-        return true;
-    } catch (...) {
+    Buffer buf(msg.payload.data(), msg.payload.size());
+    if (!buf.tryReadBool(value)) {
         return false;
     }
+    return true;
 }
 
 bool decodeUint32ReplyPayload(const Message& msg, uint32_t& value) {
-    try {
-        Buffer buf(msg.payload.data(), msg.payload.size());
-        value = buf.readUint32();
-        return true;
-    } catch (...) {
+    Buffer buf(msg.payload.data(), msg.payload.size());
+    if (!buf.tryReadUint32(value)) {
         return false;
     }
+    return true;
 }
 
 bool decodeInvokeReplyPayload(const Message& msg, int32_t& status, Buffer& response) {
-    try {
-        Buffer buf(msg.payload.data(), msg.payload.size());
-        status = buf.readInt32();
-        if (status != 0) {
-            response.clear();
-            return true;
-        }
-
-        uint32_t payload_len = buf.readUint32();
-        if (buf.remaining() < payload_len) {
-            return false;
-        }
-
-        response.clear();
-        if (payload_len > 0) {
-            response.writeRaw(buf.data() + buf.readPosition(), payload_len);
-        }
-        return true;
-    } catch (...) {
+    Buffer buf(msg.payload.data(), msg.payload.size());
+    uint32_t payload_len = 0;
+    if (!buf.tryReadInt32(status)) {
         return false;
     }
+    if (status != 0) {
+        response.clear();
+        return true;
+    }
+
+    if (!buf.tryReadUint32(payload_len)) {
+        return false;
+    }
+    if (buf.remaining() < payload_len) {
+        return false;
+    }
+
+    response.clear();
+    if (payload_len > 0) {
+        response.writeRaw(buf.data() + buf.readPosition(), payload_len);
+    }
+    return true;
 }
 
 void writeInvokeErrorReply(Buffer& payload, ErrorCode error) {
@@ -449,9 +438,7 @@ void OmniRuntime::Impl::handleSMMessage(const Message& msg) {
     case MessageType::MSG_TOPIC_PUBLISHER_NOTIFY: {
         Buffer buf(msg.payload.data(), msg.payload.size());
         std::string topic;
-        try {
-            topic = buf.readString();
-        } catch (...) {
+        if (!buf.tryReadString(topic)) {
             OMNI_LOG_WARN(LOG_TAG, "malformed_topic_publisher_notify seq=%u err=%d",
                           msg.getSequence(), static_cast<int>(ErrorCode::ERR_DESERIALIZE));
             break;
@@ -786,7 +773,10 @@ int OmniRuntime::Impl::lookupServiceUnlocked(const std::string& service_name, Se
     }
 
     Buffer rbuf(reply.payload.data(), reply.payload.size());
-    rbuf.readBool();
+    bool ignored_found = false;
+    if (!rbuf.tryReadBool(ignored_found)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
     if (!deserializeServiceInfo(rbuf, info)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
@@ -825,7 +815,10 @@ int OmniRuntime::Impl::listServicesLocked(std::vector<ServiceInfo>& services) {
     services.reserve(count);
 
     Buffer rbuf(reply.payload.data(), reply.payload.size());
-    rbuf.readUint32();
+    uint32_t ignored_count = 0;
+    if (!rbuf.tryReadUint32(ignored_count)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
     
     for (uint32_t i = 0; i < count; ++i) {
         ServiceInfo info;
@@ -871,11 +864,12 @@ int OmniRuntime::Impl::queryInterfacesLocked(const std::string& service_name,
     }
 
     Buffer rbuf(reply.payload.data(), reply.payload.size());
-    rbuf.readBool();
+    bool ignored_found = false;
+    if (!rbuf.tryReadBool(ignored_found)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
     uint32_t count = 0;
-    try {
-        count = rbuf.readUint32();
-    } catch (...) {
+    if (!rbuf.tryReadUint32(count)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     interfaces.clear();
@@ -1471,6 +1465,7 @@ void OmniRuntime::Impl::handleInvokeOneWayRequest(const std::string& service_nam
                       service_name.c_str(), transport_label, msg.getSequence(), method_id,
                       static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     }
+    (void)service->consumeInvokeError();
 }
 
 void OmniRuntime::Impl::handleSubscribeBroadcast(int client_fd, const Message& msg,
@@ -1707,6 +1702,7 @@ void OmniRuntime::Impl::handleShmRequest(const std::string& service_name,
                               entry->service->serviceName(), msg.getSequence(), method_id,
                               static_cast<int>(ErrorCode::ERR_DESERIALIZE));
             }
+            (void)entry->service->consumeInvokeError();
         },
         [this](const std::string& svc, uint32_t cid, const Message& msg) {
             (void)cid;

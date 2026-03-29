@@ -14,6 +14,17 @@
 
 using namespace omnibinder;
 
+template<typename T>
+static T mustRead(const Buffer& source, bool (Buffer::*fn)(T&)) {
+    Buffer buf(source.data(), source.size());
+    T value = T();
+    if (!(buf.*fn)(value)) {
+        printf("Buffer decode failed\n");
+        abort();
+    }
+    return value;
+}
+
 const uint16_t SM_PORT = 19930;
 std::atomic<int> success_count(0);
 std::atomic<int> failure_count(0);
@@ -44,7 +55,7 @@ public:
                  const Buffer& request, Buffer& response) override {
         if (interface_id == 0x12345678 && method_id == 0x00000001) {
             // Echo: 返回接收到的数据
-            int32_t value = request.readInt32();
+            int32_t value = mustRead<int32_t>(request, &Buffer::tryReadInt32);
             response.writeInt32(value);
             return 0;
         }
@@ -77,7 +88,7 @@ void testConcurrentInvoke(OmniRuntime& runtime, int thread_id, int iterations) {
         int ret = runtime.invoke("TestService", 0x12345678, 0x00000001,
                                request, response, 5000);
         if (ret == 0) {
-            int32_t result = response.readInt32();
+            int32_t result = mustRead<int32_t>(response, &Buffer::tryReadInt32);
             if (result == thread_id * 1000 + i) {
                 success_count++;
             } else {

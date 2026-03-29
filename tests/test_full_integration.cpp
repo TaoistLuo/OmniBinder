@@ -23,6 +23,25 @@
 
 using namespace omnibinder;
 
+template<typename T>
+static T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
+    T value = T();
+    if (!(buf.*fn)(value)) {
+        fprintf(stderr, "mustRead failed\n");
+        abort();
+    }
+    return value;
+}
+
+static std::string mustReadString(Buffer& buf) {
+    std::string value;
+    if (!buf.tryReadString(value)) {
+        fprintf(stderr, "mustReadString failed\n");
+        abort();
+    }
+    return value;
+}
+
 #define TEST(name) printf("  TEST %-45s ", #name); fflush(stdout);
 #define PASS() printf("PASS\n"); fflush(stdout);
 #define FAIL(msg) printf("FAIL: %s\n", msg); fflush(stdout);
@@ -59,8 +78,8 @@ protected:
         invoke_count_++;
         if (method_id == METHOD_ADD) {
             Buffer req(request.data(), request.size());
-            int32_t a = req.readInt32();
-            int32_t b = req.readInt32();
+            int32_t a = mustRead<int32_t>(req, &Buffer::tryReadInt32);
+            int32_t b = mustRead<int32_t>(req, &Buffer::tryReadInt32);
             response.writeInt32(a + b);
         } else if (method_id == METHOD_ECHO) {
             if (request.size() > 0) {
@@ -259,7 +278,7 @@ int main() {
         ret = c.invoke("CalcService", IFACE_ID, METHOD_ADD, req, resp, 5000);
         REQUIRE(ret == 0, "invoke add failed");
         (void)ret;
-        assert(resp.readInt32() == 300);
+        assert(mustRead<int32_t>(resp, &Buffer::tryReadInt32) == 300);
         c.stop();
         PASS();
     }
@@ -273,7 +292,7 @@ int main() {
         ret = c.invoke("CalcService", IFACE_ID, METHOD_ECHO, req, resp, 5000);
         REQUIRE(ret == 0, "invoke echo failed");
         (void)ret;
-        assert(resp.readString() == "SHM echo test");
+        if (mustReadString(resp) != "SHM echo test") return 1;
         c.stop();
         PASS();
     }
@@ -357,7 +376,7 @@ int main() {
             Buffer resp;
             a->result->ret = c.invoke("CalcService", IFACE_ID, METHOD_ADD, req, resp, 5000);
             if (a->result->ret == 0) {
-                a->result->result = resp.readInt32();
+                a->result->result = mustRead<int32_t>(resp, &Buffer::tryReadInt32);
             }
             c.stop();
             a->result->done = true;
@@ -391,7 +410,7 @@ int main() {
                 ret = runtime.invoke("CalcService", IFACE_ID, METHOD_ADD, req, resp, 5000);
                 REQUIRE(ret == 0, "sequential invoke failed");
                 (void)ret;
-                assert(resp.readInt32() == c * 100 + i + 1);
+                assert(mustRead<int32_t>(resp, &Buffer::tryReadInt32) == c * 100 + i + 1);
             }
             runtime.stop();
         }
@@ -425,7 +444,7 @@ int main() {
             [&received, &received_value](uint32_t tid, const Buffer& data) {
                 (void)tid;
                 Buffer buf(data.data(), data.size());
-                received_value = buf.readInt32();
+                received_value = mustRead<int32_t>(buf, &Buffer::tryReadInt32);
                 received = true;
             });
         REQUIRE(ret == 0, "subscribeTopic failed");

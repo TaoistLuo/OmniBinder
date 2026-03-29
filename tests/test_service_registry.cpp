@@ -182,6 +182,7 @@ int main() {
     TEST(remove_by_fd_clears_handle_lookup) {
         ServiceRegistry reg;
         const ServiceHandle handle = reg.addService(makeInfo("svc.fdh"), 40);
+        (void)handle;
         reg.removeByFd(40);
 
         ServiceEntry entry;
@@ -217,6 +218,7 @@ int main() {
     TEST(find_by_handle) {
         ServiceRegistry reg;
         const ServiceHandle handle = reg.addService(makeInfo("svc.hfind"), 60);
+        (void)handle;
 
         ServiceEntry entry;
         assert(reg.findServiceByHandle(handle, entry));
@@ -343,9 +345,10 @@ int main() {
 
     TEST(handles_are_unique) {
         ServiceRegistry reg;
-        ServiceHandle h1 = reg.addService(makeInfo("svc.h1"), 10);
-        ServiceHandle h2 = reg.addService(makeInfo("svc.h2"), 11);
-        ServiceHandle h3 = reg.addService(makeInfo("svc.h3"), 12);
+        const ServiceHandle h1 = reg.addService(makeInfo("svc.h1"), 10);
+        const ServiceHandle h2 = reg.addService(makeInfo("svc.h2"), 11);
+        const ServiceHandle h3 = reg.addService(makeInfo("svc.h3"), 12);
+        (void)h1; (void)h2; (void)h3;
         assert(h1 != INVALID_HANDLE);
         assert(h2 != INVALID_HANDLE);
         assert(h3 != INVALID_HANDLE);
@@ -357,8 +360,9 @@ int main() {
 
     TEST(handles_are_sequential) {
         ServiceRegistry reg;
-        ServiceHandle h1 = reg.addService(makeInfo("svc.s1"), 10);
-        ServiceHandle h2 = reg.addService(makeInfo("svc.s2"), 11);
+        const ServiceHandle h1 = reg.addService(makeInfo("svc.s1"), 10);
+        const ServiceHandle h2 = reg.addService(makeInfo("svc.s2"), 11);
+        (void)h1; (void)h2;
         assert(h1 == 1);
         assert(h2 == 2);
         PASS();
@@ -368,9 +372,11 @@ int main() {
         // After removing a service, the next handle should still increment,
         // not reuse the old handle.
         ServiceRegistry reg;
-        ServiceHandle h1 = reg.addService(makeInfo("svc.r1"), 10);
+        const ServiceHandle h1 = reg.addService(makeInfo("svc.r1"), 10);
+        (void)h1;
         reg.removeService("svc.r1");
-        ServiceHandle h2 = reg.addService(makeInfo("svc.r2"), 11);
+        const ServiceHandle h2 = reg.addService(makeInfo("svc.r2"), 11);
+        (void)h2;
         assert(h1 != h2);
         assert(h2 > h1);
         PASS();
@@ -382,12 +388,14 @@ int main() {
 
     TEST(re_register_after_remove) {
         ServiceRegistry reg;
-        ServiceHandle h1 = reg.addService(makeInfo("svc.rereg"), 10);
+        const ServiceHandle h1 = reg.addService(makeInfo("svc.rereg"), 10);
+        (void)h1;
         assert(h1 != INVALID_HANDLE);
         reg.removeService("svc.rereg");
         assert(!reg.exists("svc.rereg"));
 
-        ServiceHandle h2 = reg.addService(makeInfo("svc.rereg"), 20);
+        const ServiceHandle h2 = reg.addService(makeInfo("svc.rereg"), 20);
+        (void)h2;
         assert(h2 != INVALID_HANDLE);
         assert(h2 != h1);
         assert(reg.exists("svc.rereg"));

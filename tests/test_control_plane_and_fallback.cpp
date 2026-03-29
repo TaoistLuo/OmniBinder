@@ -12,6 +12,39 @@
 
 using namespace omnibinder;
 
+template<typename T>
+static T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
+    T value = T();
+    if (!(buf.*fn)(value)) {
+        fprintf(stderr, "mustRead failed\n");
+        abort();
+    }
+    return value;
+}
+
+static bool tryDecodeInvokeReplyForTest(const Message& msg, int32_t& status, Buffer& response) {
+    Buffer payload(msg.payload.data(), msg.payload.size());
+    uint32_t payload_len = 0;
+    if (!payload.tryReadInt32(status)) {
+        return false;
+    }
+    if (status != 0) {
+        response.clear();
+        return true;
+    }
+    if (!payload.tryReadUint32(payload_len)) {
+        return false;
+    }
+    if (payload.remaining() < payload_len) {
+        return false;
+    }
+    response.clear();
+    if (payload_len > 0) {
+        response.writeRaw(payload.data() + payload.readPosition(), payload_len);
+    }
+    return true;
+}
+
 #define TEST(name) printf("  TEST %-45s ", #name); fflush(stdout);
 #define PASS() printf("PASS\n"); fflush(stdout);
 
@@ -38,8 +71,8 @@ protected:
     void onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
         if (method_id == METHOD_ADD) {
             Buffer req(request.data(), request.size());
-            int32_t a = req.readInt32();
-            int32_t b = req.readInt32();
+            int32_t a = mustRead<int32_t>(req, &Buffer::tryReadInt32);
+            int32_t b = mustRead<int32_t>(req, &Buffer::tryReadInt32);
             invoke_count_++;
             response.writeInt32(a + b);
         } else if (method_id == METHOD_ECHO) {
@@ -130,9 +163,9 @@ struct DelayedReadServiceCtx {
                 msg.payload.assign(input.data() + MESSAGE_HEADER_SIZE, hdr.length);
             }
             Buffer req(msg.payload.data(), msg.payload.size());
-            uint32_t interface_id = req.readUint32();
-            uint32_t method_id = req.readUint32();
-            uint32_t payload_len = req.readUint32();
+            uint32_t interface_id = mustRead<uint32_t>(req, &Buffer::tryReadUint32);
+            uint32_t method_id = mustRead<uint32_t>(req, &Buffer::tryReadUint32);
+            uint32_t payload_len = mustRead<uint32_t>(req, &Buffer::tryReadUint32);
             assert(interface_id == IFACE_ID);
             assert(method_id == METHOD_ADD);
             (void)interface_id;
@@ -142,7 +175,8 @@ struct DelayedReadServiceCtx {
                 payload.writeRaw(req.data() + req.readPosition(), payload_len);
             }
             Buffer p(payload.data(), payload.size());
-            int32_t result = p.readInt32() + p.readInt32();
+            int32_t result = mustRead<int32_t>(p, &Buffer::tryReadInt32)
+                           + mustRead<int32_t>(p, &Buffer::tryReadInt32);
 
             Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
             reply.payload.writeInt32(0);
@@ -382,27 +416,7 @@ static void stopSM(pid_t pid) {
 }
 
 [[maybe_unused]] static bool decodeInvokeReplyForTest(const Message& msg, int32_t& status, Buffer& response) {
-    try {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        status = payload.readInt32();
-        if (status != 0) {
-            response.clear();
-            return true;
-        }
-
-        uint32_t payload_len = payload.readUint32();
-        if (payload.remaining() < payload_len) {
-            return false;
-        }
-
-        response.clear();
-        if (payload_len > 0) {
-            response.writeRaw(payload.data() + payload.readPosition(), payload_len);
-        }
-        return true;
-    } catch (...) {
-        return false;
-    }
+    return tryDecodeInvokeReplyForTest(msg, status, response);
 }
 
 [[maybe_unused]] static bool registerFakeService(TcpTransport& transport, uint32_t seq,
@@ -433,7 +447,7 @@ static void stopSM(pid_t pid) {
         return false;
     }
     Buffer payload(reply.payload.data(), reply.payload.size());
-    return payload.readBool();
+    return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
 [[maybe_unused]] static bool sendMessage(TcpTransport& transport, const Message& msg) {
@@ -451,7 +465,7 @@ static void stopSM(pid_t pid) {
     if (ret != 0 || resp.size() < sizeof(int32_t)) {
         return false;
     }
-    sum = resp.readInt32();
+    sum = mustRead<int32_t>(resp, &Buffer::tryReadInt32);
     return true;
 }
 
@@ -486,7 +500,7 @@ int main() {
         (void)recv_ok;
         assert(reply.getType() == MessageType::MSG_UNREGISTER_REPLY);
         Buffer payload(reply.payload.data(), reply.payload.size());
-        assert(payload.readBool() == false);
+        assert(mustRead<bool>(payload, &Buffer::tryReadBool) == false);
 
         OmniRuntime checker;
         assert(checker.init("127.0.0.1", SM_PORT) == 0);
@@ -505,12 +519,14 @@ int main() {
         bad_lookup.payload.writeUint32(0x12345678u);
         bool send_ok = sendMessage(rogue, bad_lookup);
         assert(send_ok);
+        (void)send_ok;
         Message lookup_reply;
         bool recv_ok = recvMessage(rogue, lookup_reply, 2000);
         assert(recv_ok);
+        (void)recv_ok;
         assert(lookup_reply.getType() == MessageType::MSG_LOOKUP_REPLY);
         Buffer lookup_payload(lookup_reply.payload.data(), lookup_reply.payload.size());
-        assert(lookup_payload.readBool() == false);
+        assert(mustRead<bool>(lookup_payload, &Buffer::tryReadBool) == false);
 
         Message bad_subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 1005);
         bad_subscribe.payload.writeUint16(7);
@@ -521,7 +537,7 @@ int main() {
         assert(recv_ok);
         assert(subscribe_reply.getType() == MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
         Buffer subscribe_payload(subscribe_reply.payload.data(), subscribe_reply.payload.size());
-        assert(subscribe_payload.readBool() == false);
+        assert(mustRead<bool>(subscribe_payload, &Buffer::tryReadBool) == false);
 
         OmniRuntime checker;
         assert(checker.init("127.0.0.1", SM_PORT) == 0);
@@ -553,7 +569,7 @@ int main() {
         (void)recv_ok;
         assert(reply.getType() == MessageType::MSG_PUBLISH_TOPIC_REPLY);
         Buffer payload(reply.payload.data(), reply.payload.size());
-        assert(payload.readBool() == false);
+        assert(mustRead<bool>(payload, &Buffer::tryReadBool) == false);
         rogue.close();
         PASS();
     }
@@ -602,7 +618,7 @@ int main() {
         int ret = probe.invoke("FallbackService", IFACE_ID, METHOD_ADD, req, resp, 5000);
         assert(ret == 0);
         (void)ret;
-        assert(resp.readInt32() == 14);
+        assert(mustRead<int32_t>(resp, &Buffer::tryReadInt32) == 14);
 
         control.close();
         probe.stop();
@@ -614,7 +630,8 @@ int main() {
         TcpTransport rogue;
         assert(connectTcp(rogue, "127.0.0.1", owned_ctx.service.port()));
 
-        int before_count = owned_ctx.service.invokeCount();
+        const int before_count = owned_ctx.service.invokeCount();
+        (void)before_count;
 
         Message short_header(MessageType::MSG_INVOKE, 2001);
         short_header.payload.writeUint32(IFACE_ID);
@@ -629,8 +646,8 @@ int main() {
         (void)recv_ok;
         assert(reply.getType() == MessageType::MSG_INVOKE_REPLY);
         Buffer payload(reply.payload.data(), reply.payload.size());
-        assert(payload.readInt32() == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
-        assert(payload.readUint32() == 0);
+        assert(mustRead<int32_t>(payload, &Buffer::tryReadInt32) == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
+        assert(mustRead<uint32_t>(payload, &Buffer::tryReadUint32) == 0);
         assert(owned_ctx.service.invokeCount() == before_count);
 
         Message short_body(MessageType::MSG_INVOKE, 2002);
@@ -645,15 +662,15 @@ int main() {
         assert(recv_ok);
         assert(short_body_reply.getType() == MessageType::MSG_INVOKE_REPLY);
         Buffer short_body_payload(short_body_reply.payload.data(), short_body_reply.payload.size());
-        assert(short_body_payload.readInt32() == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
-        assert(short_body_payload.readUint32() == 0);
+        assert(mustRead<int32_t>(short_body_payload, &Buffer::tryReadInt32) == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
+        assert(mustRead<uint32_t>(short_body_payload, &Buffer::tryReadUint32) == 0);
         assert(owned_ctx.service.invokeCount() == before_count);
 
         OmniRuntime checker;
         assert(checker.init("127.0.0.1", SM_PORT) == 0);
         int32_t sum = 0;
-        assert(invokeOwnedService(checker, 20, 22, sum));
-        assert(sum == 42);
+        if (!invokeOwnedService(checker, 20, 22, sum)) return 1;
+        if (sum != 42) return 1;
         checker.stop();
 
         rogue.close();
@@ -668,6 +685,7 @@ int main() {
         bad_subscribe.payload.writeUint32(0x99887766u);
         bool send_ok = sendMessage(rogue, bad_subscribe);
         assert(send_ok);
+        (void)send_ok;
 
         Message bad_broadcast(MessageType::MSG_BROADCAST, 2004);
         bad_broadcast.payload.writeUint32(0x99887766u);
@@ -679,8 +697,8 @@ int main() {
         OmniRuntime checker;
         assert(checker.init("127.0.0.1", SM_PORT) == 0);
         int32_t sum = 0;
-        assert(invokeOwnedService(checker, 1, 2, sum));
-        assert(sum == 3);
+        if (!invokeOwnedService(checker, 1, 2, sum)) return 1;
+        if (sum != 3) return 1;
         checker.stop();
 
         rogue.close();
@@ -728,8 +746,7 @@ int main() {
         std::vector<uint8_t> payload(4 * 1024 * 1024, 0x5A);
         req.writeRaw(payload.data(), payload.size());
         Buffer resp;
-        int ret = probe.invoke("SlowReadService", IFACE_ID, METHOD_ADD, req, resp, 10000);
-        assert(ret == 0);
+        assert(probe.invoke("SlowReadService", IFACE_ID, METHOD_ADD, req, resp, 10000) == 0);
         assert(resp.size() == 0);
 
         probe.stop();
@@ -760,8 +777,8 @@ int main() {
         assert(reply.getType() == MessageType::MSG_INVOKE_REPLY);
         int32_t status = -1;
         Buffer response;
-        assert(decodeInvokeReplyForTest(reply, status, response));
-        assert(status == 0);
+        if (!decodeInvokeReplyForTest(reply, status, response)) return 1;
+        if (status != 0) return 1;
         assert(response.size() == payload.size());
         assert(memcmp(response.data(), payload.data(), payload.size()) == 0);
 
