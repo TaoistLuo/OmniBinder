@@ -13,22 +13,20 @@ namespace omnibinder {
 namespace {
 
 bool decodeBroadcastPayload(const Message& msg, uint32_t& topic_id, Buffer& payload) {
-    try {
-        Buffer buf(msg.payload.data(), msg.payload.size());
-        topic_id = buf.readUint32();
-        uint32_t data_len = buf.readUint32();
-        if (buf.remaining() < data_len) {
-            return false;
-        }
-
-        payload.clear();
-        if (data_len > 0) {
-            payload.writeRaw(buf.data() + buf.readPosition(), data_len);
-        }
-        return true;
-    } catch (...) {
+    Buffer buf(msg.payload.data(), msg.payload.size());
+    uint32_t data_len = 0;
+    if (!buf.tryReadUint32(topic_id) || !buf.tryReadUint32(data_len)) {
         return false;
     }
+    if (buf.remaining() < data_len) {
+        return false;
+    }
+
+    payload.clear();
+    if (data_len > 0) {
+        payload.writeRaw(buf.data() + buf.readPosition(), data_len);
+    }
+    return true;
 }
 
 }
@@ -144,7 +142,9 @@ void ServiceHostRuntime::processServiceClientMessages(const std::string& service
         if (hdr.length > 0) {
             msg.payload.assign(recv_buf->data() + pos + MESSAGE_HEADER_SIZE, hdr.length);
         }
-        recv_buf->setReadPosition(pos + total);
+        if (!recv_buf->trySetReadPosition(pos + total)) {
+            return;
+        }
 
         if (msg.getType() == MessageType::MSG_INVOKE) {
             on_invoke(service_name, client_fd, msg);
@@ -167,7 +167,9 @@ void ServiceHostRuntime::processServiceClientMessages(const std::string& service
         memmove(recv_buf->mutableData(), recv_buf->data() + recv_buf->readPosition(), remaining);
     }
     recv_buf->setWritePosition(remaining);
-    recv_buf->setReadPosition(0);
+    if (!recv_buf->trySetReadPosition(0)) {
+        return;
+    }
 }
 
 void ServiceHostRuntime::onShmRequest(const std::string& service_name,

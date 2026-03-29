@@ -1,7 +1,6 @@
 #include "omnibinder/buffer.h"
 #include <cstdlib>
 #include <cstring>
-#include <stdexcept>
 
 namespace omnibinder {
 
@@ -85,7 +84,7 @@ void Buffer::grow(size_t min_capacity) {
     }
     uint8_t* new_data = static_cast<uint8_t*>(realloc(data_, new_capacity));
     if (!new_data) {
-        throw std::bad_alloc();
+        return;
     }
     data_ = new_data;
     capacity_ = new_capacity;
@@ -196,118 +195,142 @@ void Buffer::writeRaw(const void* data, size_t length) {
     }
 }
 
-// ---- 读取方法 ----
-
-bool Buffer::readBool() {
-    return readUint8() != 0;
+bool Buffer::tryReadBool(bool& value) {
+    uint8_t byte = 0;
+    if (!tryReadUint8(byte)) {
+        return false;
+    }
+    value = byte != 0;
+    return true;
 }
 
-int8_t Buffer::readInt8() {
-    return static_cast<int8_t>(readUint8());
+bool Buffer::tryReadInt8(int8_t& value) {
+    uint8_t byte = 0;
+    if (!tryReadUint8(byte)) {
+        return false;
+    }
+    value = static_cast<int8_t>(byte);
+    return true;
 }
 
-uint8_t Buffer::readUint8() {
+bool Buffer::tryReadUint8(uint8_t& value) {
     if (read_pos_ + 1 > write_pos_) {
-        throw std::runtime_error("Buffer underflow");
+        return false;
     }
-    return data_[read_pos_++];
+    value = data_[read_pos_++];
+    return true;
 }
 
-int16_t Buffer::readInt16() {
-    return static_cast<int16_t>(readUint16());
+bool Buffer::tryReadInt16(int16_t& value) {
+    uint16_t temp = 0;
+    if (!tryReadUint16(temp)) {
+        return false;
+    }
+    value = static_cast<int16_t>(temp);
+    return true;
 }
 
-uint16_t Buffer::readUint16() {
+bool Buffer::tryReadUint16(uint16_t& value) {
     if (read_pos_ + 2 > write_pos_) {
-        throw std::runtime_error("Buffer underflow");
+        return false;
     }
-    // 小端序
-    uint16_t value = static_cast<uint16_t>(data_[read_pos_])
-                   | (static_cast<uint16_t>(data_[read_pos_ + 1]) << 8);
+    value = static_cast<uint16_t>(data_[read_pos_])
+          | (static_cast<uint16_t>(data_[read_pos_ + 1]) << 8);
     read_pos_ += 2;
-    return value;
+    return true;
 }
 
-int32_t Buffer::readInt32() {
-    return static_cast<int32_t>(readUint32());
+bool Buffer::tryReadInt32(int32_t& value) {
+    uint32_t temp = 0;
+    if (!tryReadUint32(temp)) {
+        return false;
+    }
+    value = static_cast<int32_t>(temp);
+    return true;
 }
 
-uint32_t Buffer::readUint32() {
+bool Buffer::tryReadUint32(uint32_t& value) {
     if (read_pos_ + 4 > write_pos_) {
-        throw std::runtime_error("Buffer underflow");
+        return false;
     }
-    // 小端序
-    uint32_t value = static_cast<uint32_t>(data_[read_pos_])
-                   | (static_cast<uint32_t>(data_[read_pos_ + 1]) << 8)
-                   | (static_cast<uint32_t>(data_[read_pos_ + 2]) << 16)
-                   | (static_cast<uint32_t>(data_[read_pos_ + 3]) << 24);
+    value = static_cast<uint32_t>(data_[read_pos_])
+          | (static_cast<uint32_t>(data_[read_pos_ + 1]) << 8)
+          | (static_cast<uint32_t>(data_[read_pos_ + 2]) << 16)
+          | (static_cast<uint32_t>(data_[read_pos_ + 3]) << 24);
     read_pos_ += 4;
-    return value;
+    return true;
 }
 
-int64_t Buffer::readInt64() {
-    return static_cast<int64_t>(readUint64());
-}
-
-uint64_t Buffer::readUint64() {
-    if (read_pos_ + 8 > write_pos_) {
-        throw std::runtime_error("Buffer underflow");
+bool Buffer::tryReadInt64(int64_t& value) {
+    uint64_t temp = 0;
+    if (!tryReadUint64(temp)) {
+        return false;
     }
-    // 小端序
-    uint64_t value = 0;
+    value = static_cast<int64_t>(temp);
+    return true;
+}
+
+bool Buffer::tryReadUint64(uint64_t& value) {
+    if (read_pos_ + 8 > write_pos_) {
+        return false;
+    }
+    value = 0;
     for (int i = 0; i < 8; ++i) {
         value |= static_cast<uint64_t>(data_[read_pos_ + i]) << (i * 8);
     }
     read_pos_ += 8;
-    return value;
+    return true;
 }
 
-float Buffer::readFloat32() {
-    uint32_t bits = readUint32();
-    float value;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-double Buffer::readFloat64() {
-    uint64_t bits = readUint64();
-    double value;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-std::string Buffer::readString() {
-    uint32_t len = readUint32();
-    if (len == 0) {
-        return std::string();
-    }
-    if (read_pos_ + len > write_pos_) {
-        throw std::runtime_error("Buffer underflow");
-    }
-    std::string value(reinterpret_cast<const char*>(data_ + read_pos_), len);
-    read_pos_ += len;
-    return value;
-}
-
-std::vector<uint8_t> Buffer::readBytes() {
-    uint32_t len = readUint32();
-    if (len == 0) {
-        return std::vector<uint8_t>();
-    }
-    if (read_pos_ + len > write_pos_) {
-        throw std::runtime_error("Buffer underflow");
-    }
-    std::vector<uint8_t> value(data_ + read_pos_, data_ + read_pos_ + len);
-    read_pos_ += len;
-    return value;
-}
-
-bool Buffer::readRaw(void* buf, size_t length) {
-    if (read_pos_ + length > write_pos_) {
+bool Buffer::tryReadFloat32(float& value) {
+    uint32_t bits = 0;
+    if (!tryReadUint32(bits)) {
         return false;
     }
-    memcpy(buf, data_ + read_pos_, length);
-    read_pos_ += length;
+    memcpy(&value, &bits, sizeof(value));
+    return true;
+}
+
+bool Buffer::tryReadFloat64(double& value) {
+    uint64_t bits = 0;
+    if (!tryReadUint64(bits)) {
+        return false;
+    }
+    memcpy(&value, &bits, sizeof(value));
+    return true;
+}
+
+bool Buffer::tryReadString(std::string& value) {
+    uint32_t len = 0;
+    if (!tryReadUint32(len)) {
+        return false;
+    }
+    if (len == 0) {
+        value.clear();
+        return true;
+    }
+    if (read_pos_ + len > write_pos_) {
+        return false;
+    }
+    value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
+    read_pos_ += len;
+    return true;
+}
+
+bool Buffer::tryReadBytes(std::vector<uint8_t>& value) {
+    uint32_t len = 0;
+    if (!tryReadUint32(len)) {
+        return false;
+    }
+    if (len == 0) {
+        value.clear();
+        return true;
+    }
+    if (read_pos_ + len > write_pos_) {
+        return false;
+    }
+    value.assign(data_ + read_pos_, data_ + read_pos_ + len);
+    read_pos_ += len;
     return true;
 }
 
@@ -342,11 +365,12 @@ size_t Buffer::readPosition() const {
     return read_pos_;
 }
 
-void Buffer::setReadPosition(size_t pos) {
+bool Buffer::trySetReadPosition(size_t pos) {
     if (pos > write_pos_) {
-        throw std::runtime_error("Invalid read position");
+        return false;
     }
     read_pos_ = pos;
+    return true;
 }
 
 size_t Buffer::writePosition() const {

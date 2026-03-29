@@ -24,12 +24,6 @@ using namespace omnic;
 #define TEST(name) printf("  TEST %-52s ", #name); fflush(stdout);
 #define PASS() printf("PASS\n"); fflush(stdout);
 
-static std::string readFile(const std::string& path) {
-    std::ifstream ifs(path.c_str());
-    return std::string((std::istreambuf_iterator<char>(ifs)),
-                       std::istreambuf_iterator<char>());
-}
-
 static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
     std::ifstream in(file_path.c_str());
     assert(in.good());
@@ -37,8 +31,9 @@ static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
     Lexer lexer(source);
     ParseContext ctx;
     Parser parser(lexer, ctx, file_path);
-    bool ok = parser.parse(ast);
-    assert(ok);
+    if (!parser.parse(ast)) {
+        abort();
+    }
     assert(!parser.hasError());
     return ctx;
 }
@@ -62,7 +57,7 @@ static std::string shellQuote(const std::string& value) {
     return quoted;
 }
 
-static bool runCommand(const std::string& command) {
+[[maybe_unused]] static bool runCommand(const std::string& command) {
     return system(command.c_str()) == 0;
 }
 
@@ -193,7 +188,8 @@ static bool registerFakeService(TcpTransport& transport, uint32_t seq, const std
     if (!recvFullMessage(transport, reply, 2000)) return false;
     if (reply.getType() != MessageType::MSG_REGISTER_REPLY) return false;
     Buffer payload(reply.payload.data(), reply.payload.size());
-    return payload.readBool();
+    bool value = false;
+    return payload.tryReadBool(value) && value;
 }
 
 static pid_t startSM(uint16_t port) {
@@ -342,7 +338,9 @@ int main() {
     Message invoke_reply;
     assert(recvFullMessage(rogue, invoke_reply, 2000));
     Buffer invoke_payload(invoke_reply.payload.data(), invoke_reply.payload.size());
-    assert(invoke_payload.readInt32() == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
+    int32_t status = 0;
+    assert(invoke_payload.tryReadInt32(status));
+    assert(status == static_cast<int32_t>(ErrorCode::ERR_DESERIALIZE));
     assert(server.service.echoCount() == 0);
     rogue.close();
 
@@ -547,7 +545,8 @@ static bool registerFakeService(omnibinder::TcpTransport& transport, uint32_t se
     if (!recvFullMessage(transport, reply, 2000)) return false;
     if (reply.getType() != omnibinder::MessageType::MSG_REGISTER_REPLY) return false;
     omnibinder::Buffer payload(reply.payload.data(), reply.payload.size());
-    return payload.readBool();
+    bool value = false;
+    return payload.tryReadBool(value) && value;
 }
 
 static pid_t startSM(uint16_t port) {
@@ -708,7 +707,9 @@ int main() {
     omnibinder::Message invoke_reply;
     assert(recvFullMessage(rogue, invoke_reply, 2000));
     omnibinder::Buffer invoke_payload(invoke_reply.payload.data(), invoke_reply.payload.size());
-    assert(invoke_payload.readInt32() == static_cast<int32_t>(omnibinder::ErrorCode::ERR_DESERIALIZE));
+    int32_t status = 0;
+    assert(invoke_payload.tryReadInt32(status));
+    assert(status == static_cast<int32_t>(omnibinder::ErrorCode::ERR_DESERIALIZE));
     assert(server.echo_count.load() == 0);
     rogue.close();
 

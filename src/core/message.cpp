@@ -74,11 +74,13 @@ bool Message::parseHeader(const uint8_t* data, size_t length, MessageHeader& hdr
 
     // 小端序读取
     Buffer buf(data, MESSAGE_HEADER_SIZE);
-    hdr.magic    = buf.readUint32();
-    hdr.version  = buf.readUint16();
-    hdr.type     = buf.readUint16();
-    hdr.sequence = buf.readUint32();
-    hdr.length   = buf.readUint32();
+    if (!buf.tryReadUint32(hdr.magic)
+        || !buf.tryReadUint16(hdr.version)
+        || !buf.tryReadUint16(hdr.type)
+        || !buf.tryReadUint32(hdr.sequence)
+        || !buf.tryReadUint32(hdr.length)) {
+        return false;
+    }
 
     return true;
 }
@@ -152,26 +154,28 @@ void serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
 }
 
 bool deserializeServiceInfo(Buffer& buf, ServiceInfo& info) {
-    try {
-        info.name = buf.readString();
-        info.host = buf.readString();
-        info.port = buf.readUint16();
-        info.host_id = buf.readString();
-        info.shm_name = buf.readString();
-        info.shm_config.req_ring_capacity = buf.readUint32();
-        info.shm_config.resp_ring_capacity = buf.readUint32();
-
-        uint16_t iface_count = buf.readUint16();
-        info.interfaces.resize(iface_count);
-        for (uint16_t i = 0; i < iface_count; ++i) {
-            if (!deserializeInterfaceInfo(buf, info.interfaces[i])) {
-                return false;
-            }
-        }
-        return true;
-    } catch (...) {
+    uint16_t iface_count = 0;
+    uint32_t req_ring_capacity = 0;
+    uint32_t resp_ring_capacity = 0;
+    if (!buf.tryReadString(info.name)
+        || !buf.tryReadString(info.host)
+        || !buf.tryReadUint16(info.port)
+        || !buf.tryReadString(info.host_id)
+        || !buf.tryReadString(info.shm_name)
+        || !buf.tryReadUint32(req_ring_capacity)
+        || !buf.tryReadUint32(resp_ring_capacity)
+        || !buf.tryReadUint16(iface_count)) {
         return false;
     }
+    info.shm_config.req_ring_capacity = req_ring_capacity;
+    info.shm_config.resp_ring_capacity = resp_ring_capacity;
+    info.interfaces.resize(iface_count);
+    for (uint16_t i = 0; i < iface_count; ++i) {
+        if (!deserializeInterfaceInfo(buf, info.interfaces[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
@@ -189,22 +193,22 @@ void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
 }
 
 bool deserializeInterfaceInfo(Buffer& buf, InterfaceInfo& info) {
-    try {
-        info.interface_id = buf.readUint32();
-        info.name = buf.readString();
-
-        uint16_t method_count = buf.readUint16();
-        info.methods.resize(method_count);
-        for (uint16_t i = 0; i < method_count; ++i) {
-            info.methods[i].method_id = buf.readUint32();
-            info.methods[i].name = buf.readString();
-            info.methods[i].param_types = buf.readString();
-            info.methods[i].return_type = buf.readString();
-        }
-        return true;
-    } catch (...) {
+    uint16_t method_count = 0;
+    if (!buf.tryReadUint32(info.interface_id)
+        || !buf.tryReadString(info.name)
+        || !buf.tryReadUint16(method_count)) {
         return false;
     }
+    info.methods.resize(method_count);
+    for (uint16_t i = 0; i < method_count; ++i) {
+        if (!buf.tryReadUint32(info.methods[i].method_id)
+            || !buf.tryReadString(info.methods[i].name)
+            || !buf.tryReadString(info.methods[i].param_types)
+            || !buf.tryReadString(info.methods[i].return_type)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace omnibinder

@@ -254,8 +254,8 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     os << "}\n\n";
 
     os << "void " << type_name << "_destroy(" << type_name << "* self) {\n";
-    os << "    uint32_t i = 0;\n";
     if (element.primitive == TYPE_STRING || element.primitive == TYPE_BYTES) {
+        os << "    uint32_t i = 0;\n";
         os << "    if (self->data) {\n";
         os << "        for (i = 0; i < self->count; ++i) {\n";
         os << "            if (self->data[i]) { free(self->data[i]); }\n";
@@ -264,6 +264,7 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
         os << "    }\n";
         os << "    if (self->lens) { free(self->lens); }\n";
     } else if (element.isCustom() || element.isArray()) {
+        os << "    uint32_t i = 0;\n";
         os << "    if (self->data) {\n";
         os << "        for (i = 0; i < self->count; ++i) {\n";
         emitValueDestroy(os, element, "self->data[i]", pkg, "            ");
@@ -889,16 +890,23 @@ void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::s
 
         // destroy
         os << "void " << tname << "_destroy(" << tname << "* self) {\n";
+        bool has_destroy_logic = false;
         for (size_t j = 0; j < s.fields.size(); ++j) {
             const FieldDef& f = s.fields[j];
             if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
+                has_destroy_logic = true;
                 os << "    if (self->" << f.name << ") { free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
             } else if (f.type.isArray()) {
+                has_destroy_logic = true;
                 os << "    " << cArrayTypeName(f.type, pkg_) << "_destroy(&self->" << f.name << ");\n";
             } else if (f.type.primitive == TYPE_CUSTOM) {
+                has_destroy_logic = true;
                 std::string cpkg = f.type.package_name.empty() ? pkg_ : f.type.package_name;
                 os << "    " << cpkg << "_" << f.type.custom_name << "_destroy(&self->" << f.name << ");\n";
             }
+        }
+        if (!has_destroy_logic) {
+            os << "    (void)self;\n";
         }
         os << "}\n\n";
 
@@ -918,16 +926,23 @@ void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::s
 
         // destroy
         os << "void " << tname << "_destroy(" << tname << "* self) {\n";
+        bool has_destroy_logic = false;
         for (size_t j = 0; j < t.fields.size(); ++j) {
             const FieldDef& f = t.fields[j];
             if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
+                has_destroy_logic = true;
                 os << "    if (self->" << f.name << ") { free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
             } else if (f.type.isArray()) {
+                has_destroy_logic = true;
                 os << "    " << cArrayTypeName(f.type, pkg_) << "_destroy(&self->" << f.name << ");\n";
             } else if (f.type.primitive == TYPE_CUSTOM) {
+                has_destroy_logic = true;
                 std::string cpkg = f.type.package_name.empty() ? pkg_ : f.type.package_name;
                 os << "    " << cpkg << "_" << f.type.custom_name << "_destroy(&self->" << f.name << ");\n";
             }
+        }
+        if (!has_destroy_logic) {
+            os << "    (void)self;\n";
         }
         os << "}\n\n";
 

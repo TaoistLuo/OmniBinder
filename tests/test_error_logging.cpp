@@ -138,6 +138,7 @@ int main() {
     unlink(log_path);
     FILE* log_fp = freopen(log_path, "w", stderr);
     assert(log_fp != NULL);
+    (void)log_fp;
     setLogLevel(LogLevel::LOG_DEBUG);
 
     TEST(sm_connect_failure_log);
@@ -145,6 +146,7 @@ int main() {
         OmniRuntime bad_runtime;
         int ret = bad_runtime.init("127.0.0.1", 19999);
         assert(ret != 0);
+        (void)ret;
         PASS();
     }
 
@@ -152,11 +154,13 @@ int main() {
     assert(sm_pid > 0);
     bool sm_ready = waitSMReady(SM_PORT, 30);
     assert(sm_ready);
+    (void)sm_ready;
 
     ServerContext server_ctx;
     pthread_t server_tid = 0;
     int create_ret = pthread_create(&server_tid, NULL, serverThread, &server_ctx);
     assert(create_ret == 0);
+    (void)create_ret;
     for (int i = 0; i < 50 && !server_ctx.registered; ++i) {
         usleep(100000);
     }

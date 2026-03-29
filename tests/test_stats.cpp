@@ -11,6 +11,16 @@
 
 using namespace omnibinder;
 
+template<typename T>
+static T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
+    T value = T();
+    if (!(buf.*fn)(value)) {
+        printf("Buffer decode failed\n");
+        abort();
+    }
+    return value;
+}
+
 const uint16_t SM_PORT = 9900;
 
 // 简单的测试服务
@@ -42,7 +52,7 @@ public:
         if (method_id == 0x00000001) {
             // 从 const Buffer 读取需要创建临时 Buffer
             Buffer temp(request.data(), request.size());
-            int32_t value = temp.readInt32();
+            int32_t value = mustRead<int32_t>(temp, &Buffer::tryReadInt32);
             response.writeInt32(value);
         }
     }

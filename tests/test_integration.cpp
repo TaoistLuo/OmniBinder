@@ -19,6 +19,25 @@
 
 using namespace omnibinder;
 
+template<typename T>
+static T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
+    T value = T();
+    if (!(buf.*fn)(value)) {
+        fprintf(stderr, "mustRead failed\n");
+        abort();
+    }
+    return value;
+}
+
+static std::string mustReadString(Buffer& buf) {
+    std::string value;
+    if (!buf.tryReadString(value)) {
+        fprintf(stderr, "mustReadString failed\n");
+        abort();
+    }
+    return value;
+}
+
 #define TEST(name) printf("  TEST %s ... ", #name); fflush(stdout);
 #define PASS() printf("PASS\n"); fflush(stdout);
 
@@ -49,8 +68,8 @@ protected:
         invoke_count_++;
         if (method_id == METHOD_ADD) {
             Buffer req(request.data(), request.size());
-            int32_t a = req.readInt32();
-            int32_t b = req.readInt32();
+            int32_t a = mustRead<int32_t>(req, &Buffer::tryReadInt32);
+            int32_t b = mustRead<int32_t>(req, &Buffer::tryReadInt32);
             response.writeInt32(a + b);
         } else if (method_id == METHOD_ECHO) {
             if (request.size() > 0) {
@@ -79,7 +98,7 @@ struct ServerContext {
     ServerContext() : registered(false), should_stop(false), sm_port(0) {}
 };
 
-static void* serverThread(void* arg) {
+[[maybe_unused]] static void* serverThread(void* arg) {
     ServerContext* ctx = static_cast<ServerContext*>(arg);
 
     int ret = ctx->runtime.init("127.0.0.1", ctx->sm_port);
@@ -196,8 +215,7 @@ int main() {
     // ============================================================
     TEST(connect_to_sm) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
         runtime.stop();
         PASS();
     }
@@ -208,8 +226,7 @@ int main() {
     ServerContext server_ctx;
     server_ctx.sm_port = SM_PORT;
     pthread_t server_tid;
-    int pret = pthread_create(&server_tid, NULL, serverThread, &server_ctx);
-    assert(pret == 0);
+    assert(pthread_create(&server_tid, NULL, serverThread, &server_ctx) == 0);
 
     // Wait for service to be registered
     for (int i = 0; i < 50 && !server_ctx.registered; i++) {
@@ -224,12 +241,10 @@ int main() {
     // ============================================================
     TEST(list_services) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         std::vector<ServiceInfo> services;
-        ret = runtime.listServices(services);
-        assert(ret == 0);
+        assert(runtime.listServices(services) == 0);
         assert(services.size() >= 1);
 
         bool found = false;
@@ -239,7 +254,7 @@ int main() {
                 break;
             }
         }
-        assert(found);
+        if (!found) return 1;
         runtime.stop();
         PASS();
     }
@@ -249,12 +264,10 @@ int main() {
     // ============================================================
     TEST(lookup_service) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         ServiceInfo info;
-        ret = runtime.lookupService("TestService", info);
-        assert(ret == 0);
+        assert(runtime.lookupService("TestService", info) == 0);
         assert(info.name == "TestService");
         assert(info.port == server_ctx.service.port());
         assert(!info.host_id.empty());
@@ -272,12 +285,10 @@ int main() {
     // ============================================================
     TEST(lookup_nonexistent) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         ServiceInfo info;
-        ret = runtime.lookupService("NonExistentService", info);
-        assert(ret != 0);
+        assert(runtime.lookupService("NonExistentService", info) != 0);
         runtime.stop();
         PASS();
     }
@@ -287,12 +298,10 @@ int main() {
     // ============================================================
     TEST(query_interfaces) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         std::vector<InterfaceInfo> ifaces;
-        ret = runtime.queryInterfaces("TestService", ifaces);
-        assert(ret == 0);
+        assert(runtime.queryInterfaces("TestService", ifaces) == 0);
         assert(ifaces.size() == 1);
         assert(ifaces[0].name == "TestService");
         assert(ifaces[0].interface_id == IFACE_ID);
@@ -302,8 +311,7 @@ int main() {
             if (ifaces[0].methods[i].name == "Add") found_add = true;
             if (ifaces[0].methods[i].name == "Echo") found_echo = true;
         }
-        assert(found_add);
-        assert(found_echo);
+        if (!found_add || !found_echo) return 1;
         runtime.stop();
         PASS();
     }
@@ -313,21 +321,18 @@ int main() {
     // ============================================================
     TEST(invoke_add) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         Buffer request;
         request.writeInt32(17);
         request.writeInt32(25);
 
         Buffer response;
-        ret = runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
-                            request, response, 5000);
-        assert(ret == 0);
+        assert(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
+                            request, response, 5000) == 0);
         assert(response.size() >= 4);
 
-        int32_t result = response.readInt32();
-        assert(result == 42);
+        if (mustRead<int32_t>(response, &Buffer::tryReadInt32) != 42) return 1;
 
         runtime.stop();
         PASS();
@@ -338,19 +343,17 @@ int main() {
     // ============================================================
     TEST(invoke_echo) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         Buffer request;
         request.writeString("Hello OmniBinder!");
 
         Buffer response;
-        ret = runtime.invoke("TestService", IFACE_ID, METHOD_ECHO,
-                            request, response, 5000);
-        assert(ret == 0);
+        assert(runtime.invoke("TestService", IFACE_ID, METHOD_ECHO,
+                            request, response, 5000) == 0);
         assert(response.size() > 0);
 
-        std::string echo = response.readString();
+        std::string echo = mustReadString(response);
         assert(echo == "Hello OmniBinder!");
 
         runtime.stop();
@@ -362,8 +365,7 @@ int main() {
     // ============================================================
     TEST(multiple_invocations) {
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         for (int i = 0; i < 10; i++) {
             Buffer request;
@@ -371,12 +373,9 @@ int main() {
             request.writeInt32(100);
 
             Buffer response;
-            ret = runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
-                                request, response, 5000);
-            assert(ret == 0);
-
-            int32_t result = response.readInt32();
-            assert(result == i + 100);
+            assert(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
+                                request, response, 5000) == 0);
+            if (mustRead<int32_t>(response, &Buffer::tryReadInt32) != i + 100) return 1;
         }
 
         runtime.stop();
@@ -395,12 +394,10 @@ int main() {
     TEST(service_gone_after_unregister) {
         usleep(200000); // Give SM time to process
         OmniRuntime runtime;
-        int ret = runtime.init("127.0.0.1", SM_PORT);
-        assert(ret == 0);
+        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
 
         ServiceInfo info;
-        ret = runtime.lookupService("TestService", info);
-        assert(ret != 0);
+        assert(runtime.lookupService("TestService", info) != 0);
         runtime.stop();
         PASS();
     }

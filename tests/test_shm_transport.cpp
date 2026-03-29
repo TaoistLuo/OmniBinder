@@ -129,6 +129,7 @@ int main() {
         ShmTransport client0(shm_name, false);
         assert(client0.connect("", 0) == 0);
         const size_t per_client_block_size = server.activeResponseArenaSize();
+        (void)per_client_block_size;
         assert(server.activeResponseArenaSize() > 0);
         assert(server.responseSlotsInUse() == 1);
 
@@ -177,6 +178,7 @@ int main() {
         uint8_t recv_buf[256];
         memset(recv_buf, 0, sizeof(recv_buf));
         uint32_t from_client_id = 0;
+        (void)from_client_id;
         assert(server.serverRecv(recv_buf, sizeof(recv_buf), from_client_id)
                == static_cast<int>(strlen("Hello from client!")));
         assert(from_client_id == 0);  // From client slot 0
@@ -227,6 +229,7 @@ int main() {
         // Server receives request
         uint8_t buf[256];
         uint32_t from_id = 0;
+        (void)from_id;
         assert(server.serverRecv(buf, sizeof(buf), from_id) == static_cast<int>(strlen("GetData")));
         assert(from_id == 0);
 
@@ -266,6 +269,7 @@ int main() {
         // Server receives both requests
         uint8_t buf[256];
         uint32_t from_id = 0;
+        (void)from_id;
 
         assert(server.serverRecv(buf, sizeof(buf), from_id) == static_cast<int>(strlen(req0)));
         assert(from_id == 0);
@@ -350,6 +354,7 @@ int main() {
 
         std::vector<uint8_t> recv_data(data_size);
         uint32_t from_id = 0;
+        (void)from_id;
         assert(server.serverRecv(recv_data.data(), data_size, from_id) == static_cast<int>(data_size));
         assert(from_id == 0);
         assert(memcmp(send_data.data(), recv_data.data(), data_size) == 0);
@@ -381,6 +386,8 @@ int main() {
         // No data sent, recv should return 0
         uint8_t recv_buf[64];
         uint32_t from_id = 0;
+        (void)recv_buf;
+        (void)from_id;
         assert(server.serverRecv(recv_buf, sizeof(recv_buf), from_id) == 0);
         assert(client.recv(recv_buf, sizeof(recv_buf)) == 0);
 

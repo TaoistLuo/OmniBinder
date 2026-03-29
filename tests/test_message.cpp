@@ -18,12 +18,12 @@ int main() {
         assert(output.size() == MESSAGE_HEADER_SIZE + msg.payload.size());
         
         MessageHeader hdr;
-        assert(Message::parseHeader(output.data(), output.size(), hdr));
-        assert(hdr.magic == OMNI_MAGIC);
-        assert(hdr.version == OMNI_VERSION);
-        assert(hdr.type == static_cast<uint16_t>(MessageType::MSG_REGISTER));
-        assert(hdr.sequence == 42);
-        assert(hdr.length == msg.payload.size());
+        if (!Message::parseHeader(output.data(), output.size(), hdr)) abort();
+        if (hdr.magic != OMNI_MAGIC) abort();
+        if (hdr.version != OMNI_VERSION) abort();
+        if (hdr.type != static_cast<uint16_t>(MessageType::MSG_REGISTER)) abort();
+        if (hdr.sequence != 42) abort();
+        if (hdr.length != msg.payload.size()) abort();
     }
     printf("PASS\n");
     

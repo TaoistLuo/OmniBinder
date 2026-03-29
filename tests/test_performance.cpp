@@ -31,6 +31,16 @@
 
 using namespace omnibinder;
 
+template<typename T>
+static T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
+    T value;
+    if (!(buf.*fn)(value)) {
+        fprintf(stderr, "Buffer decode failed in performance test\n");
+        abort();
+    }
+    return value;
+}
+
 // ============================================================
 // 高精度计时器 (微秒级)
 // ============================================================
@@ -164,8 +174,8 @@ protected:
             }
         } else if (method_id == METHOD_ADD) {
             Buffer req(request.data(), request.size());
-            int32_t a = req.readInt32();
-            int32_t b = req.readInt32();
+            int32_t a = mustRead<int32_t>(req, &Buffer::tryReadInt32);
+            int32_t b = mustRead<int32_t>(req, &Buffer::tryReadInt32);
             response.writeInt32(a + b);
         }
     }
@@ -536,7 +546,7 @@ static void* topicSubscriberThread(void* arg) {
                 }
 
                 Buffer view(data.data(), data.size());
-                uint32_t seq = view.readUint32();
+                uint32_t seq = mustRead<uint32_t>(view, &Buffer::tryReadUint32);
                 const int payload_size = static_cast<int>(view.remaining());
 
                 if (payload_size != ctx->bench->expected_payload_size.load(std::memory_order_acquire)) {

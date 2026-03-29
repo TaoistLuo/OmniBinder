@@ -40,14 +40,14 @@ static std::string readFile(const std::string& path) {
 }
 
 static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
+    (void)ast;
     std::ifstream in(file_path.c_str());
     assert(in.good());
     std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     Lexer lexer(source);
     ParseContext ctx;
     Parser parser(lexer, ctx, file_path);
-    bool ok = parser.parse(ast);
-    assert(ok);
+    assert(parser.parse(ast));
     assert(!parser.hasError());
     return ctx;
 }
@@ -332,6 +332,7 @@ int main() {
             TYPE_INT32, TYPE_UINT32, TYPE_INT64, TYPE_UINT64,
             TYPE_FLOAT32, TYPE_FLOAT64, TYPE_STRING, TYPE_BYTES
         };
+        (void)expected;
         for (size_t i = 0; i < 13; i++) {
             assert(ast.structs[0].fields[i].type.primitive == expected[i]);
         }
@@ -932,11 +933,11 @@ int main() {
         std::string cpp = readFile(std::string(dir) + "/arrays.cpp");
 
         assert(cpp.find("buf.writeInt32(ids[i]);") != std::string::npos);
-        assert(cpp.find("ids[i] = buf.readInt32();") != std::string::npos);
+        assert(cpp.find("if (!buf.tryReadInt32(ids[i])) return false;") != std::string::npos);
         assert(cpp.find("buf.writeString(names[i]);") != std::string::npos);
-        assert(cpp.find("names[i] = buf.readString();") != std::string::npos);
+        assert(cpp.find("if (!buf.tryReadString(names[i])) return false;") != std::string::npos);
         assert(cpp.find("buf.writeBytes(blobs[i]);") != std::string::npos);
-        assert(cpp.find("blobs[i] = buf.readBytes();") != std::string::npos);
+        assert(cpp.find("if (!buf.tryReadBytes(blobs[i])) return false;") != std::string::npos);
 
         assert(cpp.find("writeint32_t") == std::string::npos);
         assert(cpp.find("readint32_t") == std::string::npos);
@@ -971,15 +972,15 @@ int main() {
 
         std::string cpp = readFile(std::string(dir) + "/array_service.cpp");
 
-        assert(cpp.find("{ uint32_t cnt0 = req.readUint32(); blobs.resize(cnt0);") != std::string::npos);
-        assert(cpp.find("blobs[i0] = req.readBytes();") != std::string::npos);
+        assert(cpp.find("{ uint32_t cnt0 = 0; if (!req.tryReadUint32(cnt0)) return false; blobs.resize(cnt0);") != std::string::npos);
+        assert(cpp.find("if (!req.tryReadBytes(blobs[i0])) return false;") != std::string::npos);
         assert(cpp.find("response.writeUint32(static_cast<uint32_t>(result.size()));") != std::string::npos);
         assert(cpp.find("response.writeInt32(result[i0]);") != std::string::npos);
         assert(cpp.find("response.writeString(result[i0]);") != std::string::npos);
         assert(cpp.find("req.writeUint32(static_cast<uint32_t>(blobs.size()));") != std::string::npos);
         assert(cpp.find("req.writeBytes(blobs[i0]);") != std::string::npos);
-        assert(cpp.find("result[i0] = resp.readInt32();") != std::string::npos);
-        assert(cpp.find("result[i0] = resp.readString();") != std::string::npos);
+        assert(cpp.find("if (!resp.tryReadInt32(result[i0])) return false;") != std::string::npos);
+        assert(cpp.find("if (!resp.tryReadString(result[i0])) return false;") != std::string::npos);
 
         assert(cpp.find("req.write(") == std::string::npos);
         assert(cpp.find("resp.read()") == std::string::npos);
@@ -1016,13 +1017,13 @@ int main() {
         std::string cpp = readFile(std::string(dir) + "/custom_arrays.cpp");
 
         assert(cpp.find("items[i0].serialize(buf);") != std::string::npos);
-        assert(cpp.find("items[i0].deserialize(buf);") != std::string::npos);
-        assert(cpp.find("items[i0].deserialize(req);") != std::string::npos);
+        assert(cpp.find("if (!items[i0].deserialize(buf)) return false;") != std::string::npos);
+        assert(cpp.find("if (!items[i0].deserialize(req)) return false;") != std::string::npos);
         assert(cpp.find("response.writeUint32(static_cast<uint32_t>(result.size()));") != std::string::npos);
         assert(cpp.find("result[i0].serialize(response);") != std::string::npos);
         assert(cpp.find("req.writeUint32(static_cast<uint32_t>(items.size()));") != std::string::npos);
         assert(cpp.find("items[i0].serialize(req);") != std::string::npos);
-        assert(cpp.find("result[i0].deserialize(resp);") != std::string::npos);
+        assert(cpp.find("if (!result[i0].deserialize(resp)) return false;") != std::string::npos);
 
         assert(cpp.find("req.write(items)") == std::string::npos);
         assert(cpp.find("response.write(result)") == std::string::npos);
@@ -1059,12 +1060,12 @@ int main() {
         assert(cpp.find("for (size_t i0 = 0; i0 < matrix.size(); ++i0) {") != std::string::npos);
         assert(cpp.find("for (size_t i1 = 0; i1 < matrix[i0].size(); ++i1) {") != std::string::npos);
         assert(cpp.find("buf.writeInt32(matrix[i0][i1]);") != std::string::npos);
-        assert(cpp.find("{ uint32_t cnt0 = buf.readUint32(); matrix.resize(cnt0);") != std::string::npos);
-        assert(cpp.find("{ uint32_t cnt1 = buf.readUint32(); matrix[i0].resize(cnt1);") != std::string::npos);
-        assert(cpp.find("matrix[i0][i1] = buf.readInt32();") != std::string::npos);
+        assert(cpp.find("{ uint32_t cnt0 = 0; if (!buf.tryReadUint32(cnt0)) return false; matrix.resize(cnt0);") != std::string::npos);
+        assert(cpp.find("{ uint32_t cnt1 = 0; if (!buf.tryReadUint32(cnt1)) return false; matrix[i0].resize(cnt1);") != std::string::npos);
+        assert(cpp.find("if (!buf.tryReadInt32(matrix[i0][i1])) return false;") != std::string::npos);
         assert(cpp.find("req.writeUint32(static_cast<uint32_t>(matrix.size()));") != std::string::npos);
         assert(cpp.find("req.writeInt32(matrix[i0][i1]);") != std::string::npos);
-        assert(cpp.find("result[i0][i1] = resp.readInt32();") != std::string::npos);
+        assert(cpp.find("if (!resp.tryReadInt32(result[i0][i1])) return false;") != std::string::npos);
 
         assert(cpp.find("req.write(matrix)") == std::string::npos);
         assert(cpp.find("resp.read()") == std::string::npos);

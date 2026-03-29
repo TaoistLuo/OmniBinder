@@ -477,7 +477,10 @@ void ConnectionManager::processMessages(ServiceConnection* conn) {
         }
 
         // 移动读取位置
-        conn->recv_buffer.setReadPosition(saved_pos + total_size);
+        if (!conn->recv_buffer.trySetReadPosition(saved_pos + total_size)) {
+            conn->connected = false;
+            return;
+        }
 
         // 回调处理消息
         if (message_cb_) {
@@ -505,7 +508,9 @@ void ConnectionManager::processMessages(ServiceConnection* conn) {
                 remaining);
     }
     conn->recv_buffer.setWritePosition(remaining);
-    conn->recv_buffer.setReadPosition(0);
+    if (!conn->recv_buffer.trySetReadPosition(0)) {
+        conn->connected = false;
+    }
 }
 
 } // namespace omnibinder

@@ -232,6 +232,10 @@ private:
     void captureOwnerThread();
     template<typename F>
     typename std::result_of<F()>::type callSerialized(F func);
+    template<typename F, typename Result>
+    Result callSerializedDispatch(F func, std::false_type);
+    template<typename F, typename Result>
+    Result callSerializedDispatch(F func, std::true_type);
     bool sendOnFd(ITransport* transport, const Message& msg);
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
     int initializeServiceListener(LocalServiceEntry* entry, Service* service,
@@ -317,7 +321,20 @@ typename std::result_of<F()>::type OmniRuntime::Impl::callSerialized(F func) {
         std::lock_guard<std::mutex> lock(api_mutex_);
         return func();
     }
-    return owner_executor_.invokeOnOwner(func);
+    typedef typename std::result_of<F()>::type Result;
+    return callSerializedDispatch<F, Result>(func, typename std::is_void<Result>::type());
+}
+
+template<typename F, typename Result>
+Result OmniRuntime::Impl::callSerializedDispatch(F func, std::false_type) {
+    return static_cast<Result>(owner_executor_.invokeOnOwnerNoThrowInt(func,
+        static_cast<int>(ErrorCode::ERR_INTERNAL)));
+}
+
+template<typename F, typename Result>
+Result OmniRuntime::Impl::callSerializedDispatch(F func, std::true_type) {
+    owner_executor_.invokeOnOwnerNoThrowVoid(func);
+    return;
 }
 
 } // namespace omnibinder
