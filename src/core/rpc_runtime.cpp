@@ -51,6 +51,9 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
                              SmControlChannel& channel,
                              const std::function<void(int)>& poll_once,
                              Message& reply) {
+    bool prev_in_wait = in_wait_for_reply_;
+    int64_t prev_deadline = wait_deadline_ms_;
+
     if (!beginWait(timeout_ms)) {
         OMNI_LOG_WARN(LOG_TAG_RPC, "Re-entrant waitForReply detected, this may cause issues");
     }
@@ -59,7 +62,8 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
     while (channel.pendingReply(seq) == NULL) {
         if (isTimedOut()) {
             channel.eraseWait(seq);
-            endWait();
+            in_wait_for_reply_ = prev_in_wait;
+            wait_deadline_ms_ = prev_deadline;
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
 
@@ -68,10 +72,12 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
     }
 
     if (!channel.takeReply(seq, reply)) {
-        endWait();
+        in_wait_for_reply_ = prev_in_wait;
+        wait_deadline_ms_ = prev_deadline;
         return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
     }
-    endWait();
+    in_wait_for_reply_ = prev_in_wait;
+    wait_deadline_ms_ = prev_deadline;
     return 0;
 }
 

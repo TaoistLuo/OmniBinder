@@ -380,9 +380,10 @@ public:
 
 protected:
     // 框架内部调用，分发请求到对应方法
-    void onInvoke(uint32_t method_id,
-                  const omnibinder::Buffer& request,
-                  omnibinder::Buffer& response) override;
+    // 返回 0 表示成功，非 0 表示错误码
+    int onInvoke(uint32_t method_id,
+                 const omnibinder::Buffer& request,
+                 omnibinder::Buffer& response) override;
 };
 
 } // namespace demo
@@ -430,6 +431,12 @@ private:
 } // namespace demo
 ```
 
+补充说明：
+
+- IDL 方法返回 `void` 仍表示业务语义上的 one-way / no-return
+- 但生成的 Stub `onInvoke()` 本身返回 `int`，用于向 runtime 显式返回 `ERR_DESERIALIZE`、`ERR_SERIALIZE` 等错误码
+- 生成的序列化代码会检查每一步 `Buffer::writeXxx()` 的返回值，而不是假设写入永远成功
+
 ### 7.6 生成的 C 代码
 
 ```c
@@ -440,6 +447,10 @@ typedef demo_SensorData (*demo_SensorService_GetLatestData_fn)(
     void* user_data);
 typedef void (*demo_SensorService_ResetSensor_fn)(
     void* user_data, int32_t sensor_id);
+
+/* runtime boundary callback */
+typedef int (*omni_invoke_callback_t)(uint32_t method_id,
+    const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
 
 /* ---- Proxy 结构与函数 ---- */
 typedef struct demo_SensorService_proxy {

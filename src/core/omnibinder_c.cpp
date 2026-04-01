@@ -54,7 +54,7 @@ public:
     omnibinder::InterfaceInfo iface_;
 
 protected:
-    void onInvoke(uint32_t method_id, const omnibinder::Buffer& request,
+    int onInvoke(uint32_t method_id, const omnibinder::Buffer& request,
                   omnibinder::Buffer& response) override {
         /* 将 C++ Buffer 包装为 omni_buffer_t 供 C 回调使用 */
         omni_buffer_t req_wrap;
@@ -62,19 +62,23 @@ protected:
 
         omni_buffer_t resp_wrap;
 
-        if (callback_) {
-            callback_(method_id, &req_wrap, &resp_wrap, user_data_);
+        if (!callback_) {
+            return static_cast<int>(omnibinder::ErrorCode::ERR_INVOKE_FAILED);
         }
 
-        if (resp_wrap.error_code != 0) {
-            reportInvokeError(resp_wrap.error_code);
-            return;
+        int status = callback_(method_id, &req_wrap, &resp_wrap, user_data_);
+        if (status != 0) {
+            return status;
         }
 
         /* 将 C 回调写入的响应数据拷贝回 C++ Buffer */
         if (resp_wrap.buf.size() > 0) {
-            response.writeRaw(resp_wrap.buf.data(), resp_wrap.buf.size());
+            if (!response.writeRaw(resp_wrap.buf.data(), resp_wrap.buf.size())) {
+                return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);
+            }
         }
+
+        return 0;
     }
 
 private:
@@ -92,18 +96,9 @@ struct omni_runtime_t {
 
 namespace {
 
-template <typename Fn, typename T>
-T readBufferValue(omni_buffer_t* buf, Fn fn, T fallback) {
-    if (!buf) {
-        return fallback;
-    }
-    T value = fn();
-    if (!buf->read_ok) {
-        buf->read_ok = false;
-        buf->error_code = -501;
-        return fallback;
-    }
-    return value;
+inline void markReadError(omni_buffer_t* buf) {
+    buf->read_ok = false;
+    buf->error_code = -501;
 }
 
 }
@@ -166,37 +161,37 @@ int32_t omni_buffer_error(const omni_buffer_t* buf) {
 
 /* 写入 */
 void omni_buffer_write_bool(omni_buffer_t* buf, uint8_t val) {
-    if (buf) buf->buf.writeBool(val != 0);
+    if (buf) (void)buf->buf.writeBool(val != 0);
 }
 void omni_buffer_write_int8(omni_buffer_t* buf, int8_t val) {
-    if (buf) buf->buf.writeInt8(val);
+    if (buf) (void)buf->buf.writeInt8(val);
 }
 void omni_buffer_write_uint8(omni_buffer_t* buf, uint8_t val) {
-    if (buf) buf->buf.writeUint8(val);
+    if (buf) (void)buf->buf.writeUint8(val);
 }
 void omni_buffer_write_int16(omni_buffer_t* buf, int16_t val) {
-    if (buf) buf->buf.writeInt16(val);
+    if (buf) (void)buf->buf.writeInt16(val);
 }
 void omni_buffer_write_uint16(omni_buffer_t* buf, uint16_t val) {
-    if (buf) buf->buf.writeUint16(val);
+    if (buf) (void)buf->buf.writeUint16(val);
 }
 void omni_buffer_write_int32(omni_buffer_t* buf, int32_t val) {
-    if (buf) buf->buf.writeInt32(val);
+    if (buf) (void)buf->buf.writeInt32(val);
 }
 void omni_buffer_write_uint32(omni_buffer_t* buf, uint32_t val) {
-    if (buf) buf->buf.writeUint32(val);
+    if (buf) (void)buf->buf.writeUint32(val);
 }
 void omni_buffer_write_int64(omni_buffer_t* buf, int64_t val) {
-    if (buf) buf->buf.writeInt64(val);
+    if (buf) (void)buf->buf.writeInt64(val);
 }
 void omni_buffer_write_uint64(omni_buffer_t* buf, uint64_t val) {
-    if (buf) buf->buf.writeUint64(val);
+    if (buf) (void)buf->buf.writeUint64(val);
 }
 void omni_buffer_write_float32(omni_buffer_t* buf, float val) {
-    if (buf) buf->buf.writeFloat32(val);
+    if (buf) (void)buf->buf.writeFloat32(val);
 }
 void omni_buffer_write_float64(omni_buffer_t* buf, double val) {
-    if (buf) buf->buf.writeFloat64(val);
+    if (buf) (void)buf->buf.writeFloat64(val);
 }
 void omni_buffer_write_string(omni_buffer_t* buf, const char* val, uint32_t len) {
     if (buf) {
@@ -204,7 +199,7 @@ void omni_buffer_write_string(omni_buffer_t* buf, const char* val, uint32_t len)
             len = 0;
         }
         std::string s(val ? val : "", len);
-        buf->buf.writeString(s);
+        (void)buf->buf.writeString(s);
     }
 }
 void omni_buffer_write_bytes(omni_buffer_t* buf, const uint8_t* data, uint32_t len) {
@@ -213,130 +208,119 @@ void omni_buffer_write_bytes(omni_buffer_t* buf, const uint8_t* data, uint32_t l
         if (data && len > 0) {
             v.assign(data, data + len);
         }
-        buf->buf.writeBytes(v);
+        (void)buf->buf.writeBytes(v);
     }
 }
 
 /* 读取 */
 uint8_t omni_buffer_read_bool(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> uint8_t {
-        bool value = false;
-        if (!buf || !buf->buf.tryReadBool(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value ? 1 : 0;
-    }, static_cast<uint8_t>(0));
+    if (!buf) return 0;
+    bool value = false;
+    if (!buf->buf.tryReadBool(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value ? 1 : 0;
 }
 
 int8_t omni_buffer_read_int8(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> int8_t {
-        int8_t value = 0;
-        if (!buf || !buf->buf.tryReadInt8(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<int8_t>(0));
+    if (!buf) return 0;
+    int8_t value = 0;
+    if (!buf->buf.tryReadInt8(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 uint8_t omni_buffer_read_uint8(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> uint8_t {
-        uint8_t value = 0;
-        if (!buf || !buf->buf.tryReadUint8(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<uint8_t>(0));
+    if (!buf) return 0;
+    uint8_t value = 0;
+    if (!buf->buf.tryReadUint8(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 int16_t omni_buffer_read_int16(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> int16_t {
-        int16_t value = 0;
-        if (!buf || !buf->buf.tryReadInt16(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<int16_t>(0));
+    if (!buf) return 0;
+    int16_t value = 0;
+    if (!buf->buf.tryReadInt16(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 uint16_t omni_buffer_read_uint16(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> uint16_t {
-        uint16_t value = 0;
-        if (!buf || !buf->buf.tryReadUint16(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<uint16_t>(0));
+    if (!buf) return 0;
+    uint16_t value = 0;
+    if (!buf->buf.tryReadUint16(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 int32_t omni_buffer_read_int32(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> int32_t {
-        int32_t value = 0;
-        if (!buf || !buf->buf.tryReadInt32(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<int32_t>(0));
+    if (!buf) return 0;
+    int32_t value = 0;
+    if (!buf->buf.tryReadInt32(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 uint32_t omni_buffer_read_uint32(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> uint32_t {
-        uint32_t value = 0;
-        if (!buf || !buf->buf.tryReadUint32(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<uint32_t>(0));
+    if (!buf) return 0;
+    uint32_t value = 0;
+    if (!buf->buf.tryReadUint32(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 int64_t omni_buffer_read_int64(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> int64_t {
-        int64_t value = 0;
-        if (!buf || !buf->buf.tryReadInt64(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<int64_t>(0));
+    if (!buf) return 0;
+    int64_t value = 0;
+    if (!buf->buf.tryReadInt64(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 uint64_t omni_buffer_read_uint64(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> uint64_t {
-        uint64_t value = 0;
-        if (!buf || !buf->buf.tryReadUint64(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0;
-        }
-        return value;
-    }, static_cast<uint64_t>(0));
+    if (!buf) return 0;
+    uint64_t value = 0;
+    if (!buf->buf.tryReadUint64(value)) {
+        markReadError(buf);
+        return 0;
+    }
+    return value;
 }
 
 float omni_buffer_read_float32(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> float {
-        float value = 0.0f;
-        if (!buf || !buf->buf.tryReadFloat32(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0.0f;
-        }
-        return value;
-    }, 0.0f);
+    if (!buf) return 0.0f;
+    float value = 0.0f;
+    if (!buf->buf.tryReadFloat32(value)) {
+        markReadError(buf);
+        return 0.0f;
+    }
+    return value;
 }
 
 double omni_buffer_read_float64(omni_buffer_t* buf) {
-    return readBufferValue(buf, [buf]() -> double {
-        double value = 0.0;
-        if (!buf || !buf->buf.tryReadFloat64(value)) {
-            if (buf) { buf->read_ok = false; }
-            return 0.0;
-        }
-        return value;
-    }, 0.0);
+    if (!buf) return 0.0;
+    double value = 0.0;
+    if (!buf->buf.tryReadFloat64(value)) {
+        markReadError(buf);
+        return 0.0;
+    }
+    return value;
 }
 
 char* omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len) {
@@ -344,21 +328,16 @@ char* omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len) {
         if (out_len) *out_len = 0;
         return NULL;
     }
-    std::string s = readBufferValue(buf, [buf]() -> std::string {
-        std::string value;
-        if (!buf->buf.tryReadString(value)) {
-            buf->read_ok = false;
-            return std::string();
-        }
-        return value;
-    }, std::string());
-    if (out_len && s.empty()) {
-        *out_len = 0;
+    std::string value;
+    if (!buf->buf.tryReadString(value)) {
+        markReadError(buf);
+        if (out_len) *out_len = 0;
+        return NULL;
     }
-    uint32_t len = static_cast<uint32_t>(s.size());
+    uint32_t len = static_cast<uint32_t>(value.size());
     char* result = (char*)malloc(len + 1);
     if (result) {
-        memcpy(result, s.c_str(), len + 1);
+        memcpy(result, value.c_str(), len + 1);
     }
     if (out_len) *out_len = len;
     return result;
@@ -369,18 +348,16 @@ uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len) {
         if (out_len) *out_len = 0;
         return NULL;
     }
-    std::vector<uint8_t> v = readBufferValue(buf, [buf]() -> std::vector<uint8_t> {
-        std::vector<uint8_t> value;
-        if (!buf->buf.tryReadBytes(value)) {
-            buf->read_ok = false;
-            return std::vector<uint8_t>();
-        }
-        return value;
-    }, std::vector<uint8_t>());
-    uint32_t len = static_cast<uint32_t>(v.size());
+    std::vector<uint8_t> value;
+    if (!buf->buf.tryReadBytes(value)) {
+        markReadError(buf);
+        *out_len = 0;
+        return NULL;
+    }
+    uint32_t len = static_cast<uint32_t>(value.size());
     uint8_t* result = (uint8_t*)malloc(len);
     if (result && len > 0) {
-        memcpy(result, v.data(), len);
+        memcpy(result, value.data(), len);
     }
     *out_len = len;
     return result;

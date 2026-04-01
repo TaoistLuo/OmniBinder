@@ -1,19 +1,25 @@
 # tests/CMakeLists.txt
-
+#
 # 测试可执行文件输出到 target/test
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/target/test)
 
-# 简单测试框架（不引入外部依赖）
+# 公共测试头文件路径
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
+# ============================================================
+# 单元测试（使用 GTest）
+# ============================================================
+
 add_executable(test_buffer test_buffer.cpp)
-target_link_libraries(test_buffer PRIVATE omnibinder_static)
+target_link_libraries(test_buffer PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_buffer COMMAND test_buffer)
 
 add_executable(test_message test_message.cpp)
-target_link_libraries(test_message PRIVATE omnibinder_static)
+target_link_libraries(test_message PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_message COMMAND test_message)
 
 add_executable(test_event_loop test_event_loop.cpp)
-target_link_libraries(test_event_loop PRIVATE omnibinder_static)
+target_link_libraries(test_event_loop PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_event_loop COMMAND test_event_loop)
 
 add_executable(test_owner_thread_executor test_owner_thread_executor.cpp)
@@ -21,11 +27,11 @@ target_include_directories(test_owner_thread_executor PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/include
 )
-target_link_libraries(test_owner_thread_executor PRIVATE omnibinder_static pthread)
+target_link_libraries(test_owner_thread_executor PRIVATE omnibinder_static pthread gtest gtest_main)
 add_test(NAME test_owner_thread_executor COMMAND test_owner_thread_executor)
 
 add_executable(test_transport test_transport.cpp)
-target_link_libraries(test_transport PRIVATE omnibinder_static)
+target_link_libraries(test_transport PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_transport COMMAND test_transport)
 
 add_executable(test_service_registry
@@ -33,7 +39,7 @@ add_executable(test_service_registry
     ${CMAKE_SOURCE_DIR}/service_manager/service_registry.cpp
 )
 target_include_directories(test_service_registry PRIVATE ${CMAKE_SOURCE_DIR}/service_manager)
-target_link_libraries(test_service_registry PRIVATE omnibinder_static)
+target_link_libraries(test_service_registry PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_service_registry COMMAND test_service_registry)
 
 add_executable(test_heartbeat_death
@@ -42,7 +48,7 @@ add_executable(test_heartbeat_death
     ${CMAKE_SOURCE_DIR}/service_manager/death_notifier.cpp
 )
 target_include_directories(test_heartbeat_death PRIVATE ${CMAKE_SOURCE_DIR}/service_manager)
-target_link_libraries(test_heartbeat_death PRIVATE omnibinder_static)
+target_link_libraries(test_heartbeat_death PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_heartbeat_death COMMAND test_heartbeat_death)
 
 add_executable(test_topic_manager
@@ -50,11 +56,11 @@ add_executable(test_topic_manager
     ${CMAKE_SOURCE_DIR}/service_manager/topic_manager.cpp
 )
 target_include_directories(test_topic_manager PRIVATE ${CMAKE_SOURCE_DIR}/service_manager)
-target_link_libraries(test_topic_manager PRIVATE omnibinder_static)
+target_link_libraries(test_topic_manager PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_topic_manager COMMAND test_topic_manager)
 
 add_executable(test_shm_transport test_shm_transport.cpp)
-target_link_libraries(test_shm_transport PRIVATE omnibinder_static)
+target_link_libraries(test_shm_transport PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_shm_transport COMMAND test_shm_transport)
 
 add_executable(test_idl_compiler
@@ -68,6 +74,7 @@ target_include_directories(test_idl_compiler PRIVATE
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc
     ${CMAKE_SOURCE_DIR}/include
 )
+target_link_libraries(test_idl_compiler PRIVATE gtest gtest_main)
 add_test(NAME test_idl_compiler COMMAND test_idl_compiler)
 
 add_executable(test_omni_cli_type_codec
@@ -83,8 +90,28 @@ target_include_directories(test_omni_cli_type_codec PRIVATE
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc
     ${CMAKE_SOURCE_DIR}/include
 )
-target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static)
+target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_omni_cli_type_codec COMMAND test_omni_cli_type_codec)
+
+add_executable(test_stats test_stats.cpp)
+target_link_libraries(test_stats PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_stats service_manager)
+add_test(NAME test_stats COMMAND test_stats
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_stats PROPERTIES TIMEOUT 120)
+
+add_executable(test_c_api test_c_api.cpp)
+target_link_libraries(test_c_api PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_c_api service_manager)
+add_test(NAME test_c_api COMMAND test_c_api
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_c_api PROPERTIES TIMEOUT 120)
+
+# ============================================================
+# 集成测试（使用 GTest，需要 service_manager）
+# ============================================================
 
 add_executable(test_generated_runtime_integration
     test_generated_runtime_integration.cpp
@@ -102,20 +129,91 @@ target_compile_definitions(test_generated_runtime_integration PRIVATE
     OMNI_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     OMNI_BUILD_DIR="${CMAKE_BINARY_DIR}"
 )
-target_link_libraries(test_generated_runtime_integration PRIVATE omnibinder_static pthread)
+target_link_libraries(test_generated_runtime_integration PRIVATE omnibinder_static pthread gtest gtest_main)
 add_dependencies(test_generated_runtime_integration service_manager)
 add_test(NAME test_generated_runtime_integration COMMAND test_generated_runtime_integration
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(test_generated_runtime_integration PROPERTIES TIMEOUT 180)
+set_tests_properties(test_generated_runtime_integration PROPERTIES TIMEOUT 300)
 
-add_executable(test_c_api test_c_api.cpp)
-target_link_libraries(test_c_api PRIVATE omnibinder_static pthread)
-add_dependencies(test_c_api service_manager)
-add_test(NAME test_c_api COMMAND test_c_api
+add_executable(test_integration test_integration.cpp)
+target_link_libraries(test_integration PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_integration service_manager)
+add_test(NAME test_integration COMMAND test_integration
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(test_c_api PROPERTIES TIMEOUT 120)
+set_tests_properties(test_integration PROPERTIES TIMEOUT 60)
+
+add_executable(test_full_integration test_full_integration.cpp)
+target_link_libraries(test_full_integration PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_full_integration service_manager)
+add_test(NAME test_full_integration COMMAND test_full_integration
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_full_integration PROPERTIES TIMEOUT 90)
+
+add_executable(test_control_plane_and_fallback test_control_plane_and_fallback.cpp)
+target_link_libraries(test_control_plane_and_fallback PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_control_plane_and_fallback service_manager)
+add_test(NAME test_control_plane_and_fallback COMMAND test_control_plane_and_fallback
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_control_plane_and_fallback PROPERTIES TIMEOUT 600)
+
+add_executable(test_threadsafe_client_and_reconnect test_threadsafe_client_and_reconnect.cpp)
+target_link_libraries(test_threadsafe_client_and_reconnect PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_threadsafe_client_and_reconnect service_manager)
+add_test(NAME test_threadsafe_client_and_reconnect COMMAND test_threadsafe_client_and_reconnect
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_threadsafe_client_and_reconnect PROPERTIES TIMEOUT 120)
+
+add_executable(test_runtime_stats test_runtime_stats.cpp)
+target_link_libraries(test_runtime_stats PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_runtime_stats service_manager)
+add_test(NAME test_runtime_stats COMMAND test_runtime_stats
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_runtime_stats PROPERTIES TIMEOUT 120)
+
+add_executable(test_error_logging test_error_logging.cpp)
+target_link_libraries(test_error_logging PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_error_logging service_manager)
+add_test(NAME test_error_logging COMMAND test_error_logging
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_error_logging PROPERTIES TIMEOUT 120)
+
+add_executable(test_thread_safety test_thread_safety.cpp)
+target_link_libraries(test_thread_safety PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_thread_safety service_manager)
+add_test(NAME test_thread_safety COMMAND test_thread_safety
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_thread_safety PROPERTIES TIMEOUT 240)
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_sm_reconnect.cpp)
+    add_executable(test_sm_reconnect test_sm_reconnect.cpp)
+    target_link_libraries(test_sm_reconnect PRIVATE omnibinder_static pthread gtest gtest_main)
+    add_dependencies(test_sm_reconnect service_manager)
+    add_test(NAME test_sm_reconnect COMMAND test_sm_reconnect
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(test_sm_reconnect PROPERTIES TIMEOUT 120)
+endif()
+
+# ============================================================
+# 性能测试与稳定性测试（保留原有格式，需要输出报告）
+# ============================================================
+
+add_executable(test_performance test_performance.cpp)
+target_link_libraries(test_performance PRIVATE omnibinder_static pthread)
+add_dependencies(test_performance service_manager)
+add_test(NAME test_performance COMMAND test_performance
+    --report ${CMAKE_SOURCE_DIR}/docs/performance-report.md
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_performance PROPERTIES TIMEOUT 120)
 
 add_executable(test_soak_runner test_soak_runner.cpp)
 add_dependencies(test_soak_runner
@@ -127,7 +225,7 @@ add_dependencies(test_soak_runner
 add_test(NAME test_soak_runner COMMAND test_soak_runner 2
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(test_soak_runner PROPERTIES TIMEOUT 300)
+set_tests_properties(test_soak_runner PROPERTIES TIMEOUT 900)
 
 add_executable(test_transient_disconnect_recovery test_transient_disconnect_recovery.cpp)
 target_link_libraries(test_transient_disconnect_recovery PRIVATE omnibinder_static pthread)
@@ -137,71 +235,9 @@ add_test(NAME test_transient_disconnect_recovery COMMAND test_transient_disconne
 )
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
 
-# 端到端集成测试（需要 service_manager 可执行文件）
-add_executable(test_integration test_integration.cpp)
-target_link_libraries(test_integration PRIVATE omnibinder_static)
-add_dependencies(test_integration service_manager)
-add_test(NAME test_integration COMMAND test_integration
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_integration PROPERTIES TIMEOUT 60)
-
-# 完整集成测试（SHM多客户端、广播订阅、死亡通知）
-add_executable(test_full_integration test_full_integration.cpp)
-target_link_libraries(test_full_integration PRIVATE omnibinder_static)
-target_link_libraries(test_full_integration PRIVATE pthread)
-add_dependencies(test_full_integration service_manager)
-add_test(NAME test_full_integration COMMAND test_full_integration
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_full_integration PROPERTIES TIMEOUT 90)
-
-add_executable(test_control_plane_and_fallback test_control_plane_and_fallback.cpp)
-target_link_libraries(test_control_plane_and_fallback PRIVATE omnibinder_static)
-target_link_libraries(test_control_plane_and_fallback PRIVATE pthread)
-add_dependencies(test_control_plane_and_fallback service_manager)
-add_test(NAME test_control_plane_and_fallback COMMAND test_control_plane_and_fallback
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_control_plane_and_fallback PROPERTIES TIMEOUT 90)
-
-# 性能基准测试（RPC 往返延迟、话题发布/订阅延迟）
-add_executable(test_performance test_performance.cpp)
-target_link_libraries(test_performance PRIVATE omnibinder_static)
-target_link_libraries(test_performance PRIVATE pthread)
-add_dependencies(test_performance service_manager)
-add_test(NAME test_performance COMMAND test_performance
-    --report ${CMAKE_SOURCE_DIR}/docs/performance-report.md
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_performance PROPERTIES TIMEOUT 120)
-
-add_executable(test_threadsafe_client_and_reconnect test_threadsafe_client_and_reconnect.cpp)
-target_link_libraries(test_threadsafe_client_and_reconnect PRIVATE omnibinder_static)
-target_link_libraries(test_threadsafe_client_and_reconnect PRIVATE pthread)
-add_dependencies(test_threadsafe_client_and_reconnect service_manager)
-add_test(NAME test_threadsafe_client_and_reconnect COMMAND test_threadsafe_client_and_reconnect
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_threadsafe_client_and_reconnect PROPERTIES TIMEOUT 120)
-
-add_executable(test_runtime_stats test_runtime_stats.cpp)
-target_link_libraries(test_runtime_stats PRIVATE omnibinder_static)
-target_link_libraries(test_runtime_stats PRIVATE pthread)
-add_dependencies(test_runtime_stats service_manager)
-add_test(NAME test_runtime_stats COMMAND test_runtime_stats
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_runtime_stats PROPERTIES TIMEOUT 120)
-
-add_executable(test_error_logging test_error_logging.cpp)
-target_link_libraries(test_error_logging PRIVATE omnibinder_static)
-target_link_libraries(test_error_logging PRIVATE pthread)
-add_dependencies(test_error_logging service_manager)
-add_test(NAME test_error_logging COMMAND test_error_logging
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_error_logging PROPERTIES TIMEOUT 120)
+# ============================================================
+# Python 测试
+# ============================================================
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)

@@ -1,16 +1,19 @@
+#include <gtest/gtest.h>
+#include "test_common.h"
 #include "lexer.h"
 #include "parser.h"
 #include "ast.h"
 #include "codegen_cpp.h"
 #include "codegen_c.h"
 
-#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
 #include <unistd.h>
 
+using namespace omnibinder;
+using namespace omnibinder::test;
 using namespace omnic;
 
 #ifndef OMNI_SOURCE_DIR
@@ -21,26 +24,28 @@ using namespace omnic;
 #define OMNI_BUILD_DIR "."
 #endif
 
-#define TEST(name) printf("  TEST %-52s ", #name); fflush(stdout);
-#define PASS() printf("PASS\n"); fflush(stdout);
-
-static ParseContext parseFile(const std::string& file_path, AstFile& ast) {
+static bool parseFile(const std::string& file_path, AstFile& ast, ParseContext& ctx) {
     std::ifstream in(file_path.c_str());
-    assert(in.good());
+    if (!in.good()) {
+        fprintf(stderr, "parseFile: cannot open '%s'\n", file_path.c_str());
+        return false;
+    }
     std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     Lexer lexer(source);
-    ParseContext ctx;
     Parser parser(lexer, ctx, file_path);
-    if (!parser.parse(ast)) {
-        abort();
+    if (!parser.parse(ast) || parser.hasError()) {
+        fprintf(stderr, "parseFile: parse failed for '%s'\n", file_path.c_str());
+        return false;
     }
-    assert(!parser.hasError());
-    return ctx;
+    return true;
 }
 
 static void writeFile(const std::string& path, const std::string& content) {
     std::ofstream out(path.c_str());
-    assert(out.good());
+    if (!out.good()) {
+        fprintf(stderr, "FAIL: writeFile failed for %s\n", path.c_str());
+        abort();
+    }
     out << content;
 }
 
@@ -57,7 +62,7 @@ static std::string shellQuote(const std::string& value) {
     return quoted;
 }
 
-[[maybe_unused]] static bool runCommand(const std::string& command) {
+static bool runCommand(const std::string& command) {
     return system(command.c_str()) == 0;
 }
 
@@ -70,40 +75,7 @@ static std::string replaceAll(std::string input, const std::string& from, const 
     return input;
 }
 
-int main() {
-    printf("=== Generated Runtime Integration Tests ===\n\n");
-
-    char dir_template[] = "/tmp/omnibinder_generated_runtime_XXXXXX";
-    char* dir_path = mkdtemp(dir_template);
-    assert(dir_path != NULL);
-    std::string dir(dir_path);
-
-    const std::string idl =
-        "package demo;\n"
-        "struct Item {\n"
-        "    int32 id;\n"
-        "}\n"
-        "topic ItemTopic {\n"
-        "    Item item;\n"
-        "}\n"
-        "service ItemService {\n"
-        "    Item echoItem(Item item);\n"
-        "    publish ItemTopic;\n"
-        "}";
-
-    std::string idl_path = dir + "/guarded.bidl";
-    writeFile(idl_path, idl);
-
-    AstFile ast;
-    ParseContext ctx = parseFile(idl_path, ast);
-    assert(ctx.loaded_packages.count("demo") == 1);
-
-    CppCodeGen cpp_gen;
-    CCodeGen c_gen;
-    assert(cpp_gen.generate(ast, dir, "guarded"));
-    assert(c_gen.generate(ast, dir, "guarded"));
-
-    const std::string cpp_harness_template = R"CPP(
+static const std::string kCppHarnessTemplate = R"CPP(
 #include "guarded.h"
 #include <omnibinder/omnibinder.h>
 #include <omnibinder/message.h>
@@ -125,6 +97,17 @@ static const uint16_t SM_PORT_REPLY = __CPP_REPLY_PORT__;
 static const uint32_t METHOD_ECHO = fnv1a_32("echoItem");
 static const uint32_t IFACE_ID = fnv1a_32("demo.ItemService");
 static const uint32_t TOPIC_ID = fnv1a_32("ItemTopic");
+
+static pid_t g_sm_pids[4] = {};
+static int g_sm_count = 0;
+static void cleanupSM() {
+    for (int i = 0; i < g_sm_count; ++i) {
+        if (g_sm_pids[i] > 0) {
+            kill(g_sm_pids[i], SIGKILL);
+            waitpid(g_sm_pids[i], NULL, 0);
+        }
+    }
+}
 
 static bool connectTcp(TcpTransport& transport, const std::string& host, uint16_t port) {
     int ret = transport.connect(host, port);
@@ -200,6 +183,7 @@ static pid_t startSM(uint16_t port) {
         execl("__SERVICE_MANAGER__", "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
         _exit(1);
     }
+    if (pid > 0 && g_sm_count < 4) g_sm_pids[g_sm_count++] = pid;
     return pid;
 }
 
@@ -318,6 +302,7 @@ static void* rawReplyThread(void* arg) {
 }
 
 int main() {
+    atexit(cleanupSM);
     pid_t sm_req = startSM(SM_PORT_REQ);
     assert(sm_req > 0);
     assert(waitSM(SM_PORT_REQ));
@@ -378,8 +363,7 @@ int main() {
     assert(reg_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     TcpTransport sm_conn;
     assert(connectTcp(sm_conn, "127.0.0.1", SM_PORT_REPLY));
-    assert(registerFakeService(sm_conn, 9101, "ItemService", raw_ctx.port, reg_runtime.hostId()));
-    sm_conn.close();
+    assert(registerFakeService(sm_conn, 9101, "ItemService", raw_ctx.port, "remote-raw-node"));
 
     OmniRuntime client_runtime;
     assert(client_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
@@ -388,9 +372,11 @@ int main() {
     input.id = 77;
     demo::Item result;
     int ret = reply_proxy.echoItem(input, &result);
+    fprintf(stderr, "DEBUG: echoItem ret=%d\\n", ret);
     assert(ret == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_runtime.stop();
     reg_runtime.stop();
+    sm_conn.close();
 
     pthread_join(raw_tid, NULL);
     stopSM(sm_reply);
@@ -410,8 +396,7 @@ int main() {
     assert(reg_status_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     TcpTransport sm_status_conn;
     assert(connectTcp(sm_status_conn, "127.0.0.1", SM_PORT_REPLY));
-    assert(registerFakeService(sm_status_conn, 9102, "ItemService", raw_status_ctx.port, reg_status_runtime.hostId()));
-    sm_status_conn.close();
+    assert(registerFakeService(sm_status_conn, 9102, "ItemService", raw_status_ctx.port, "remote-raw-node"));
 
     OmniRuntime client_status_runtime;
     assert(client_status_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
@@ -423,6 +408,7 @@ int main() {
     assert(ret == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_status_runtime.stop();
     reg_status_runtime.stop();
+    sm_status_conn.close();
 
     pthread_join(raw_status_tid, NULL);
     stopSM(sm_reply_truncated_status);
@@ -442,8 +428,7 @@ int main() {
     assert(reg_length_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     TcpTransport sm_length_conn;
     assert(connectTcp(sm_length_conn, "127.0.0.1", SM_PORT_REPLY));
-    assert(registerFakeService(sm_length_conn, 9103, "ItemService", raw_length_ctx.port, reg_length_runtime.hostId()));
-    sm_length_conn.close();
+    assert(registerFakeService(sm_length_conn, 9103, "ItemService", raw_length_ctx.port, "remote-raw-node"));
 
     OmniRuntime client_length_runtime;
     assert(client_length_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
@@ -455,6 +440,7 @@ int main() {
     assert(ret == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_length_runtime.stop();
     reg_length_runtime.stop();
+    sm_length_conn.close();
 
     pthread_join(raw_length_tid, NULL);
     stopSM(sm_reply_truncated_length);
@@ -462,7 +448,7 @@ int main() {
 }
 )CPP";
 
-    const std::string c_harness_template = R"CPP(
+static const std::string kCHarnessTemplate = R"CPP(
 #include "guarded_c.h"
 #include <omnibinder/omnibinder.h>
 #include <omnibinder/message.h>
@@ -482,6 +468,17 @@ static const uint16_t SM_PORT_REPLY = __C_REPLY_PORT__;
 static const uint32_t METHOD_ECHO = omni_fnv1a_32("echoItem");
 static const uint32_t IFACE_ID = omni_fnv1a_32("demo.ItemService");
 static const uint32_t TOPIC_ID = omni_fnv1a_32("ItemTopic");
+
+static pid_t g_sm_pids[4] = {};
+static int g_sm_count = 0;
+static void cleanupSM() {
+    for (int i = 0; i < g_sm_count; ++i) {
+        if (g_sm_pids[i] > 0) {
+            kill(g_sm_pids[i], SIGKILL);
+            waitpid(g_sm_pids[i], NULL, 0);
+        }
+    }
+}
 
 static bool connectTcp(omnibinder::TcpTransport& transport, const std::string& host, uint16_t port) {
     int ret = transport.connect(host, port);
@@ -557,6 +554,7 @@ static pid_t startSM(uint16_t port) {
         execl("__SERVICE_MANAGER__", "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
         _exit(1);
     }
+    if (pid > 0 && g_sm_count < 4) g_sm_pids[g_sm_count++] = pid;
     return pid;
 }
 
@@ -687,6 +685,7 @@ static void topicCallback(const demo_ItemTopic* msg, void* user_data) {
 }
 
 int main() {
+    atexit(cleanupSM);
     pid_t sm_req = startSM(SM_PORT_REQ);
     assert(sm_req > 0);
     assert(waitSM(SM_PORT_REQ));
@@ -750,7 +749,6 @@ int main() {
     omnibinder::TcpTransport sm_conn;
     assert(connectTcp(sm_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_conn, 9301, "ItemService", raw_ctx.port, std::string()));
-    sm_conn.close();
 
     omni_runtime_t* client_runtime = omni_runtime_create();
     assert(omni_runtime_init(client_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
@@ -769,6 +767,7 @@ int main() {
     omni_runtime_destroy(client_runtime);
     omni_runtime_stop(reg_runtime);
     omni_runtime_destroy(reg_runtime);
+    sm_conn.close();
 
     pthread_join(raw_tid, NULL);
     stopSM(sm_reply);
@@ -789,7 +788,6 @@ int main() {
     omnibinder::TcpTransport sm_status_conn;
     assert(connectTcp(sm_status_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_status_conn, 9302, "ItemService", raw_status_ctx.port, std::string()));
-    sm_status_conn.close();
 
     omni_runtime_t* client_status_runtime = omni_runtime_create();
     assert(omni_runtime_init(client_status_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
@@ -808,6 +806,7 @@ int main() {
     omni_runtime_destroy(client_status_runtime);
     omni_runtime_stop(reg_status_runtime);
     omni_runtime_destroy(reg_status_runtime);
+    sm_status_conn.close();
 
     pthread_join(raw_status_tid, NULL);
     stopSM(sm_reply_truncated_status);
@@ -828,7 +827,6 @@ int main() {
     omnibinder::TcpTransport sm_length_conn;
     assert(connectTcp(sm_length_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_length_conn, 9303, "ItemService", raw_length_ctx.port, std::string()));
-    sm_length_conn.close();
 
     omni_runtime_t* client_length_runtime = omni_runtime_create();
     assert(omni_runtime_init(client_length_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
@@ -847,6 +845,7 @@ int main() {
     omni_runtime_destroy(client_length_runtime);
     omni_runtime_stop(reg_length_runtime);
     omni_runtime_destroy(reg_length_runtime);
+    sm_length_conn.close();
 
     pthread_join(raw_length_tid, NULL);
     stopSM(sm_reply_truncated_length);
@@ -854,57 +853,107 @@ int main() {
 }
 )CPP";
 
-    std::string cpp_harness = cpp_harness_template;
-    cpp_harness = replaceAll(cpp_harness, "__CPP_REQ_PORT__", "19961");
-    cpp_harness = replaceAll(cpp_harness, "__CPP_REPLY_PORT__", "19962");
-    cpp_harness = replaceAll(cpp_harness, "__SERVICE_MANAGER__", std::string(OMNI_BUILD_DIR) + "/target/bin/service_manager");
+class GeneratedRuntimeTest : public ::testing::Test {
+protected:
+    static std::string dir_;
+    static std::string idl_path_;
+    static std::string cpp_harness_path_;
+    static std::string c_harness_path_;
 
-    std::string c_harness = c_harness_template;
-    c_harness = replaceAll(c_harness, "__C_REQ_PORT__", "19963");
-    c_harness = replaceAll(c_harness, "__C_REPLY_PORT__", "19964");
-    c_harness = replaceAll(c_harness, "__SERVICE_MANAGER__", std::string(OMNI_BUILD_DIR) + "/target/bin/service_manager");
-
-    std::string cpp_harness_path = dir + "/generated_cpp_harness.cpp";
-    std::string c_harness_path = dir + "/generated_c_harness.cpp";
-    writeFile(cpp_harness_path, cpp_harness);
-    writeFile(c_harness_path, c_harness);
-
-    std::string lib_path = std::string(OMNI_BUILD_DIR) + "/target/lib/libomnibinder.a";
-    std::string include_flags = std::string("-I") + shellQuote(std::string(OMNI_SOURCE_DIR) + "/include") +
-                                " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/src") +
-                                " -I" + shellQuote(dir);
-
-    TEST(compile_generated_cpp_runtime_harness) {
-        std::string cmd = std::string("g++ -std=c++11 ") + include_flags +
-            " " + shellQuote(cpp_harness_path) +
-            " " + shellQuote(dir + "/guarded.cpp") +
-            " " + shellQuote(lib_path) +
-            " -lpthread -o " + shellQuote(dir + "/generated_cpp_harness");
-        assert(runCommand(cmd));
-        PASS();
+    static std::string getIncludeFlags() {
+        return std::string("-DOMNIBINDER_LINUX") +
+               " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/include") +
+               " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/src") +
+               " -I" + shellQuote(dir_);
     }
 
-    TEST(run_generated_cpp_runtime_harness) {
-        assert(runCommand(shellQuote(dir + "/generated_cpp_harness")));
-        PASS();
+    static std::string getLibPath() {
+        return std::string(OMNI_BUILD_DIR) + "/target/lib/libomnibinder.a";
     }
 
-    TEST(compile_generated_c_runtime_harness) {
-        std::string cmd = std::string("g++ -std=c++11 ") + include_flags +
-            " " + shellQuote(c_harness_path) +
-            " " + shellQuote(dir + "/guarded.c") +
-            " " + shellQuote(lib_path) +
-            " -lpthread -o " + shellQuote(dir + "/generated_c_harness");
-        assert(runCommand(cmd));
-        PASS();
+    static void SetUpTestSuite() {
+        system("pkill -f 'service_manager --port 1996' 2>/dev/null || true");
+        usleep(200000);
+
+        char dir_template[] = "/tmp/omnibinder_generated_runtime_XXXXXX";
+        char* dir_path = mkdtemp(dir_template);
+        ASSERT_TRUE(dir_path != NULL);
+        dir_ = dir_path;
+
+        const std::string idl =
+            "package demo;\n"
+            "struct Item {\n"
+            "    int32 id;\n"
+            "}\n"
+            "topic ItemTopic {\n"
+            "    Item item;\n"
+            "}\n"
+            "service ItemService {\n"
+            "    Item echoItem(Item item);\n"
+            "    publishes ItemTopic;\n"
+            "}";
+
+        idl_path_ = dir_ + "/guarded.bidl";
+        writeFile(idl_path_, idl);
+
+        AstFile ast;
+        ParseContext ctx;
+        ASSERT_TRUE(parseFile(idl_path_, ast, ctx));
+        ASSERT_EQ(ctx.loaded_packages.count("demo"), 1u);
+
+        CppCodeGen cpp_gen;
+        CCodeGen c_gen;
+        ASSERT_TRUE(cpp_gen.generate(ast, dir_, "guarded"));
+        ASSERT_TRUE(c_gen.generate(ast, dir_, "guarded"));
+
+        std::string cpp_harness = kCppHarnessTemplate;
+        cpp_harness = replaceAll(cpp_harness, "__CPP_REQ_PORT__", "19961");
+        cpp_harness = replaceAll(cpp_harness, "__CPP_REPLY_PORT__", "19962");
+        cpp_harness = replaceAll(cpp_harness, "__SERVICE_MANAGER__", std::string(OMNI_BUILD_DIR) + "/target/bin/service_manager");
+
+        std::string c_harness = kCHarnessTemplate;
+        c_harness = replaceAll(c_harness, "__C_REQ_PORT__", "19963");
+        c_harness = replaceAll(c_harness, "__C_REPLY_PORT__", "19964");
+        c_harness = replaceAll(c_harness, "__SERVICE_MANAGER__", std::string(OMNI_BUILD_DIR) + "/target/bin/service_manager");
+
+        cpp_harness_path_ = dir_ + "/generated_cpp_harness.cpp";
+        c_harness_path_ = dir_ + "/generated_c_harness.cpp";
+        writeFile(cpp_harness_path_, cpp_harness);
+        writeFile(c_harness_path_, c_harness);
     }
 
-    TEST(run_generated_c_runtime_harness) {
-        assert(runCommand(shellQuote(dir + "/generated_c_harness")));
-        PASS();
+    static void TearDownTestSuite() {
+        unlink(idl_path_.c_str());
     }
+};
 
-    unlink(idl_path.c_str());
-    PASS();
-    return 0;
+std::string GeneratedRuntimeTest::dir_;
+std::string GeneratedRuntimeTest::idl_path_;
+std::string GeneratedRuntimeTest::cpp_harness_path_;
+std::string GeneratedRuntimeTest::c_harness_path_;
+
+TEST_F(GeneratedRuntimeTest, CompileGeneratedCppRuntimeHarness) {
+    std::string cmd = std::string("g++ -std=c++11 ") + getIncludeFlags() +
+        " " + shellQuote(cpp_harness_path_) +
+        " " + shellQuote(dir_ + "/guarded.cpp") +
+        " " + shellQuote(getLibPath()) +
+        " -lpthread -lrt -o " + shellQuote(dir_ + "/generated_cpp_harness");
+    ASSERT_TRUE(runCommand(cmd));
+}
+
+TEST_F(GeneratedRuntimeTest, RunGeneratedCppRuntimeHarness) {
+    ASSERT_TRUE(runCommand(shellQuote(dir_ + "/generated_cpp_harness")));
+}
+
+TEST_F(GeneratedRuntimeTest, CompileGeneratedCRuntimeHarness) {
+    std::string cmd = std::string("g++ -std=c++11 ") + getIncludeFlags() +
+        " " + shellQuote(c_harness_path_) +
+        " " + shellQuote(dir_ + "/guarded.c") +
+        " " + shellQuote(getLibPath()) +
+        " -lpthread -lrt -o " + shellQuote(dir_ + "/generated_c_harness");
+    ASSERT_TRUE(runCommand(cmd));
+}
+
+TEST_F(GeneratedRuntimeTest, RunGeneratedCRuntimeHarness) {
+    ASSERT_TRUE(runCommand(shellQuote(dir_ + "/generated_c_harness")));
 }

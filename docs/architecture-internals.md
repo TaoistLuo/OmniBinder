@@ -31,7 +31,7 @@
 |     |-- ServiceHostRuntime                                         |
 |     `-- ConnectionManager                                          |
 |                                                                   |
-|   EventLoop                                                        |
+|   EventLoop / OwnerThreadExecutor                                  |
 |   Transport Layer: TcpTransport / ShmTransport                     |
 +-------------------------------------------------------------------+
 |                     ServiceManager（独立进程）                      |
@@ -66,6 +66,8 @@ OmniBinder 的内部实现分成两个平面：
 - `src/core/connection_manager.cpp`
 - `src/core/event_loop.h`
 - `src/core/event_loop.cpp`
+- `src/core/owner_thread_executor.h`
+- `include/omnibinder/buffer.h`
 
 ### 3.2 传输层文件
 
@@ -204,7 +206,26 @@ OmniBinder 的内部实现分成两个平面：
 
 - 它不直接持有 transport
 - 它通过 `SmControlChannel` 读取 pending reply
-- 它通过外部传入的 `pollOnce()` 驱动事件循环
+- 它通过外部传入的 reply-wait pump 驱动事件循环
+
+### 6.6 当前等待语义
+
+当前 `waitForReply()` 不再使用会执行 `post()` functor 的完整 `pollOnce()`。
+
+reply wait 期间只处理：
+
+- fd 事件
+- timer 事件
+
+这样可以避免共享同一个 `OmniRuntime` 做并发同步调用时出现 re-entrant `waitForReply`。
+
+### 6.7 错误处理边界
+
+当前实现采用“主路径显式状态 + 边界捕获异常”的模型：
+
+- Buffer / Message / invoke 主路径：使用 `bool` 或错误码
+- `Service::onInvoke()`：显式返回 `int`
+- owner-thread / event-loop / fd callback 边界：允许捕获异常，但必须记录日志并转换为错误状态
 
 ## 7. TopicRuntime
 
@@ -281,6 +302,17 @@ OmniBinder 的内部实现分成两个平面：
 - 会使边界虽然更“纯”，但显著增加复杂度和侵入性
 
 当前实现选择的是**更清晰、可读、稳定的切分边界**。
+
+### 8.5 本地服务调用状态模型
+
+本地服务调用路径已经切换到显式返回值模型：
+
+- `Service::onInvoke()` 返回 `int`
+- `0` 为成功
+- 非 `0` 为业务 / 反序列化 / 序列化错误
+- runtime 根据返回值构造 `MSG_INVOKE_REPLY`
+
+旧的 `invoke_error_code_` 旁路状态已移除。
 
 ## 9. ConnectionManager
 

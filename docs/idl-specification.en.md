@@ -353,6 +353,24 @@ int  demo_SensorService_proxy_SetThreshold(demo_SensorService_proxy* p,
 
 ---
 
+## 7. Runtime boundary contract
+
+The generated Stub/Proxy code now follows an explicit-status runtime contract:
+
+- business methods still keep their IDL return type (`void`, primitive, struct, array, ...)
+- the generated `onInvoke(...)` itself returns `int`
+- `0` means success
+- non-zero means an `ErrorCode` such as `ERR_DESERIALIZE` or `ERR_SERIALIZE`
+
+This lets the runtime propagate decode/encode failures explicitly instead of relying on hidden side channels.
+
+The generated C runtime callback contract is also explicit-status based:
+
+```c
+typedef int (*omni_invoke_callback_t)(uint32_t method_id,
+    const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
+```
+
 ## 8. ID generation rules
 
 ### 8.1 `interface_id`

@@ -78,6 +78,8 @@ public:
     // timeout_ms: 最大等待时间，0 = 不等待，-1 = 无限等待
     void pollOnce(int timeout_ms = -1);
 
+    void pollOnceWithoutFunctors(int timeout_ms = -1);
+
     // 停止事件循环
     void stop();
 
@@ -152,6 +154,8 @@ private:
 
     // 执行所有待处理的投递回调
     void processPendingFunctors();
+
+    void pollOnceInternal(int timeout_ms, bool process_functors);
 
     // 处理到期的定时器，返回距下一个定时器到期的毫秒数（-1 表示无定时器）
     int processTimers();

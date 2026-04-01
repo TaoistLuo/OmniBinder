@@ -99,6 +99,9 @@ void SmControlChannel::beginWait(uint32_t seq) {
                                  std::forward_as_tuple());
         return;
     }
+    if (it->second.ready) {
+        return;
+    }
     it->second.ready = false;
     it->second.message.payload.clear();
 }
@@ -139,7 +142,15 @@ void SmControlChannel::eraseWait(uint32_t seq) {
 
 void SmControlChannel::storeReply(uint32_t seq, const Message& msg) {
     std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
-    if (it == pending_replies_.end() || it->second.ready) {
+    if (it == pending_replies_.end()) {
+        PendingReplySlot slot;
+        slot.message.header = msg.header;
+        slot.message.payload.assign(msg.payload.data(), msg.payload.size());
+        slot.ready = true;
+        pending_replies_.emplace(seq, std::move(slot));
+        return;
+    }
+    if (it->second.ready) {
         return;
     }
 

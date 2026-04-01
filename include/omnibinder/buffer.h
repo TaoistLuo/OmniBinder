@@ -51,75 +51,79 @@ namespace omnibinder {
  */
 class Buffer {
 public:
-    Buffer();
-    explicit Buffer(size_t initial_capacity);
-    Buffer(const uint8_t* data, size_t length);
-    ~Buffer();
+    Buffer() noexcept;
+    explicit Buffer(size_t initial_capacity) noexcept;
+    Buffer(const uint8_t* data, size_t length) noexcept;
+    ~Buffer() noexcept;
 
     // C++11: 支持移动语义
-    Buffer(Buffer&& other);
-    Buffer& operator=(Buffer&& other);
+    Buffer(Buffer&& other) noexcept;
+    Buffer& operator=(Buffer&& other) noexcept;
 
     // ---- 写入（序列化）----
-    void writeBool(bool value);
-    void writeInt8(int8_t value);
-    void writeUint8(uint8_t value);
-    void writeInt16(int16_t value);
-    void writeUint16(uint16_t value);
-    void writeInt32(int32_t value);
-    void writeUint32(uint32_t value);
-    void writeInt64(int64_t value);
-    void writeUint64(uint64_t value);
-    void writeFloat32(float value);
-    void writeFloat64(double value);
-    void writeString(const std::string& value);
-    void writeBytes(const void* data, size_t length);
-    void writeBytes(const std::vector<uint8_t>& data);
-    void writeRaw(const void* data, size_t length);
+    bool writeBool(bool value) noexcept;
+    bool writeInt8(int8_t value) noexcept;
+    bool writeUint8(uint8_t value) noexcept;
+    bool writeInt16(int16_t value) noexcept;
+    bool writeUint16(uint16_t value) noexcept;
+    bool writeInt32(int32_t value) noexcept;
+    bool writeUint32(uint32_t value) noexcept;
+    bool writeInt64(int64_t value) noexcept;
+    bool writeUint64(uint64_t value) noexcept;
+    bool writeFloat32(float value) noexcept;
+    bool writeFloat64(double value) noexcept;
+    bool writeString(const std::string& value) noexcept;
+    bool writeBytes(const void* data, size_t length) noexcept;
+    bool writeBytes(const std::vector<uint8_t>& data) noexcept;
+    bool writeRaw(const void* data, size_t length) noexcept;
 
-    bool tryReadBool(bool& value);
-    bool tryReadInt8(int8_t& value);
-    bool tryReadUint8(uint8_t& value);
-    bool tryReadInt16(int16_t& value);
-    bool tryReadUint16(uint16_t& value);
-    bool tryReadInt32(int32_t& value);
-    bool tryReadUint32(uint32_t& value);
-    bool tryReadInt64(int64_t& value);
-    bool tryReadUint64(uint64_t& value);
-    bool tryReadFloat32(float& value);
-    bool tryReadFloat64(double& value);
-    bool tryReadString(std::string& value);
-    bool tryReadBytes(std::vector<uint8_t>& value);
+    bool tryReadBool(bool& value) noexcept;
+    bool tryReadInt8(int8_t& value) noexcept;
+    bool tryReadUint8(uint8_t& value) noexcept;
+    bool tryReadInt16(int16_t& value) noexcept;
+    bool tryReadUint16(uint16_t& value) noexcept;
+    bool tryReadInt32(int32_t& value) noexcept;
+    bool tryReadUint32(uint32_t& value) noexcept;
+    bool tryReadInt64(int64_t& value) noexcept;
+    bool tryReadUint64(uint64_t& value) noexcept;
+    bool tryReadFloat32(float& value) noexcept;
+    bool tryReadFloat64(double& value) noexcept;
+    bool tryReadString(std::string& value) noexcept;
+    bool tryReadBytes(std::vector<uint8_t>& value) noexcept;
 
     // ---- 缓冲区管理 ----
-    const uint8_t* data() const;
-    uint8_t* mutableData();
-    size_t size() const;
-    size_t capacity() const;
-    void reset();
-    void clear();
-    size_t readPosition() const;
-    bool trySetReadPosition(size_t pos);
-    size_t writePosition() const;
-    void setWritePosition(size_t pos);
-    bool hasRemaining() const;
-    size_t remaining() const;
-    void assign(const uint8_t* data, size_t length);
-    void reserve(size_t capacity);
-    void resize(size_t new_size);
+    const uint8_t* data() const noexcept;
+    uint8_t* mutableData() noexcept;
+    size_t size() const noexcept;
+    size_t capacity() const noexcept;
+    void reset() noexcept;
+    void clear() noexcept;
+    size_t readPosition() const noexcept;
+    bool trySetReadPosition(size_t pos) noexcept;
+    size_t writePosition() const noexcept;
+    void setWritePosition(size_t pos) noexcept;
+    bool hasRemaining() const noexcept;
+    size_t remaining() const noexcept;
+    void assign(const uint8_t* data, size_t length) noexcept;
+    void reserve(size_t capacity) noexcept;
+    void resize(size_t new_size) noexcept;
+
+    // ---- 写入状态检查 ----
+    bool writeOk() const noexcept;
 
 private:
     // 禁止拷贝
     Buffer(const Buffer&);
     Buffer& operator=(const Buffer&);
 
-    void ensureCapacity(size_t additional);
-    void grow(size_t min_capacity);
+    bool ensureCapacity(size_t additional) noexcept;
+    void grow(size_t min_capacity) noexcept;
 
     uint8_t* data_;
     size_t   capacity_;
     size_t   write_pos_;
     size_t   read_pos_;
+    bool     write_failed_;
 };
 
 } // namespace omnibinder

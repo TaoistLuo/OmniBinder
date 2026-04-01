@@ -360,10 +360,17 @@ payload:      方法参数的序列化数据
 
 status:
   0 = 成功
-  1 = 接口不存在
-  2 = 方法不存在
-  3 = 参数错误
-  4 = 执行异常
+  负值 = 错误码（见 error.h）
+
+当前语义补充：
+
+- `ERR_INTERFACE_NOT_FOUND`：接口不存在
+- `ERR_METHOD_NOT_FOUND`：方法不存在
+- `ERR_DESERIALIZE`：参数反序列化失败
+- `ERR_SERIALIZE`：响应序列化失败
+- `ERR_INVOKE_FAILED`：调用边界异常或内部执行失败
+
+`MSG_INVOKE_REPLY` 的 `status` 字段是当前运行时显式错误传播的正式协议出口，不再依赖内部 side-channel。
 ```
 
 ### 4.16 广播消息（MSG_BROADCAST）

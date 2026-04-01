@@ -1030,7 +1030,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
     os << "} " << prefix << "_stub_data;\n\n";
 
     // onInvoke dispatch function
-    os << "static void " << prefix << "_on_invoke(uint32_t method_id,\n";
+    os << "static int " << prefix << "_on_invoke(uint32_t method_id,\n";
     os << "    const omni_buffer_t* request, omni_buffer_t* response, void* user_data)\n";
     os << "{\n";
     os << "    " << prefix << "_stub_data* data = (" << prefix << "_stub_data*)user_data;\n";
@@ -1057,7 +1057,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 std::string ppfx = cDestroyPrefix(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << ";\n";
                 os << "        " << ppfx << "_init(&" << m.param.name << ");\n";
-                os << "        if (!" << ppfx << "_deserialize(&" << m.param.name << ", req)) { " << ppfx << "_destroy(&" << m.param.name << "); omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }\n";
+                os << "        if (!" << ppfx << "_deserialize(&" << m.param.name << ", req)) { " << ppfx << "_destroy(&" << m.param.name << "); omni_buffer_destroy(req); return -501; }\n";
             } else if (isCStringLike(m.param.type)) {
                 std::string ptype = cTypeName(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << " = NULL;\n";
@@ -1067,7 +1067,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 } else {
                     os << "        " << m.param.name << " = omni_buffer_read_bytes(req, &" << m.param.name << "_len);\n";
                 }
-                os << "        if (!omni_buffer_read_ok(req)) { if (" << m.param.name << ") free(" << m.param.name << "); omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }\n";
+                os << "        if (!omni_buffer_read_ok(req)) { if (" << m.param.name << ") free(" << m.param.name << "); omni_buffer_destroy(req); return -501; }\n";
             } else {
                 std::string ptype = cTypeName(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << " = ";
@@ -1077,7 +1077,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
                 } else {
                     os << "0;\n";
                 }
-                os << "        if (!omni_buffer_read_ok(req)) { omni_buffer_mark_error(response, -501); omni_buffer_destroy(req); return; }\n";
+                os << "        if (!omni_buffer_read_ok(req)) { omni_buffer_destroy(req); return -501; }\n";
             }
         }
 
@@ -1153,6 +1153,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*
         os << "    }\n";
     }
     os << "    omni_buffer_destroy(req);\n";
+    os << "    return 0;\n";
     os << "}\n\n";
 
     os << "omni_service_t* " << prefix << "_stub_create_from_callbacks(const " << prefix << "_callbacks* cbs) {\n";

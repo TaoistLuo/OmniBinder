@@ -154,6 +154,16 @@ void EventLoop::wakeup()
 
 void EventLoop::pollOnce(int timeout_ms)
 {
+    pollOnceInternal(timeout_ms, true);
+}
+
+void EventLoop::pollOnceWithoutFunctors(int timeout_ms)
+{
+    pollOnceInternal(timeout_ms, false);
+}
+
+void EventLoop::pollOnceInternal(int timeout_ms, bool process_functors)
+{
 #ifdef OMNIBINDER_LINUX
     if (epoll_fd_ < 0) {
         return;
@@ -206,7 +216,9 @@ void EventLoop::pollOnce(int timeout_ms)
     processTimers();
 
     // 处理投递的回调
-    processPendingFunctors();
+    if (process_functors) {
+        processPendingFunctors();
+    }
 
 #elif defined(OMNIBINDER_WINDOWS)
     // Windows select 桩实现
@@ -312,7 +324,9 @@ void EventLoop::pollOnce(int timeout_ms)
     processTimers();
 
     // 处理投递的回调
-    processPendingFunctors();
+    if (process_functors) {
+        processPendingFunctors();
+    }
 #endif
 }
 

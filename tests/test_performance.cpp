@@ -166,18 +166,19 @@ public:
     const char* serviceName() const override { return "PerfService"; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
 protected:
-    void onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
+    int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
         if (method_id == METHOD_ECHO) {
             // 原样返回
             if (request.size() > 0) {
-                response.writeRaw(request.data(), request.size());
+                if (!response.writeRaw(request.data(), request.size())) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
             }
         } else if (method_id == METHOD_ADD) {
             Buffer req(request.data(), request.size());
             int32_t a = mustRead<int32_t>(req, &Buffer::tryReadInt32);
             int32_t b = mustRead<int32_t>(req, &Buffer::tryReadInt32);
-            response.writeInt32(a + b);
+            if (!response.writeInt32(a + b)) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
         }
+        return 0;
     }
 private:
     InterfaceInfo iface_;
@@ -193,7 +194,7 @@ public:
     const char* serviceName() const override { return "PerfTopicService"; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
 protected:
-    void onInvoke(uint32_t, const Buffer&, Buffer&) override {}
+    int onInvoke(uint32_t, const Buffer&, Buffer&) override { return 0; }
 private:
     InterfaceInfo iface_;
 };

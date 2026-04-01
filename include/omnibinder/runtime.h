@@ -97,6 +97,8 @@ public:
     const std::string& hostId() const;
     int getStats(RuntimeStats& stats);
     void resetStats();
+    void clearServiceCache();
+    void closeAllConnections();
 
 private:
     OmniRuntime(const OmniRuntime&);

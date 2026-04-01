@@ -54,14 +54,11 @@ public:
     const std::string& getRegisterHost() const;
     void setShmConfig(const ShmConfig& config);
     ShmConfig shmConfig() const;
-    void reportInvokeError(int32_t error_code);
-    int32_t consumeInvokeError();
-
     virtual const char* serviceName() const = 0;
     virtual const InterfaceInfo& interfaceInfo() const = 0;
 
 protected:
-    virtual void onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) = 0;
+    virtual int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) = 0;
     virtual void onStart();
     virtual void onStop();
     virtual void onClientConnected(const std::string& client_info);
@@ -80,7 +77,6 @@ private:
     std::string register_host_;
     ShmConfig shm_config_;
     OmniRuntime* runtime_;
-    int32_t invoke_error_code_;
 };
 
 } // namespace omnibinder

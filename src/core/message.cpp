@@ -53,15 +53,19 @@ bool Message::serialize(Buffer& output) const {
     h.length = static_cast<uint32_t>(payload.size());
 
     // 写入头部（小端序）
-    output.writeUint32(h.magic);
-    output.writeUint16(h.version);
-    output.writeUint16(h.type);
-    output.writeUint32(h.sequence);
-    output.writeUint32(h.length);
+    if (!output.writeUint32(h.magic)
+        || !output.writeUint16(h.version)
+        || !output.writeUint16(h.type)
+        || !output.writeUint32(h.sequence)
+        || !output.writeUint32(h.length)) {
+        return false;
+    }
 
     // 写入载荷
     if (h.length > 0) {
-        output.writeRaw(payload.data(), h.length);
+        if (!output.writeRaw(payload.data(), h.length)) {
+            return false;
+        }
     }
 
     return true;
@@ -133,82 +137,51 @@ const char* messageTypeToString(MessageType type) {
 }
 
 // ============================================================
-// ServiceInfo 序列化/反序列化
+// ServiceInfo 序列化（deserialize 已移至 message.h 模板）
 // ============================================================
 
 void serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
-    buf.writeString(info.name);
-    buf.writeString(info.host);
-    buf.writeUint16(info.port);
-    buf.writeString(info.host_id);
-    buf.writeString(info.shm_name);
-    buf.writeUint32(static_cast<uint32_t>(info.shm_config.req_ring_capacity));
-    buf.writeUint32(static_cast<uint32_t>(info.shm_config.resp_ring_capacity));
+    if (!buf.writeString(info.name)
+        || !buf.writeString(info.host)
+        || !buf.writeUint16(info.port)
+        || !buf.writeString(info.host_id)
+        || !buf.writeString(info.shm_name)
+        || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.req_ring_capacity))
+        || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.resp_ring_capacity))) {
+        return;
+    }
 
     // 接口列表
     uint16_t iface_count = static_cast<uint16_t>(info.interfaces.size());
-    buf.writeUint16(iface_count);
+    if (!buf.writeUint16(iface_count)) {
+        return;
+    }
     for (uint16_t i = 0; i < iface_count; ++i) {
         serializeInterfaceInfo(info.interfaces[i], buf);
-    }
-}
-
-bool deserializeServiceInfo(Buffer& buf, ServiceInfo& info) {
-    uint16_t iface_count = 0;
-    uint32_t req_ring_capacity = 0;
-    uint32_t resp_ring_capacity = 0;
-    if (!buf.tryReadString(info.name)
-        || !buf.tryReadString(info.host)
-        || !buf.tryReadUint16(info.port)
-        || !buf.tryReadString(info.host_id)
-        || !buf.tryReadString(info.shm_name)
-        || !buf.tryReadUint32(req_ring_capacity)
-        || !buf.tryReadUint32(resp_ring_capacity)
-        || !buf.tryReadUint16(iface_count)) {
-        return false;
-    }
-    info.shm_config.req_ring_capacity = req_ring_capacity;
-    info.shm_config.resp_ring_capacity = resp_ring_capacity;
-    info.interfaces.resize(iface_count);
-    for (uint16_t i = 0; i < iface_count; ++i) {
-        if (!deserializeInterfaceInfo(buf, info.interfaces[i])) {
-            return false;
+        if (!buf.writeOk()) {
+            return;
         }
     }
-    return true;
 }
 
 void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
-    buf.writeUint32(info.interface_id);
-    buf.writeString(info.name);
+    if (!buf.writeUint32(info.interface_id)
+        || !buf.writeString(info.name)) {
+        return;
+    }
 
     uint16_t method_count = static_cast<uint16_t>(info.methods.size());
-    buf.writeUint16(method_count);
-    for (uint16_t i = 0; i < method_count; ++i) {
-        buf.writeUint32(info.methods[i].method_id);
-        buf.writeString(info.methods[i].name);
-        buf.writeString(info.methods[i].param_types);
-        buf.writeString(info.methods[i].return_type);
+    if (!buf.writeUint16(method_count)) {
+        return;
     }
-}
-
-bool deserializeInterfaceInfo(Buffer& buf, InterfaceInfo& info) {
-    uint16_t method_count = 0;
-    if (!buf.tryReadUint32(info.interface_id)
-        || !buf.tryReadString(info.name)
-        || !buf.tryReadUint16(method_count)) {
-        return false;
-    }
-    info.methods.resize(method_count);
     for (uint16_t i = 0; i < method_count; ++i) {
-        if (!buf.tryReadUint32(info.methods[i].method_id)
-            || !buf.tryReadString(info.methods[i].name)
-            || !buf.tryReadString(info.methods[i].param_types)
-            || !buf.tryReadString(info.methods[i].return_type)) {
-            return false;
+        if (!buf.writeUint32(info.methods[i].method_id)
+            || !buf.writeString(info.methods[i].name)
+            || !buf.writeString(info.methods[i].param_types)
+            || !buf.writeString(info.methods[i].return_type)) {
+            return;
         }
     }
-    return true;
 }
 
 } // namespace omnibinder

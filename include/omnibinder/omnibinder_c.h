@@ -65,7 +65,7 @@ typedef struct omni_runtime_stats_t {
  * ============================================================ */
 
 /** 服务端方法调用回调 */
-typedef void (*omni_invoke_callback_t)(uint32_t method_id,
+typedef int (*omni_invoke_callback_t)(uint32_t method_id,
     const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
 
 /** 话题广播接收回调 */
