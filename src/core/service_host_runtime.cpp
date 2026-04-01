@@ -13,7 +13,7 @@ namespace omnibinder {
 namespace {
 
 bool decodeBroadcastPayload(const Message& msg, uint32_t& topic_id, Buffer& payload) {
-    Buffer buf(msg.payload.data(), msg.payload.size());
+    BufferView buf(msg.payload.data(), msg.payload.size());
     uint32_t data_len = 0;
     if (!buf.tryReadUint32(topic_id) || !buf.tryReadUint32(data_len)) {
         return false;

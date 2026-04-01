@@ -8,7 +8,6 @@ Service::Service(const std::string& name)
     , register_host_()
     , shm_config_()
     , runtime_(NULL)
-    , invoke_error_code_(0)
 {
 }
 
@@ -41,16 +40,6 @@ void Service::setShmConfig(const ShmConfig& config) {
 
 ShmConfig Service::shmConfig() const {
     return shm_config_;
-}
-
-void Service::reportInvokeError(int32_t error_code) {
-    invoke_error_code_ = error_code;
-}
-
-int32_t Service::consumeInvokeError() {
-    const int32_t error_code = invoke_error_code_;
-    invoke_error_code_ = 0;
-    return error_code;
 }
 
 OmniRuntime* Service::runtime() const {

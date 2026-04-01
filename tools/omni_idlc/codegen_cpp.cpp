@@ -112,16 +112,16 @@ void emitSerializeValue(const TypeRef& type, const std::string& expr,
     case TYPE_FLOAT64:
     case TYPE_STRING:
     case TYPE_BYTES:
-        os << indent << buffer_name << ".write" << bufferMethodSuffix(type)
-           << "(" << expr << ");\n";
+        os << indent << "if (!" << buffer_name << ".write" << bufferMethodSuffix(type)
+           << "(" << expr << ")) return false;\n";
         break;
     case TYPE_CUSTOM:
-        os << indent << expr << ".serialize(" << buffer_name << ");\n";
+        os << indent << "if (!" << expr << ".serialize(" << buffer_name << ")) return false;\n";
         break;
     case TYPE_ARRAY: {
         std::string idx = "i" + std::to_string(depth);
-        os << indent << buffer_name << ".writeUint32(static_cast<uint32_t>("
-           << expr << ".size()));\n";
+        os << indent << "if (!" << buffer_name << ".writeUint32(static_cast<uint32_t>("
+           << expr << ".size()))) return false;\n";
         os << indent << "for (size_t " << idx << " = 0; " << idx << " < "
            << expr << ".size(); ++" << idx << ") {\n";
         emitSerializeValue(*type.element_type, expr + "[" + idx + "]", buffer_name,
@@ -379,7 +379,7 @@ void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
     }
     
     os << "\nprotected:\n";
-    os << "    void onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) override;\n";
+    os << "    int onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) override;\n";
     os << "};\n\n";
 }
 
@@ -485,7 +485,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "        s_" << svc.name << "_info_init = true;\n";
         os << "    }\n    return s_" << svc.name << "_info;\n}\n\n";
         
-        os << "void " << svc.name << "Stub::onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) {\n";
+        os << "int " << svc.name << "Stub::onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) {\n";
             os << "    omnibinder::Buffer req(request.data(), request.size());\n";
             os << "    switch (method_id) {\n";
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
@@ -495,7 +495,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             if (m.has_param) {
                 os << "        " << cppTypeName(m.param.type) << " " << m.param.name << ";\n";
                 emitDeserializeValue(m.param.type, m.param.name, "req", "        ", 0,
-                                     "{ reportInvokeError(static_cast<int32_t>(omnibinder::ErrorCode::ERR_DESERIALIZE)); return; }",
+                                     "return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);",
                                      os);
             }
             if (!m.return_type.isVoid()) {
@@ -506,11 +506,21 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             if (m.has_param) os << m.param.name;
             os << ");\n";
             if (!m.return_type.isVoid()) {
-                emitSerializeValue(m.return_type, "result", "response", "        ", 0, os);
+                std::ostringstream serialize_os;
+                emitSerializeValue(m.return_type, "result", "response", "        ", 0, serialize_os);
+                std::string serialize_code = serialize_os.str();
+                const std::string from = "return false;";
+                const std::string to = "return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);";
+                size_t pos = 0;
+                while ((pos = serialize_code.find(from, pos)) != std::string::npos) {
+                    serialize_code.replace(pos, from.size(), to);
+                    pos += to.size();
+                }
+                os << serialize_code;
             }
-            os << "        break;\n    }\n";
+            os << "        return 0;\n    }\n";
         }
-        os << "    default: break;\n    }\n}\n\n";
+        os << "    default: return static_cast<int>(omnibinder::ErrorCode::ERR_METHOD_NOT_FOUND);\n    }\n}\n\n";
         
         for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
             const std::string& topic = svc.publishes[pi];

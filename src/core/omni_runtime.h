@@ -123,6 +123,7 @@ public:
     void stop();
     bool isRunning() const;
     void pollOnce(int timeout_ms);
+    void pollOnceWithoutFunctors(int timeout_ms);
 
     // --- 服务注册 ---
     int registerService(Service* service);
@@ -182,6 +183,8 @@ public:
     void resetStats();
     int getStatsLocked(RuntimeStats& stats);
     void resetStatsLocked();
+    void clearServiceCache();
+    void closeAllConnections();
     void setOwner(OmniRuntime* owner) { owner_ = owner; }
 
 private:
@@ -328,12 +331,16 @@ typename std::result_of<F()>::type OmniRuntime::Impl::callSerialized(F func) {
 template<typename F, typename Result>
 Result OmniRuntime::Impl::callSerializedDispatch(F func, std::false_type) {
     return static_cast<Result>(owner_executor_.invokeOnOwnerNoThrowInt(func,
-        static_cast<int>(ErrorCode::ERR_INTERNAL)));
+        static_cast<int>(ErrorCode::ERR_INVOKE_FAILED)));
 }
 
 template<typename F, typename Result>
 Result OmniRuntime::Impl::callSerializedDispatch(F func, std::true_type) {
-    owner_executor_.invokeOnOwnerNoThrowVoid(func);
+    const int status = owner_executor_.invokeOnOwnerNoThrowVoid(
+        func, static_cast<int>(ErrorCode::ERR_INVOKE_FAILED));
+    if (status != 0) {
+        throw std::runtime_error("owner-thread callback failed");
+    }
     return;
 }
 

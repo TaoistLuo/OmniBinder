@@ -61,8 +61,10 @@
 它们的当前语义是：
 
 - 调用线程可以阻塞等待结果
-- 超时前会持续处理事件并等待 reply
+- 超时前会持续处理 fd / timer 事件并等待 reply
 - 不应把这类同步等待理解成“内部可由多个线程并行处理同一实例状态”
+
+补充：reply wait 期间不会执行通过 `post()` 投递的 pending API functor，这样可以避免共享同一个 runtime 时出现 re-entrant `waitForReply`。
 
 ### 2.1.3 超时与阻塞语义
 
@@ -84,6 +86,8 @@
 
 - 不建议在 `TopicCallback`、`DeathCallback`、服务端 `onInvoke()`、`onStart()`、`onStop()` 等 owner event-loop 线程回调中，再对同一个 `OmniRuntime` 发起**同步阻塞 API**（如 `invoke()`、`lookupService()`、`subscribeTopic()`）
 - 回调中应尽量只做轻量处理，必要时把后续同步工作转交给其他线程或异步任务
+
+当前 owner-thread 桥接路径中的异常不会再被伪装成成功；边界层会记录错误并返回 fallback status。
 
 ---
 

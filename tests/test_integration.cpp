@@ -7,41 +7,15 @@
 // 4. List services / query interfaces
 // 5. Unregister and verify cleanup
 
+#include <gtest/gtest.h>
+#include "test_common.h"
 #include <omnibinder/omnibinder.h>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <cassert>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
 #include <pthread.h>
 
 using namespace omnibinder;
+using namespace omnibinder::test;
 
-template<typename T>
-static T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
-    T value = T();
-    if (!(buf.*fn)(value)) {
-        fprintf(stderr, "mustRead failed\n");
-        abort();
-    }
-    return value;
-}
-
-static std::string mustReadString(Buffer& buf) {
-    std::string value;
-    if (!buf.tryReadString(value)) {
-        fprintf(stderr, "mustReadString failed\n");
-        abort();
-    }
-    return value;
-}
-
-#define TEST(name) printf("  TEST %s ... ", #name); fflush(stdout);
-#define PASS() printf("PASS\n"); fflush(stdout);
-
-// Method IDs (FNV-1a hashes)
+static const uint16_t SM_PORT = 19901;
 static const uint32_t METHOD_ADD = fnv1a_32("Add");
 static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
 static const uint32_t IFACE_ID = fnv1a_32("TestService");
@@ -64,20 +38,21 @@ public:
     int invokeCount() const { return invoke_count_; }
 
 protected:
-    void onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
+    int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
         invoke_count_++;
         if (method_id == METHOD_ADD) {
             Buffer req(request.data(), request.size());
             int32_t a = mustRead<int32_t>(req, &Buffer::tryReadInt32);
             int32_t b = mustRead<int32_t>(req, &Buffer::tryReadInt32);
-            response.writeInt32(a + b);
+            if (!response.writeInt32(a + b)) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
         } else if (method_id == METHOD_ECHO) {
             if (request.size() > 0) {
-                response.writeRaw(request.data(), request.size());
+                if (!response.writeRaw(request.data(), request.size())) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
             }
         } else {
-            response.writeInt32(-1);
+            if (!response.writeInt32(-1)) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
         }
+        return 0;
     }
 
 private:
@@ -98,7 +73,7 @@ struct ServerContext {
     ServerContext() : registered(false), should_stop(false), sm_port(0) {}
 };
 
-[[maybe_unused]] static void* serverThread(void* arg) {
+static void* serverThread(void* arg) {
     ServerContext* ctx = static_cast<ServerContext*>(arg);
 
     int ret = ctx->runtime.init("127.0.0.1", ctx->sm_port);
@@ -127,283 +102,179 @@ struct ServerContext {
 }
 
 // ============================================================
-// Helper: start ServiceManager process
+// Test fixture
 // ============================================================
-static pid_t startServiceManager(uint16_t port) {
-    char kill_cmd[128];
-    snprintf(kill_cmd, sizeof(kill_cmd), "pkill -f 'service_manager --port %u' >/dev/null 2>&1 || true", port);
-    int kill_rc = system(kill_cmd);
-    (void)kill_rc;
-    usleep(100000);
+class IntegrationTest : public ::testing::Test {
+protected:
+    static pid_t sm_pid_;
+    static ServerContext* server_ctx_;
+    static pthread_t server_tid_;
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%u", port);
-        const char* paths[] = {
-            "./target/bin/service_manager",
-            "./build/target/bin/service_manager",
-            "./service_manager/service_manager",
-            "../service_manager/service_manager",
-            "service_manager",
-            NULL
-        };
-        for (int i = 0; paths[i] != NULL; i++) {
-            execl(paths[i], "service_manager",
-                  "--port", port_str, "--log-level", "3", (char*)NULL);
-        }
-        fprintf(stderr, "Failed to exec service_manager\n");
-        _exit(1);
-    }
-    return pid;
-}
+    static void SetUpTestSuite() {
+        sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19901", "--log-level", "3");
+        ASSERT_GT(sm_pid_, 0);
+        ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
-static void stopServiceManager(pid_t pid) {
-    if (pid > 0) {
-        kill(pid, SIGTERM);
-        int status;
-        for (int i = 0; i < 20; ++i) {
-            pid_t ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) {
-                return;
-            }
+        // Start server in background thread
+        server_ctx_ = new ServerContext();
+        server_ctx_->sm_port = SM_PORT;
+        ASSERT_EQ(pthread_create(&server_tid_, NULL, serverThread, server_ctx_), 0);
+
+        // Wait for service to be registered
+        for (int i = 0; i < 50 && !server_ctx_->registered; i++) {
             usleep(100000);
         }
-        if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-        }
-    }
-}
-
-static bool waitForSM(const char* host, uint16_t port, int max_retries) {
-    for (int i = 0; i < max_retries; i++) {
-        OmniRuntime probe;
-        int ret = probe.init(host, port);
-        if (ret == 0) {
-            probe.stop();
-            return true;
-        }
-        usleep(100000);
-    }
-    return false;
-}
-
-// ============================================================
-// Main
-// ============================================================
-static uint16_t SM_PORT = 19901;
-
-int main() {
-    printf("=== Integration Tests ===\n\n");
-
-    // Start ServiceManager
-    printf("Starting ServiceManager on port %u...\n", SM_PORT);
-    pid_t sm_pid = startServiceManager(SM_PORT);
-    assert(sm_pid > 0);
-
-    bool ready = waitForSM("127.0.0.1", SM_PORT, 30);
-    if (!ready) {
-        fprintf(stderr, "ServiceManager failed to start\n");
-        stopServiceManager(sm_pid);
-        return 1;
-    }
-    printf("ServiceManager ready (pid=%d)\n\n", sm_pid);
-
-    // ============================================================
-    // Test: Connect to ServiceManager
-    // ============================================================
-    TEST(connect_to_sm) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
-        runtime.stop();
-        PASS();
+        ASSERT_TRUE(server_ctx_->registered);
     }
 
-    // ============================================================
-    // Start server in background thread
-    // ============================================================
-    ServerContext server_ctx;
-    server_ctx.sm_port = SM_PORT;
-    pthread_t server_tid;
-    assert(pthread_create(&server_tid, NULL, serverThread, &server_ctx) == 0);
+    static void TearDownTestSuite() {
+        if (server_ctx_) {
+            server_ctx_->should_stop = true;
+            pthread_join(server_tid_, NULL);
 
-    // Wait for service to be registered
-    for (int i = 0; i < 50 && !server_ctx.registered; i++) {
-        usleep(100000);
-    }
-    assert(server_ctx.registered);
-    printf("  Server thread started, service registered on port %u\n\n",
-           server_ctx.service.port());
-
-    // ============================================================
-    // Test: List services
-    // ============================================================
-    TEST(list_services) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
-
-        std::vector<ServiceInfo> services;
-        assert(runtime.listServices(services) == 0);
-        assert(services.size() >= 1);
-
-        bool found = false;
-        for (size_t i = 0; i < services.size(); i++) {
-            if (services[i].name == "TestService") {
-                found = true;
-                break;
+            // Verify service is gone after unregister
+            usleep(200000);
+            OmniRuntime runtime;
+            if (runtime.init("127.0.0.1", SM_PORT) == 0) {
+                ServiceInfo info;
+                EXPECT_NE(runtime.lookupService("TestService", info), 0);
+                runtime.stop();
             }
+
+            delete server_ctx_;
+            server_ctx_ = nullptr;
         }
-        if (!found) return 1;
-        runtime.stop();
-        PASS();
+        stopProcess(sm_pid_);
     }
+};
 
-    // ============================================================
-    // Test: Lookup service
-    // ============================================================
-    TEST(lookup_service) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
+pid_t IntegrationTest::sm_pid_ = 0;
+ServerContext* IntegrationTest::server_ctx_ = nullptr;
+pthread_t IntegrationTest::server_tid_ = 0;
 
-        ServiceInfo info;
-        assert(runtime.lookupService("TestService", info) == 0);
-        assert(info.name == "TestService");
-        assert(info.port == server_ctx.service.port());
-        assert(!info.host_id.empty());
-        assert(info.shm_config.req_ring_capacity == 4 * 1024);
-        assert(info.shm_config.resp_ring_capacity == 4 * 1024);
-        assert(info.interfaces.size() == 1);
-        assert(info.interfaces[0].name == "TestService");
-        assert(info.interfaces[0].methods.size() == 2);
-        runtime.stop();
-        PASS();
-    }
+// ============================================================
+// Tests
+// ============================================================
 
-    // ============================================================
-    // Test: Lookup non-existent service
-    // ============================================================
-    TEST(lookup_nonexistent) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
+TEST_F(IntegrationTest, ConnectToSm) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    runtime.stop();
+}
 
-        ServiceInfo info;
-        assert(runtime.lookupService("NonExistentService", info) != 0);
-        runtime.stop();
-        PASS();
-    }
+TEST_F(IntegrationTest, ListServices) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
 
-    // ============================================================
-    // Test: Query interfaces
-    // ============================================================
-    TEST(query_interfaces) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
+    std::vector<ServiceInfo> services;
+    ASSERT_EQ(runtime.listServices(services), 0);
+    ASSERT_GE(services.size(), 1u);
 
-        std::vector<InterfaceInfo> ifaces;
-        assert(runtime.queryInterfaces("TestService", ifaces) == 0);
-        assert(ifaces.size() == 1);
-        assert(ifaces[0].name == "TestService");
-        assert(ifaces[0].interface_id == IFACE_ID);
-
-        bool found_add = false, found_echo = false;
-        for (size_t i = 0; i < ifaces[0].methods.size(); i++) {
-            if (ifaces[0].methods[i].name == "Add") found_add = true;
-            if (ifaces[0].methods[i].name == "Echo") found_echo = true;
+    bool found = false;
+    for (size_t i = 0; i < services.size(); i++) {
+        if (services[i].name == "TestService") {
+            found = true;
+            break;
         }
-        if (!found_add || !found_echo) return 1;
-        runtime.stop();
-        PASS();
     }
+    EXPECT_TRUE(found);
+    runtime.stop();
+}
 
-    // ============================================================
-    // Test: Invoke Add method
-    // ============================================================
-    TEST(invoke_add) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
+TEST_F(IntegrationTest, LookupService) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
 
+    ServiceInfo info;
+    ASSERT_EQ(runtime.lookupService("TestService", info), 0);
+    EXPECT_EQ(info.name, "TestService");
+    EXPECT_EQ(info.port, server_ctx_->service.port());
+    EXPECT_FALSE(info.host_id.empty());
+    EXPECT_EQ(info.shm_config.req_ring_capacity, 4u * 1024);
+    EXPECT_EQ(info.shm_config.resp_ring_capacity, 4u * 1024);
+    ASSERT_EQ(info.interfaces.size(), 1u);
+    EXPECT_EQ(info.interfaces[0].name, "TestService");
+    EXPECT_EQ(info.interfaces[0].methods.size(), 2u);
+    runtime.stop();
+}
+
+TEST_F(IntegrationTest, LookupNonExistent) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    ServiceInfo info;
+    EXPECT_NE(runtime.lookupService("NonExistentService", info), 0);
+    runtime.stop();
+}
+
+TEST_F(IntegrationTest, QueryInterfaces) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    std::vector<InterfaceInfo> ifaces;
+    ASSERT_EQ(runtime.queryInterfaces("TestService", ifaces), 0);
+    ASSERT_EQ(ifaces.size(), 1u);
+    EXPECT_EQ(ifaces[0].name, "TestService");
+    EXPECT_EQ(ifaces[0].interface_id, IFACE_ID);
+
+    bool found_add = false, found_echo = false;
+    for (size_t i = 0; i < ifaces[0].methods.size(); i++) {
+        if (ifaces[0].methods[i].name == "Add") found_add = true;
+        if (ifaces[0].methods[i].name == "Echo") found_echo = true;
+    }
+    EXPECT_TRUE(found_add);
+    EXPECT_TRUE(found_echo);
+    runtime.stop();
+}
+
+TEST_F(IntegrationTest, InvokeAdd) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    Buffer request;
+    request.writeInt32(17);
+    request.writeInt32(25);
+
+    Buffer response;
+    ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
+                        request, response, 5000), 0);
+    ASSERT_GE(response.size(), 4u);
+
+    EXPECT_EQ(mustRead<int32_t>(response, &Buffer::tryReadInt32), 42);
+    runtime.stop();
+}
+
+TEST_F(IntegrationTest, InvokeEcho) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    Buffer request;
+    request.writeString("Hello OmniBinder!");
+
+    Buffer response;
+    ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ECHO,
+                        request, response, 5000), 0);
+    EXPECT_GT(response.size(), 0u);
+
+    std::string echo = mustReadString(response);
+    EXPECT_EQ(echo, "Hello OmniBinder!");
+    runtime.stop();
+}
+
+TEST_F(IntegrationTest, MultipleInvocations) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    for (int i = 0; i < 10; i++) {
         Buffer request;
-        request.writeInt32(17);
-        request.writeInt32(25);
+        request.writeInt32(i);
+        request.writeInt32(100);
 
         Buffer response;
-        assert(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
-                            request, response, 5000) == 0);
-        assert(response.size() >= 4);
-
-        if (mustRead<int32_t>(response, &Buffer::tryReadInt32) != 42) return 1;
-
-        runtime.stop();
-        PASS();
+        ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
+                            request, response, 5000), 0);
+        EXPECT_EQ(mustRead<int32_t>(response, &Buffer::tryReadInt32), i + 100);
     }
 
-    // ============================================================
-    // Test: Invoke Echo method
-    // ============================================================
-    TEST(invoke_echo) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
-
-        Buffer request;
-        request.writeString("Hello OmniBinder!");
-
-        Buffer response;
-        assert(runtime.invoke("TestService", IFACE_ID, METHOD_ECHO,
-                            request, response, 5000) == 0);
-        assert(response.size() > 0);
-
-        std::string echo = mustReadString(response);
-        assert(echo == "Hello OmniBinder!");
-
-        runtime.stop();
-        PASS();
-    }
-
-    // ============================================================
-    // Test: Multiple sequential invocations
-    // ============================================================
-    TEST(multiple_invocations) {
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
-
-        for (int i = 0; i < 10; i++) {
-            Buffer request;
-            request.writeInt32(i);
-            request.writeInt32(100);
-
-            Buffer response;
-            assert(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
-                                request, response, 5000) == 0);
-            if (mustRead<int32_t>(response, &Buffer::tryReadInt32) != i + 100) return 1;
-        }
-
-        runtime.stop();
-        PASS();
-    }
-
-    // ============================================================
-    // Cleanup
-    // ============================================================
-    printf("\nCleaning up...\n");
-    server_ctx.should_stop = true;
-    pthread_join(server_tid, NULL);
-    printf("  Server thread stopped\n");
-
-    // Verify service is gone after unregister
-    TEST(service_gone_after_unregister) {
-        usleep(200000); // Give SM time to process
-        OmniRuntime runtime;
-        assert(runtime.init("127.0.0.1", SM_PORT) == 0);
-
-        ServiceInfo info;
-        assert(runtime.lookupService("TestService", info) != 0);
-        runtime.stop();
-        PASS();
-    }
-
-    stopServiceManager(sm_pid);
-
-    printf("\nAll integration tests passed!\n");
-    return 0;
+    runtime.stop();
 }

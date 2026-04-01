@@ -22,6 +22,14 @@ ctest --test-dir build --output-on-failure
 - 某些集成测试和性能测试依赖 `build/target/bin/service_manager`、`build/target/test/*` 这类构建目录下的产物
 - 直接在仓库根目录执行时，工作目录不同，可能导致行为不一致
 
+典型误判信号：
+
+- `waitPortReady(...)` 失败
+- `runtime.init(...) == -4`
+- 随后出现一串与业务无关的连带失败
+
+这类现象应首先判断为工作目录错误，而不是运行时代码回归。
+
 ### 2.2 如果要手工执行，请在正确工作目录中运行
 
 当前测试二进制生成在：
@@ -188,6 +196,11 @@ ctest --test-dir build --output-on-failure -R test_shm_transport
 用途：
 
 - 验证 `omni-idlc` 的词法 / 语法 / AST 基础能力
+- 验证生成代码是否匹配当前显式错误处理契约：
+  - `Buffer::writeXxx()` 返回 `bool`
+  - Stub `onInvoke()` 返回 `int`
+  - 参数反序列化失败返回 `ERR_DESERIALIZE`
+  - 响应序列化失败返回 `ERR_SERIALIZE`
 
 推荐运行：
 
@@ -234,6 +247,7 @@ ctest --test-dir build --output-on-failure -R test_c_api
 - 服务发现
 - 接口查询
 - 基础 RPC 调用
+- `mustRead*` 等测试辅助函数与当前 Buffer 契约的一致性
 
 工作目录要求：
 
@@ -311,6 +325,12 @@ cd build
 
 - 验证同一个 `OmniRuntime` 的多线程并发调用路径
 - 验证 ServiceManager 重启后的基础重连与控制面状态恢复
+
+当前关键语义：
+
+- reply wait 期间不执行 pending API functor
+- 避免共享 runtime 并发同步调用时出现 re-entrant `waitForReply`
+- 如果该测试重新出现大量 `Re-entrant waitForReply detected`，优先检查等待泵语义是否被改回了完整 `pollOnce()`
 
 推荐运行：
 
@@ -431,6 +451,7 @@ cd build
 - RPC Add 延迟
 - topic pub/sub 延迟
 - 自动生成 `docs/performance-report.md`
+- 验证显式错误处理与等待模型改造没有引入明显性能回退
 
 ### 7.2 `test_soak_runner`
 

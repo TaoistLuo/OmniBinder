@@ -1,23 +1,9 @@
+#include <gtest/gtest.h>
+#include "test_common.h"
 #include <omnibinder/omnibinder_c.h>
-
-#include <cassert>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <pthread.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
-#define TEST(name) printf("  TEST %-38s ", #name); fflush(stdout)
-#define PASS() printf("PASS\n"); fflush(stdout)
-#define FAIL(msg) printf("FAIL: %s\n", msg); fflush(stdout)
-#define REQUIRE(cond, msg) do { \
-    if (!(cond)) { \
-        FAIL(msg); \
-        return 1; \
-    } \
-} while (0)
+using namespace omnibinder::test;
 
 static const uint16_t SM_PORT = 19941;
 static const uint32_t IFACE_ID = 0x11223344u;
@@ -25,372 +11,219 @@ static const uint32_t METHOD_ECHO = 0x55667788u;
 static const uint32_t METHOD_GET_NAME = 0x55667789u;
 static const uint32_t METHOD_ECHO_BYTES = 0x5566778au;
 
-struct ServerContext {
+static int cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
+                          omni_buffer_t* response, void* user_data) {
+    (void)user_data;
+    if (method_id == METHOD_ECHO) {
+        uint32_t len = 0;
+        char* payload = omni_buffer_read_string(const_cast<omni_buffer_t*>(request), &len);
+        if (payload == NULL) return -501;
+        omni_buffer_write_string(response, payload, len);
+        free(payload);
+    } else if (method_id == METHOD_GET_NAME) {
+        omni_buffer_write_string(response, "c-api-service", 13);
+    } else if (method_id == METHOD_ECHO_BYTES) {
+        uint32_t bytes_len = 0;
+        uint8_t* bytes = omni_buffer_read_bytes(const_cast<omni_buffer_t*>(request), &bytes_len);
+        omni_buffer_write_bytes(response, bytes, bytes_len);
+        free(bytes);
+    }
+    return 0;
+}
+
+struct CApiServerCtx {
     omni_runtime_t* runtime;
     omni_service_t* service;
     volatile bool registered;
     volatile bool should_stop;
-    ServerContext() : runtime(NULL), service(NULL), registered(false), should_stop(false) {}
+    CApiServerCtx() : runtime(NULL), service(NULL), registered(false), should_stop(false) {}
 };
 
-static void cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
-                          omni_buffer_t* response, void* user_data) {
-    (void)user_data;
-    if (method_id != METHOD_ECHO) {
-        if (method_id == METHOD_GET_NAME) {
-            omni_buffer_write_string(response, "c-api-service", 13);
-        } else if (method_id == METHOD_ECHO_BYTES) {
-            uint32_t bytes_len = 0;
-            uint8_t* bytes = omni_buffer_read_bytes(const_cast<omni_buffer_t*>(request), &bytes_len);
-            omni_buffer_write_bytes(response, bytes, bytes_len);
-            free(bytes);
-        }
-        return;
-    }
-    uint32_t len = 0;
-    char* payload = omni_buffer_read_string(const_cast<omni_buffer_t*>(request), &len);
-    if (payload == NULL) {
-        return;
-    }
-    omni_buffer_write_string(response, payload, len);
-    free(payload);
-}
-
-static void* serverThread(void* arg) {
-    ServerContext* ctx = static_cast<ServerContext*>(arg);
+static void* cApiServerThread(void* arg) {
+    CApiServerCtx* ctx = static_cast<CApiServerCtx*>(arg);
     int ret = omni_runtime_init(ctx->runtime, "127.0.0.1", SM_PORT);
-    if (ret != 0) {
-        return NULL;
-    }
-
+    if (ret != 0) return NULL;
     ret = omni_runtime_register_service(ctx->runtime, ctx->service);
-    if (ret != 0) {
-        return NULL;
-    }
+    if (ret != 0) return NULL;
     ctx->registered = true;
-
-    while (!ctx->should_stop) {
-        omni_runtime_poll_once(ctx->runtime, 20);
-    }
-
+    while (!ctx->should_stop) omni_runtime_poll_once(ctx->runtime, 20);
     omni_runtime_unregister_service(ctx->runtime, ctx->service);
     omni_runtime_stop(ctx->runtime);
     return NULL;
 }
 
-static pid_t startSM(uint16_t port) {
-    char kill_cmd[128];
-    std::snprintf(kill_cmd, sizeof(kill_cmd), "pkill -f 'service_manager --port %u' >/dev/null 2>&1 || true", port);
-    int kill_rc = system(kill_cmd);
-    (void)kill_rc;
-    usleep(100000);
+class CApiTest : public ::testing::Test {
+protected:
+    static pid_t sm_pid_;
+    static CApiServerCtx* server_ctx_;
+    static pthread_t server_tid_;
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        char port_str[16];
-        std::snprintf(port_str, sizeof(port_str), "%u", port);
-        const char* paths[] = {
-            "./target/bin/service_manager",
-            "./build/target/bin/service_manager",
-            "./service_manager/service_manager",
-            "../service_manager/service_manager",
-            "service_manager",
-            NULL
-        };
-        for (int i = 0; paths[i] != NULL; ++i) {
-            execl(paths[i], "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
-        }
-        _exit(1);
+    static void SetUpTestSuite() {
+        sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19941", "--log-level", "3");
+        ASSERT_GT(sm_pid_, 0);
+        ASSERT_TRUE(waitPortReady(SM_PORT, 30));
+
+        server_ctx_ = new CApiServerCtx();
+        server_ctx_->runtime = omni_runtime_create();
+        server_ctx_->service = omni_service_create("CService", IFACE_ID, cEchoCallback, NULL);
+        ASSERT_NE(server_ctx_->runtime, nullptr);
+        ASSERT_NE(server_ctx_->service, nullptr);
+        omni_service_add_method_ex(server_ctx_->service, METHOD_ECHO, "Echo", "std::string", "std::string");
+        omni_service_add_method_ex(server_ctx_->service, METHOD_GET_NAME, "GetName", "", "std::string");
+        omni_service_add_method_ex(server_ctx_->service, METHOD_ECHO_BYTES, "EchoBytes", "std::vector<uint8_t>", "std::vector<uint8_t>");
+
+        ASSERT_EQ(pthread_create(&server_tid_, NULL, cApiServerThread, server_ctx_), 0);
+        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) usleep(100000);
+        ASSERT_TRUE(server_ctx_->registered);
     }
-    return pid;
+
+    static void TearDownTestSuite() {
+        server_ctx_->should_stop = true;
+        pthread_join(server_tid_, NULL);
+        omni_service_destroy(server_ctx_->service);
+        omni_runtime_destroy(server_ctx_->runtime);
+        delete server_ctx_;
+        stopProcess(sm_pid_);
+    }
+};
+
+pid_t CApiTest::sm_pid_ = 0;
+CApiServerCtx* CApiTest::server_ctx_ = nullptr;
+pthread_t CApiTest::server_tid_ = 0;
+
+TEST_F(CApiTest, BufferRoundtripAndHash) {
+    omni_buffer_t* buf = omni_buffer_create();
+    ASSERT_NE(buf, nullptr);
+    omni_buffer_write_int32(buf, 1234);
+    omni_buffer_write_string(buf, "hello-c-api", 11);
+    EXPECT_GT(omni_buffer_size(buf), 0u);
+    omni_buffer_reset(buf);
+    EXPECT_EQ(omni_buffer_read_int32(buf), 1234);
+    uint32_t len = 0;
+    char* text = omni_buffer_read_string(buf, &len);
+    ASSERT_NE(text, nullptr);
+    EXPECT_EQ(len, 11u);
+    EXPECT_STREQ(text, "hello-c-api");
+    free(text);
+
+    omni_buffer_t* empty = omni_buffer_create();
+    ASSERT_NE(empty, nullptr);
+    omni_buffer_write_string(empty, NULL, 0);
+    omni_buffer_reset(empty);
+    uint32_t empty_len = 99;
+    char* empty_text = omni_buffer_read_string(empty, &empty_len);
+    ASSERT_NE(empty_text, nullptr);
+    EXPECT_EQ(empty_len, 0u);
+    EXPECT_STREQ(empty_text, "");
+    free(empty_text);
+    omni_buffer_destroy(empty);
+
+    EXPECT_NE(omni_fnv1a_32("Echo"), 0u);
+    omni_buffer_destroy(buf);
 }
 
-static void stopSM(pid_t pid) {
-    if (pid > 0) {
-        kill(pid, SIGTERM);
-        int status = 0;
-        for (int i = 0; i < 20; ++i) {
-            pid_t ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) {
-                return;
-            }
-            usleep(100000);
-        }
-        if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-        }
-    }
+TEST_F(CApiTest, BufferUnderflowReadsFailSafe) {
+    omni_buffer_t* b = omni_buffer_create();
+    ASSERT_NE(b, nullptr);
+    EXPECT_EQ(omni_buffer_read_bool(b), 0);
+    EXPECT_EQ(omni_buffer_read_ok(b), 0);
+    omni_buffer_destroy(b);
+
+    omni_buffer_t* si8 = omni_buffer_create();
+    EXPECT_EQ(omni_buffer_read_int8(si8), 0);
+    EXPECT_EQ(omni_buffer_read_ok(si8), 0);
+    omni_buffer_destroy(si8);
+
+    omni_buffer_t* si16 = omni_buffer_create();
+    EXPECT_EQ(omni_buffer_read_int16(si16), 0);
+    EXPECT_EQ(omni_buffer_read_ok(si16), 0);
+    omni_buffer_destroy(si16);
+
+    omni_buffer_t* si32 = omni_buffer_create();
+    omni_buffer_write_uint16(si32, 0x1234u);
+    omni_buffer_reset(si32);
+    EXPECT_EQ(omni_buffer_read_int32(si32), 0);
+    EXPECT_EQ(omni_buffer_read_ok(si32), 0);
+    omni_buffer_destroy(si32);
+
+    omni_buffer_t* marked = omni_buffer_create();
+    ASSERT_NE(marked, nullptr);
+    omni_buffer_mark_error(marked, -501);
+    EXPECT_EQ(omni_buffer_error(marked), -501);
+    EXPECT_EQ(omni_buffer_read_ok(marked), 0);
+    omni_buffer_clear_error(marked);
+    EXPECT_EQ(omni_buffer_error(marked), 0);
+    EXPECT_EQ(omni_buffer_read_ok(marked), 1);
+    omni_buffer_destroy(marked);
 }
 
-static bool waitSMReady(uint16_t port, int retries) {
-    for (int i = 0; i < retries; ++i) {
-        omni_runtime_t* probe = omni_runtime_create();
-        assert(probe != NULL);
-        if (omni_runtime_init(probe, "127.0.0.1", port) == 0) {
-            omni_runtime_stop(probe);
-            omni_runtime_destroy(probe);
-            return true;
-        }
-        omni_runtime_destroy(probe);
-        usleep(100000);
-    }
-    return false;
+TEST_F(CApiTest, RegisterInvokeAndStats) {
+    omni_runtime_t* runtime = omni_runtime_create();
+    ASSERT_NE(runtime, nullptr);
+    ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
+
+    omni_buffer_t* req = omni_buffer_create();
+    omni_buffer_t* resp = omni_buffer_create();
+    ASSERT_NE(req, nullptr);
+    ASSERT_NE(resp, nullptr);
+    omni_buffer_write_string(req, "rpc-through-c-api", 17);
+
+    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO, req, resp, 3000), 0);
+
+    uint32_t len = 0;
+    char* echoed = omni_buffer_read_string(resp, &len);
+    ASSERT_NE(echoed, nullptr);
+    EXPECT_EQ(len, 17u);
+    EXPECT_STREQ(echoed, "rpc-through-c-api");
+    free(echoed);
+
+    omni_runtime_stats_t stats;
+    ASSERT_EQ(omni_runtime_get_stats(runtime, &stats), 0);
+    EXPECT_EQ(stats.total_rpc_calls, 1u);
+    EXPECT_EQ(stats.total_rpc_success, 1u);
+    EXPECT_EQ(stats.total_rpc_failures, 0u);
+
+    omni_runtime_reset_stats(runtime);
+    ASSERT_EQ(omni_runtime_get_stats(runtime, &stats), 0);
+    EXPECT_EQ(stats.total_rpc_calls, 0u);
+
+    omni_buffer_destroy(req);
+    omni_buffer_destroy(resp);
+    omni_runtime_stop(runtime);
+    omni_runtime_destroy(runtime);
 }
 
-int main() {
-    printf("=== C API Tests ===\n\n");
+TEST_F(CApiTest, StringAndBytesMethods) {
+    omni_runtime_t* runtime = omni_runtime_create();
+    ASSERT_NE(runtime, nullptr);
+    ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
 
-    TEST(buffer_roundtrip_and_hash);
-    {
-        omni_buffer_t* buf = omni_buffer_create();
-        REQUIRE(buf != NULL, "buffer create failed");
-        omni_buffer_write_int32(buf, 1234);
-        omni_buffer_write_string(buf, "hello-c-api", 11);
-        REQUIRE(omni_buffer_size(buf) > 0, "buffer remained empty after writes");
-        omni_buffer_reset(buf);
-        int32_t value = omni_buffer_read_int32(buf);
-        REQUIRE(value == 1234, "buffer int roundtrip failed");
-        uint32_t len = 0;
-        char* text = omni_buffer_read_string(buf, &len);
-        REQUIRE(text != NULL, "buffer string read returned null");
-        REQUIRE(len == 11, "buffer string length mismatch");
-        REQUIRE(std::strcmp(text, "hello-c-api") == 0, "buffer string content mismatch");
-        free(text);
+    omni_buffer_t* req = omni_buffer_create();
+    omni_buffer_t* resp = omni_buffer_create();
+    ASSERT_NE(req, nullptr);
+    ASSERT_NE(resp, nullptr);
 
-        omni_buffer_t* empty = omni_buffer_create();
-        REQUIRE(empty != NULL, "empty buffer create failed");
-        omni_buffer_write_string(empty, NULL, 0);
-        omni_buffer_reset(empty);
-        uint32_t empty_len = 99;
-        char* empty_text = omni_buffer_read_string(empty, &empty_len);
-        REQUIRE(empty_text != NULL, "empty string read returned null");
-        REQUIRE(empty_len == 0, "empty string length mismatch");
-        REQUIRE(std::strcmp(empty_text, "") == 0, "empty string content mismatch");
-        free(empty_text);
-        omni_buffer_destroy(empty);
+    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_GET_NAME, req, resp, 3000), 0);
+    uint32_t name_len = 0;
+    char* name = omni_buffer_read_string(resp, &name_len);
+    ASSERT_NE(name, nullptr);
+    EXPECT_EQ(name_len, 13u);
+    EXPECT_STREQ(name, "c-api-service");
+    free(name);
 
-        REQUIRE(omni_fnv1a_32("Echo") != 0, "fnv hash returned zero");
-        omni_buffer_destroy(buf);
-        PASS();
-    }
+    omni_buffer_reset(req);
+    omni_buffer_reset(resp);
+    const uint8_t payload[] = {0x00, 0x11, 0x22, 0x33, 0xfe, 0xff};
+    omni_buffer_write_bytes(req, payload, sizeof(payload));
+    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO_BYTES, req, resp, 3000), 0);
+    uint32_t out_len = 0;
+    uint8_t* out = omni_buffer_read_bytes(resp, &out_len);
+    EXPECT_EQ(out_len, sizeof(payload));
+    EXPECT_EQ(std::memcmp(out, payload, sizeof(payload)), 0);
+    free(out);
 
-    TEST(buffer_underflow_reads_fail_safe);
-    {
-        omni_buffer_t* short_bool = omni_buffer_create();
-        REQUIRE(short_bool != NULL, "short bool buffer create failed");
-        REQUIRE(omni_buffer_read_bool(short_bool) == 0, "underflow bool should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_bool) == 0, "underflow bool should mark read error");
-        omni_buffer_destroy(short_bool);
-
-        omni_buffer_t* short_i8 = omni_buffer_create();
-        REQUIRE(short_i8 != NULL, "short int8 buffer create failed");
-        REQUIRE(omni_buffer_read_int8(short_i8) == 0, "underflow int8 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_i8) == 0, "underflow int8 should mark read error");
-        omni_buffer_destroy(short_i8);
-
-        omni_buffer_t* short_u8 = omni_buffer_create();
-        REQUIRE(short_u8 != NULL, "short uint8 buffer create failed");
-        REQUIRE(omni_buffer_read_uint8(short_u8) == 0, "underflow uint8 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_u8) == 0, "underflow uint8 should mark read error");
-        omni_buffer_destroy(short_u8);
-
-        omni_buffer_t* short_i16 = omni_buffer_create();
-        REQUIRE(short_i16 != NULL, "short int16 buffer create failed");
-        REQUIRE(omni_buffer_read_int16(short_i16) == 0, "underflow int16 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_i16) == 0, "underflow int16 should mark read error");
-        omni_buffer_destroy(short_i16);
-
-        omni_buffer_t* short_u16 = omni_buffer_create();
-        REQUIRE(short_u16 != NULL, "short uint16 buffer create failed");
-        REQUIRE(omni_buffer_read_uint16(short_u16) == 0, "underflow uint16 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_u16) == 0, "underflow uint16 should mark read error");
-        omni_buffer_destroy(short_u16);
-
-        omni_buffer_t* short_string = omni_buffer_create();
-        REQUIRE(short_string != NULL, "short string buffer create failed");
-        omni_buffer_write_uint32(short_string, 8);
-        omni_buffer_reset(short_string);
-        uint32_t str_len = 123;
-        char* text = omni_buffer_read_string(short_string, &str_len);
-        REQUIRE(text != NULL, "underflow string returned null");
-        REQUIRE(str_len == 0, "underflow string length should be zero");
-        REQUIRE(std::strcmp(text, "") == 0, "underflow string should become empty sentinel");
-        REQUIRE(omni_buffer_read_ok(short_string) == 0, "underflow string should mark read error");
-        free(text);
-        omni_buffer_destroy(short_string);
-
-        omni_buffer_t* short_bytes = omni_buffer_create();
-        REQUIRE(short_bytes != NULL, "short bytes buffer create failed");
-        omni_buffer_write_uint32(short_bytes, 4);
-        omni_buffer_reset(short_bytes);
-        uint32_t bytes_len = 99;
-        uint8_t* bytes = omni_buffer_read_bytes(short_bytes, &bytes_len);
-        REQUIRE(bytes_len == 0, "underflow bytes length should be zero");
-        REQUIRE(bytes == NULL || bytes_len == 0, "underflow bytes should be empty sentinel");
-        REQUIRE(omni_buffer_read_ok(short_bytes) == 0, "underflow bytes should mark read error");
-        free(bytes);
-        omni_buffer_destroy(short_bytes);
-
-        omni_buffer_t* short_int = omni_buffer_create();
-        REQUIRE(short_int != NULL, "short int buffer create failed");
-        omni_buffer_write_uint16(short_int, 0x1234u);
-        omni_buffer_reset(short_int);
-        REQUIRE(omni_buffer_read_int32(short_int) == 0, "underflow int32 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_int) == 0, "underflow int32 should mark read error");
-        omni_buffer_destroy(short_int);
-
-        omni_buffer_t* short_u32 = omni_buffer_create();
-        REQUIRE(short_u32 != NULL, "short uint32 buffer create failed");
-        REQUIRE(omni_buffer_read_uint32(short_u32) == 0, "underflow uint32 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_u32) == 0, "underflow uint32 should mark read error");
-        omni_buffer_destroy(short_u32);
-
-        omni_buffer_t* short_i64 = omni_buffer_create();
-        REQUIRE(short_i64 != NULL, "short int64 buffer create failed");
-        REQUIRE(omni_buffer_read_int64(short_i64) == 0, "underflow int64 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_i64) == 0, "underflow int64 should mark read error");
-        omni_buffer_destroy(short_i64);
-
-        omni_buffer_t* short_u64 = omni_buffer_create();
-        REQUIRE(short_u64 != NULL, "short uint64 buffer create failed");
-        REQUIRE(omni_buffer_read_uint64(short_u64) == 0, "underflow uint64 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_u64) == 0, "underflow uint64 should mark read error");
-        omni_buffer_destroy(short_u64);
-
-        omni_buffer_t* short_f32 = omni_buffer_create();
-        REQUIRE(short_f32 != NULL, "short float32 buffer create failed");
-        REQUIRE(omni_buffer_read_float32(short_f32) == 0.0f, "underflow float32 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_f32) == 0, "underflow float32 should mark read error");
-        omni_buffer_destroy(short_f32);
-
-        omni_buffer_t* short_f64 = omni_buffer_create();
-        REQUIRE(short_f64 != NULL, "short float64 buffer create failed");
-        REQUIRE(omni_buffer_read_float64(short_f64) == 0.0, "underflow float64 should fall back to zero");
-        REQUIRE(omni_buffer_read_ok(short_f64) == 0, "underflow float64 should mark read error");
-        omni_buffer_destroy(short_f64);
-
-        omni_buffer_t* marked = omni_buffer_create();
-        REQUIRE(marked != NULL, "marked buffer create failed");
-        omni_buffer_mark_error(marked, -501);
-        REQUIRE(omni_buffer_error(marked) == -501, "marked error code mismatch");
-        REQUIRE(omni_buffer_read_ok(marked) == 0, "marked error should clear read-ok state");
-        omni_buffer_clear_error(marked);
-        REQUIRE(omni_buffer_error(marked) == 0, "clear error code mismatch");
-        REQUIRE(omni_buffer_read_ok(marked) == 1, "clear error should restore read-ok state");
-        omni_buffer_destroy(marked);
-        PASS();
-    }
-
-    pid_t sm_pid = startSM(SM_PORT);
-    REQUIRE(sm_pid > 0, "failed to start service manager");
-    REQUIRE(waitSMReady(SM_PORT, 30), "service manager did not become ready");
-
-    ServerContext server_ctx;
-    server_ctx.runtime = omni_runtime_create();
-    server_ctx.service = omni_service_create("CService", IFACE_ID, cEchoCallback, NULL);
-    REQUIRE(server_ctx.runtime != NULL, "server runtime create failed");
-    REQUIRE(server_ctx.service != NULL, "server service create failed");
-    omni_service_add_method_ex(server_ctx.service, METHOD_ECHO, "Echo", "std::string", "std::string");
-    omni_service_add_method_ex(server_ctx.service, METHOD_GET_NAME, "GetName", "", "std::string");
-    omni_service_add_method_ex(server_ctx.service, METHOD_ECHO_BYTES, "EchoBytes", "std::vector<uint8_t>", "std::vector<uint8_t>");
-
-    pthread_t server_tid = 0;
-    int pthread_ret = pthread_create(&server_tid, NULL, serverThread, &server_ctx);
-    REQUIRE(pthread_ret == 0, "server thread create failed");
-    for (int i = 0; i < 50 && !server_ctx.registered; ++i) {
-        usleep(100000);
-    }
-    REQUIRE(server_ctx.registered, "server failed to register service");
-
-    TEST(c_api_register_invoke_and_stats);
-    {
-        omni_runtime_t* runtime = omni_runtime_create();
-        REQUIRE(runtime != NULL, "runtime create failed");
-        int init_ret = omni_runtime_init(runtime, "127.0.0.1", SM_PORT);
-        REQUIRE(init_ret == 0, "runtime init failed");
-
-        omni_buffer_t* req = omni_buffer_create();
-        omni_buffer_t* resp = omni_buffer_create();
-        REQUIRE(req != NULL, "request buffer create failed");
-        REQUIRE(resp != NULL, "response buffer create failed");
-        omni_buffer_write_string(req, "rpc-through-c-api", 17);
-
-        int ret = omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO, req, resp, 3000);
-        REQUIRE(ret == 0, "c api invoke failed");
-
-        uint32_t len = 0;
-        char* echoed = omni_buffer_read_string(resp, &len);
-        REQUIRE(echoed != NULL, "invoke response string was null");
-        REQUIRE(len == 17, "invoke response length mismatch");
-        REQUIRE(std::strcmp(echoed, "rpc-through-c-api") == 0, "invoke response content mismatch");
-        free(echoed);
-
-        omni_runtime_stats_t stats;
-        int stats_ret = omni_runtime_get_stats(runtime, &stats);
-        REQUIRE(stats_ret == 0, "get stats failed");
-        REQUIRE(stats.total_rpc_calls == 1, "stats rpc call count mismatch");
-        REQUIRE(stats.total_rpc_success == 1, "stats rpc success count mismatch");
-        REQUIRE(stats.total_rpc_failures == 0, "stats rpc failure count mismatch");
-
-        omni_runtime_reset_stats(runtime);
-        stats_ret = omni_runtime_get_stats(runtime, &stats);
-        REQUIRE(stats_ret == 0, "get stats after reset failed");
-        REQUIRE(stats.total_rpc_calls == 0, "stats reset did not clear rpc calls");
-
-        omni_buffer_destroy(req);
-        omni_buffer_destroy(resp);
-        omni_runtime_stop(runtime);
-        omni_runtime_destroy(runtime);
-        PASS();
-    }
-
-    TEST(c_api_string_and_bytes_methods);
-    {
-        omni_runtime_t* runtime = omni_runtime_create();
-        REQUIRE(runtime != NULL, "runtime create failed");
-        int init_ret = omni_runtime_init(runtime, "127.0.0.1", SM_PORT);
-        REQUIRE(init_ret == 0, "runtime init failed");
-
-        omni_buffer_t* req = omni_buffer_create();
-        omni_buffer_t* resp = omni_buffer_create();
-        REQUIRE(req != NULL && resp != NULL, "buffer create failed");
-
-        int ret = omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_GET_NAME, req, resp, 3000);
-        REQUIRE(ret == 0, "get-name invoke failed");
-        uint32_t name_len = 0;
-        char* name = omni_buffer_read_string(resp, &name_len);
-        REQUIRE(name != NULL, "get-name response null");
-        REQUIRE(name_len == 13, "get-name length mismatch");
-        REQUIRE(std::strcmp(name, "c-api-service") == 0, "get-name content mismatch");
-        free(name);
-
-        omni_buffer_reset(req);
-        omni_buffer_reset(resp);
-        const uint8_t payload[] = {0x00, 0x11, 0x22, 0x33, 0xfe, 0xff};
-        omni_buffer_write_bytes(req, payload, sizeof(payload));
-        ret = omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO_BYTES, req, resp, 3000);
-        REQUIRE(ret == 0, "echo-bytes invoke failed");
-        uint32_t out_len = 0;
-        uint8_t* out = omni_buffer_read_bytes(resp, &out_len);
-        REQUIRE(out != NULL || out_len == 0, "echo-bytes response invalid");
-        REQUIRE(out_len == sizeof(payload), "echo-bytes length mismatch");
-        REQUIRE(std::memcmp(out, payload, sizeof(payload)) == 0, "echo-bytes content mismatch");
-        free(out);
-
-        omni_buffer_destroy(req);
-        omni_buffer_destroy(resp);
-        omni_runtime_stop(runtime);
-        omni_runtime_destroy(runtime);
-        PASS();
-    }
-
-    server_ctx.should_stop = true;
-    pthread_join(server_tid, NULL);
-    omni_service_destroy(server_ctx.service);
-    omni_runtime_destroy(server_ctx.runtime);
-    stopSM(sm_pid);
-
-    printf("\nAll C API tests passed.\n");
-    return 0;
+    omni_buffer_destroy(req);
+    omni_buffer_destroy(resp);
+    omni_runtime_stop(runtime);
+    omni_runtime_destroy(runtime);
 }

@@ -37,6 +37,7 @@
 
 #include "omnibinder/types.h"
 #include "omnibinder/buffer.h"
+#include "omnibinder/buffer_view.h"
 #include <stdint.h>
 
 namespace omnibinder {
@@ -158,10 +159,54 @@ uint32_t nextSequenceNumber();
 // 辅助函数：序列化/反序列化 ServiceInfo 到 Buffer
 // ============================================================
 void serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
-bool deserializeServiceInfo(Buffer& buf, ServiceInfo& info);
+
+template <typename BufT>
+bool deserializeServiceInfo(BufT& buf, ServiceInfo& info) {
+    uint16_t iface_count = 0;
+    uint32_t req_ring_capacity = 0;
+    uint32_t resp_ring_capacity = 0;
+    if (!buf.tryReadString(info.name)
+        || !buf.tryReadString(info.host)
+        || !buf.tryReadUint16(info.port)
+        || !buf.tryReadString(info.host_id)
+        || !buf.tryReadString(info.shm_name)
+        || !buf.tryReadUint32(req_ring_capacity)
+        || !buf.tryReadUint32(resp_ring_capacity)
+        || !buf.tryReadUint16(iface_count)) {
+        return false;
+    }
+    info.shm_config.req_ring_capacity = req_ring_capacity;
+    info.shm_config.resp_ring_capacity = resp_ring_capacity;
+    info.interfaces.resize(iface_count);
+    for (uint16_t i = 0; i < iface_count; ++i) {
+        if (!deserializeInterfaceInfo(buf, info.interfaces[i])) {
+            return false;
+        }
+    }
+    return true;
+}
 
 void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf);
-bool deserializeInterfaceInfo(Buffer& buf, InterfaceInfo& info);
+
+template <typename BufT>
+bool deserializeInterfaceInfo(BufT& buf, InterfaceInfo& info) {
+    uint16_t method_count = 0;
+    if (!buf.tryReadUint32(info.interface_id)
+        || !buf.tryReadString(info.name)
+        || !buf.tryReadUint16(method_count)) {
+        return false;
+    }
+    info.methods.resize(method_count);
+    for (uint16_t i = 0; i < method_count; ++i) {
+        if (!buf.tryReadUint32(info.methods[i].method_id)
+            || !buf.tryReadString(info.methods[i].name)
+            || !buf.tryReadString(info.methods[i].param_types)
+            || !buf.tryReadString(info.methods[i].return_type)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 } // namespace omnibinder
 

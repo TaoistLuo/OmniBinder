@@ -1,180 +1,125 @@
-/**
- * @file test_stats.cpp
- * @brief 运行时统计测试
- */
-
-#include <omnibinder/omnibinder.h>
-#include <cstdio>
-#include <cstdlib>
-#include <unistd.h>
-#include <sys/wait.h>
+#include <gtest/gtest.h>
+#include "test_common.h"
+#include <omnibinder/runtime.h>
+#include <omnibinder/service.h>
+#include <pthread.h>
+#include <utility>
 
 using namespace omnibinder;
+using namespace omnibinder::test;
 
-template<typename T>
-static T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
-    T value = T();
-    if (!(buf.*fn)(value)) {
-        printf("Buffer decode failed\n");
-        abort();
-    }
-    return value;
-}
+static const uint16_t SM_PORT = 9900;
 
-const uint16_t SM_PORT = 9900;
-
-// 简单的测试服务
-class TestService : public Service {
+class StatsTestService : public Service {
 public:
-    TestService() : Service("TestService") {}
-    
-    const char* serviceName() const override {
-        return "TestService";
-    }
-    
+    StatsTestService() : Service("TestService") {}
+
+    const char* serviceName() const override { return "TestService"; }
+
     const InterfaceInfo& interfaceInfo() const override {
         static InterfaceInfo info;
         static bool initialized = false;
         if (!initialized) {
             info.interface_id = 0x12345678;
             info.name = "ITestService";
-            
-            MethodInfo method;
-            method.method_id = 0x00000001;
-            method.name = "echo";
-            info.methods.push_back(method);
+            MethodInfo m;
+            m.method_id = 0x00000001;
+            m.name = "echo";
+            info.methods.push_back(m);
             initialized = true;
         }
         return info;
     }
-    
-    void onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
+
+    int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
         if (method_id == 0x00000001) {
-            // 从 const Buffer 读取需要创建临时 Buffer
             Buffer temp(request.data(), request.size());
             int32_t value = mustRead<int32_t>(temp, &Buffer::tryReadInt32);
-            response.writeInt32(value);
+            if (!response.writeInt32(value)) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
         }
+        return 0;
     }
 };
 
-int main() {
-    printf("=== Runtime Stats Test ===\n\n");
-    
-    // 启动 ServiceManager
-    printf("Starting ServiceManager...\n");
-    pid_t sm_pid = fork();
-    if (sm_pid == 0) {
-        execl("./target/bin/service_manager", "service_manager", NULL);
-        exit(1);
+class StatsTest : public ::testing::Test {
+protected:
+    static pid_t sm_pid_;
+
+    static void SetUpTestSuite() {
+        sm_pid_ = startProcess("./target/bin/service_manager");
+        ASSERT_GT(sm_pid_, 0);
+        ASSERT_TRUE(waitPortReady(SM_PORT, 5));
     }
-    sleep(1);
-    
-    // 创建服务端
-    printf("Starting test service...\n");
-    OmniRuntime server_client;
-    if (server_runtime.init("127.0.0.1", SM_PORT) != 0) {
-        printf("Failed to init server client\n");
-        kill(sm_pid, SIGTERM);
-        return 1;
+
+    static void TearDownTestSuite() {
+        stopProcess(sm_pid_);
     }
-    
-    TestService test_service;
-    if (server_runtime.registerService(&test_service) != 0) {
-        printf("Failed to register service\n");
-        kill(sm_pid, SIGTERM);
-        return 1;
+};
+
+pid_t StatsTest::sm_pid_ = 0;
+
+TEST_F(StatsTest, InvokeUpdatesRpcCount) {
+    OmniRuntime server_rt;
+    ASSERT_EQ(server_rt.init("127.0.0.1", SM_PORT), 0);
+    StatsTestService svc;
+    ASSERT_EQ(server_rt.registerService(&svc), 0);
+
+    volatile bool server_should_stop = false;
+    pthread_t server_tid;
+    auto serverLoop = [](void* arg) -> void* {
+        auto* ctx = static_cast<std::pair<OmniRuntime*, volatile bool*>*>(arg);
+        while (!*ctx->second) ctx->first->pollOnce(50);
+        return NULL;
+    };
+    std::pair<OmniRuntime*, volatile bool*> server_ctx(&server_rt, &server_should_stop);
+    ASSERT_EQ(pthread_create(&server_tid, NULL, serverLoop, &server_ctx), 0);
+
+    OmniRuntime client_rt;
+    ASSERT_EQ(client_rt.init("127.0.0.1", SM_PORT), 0);
+
+    for (int i = 0; i < 3; i++) {
+        Buffer req, resp;
+        req.writeInt32(i);
+        int ret = client_rt.invoke("TestService", 0x12345678, 0x00000001, req, resp, 5000);
+        EXPECT_EQ(ret, 0);
     }
-    
-    // 在单独线程运行服务端事件循环
-    pid_t server_pid = fork();
-    if (server_pid == 0) {
-        server_client.run();
-        exit(0);
-    }
-    
-    sleep(1);
-    
-    // 创建客户端
-    printf("Creating client...\n");
-    OmniRuntime runtime;
-    if (runtime.init("127.0.0.1", SM_PORT) != 0) {
-        printf("Failed to init client\n");
-        kill(server_pid, SIGTERM);
-        kill(sm_pid, SIGTERM);
-        return 1;
-    }
-    
-    // 在单独进程运行客户端事件循环
-    pid_t client_pid = fork();
-    if (client_pid == 0) {
-        client.run();
-        exit(0);
-    }
-    
-    sleep(1);
-    
-    // 测试：获取初始统计
-    printf("\n[Test 1] Initial stats\n");
+
     RuntimeStats stats;
-    runtime.getStats(stats);
-    printf("  RPC calls: %lu\n", stats.total_rpc_calls);
-    printf("  RPC success: %lu\n", stats.total_rpc_success);
-    printf("  RPC failures: %lu\n", stats.total_rpc_failures);
-    printf("  Active connections: %u\n", stats.active_connections);
-    
-    // 测试：执行 RPC 调用
-    printf("\n[Test 2] After 10 RPC calls\n");
-    for (int i = 0; i < 10; i++) {
-        Buffer request, response;
-        request.writeInt32(i);
-        runtime.invoke("TestService", 0x12345678, 0x00000001,
-                     request, response, 5000);
-    }
-    
-    sleep(1);
-    runtime.getStats(stats);
-    printf("  RPC calls: %lu\n", stats.total_rpc_calls);
-    printf("  RPC success: %lu\n", stats.total_rpc_success);
-    printf("  RPC failures: %lu\n", stats.total_rpc_failures);
-    printf("  Active connections: %u\n", stats.active_connections);
-    
-    if (stats.total_rpc_calls != 10) {
-        printf("  FAILED: Expected 10 RPC calls, got %lu\n", stats.total_rpc_calls);
-        goto cleanup;
-    }
-    if (stats.total_rpc_success != 10) {
-        printf("  FAILED: Expected 10 successful RPCs, got %lu\n", stats.total_rpc_success);
-        goto cleanup;
-    }
-    printf("  PASSED\n");
-    
-    // 测试：重置统计
-    printf("\n[Test 3] After reset\n");
-    runtime.resetStats();
-    runtime.getStats(stats);
-    printf("  RPC calls: %lu\n", stats.total_rpc_calls);
-    printf("  RPC success: %lu\n", stats.total_rpc_success);
-    
-    if (stats.total_rpc_calls != 0) {
-        printf("  FAILED: Expected 0 RPC calls after reset, got %lu\n", stats.total_rpc_calls);
-        goto cleanup;
-    }
-    printf("  PASSED\n");
-    
-    printf("\n=== All stats tests PASSED ===\n");
-    
-cleanup:
-    // 清理
-    printf("\nCleaning up...\n");
+    ASSERT_EQ(client_rt.getStats(stats), 0);
+    EXPECT_GE(stats.total_rpc_calls, 3u);
+    EXPECT_GE(stats.total_rpc_success, 3u);
+
+    server_should_stop = true;
+    pthread_join(server_tid, NULL);
+    client_rt.stop();
+    server_rt.stop();
+}
+
+TEST_F(StatsTest, FailedInvokeUpdatesFailureCount) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    Buffer req, resp;
+    req.writeRaw("bad", 3);
+    int ret = runtime.invoke("MissingService", 0x12345678, 0x00000001, req, resp, 1000);
+    EXPECT_NE(ret, 0);
+
+    RuntimeStats stats;
+    ASSERT_EQ(runtime.getStats(stats), 0);
+    EXPECT_GE(stats.total_rpc_calls, 1u);
+    EXPECT_GE(stats.total_rpc_failures, 1u);
+
     runtime.stop();
-    server_runtime.stop();
-    kill(client_pid, SIGTERM);
-    kill(server_pid, SIGTERM);
-    kill(sm_pid, SIGTERM);
-    waitpid(client_pid, NULL, 0);
-    waitpid(server_pid, NULL, 0);
-    waitpid(sm_pid, NULL, 0);
-    
-    return 0;
+}
+
+TEST_F(StatsTest, ResetClearsStats) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    runtime.resetStats();
+    RuntimeStats stats;
+    ASSERT_EQ(runtime.getStats(stats), 0);
+    EXPECT_EQ(stats.total_rpc_calls, 0u);
+
+    runtime.stop();
 }

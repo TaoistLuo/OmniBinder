@@ -2,6 +2,7 @@
 #define OMNIBINDER_OWNER_THREAD_EXECUTOR_H
 
 #include "event_loop.h"
+#include "omnibinder/log.h"
 
 #include <pthread.h>
 
@@ -12,6 +13,8 @@
 #include <type_traits>
 
 namespace omnibinder {
+
+#define OWNER_THREAD_EXECUTOR_LOG_TAG "OwnerThreadExecutor"
 
 template<typename T>
 class ExecutionResult {
@@ -244,14 +247,30 @@ public:
     template<typename F>
     int invokeOnOwnerNoThrowInt(F func, int fallback) {
         if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
-            return func();
+            try {
+                return func();
+            } catch (const std::exception& e) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: %s", e.what());
+                return fallback;
+            } catch (...) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: unknown");
+                return fallback;
+            }
         }
 
         std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
         loop_->post([func, state, fallback]() {
             try {
                 state->completeSuccess(func());
+            } catch (const std::exception& e) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: %s", e.what());
+                state->completeSuccess(fallback);
             } catch (...) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: unknown");
                 state->completeSuccess(fallback);
             }
         });
@@ -264,22 +283,43 @@ public:
     }
 
     template<typename F>
-    void invokeOnOwnerNoThrowVoid(F func) {
+    int invokeOnOwnerNoThrowVoid(F func, int fallback) {
         if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
-            func();
-            return;
-        }
-
-        std::shared_ptr< SyncCallState<void> > state(new SyncCallState<void>());
-        loop_->post([func, state]() {
             try {
                 func();
+                return 0;
+            } catch (const std::exception& e) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: %s", e.what());
+                return fallback;
             } catch (...) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: unknown");
+                return fallback;
             }
-            state->completeSuccess();
+        }
+
+        std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
+        loop_->post([func, state, fallback]() {
+            try {
+                func();
+                state->completeSuccess(0);
+            } catch (const std::exception& e) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: %s", e.what());
+                state->completeSuccess(fallback);
+            } catch (...) {
+                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
+                               "owner_thread_callback_exception: unknown");
+                state->completeSuccess(fallback);
+            }
         });
 
-        (void)state->wait();
+        ExecutionResult<int> result = state->wait();
+        if (!result.ok()) {
+            return fallback;
+        }
+        return result.value();
     }
 
 private:
@@ -387,5 +427,7 @@ private:
 };
 
 }
+
+#undef OWNER_THREAD_EXECUTOR_LOG_TAG
 
 #endif

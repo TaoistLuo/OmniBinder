@@ -11,6 +11,7 @@
 `include/omnibinder/buffer.h`
 
 Buffer 是序列化/反序列化的核心工具类，提供自动扩容的字节缓冲区。
+当前版本采用显式失败模型：写入接口返回 `bool`，读取接口采用 `tryReadXxx(out)` 返回 `bool`，普通协议错误不再依赖 C++ 异常传播。
 
 ```cpp
 namespace omnibinder {
@@ -28,38 +29,37 @@ public:
 
     // ---- 写入（序列化）----
 
-    void writeBool(bool value);
-    void writeInt8(int8_t value);
-    void writeUint8(uint8_t value);
-    void writeInt16(int16_t value);
-    void writeUint16(uint16_t value);
-    void writeInt32(int32_t value);
-    void writeUint32(uint32_t value);
-    void writeInt64(int64_t value);
-    void writeUint64(uint64_t value);
-    void writeFloat32(float value);
-    void writeFloat64(double value);
-    void writeString(const std::string& value);
-    void writeBytes(const void* data, size_t length);
-    void writeBytes(const std::vector<uint8_t>& data);
-    void writeRaw(const void* data, size_t length);
+    bool writeBool(bool value) noexcept;
+    bool writeInt8(int8_t value) noexcept;
+    bool writeUint8(uint8_t value) noexcept;
+    bool writeInt16(int16_t value) noexcept;
+    bool writeUint16(uint16_t value) noexcept;
+    bool writeInt32(int32_t value) noexcept;
+    bool writeUint32(uint32_t value) noexcept;
+    bool writeInt64(int64_t value) noexcept;
+    bool writeUint64(uint64_t value) noexcept;
+    bool writeFloat32(float value) noexcept;
+    bool writeFloat64(double value) noexcept;
+    bool writeString(const std::string& value) noexcept;
+    bool writeBytes(const void* data, size_t length) noexcept;
+    bool writeBytes(const std::vector<uint8_t>& data) noexcept;
+    bool writeRaw(const void* data, size_t length) noexcept;
 
     // ---- 读取（反序列化）----
 
-    bool readBool();
-    int8_t readInt8();
-    uint8_t readUint8();
-    int16_t readInt16();
-    uint16_t readUint16();
-    int32_t readInt32();
-    uint32_t readUint32();
-    int64_t readInt64();
-    uint64_t readUint64();
-    float readFloat32();
-    double readFloat64();
-    std::string readString();
-    std::vector<uint8_t> readBytes();
-    void readRaw(void* buf, size_t length);
+    bool tryReadBool(bool& value) noexcept;
+    bool tryReadInt8(int8_t& value) noexcept;
+    bool tryReadUint8(uint8_t& value) noexcept;
+    bool tryReadInt16(int16_t& value) noexcept;
+    bool tryReadUint16(uint16_t& value) noexcept;
+    bool tryReadInt32(int32_t& value) noexcept;
+    bool tryReadUint32(uint32_t& value) noexcept;
+    bool tryReadInt64(int64_t& value) noexcept;
+    bool tryReadUint64(uint64_t& value) noexcept;
+    bool tryReadFloat32(float& value) noexcept;
+    bool tryReadFloat64(double& value) noexcept;
+    bool tryReadString(std::string& value) noexcept;
+    bool tryReadBytes(std::vector<uint8_t>& value) noexcept;
 
     // ---- 缓冲区管理 ----
 
@@ -91,7 +91,10 @@ public:
     size_t readPosition() const;
 
     // 设置读取位置
-    void setReadPosition(size_t pos);
+    bool trySetReadPosition(size_t pos);
+
+    // 检查写入状态
+    bool writeOk() const;
 
     // 获取当前写入位置
     size_t writePosition() const;
@@ -149,7 +152,8 @@ OmniRuntime 是用户使用 OmniBinder 的主要入口，负责与 ServiceManage
 - `timeout_ms == 0` 时使用默认超时，默认值可通过 `setDefaultTimeout()` 修改
 - 同步等待由运行时 deadline 控制，超时返回错误码 `ERR_TIMEOUT`
 - 正常调用路径不会无限期阻塞等待 reply
-- 但不建议在 owner event-loop 回调中再发起同步阻塞 API，因为那会进入嵌套等待语义
+- reply wait 期间只处理 fd / timer，不执行通过 `post()` 投递的 pending API functor
+- 不建议在 owner event-loop 回调中再发起同步阻塞 API
 
 ```cpp
 namespace omnibinder {
@@ -438,7 +442,7 @@ public:
   - 写入 `ServiceInfo.shm_config`
   - 在客户端 lookup 后用于创建客户端侧 SHM transport
 
-### 2.3 Service（服务基类）
+### 2.3.1 调用契约
 
 `include/omnibinder/service.h`
 
@@ -466,12 +470,10 @@ public:
 
 protected:
     // 处理接口调用请求（由 IDL 生成的子类实现）
-    // method_id: 方法ID
-    // request: 请求数据
-    // response: 响应数据（需要填充）
-    virtual void onInvoke(uint32_t method_id,
-                          const Buffer& request,
-                          Buffer& response) = 0;
+    // 返回 0 表示成功，非 0 表示错误码
+    virtual int onInvoke(uint32_t method_id,
+                         const Buffer& request,
+                         Buffer& response) = 0;
 
     // 服务启动时回调（可选覆盖）
     virtual void onStart();
@@ -498,6 +500,15 @@ private:
 
 } // namespace omnibinder
 ```
+
+`onInvoke()` 当前采用显式返回状态码模型：
+
+- `0` 表示成功
+- `ERR_DESERIALIZE` 表示参数反序列化失败
+- `ERR_SERIALIZE` 表示响应序列化失败
+- 其它非 `0` 值表示业务或运行时错误
+
+旧的 `reportInvokeError()` / `consumeInvokeError()` 已移除。
 
 ### 2.4 ITransport（传输层接口）
 
@@ -855,7 +866,7 @@ typedef struct omni_runtime_stats_t {
 } omni_runtime_stats_t;
 
 /* 回调函数类型 */
-typedef void (*omni_invoke_callback_t)(uint32_t method_id,
+typedef int (*omni_invoke_callback_t)(uint32_t method_id,
     const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
 
 typedef void (*omni_topic_callback_t)(uint32_t topic_id,

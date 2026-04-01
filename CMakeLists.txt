@@ -114,6 +114,20 @@ endif()
 # 测试
 if(OMNIBINDER_BUILD_TESTS)
     enable_testing()
+
+    # 抑制 googletest 对 C++17 特性的检测警告（项目使用 C++11）
+    set(CMAKE_CXX_STANDARD 11 CACHE STRING "C++ standard" FORCE)
+
+    # 禁用 googletest 自带的所有选项
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    set(gtest_disable_pthreads OFF CACHE BOOL "" FORCE)
+
+    add_subdirectory(thirdparty/googletest-release-1.10.0)
+
+    # 恢复项目 C++ 标准
+    set(CMAKE_CXX_STANDARD 11 CACHE STRING "C++ standard" FORCE)
+
     add_subdirectory(tests)
 endif()
 

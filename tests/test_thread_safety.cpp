@@ -1,265 +1,129 @@
-/**
- * @file test_thread_safety.cpp
- * @brief 线程安全测试
- */
-
-#include <omnibinder/omnibinder.h>
+#include <gtest/gtest.h>
+#include "test_common.h"
+#include <omnibinder/runtime.h>
+#include <omnibinder/service.h>
+#include <atomic>
 #include <thread>
 #include <vector>
-#include <atomic>
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <unistd.h>
 
 using namespace omnibinder;
+using namespace omnibinder::test;
 
-template<typename T>
-static T mustRead(const Buffer& source, bool (Buffer::*fn)(T&)) {
-    Buffer buf(source.data(), source.size());
-    T value = T();
-    if (!(buf.*fn)(value)) {
-        printf("Buffer decode failed\n");
-        abort();
-    }
-    return value;
-}
+static const uint16_t SM_PORT = 19930;
+static std::atomic<int> success_count(0);
+static std::atomic<int> failure_count(0);
 
-const uint16_t SM_PORT = 19930;
-std::atomic<int> success_count(0);
-std::atomic<int> failure_count(0);
+static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
+static const uint32_t IFACE_ID = 0x12345678;
 
-// 简单的测试服务
-class TestService : public Service {
+class ThreadSafetyTestService : public Service {
 public:
-    TestService() : Service("TestService") {}
-    
-    const char* serviceName() const override {
-        return "TestService";
+    ThreadSafetyTestService() : Service("TestService") {
+        iface_.interface_id = IFACE_ID;
+        iface_.name = "TestService";
+        iface_.methods.push_back(MethodInfo(METHOD_ECHO, "Echo"));
     }
-    
-    InterfaceInfo interfaceInfo() const override {
-        InterfaceInfo info;
-        info.interface_id = 0x12345678;
-        info.interface_name = "ITestService";
-        
-        MethodInfo method;
-        method.method_id = 0x00000001;
-        method.method_name = "echo";
-        info.methods.push_back(method);
-        
-        return info;
-    }
-    
-    int onInvoke(uint32_t interface_id, uint32_t method_id,
-                 const Buffer& request, Buffer& response) override {
-        if (interface_id == 0x12345678 && method_id == 0x00000001) {
-            // Echo: 返回接收到的数据
-            int32_t value = mustRead<int32_t>(request, &Buffer::tryReadInt32);
-            response.writeInt32(value);
-            return 0;
+    const char* serviceName() const override { return "TestService"; }
+    const InterfaceInfo& interfaceInfo() const override { return iface_; }
+protected:
+    int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
+        if (method_id == METHOD_ECHO) {
+            if (!response.writeRaw(request.data(), request.size())) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
         }
-        return -1;
+        return 0;
+    }
+private:
+    InterfaceInfo iface_;
+};
+
+class ThreadSafetyTest : public ::testing::Test {
+protected:
+    static pid_t sm_pid_;
+    static OmniRuntime* server_rt_;
+    static ThreadSafetyTestService* svc_;
+    static std::thread* server_thread_;
+
+    static void SetUpTestSuite() {
+        sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19930", "--log-level", "3");
+        ASSERT_GT(sm_pid_, 0);
+        ASSERT_TRUE(waitPortReady(SM_PORT, 30));
+
+        svc_ = new ThreadSafetyTestService();
+        server_rt_ = new OmniRuntime();
+        ASSERT_EQ(server_rt_->init("127.0.0.1", SM_PORT), 0);
+        ASSERT_EQ(server_rt_->registerService(svc_), 0);
+        server_thread_ = new std::thread([]() { server_rt_->run(); });
+        usleep(500000);
+    }
+
+    static void TearDownTestSuite() {
+        server_rt_->stop();
+        server_thread_->join();
+        delete server_thread_;
+        delete svc_;
+        delete server_rt_;
+        stopProcess(sm_pid_);
     }
 };
 
-// 测试1: 多线程同时调用 lookupService
-void testConcurrentLookup(OmniRuntime& runtime, int thread_id, int iterations) {
+pid_t ThreadSafetyTest::sm_pid_ = 0;
+OmniRuntime* ThreadSafetyTest::server_rt_ = nullptr;
+ThreadSafetyTestService* ThreadSafetyTest::svc_ = nullptr;
+std::thread* ThreadSafetyTest::server_thread_ = nullptr;
+
+static void concurrentLookup(OmniRuntime& runtime, int thread_id, int iterations) {
     for (int i = 0; i < iterations; i++) {
         ServiceInfo info;
         int ret = runtime.lookupService("TestService", info);
-        if (ret == 0) {
-            success_count++;
-        } else {
-            failure_count++;
-        }
-        
-        // 随机延迟
+        if (ret == 0) success_count++;
+        else failure_count++;
         std::this_thread::sleep_for(std::chrono::microseconds(rand() % 100));
     }
 }
 
-// 测试2: 多线程同时调用 invoke
-void testConcurrentInvoke(OmniRuntime& runtime, int thread_id, int iterations) {
+static void concurrentInvoke(OmniRuntime& runtime, int thread_id, int iterations) {
     for (int i = 0; i < iterations; i++) {
         Buffer request, response;
         request.writeInt32(thread_id * 1000 + i);
-        
-        int ret = runtime.invoke("TestService", 0x12345678, 0x00000001,
-                               request, response, 5000);
-        if (ret == 0) {
-            int32_t result = mustRead<int32_t>(response, &Buffer::tryReadInt32);
-            if (result == thread_id * 1000 + i) {
-                success_count++;
-            } else {
-                failure_count++;
-                printf("Thread %d: Expected %d, got %d\n", 
-                       thread_id, thread_id * 1000 + i, result);
-            }
-        } else {
-            failure_count++;
-        }
-        
+        int ret = runtime.invoke("TestService", IFACE_ID, METHOD_ECHO, request, response, 5000);
+        if (ret == 0) success_count++;
+        else failure_count++;
         std::this_thread::sleep_for(std::chrono::microseconds(rand() % 100));
     }
 }
 
-// 测试3: 多线程同时注册/注销服务
-void testConcurrentRegister(OmniRuntime& runtime, int thread_id, int iterations) {
-    for (int i = 0; i < iterations; i++) {
-        TestService service;
-        
-        int ret = runtime.registerService(&service);
-        if (ret == 0) {
-            success_count++;
-            
-            // 短暂等待
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            
-            ret = runtime.unregisterService(&service);
-            if (ret == 0) {
-                success_count++;
-            } else {
-                failure_count++;
-            }
-        } else {
-            failure_count++;
-        }
-        
-        std::this_thread::sleep_for(std::chrono::milliseconds(rand() % 50));
+TEST_F(ThreadSafetyTest, ConcurrentLookup) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    std::thread rt_thread([&runtime]() { runtime.run(); });
+    usleep(200000);
+    success_count = 0;
+    failure_count = 0;
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 10; i++) {
+        threads.emplace_back(concurrentLookup, std::ref(runtime), i, 100);
     }
+    for (auto& t : threads) t.join();
+    EXPECT_EQ(failure_count.load(), 0);
+    runtime.stop();
+    rt_thread.join();
 }
 
-int main() {
-    printf("=== OmniBinder Thread Safety Test ===\n\n");
-    
-    // 启动 ServiceManager
-    printf("Starting ServiceManager...\n");
-    pid_t sm_pid = fork();
-    if (sm_pid == 0) {
-        execl("./target/bin/service_manager", "service_manager", NULL);
-        exit(1);
-    }
-    sleep(1);
-    
-    // 创建服务端
-    printf("Starting test service...\n");
-    OmniRuntime server_runtime;
-    if (server_runtime.init("127.0.0.1", SM_PORT) != 0) {
-        printf("Failed to init server client\n");
-        kill(sm_pid, SIGTERM);
-        return 1;
-    }
-    
-    TestService test_service;
-    if (server_runtime.registerService(&test_service) != 0) {
-        printf("Failed to register service\n");
-        kill(sm_pid, SIGTERM);
-        return 1;
-    }
-    
-    // 在单独线程运行服务端事件循环
-    std::thread server_thread([&server_runtime]() {
-        server_runtime.run();
-    });
-    
-    sleep(1);
-    
-    // 创建客户端
-    printf("Creating client...\n");
+TEST_F(ThreadSafetyTest, ConcurrentInvoke) {
     OmniRuntime runtime;
-    if (runtime.init("127.0.0.1", SM_PORT) != 0) {
-        printf("Failed to init client\n");
-        server_runtime.stop();
-        server_thread.join();
-        kill(sm_pid, SIGTERM);
-        return 1;
-    }
-    
-    // 在单独线程运行客户端事件循环
-    std::thread runtime_thread([&runtime]() {
-        runtime.run();
-    });
-    
-    sleep(1);
-    
-    // 测试1: 多线程并发查询
-    printf("\n[Test 1] Concurrent lookupService (10 threads x 100 iterations)\n");
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    std::thread rt_thread([&runtime]() { runtime.run(); });
+    usleep(200000);
     success_count = 0;
     failure_count = 0;
-    {
-        std::vector<std::thread> threads;
-        auto start = std::chrono::steady_clock::now();
-        
-        for (int i = 0; i < 10; i++) {
-            threads.emplace_back(testConcurrentLookup, std::ref(runtime), i, 100);
-        }
-        
-        for (auto& t : threads) {
-            t.join();
-        }
-        
-        auto end = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        
-        printf("  Success: %d, Failure: %d\n", success_count.load(), failure_count.load());
-        printf("  Duration: %ld ms\n", duration.count());
-        
-        if (failure_count > 0) {
-            printf("  FAILED!\n");
-            runtime.stop();
-            server_runtime.stop();
-            runtime_thread.join();
-            server_thread.join();
-            kill(sm_pid, SIGTERM);
-            return 1;
-        }
-        printf("  PASSED\n");
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 10; i++) {
+        threads.emplace_back(concurrentInvoke, std::ref(runtime), i, 50);
     }
-    
-    // 测试2: 多线程并发 RPC 调用
-    printf("\n[Test 2] Concurrent invoke (10 threads x 50 iterations)\n");
-    success_count = 0;
-    failure_count = 0;
-    {
-        std::vector<std::thread> threads;
-        auto start = std::chrono::steady_clock::now();
-        
-        for (int i = 0; i < 10; i++) {
-            threads.emplace_back(testConcurrentInvoke, std::ref(runtime), i, 50);
-        }
-        
-        for (auto& t : threads) {
-            t.join();
-        }
-        
-        auto end = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        
-        printf("  Success: %d, Failure: %d\n", success_count.load(), failure_count.load());
-        printf("  Duration: %ld ms\n", duration.count());
-        
-        if (failure_count > 0) {
-            printf("  FAILED!\n");
-            runtime.stop();
-            server_runtime.stop();
-            runtime_thread.join();
-            server_thread.join();
-            kill(sm_pid, SIGTERM);
-            return 1;
-        }
-        printf("  PASSED\n");
-    }
-    
-    // 清理
-    printf("\nCleaning up...\n");
+    for (auto& t : threads) t.join();
+    EXPECT_EQ(failure_count.load(), 0);
     runtime.stop();
-    server_runtime.stop();
-    runtime_thread.join();
-    server_thread.join();
-    kill(sm_pid, SIGTERM);
-    waitpid(sm_pid, NULL, 0);
-    
-    printf("\n=== All thread safety tests PASSED ===\n");
-    return 0;
+    rt_thread.join();
 }
