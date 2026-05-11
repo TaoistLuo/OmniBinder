@@ -96,7 +96,7 @@ public:
     void setDefaultTimeout(uint32_t timeout_ms);
     const std::string& hostId() const;
     int getStats(RuntimeStats& stats);
-    void resetStats();
+    int resetStats();
     void clearServiceCache();
     void closeAllConnections();
 

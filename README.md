@@ -522,7 +522,7 @@ int main() {
 | [omni-cli 使用指南](docs/omni-tool-usage.md) | 命令行工具使用说明、JSON 格式支持 |
 | [测试说明](docs/testing-guide.md) | 测试用例用途、启动方式、推荐执行方法 |
 | [使用示例](docs/examples.md) | 完整的服务端/客户端示例、跨板通信示例 |
-| [下游 Sensor/HMI 示例](examples/artifact_sensor_hmi/README.md) | 使用已构建 `lib` 与 `omni-idlc` 独立构建的 C/C++ 业务示例 |
+| [下游 Sensor/HMI 示例](examples/artifact_examples/README.md) | 使用已构建 `lib` 与 `omni-idlc` 独立构建的 C/C++ 业务示例 |
 | [发布特性](RELEASE_FEATURES.md) | 当前版本核心能力、交付内容与适用场景 |
 | [性能报告](docs/performance-report.md) | RPC 和话题的延迟测试数据（微秒级） 
 
@@ -544,7 +544,7 @@ omnibinder/
 ├── examples/
 │   ├── example_cpp/               # 仓库内 C++ 示例
 │   ├── example_c/                 # 仓库内 C 示例
-│   └── artifact_sensor_hmi/       # 下游独立消费式示例
+│   └── artifact_examples/       # 下游独立消费式示例
 ├── tests/                         # 单元 / 集成 / 性能 / 长稳测试
 ├── docs/                          # 对外文档
 ├── RELEASE_FEATURES.md            # 当前版本发布特性文档

@@ -151,12 +151,12 @@
 omnibinder::OmniRuntime runtime;
 runtime.init("127.0.0.1", 9900);
 
-std::thread loop_thread([&client]() {
-    client.run();
-});
+std::thread loop_thread([&runtime]() {
+        runtime.run();
+    });
 
-// 其他线程安全发起调用
-std::thread worker([&client]() {
+    // 其他线程安全发起调用
+    std::thread worker([&runtime]() {
     omnibinder::Buffer req, resp;
     runtime.invoke("SensorService", 0x1234, 0x1, req, resp, 3000);
 });

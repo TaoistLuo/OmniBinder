@@ -233,171 +233,73 @@ public:
     }
 
     template<typename F>
-    typename std::result_of<F()>::type invoke(F func) {
+    typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
+                           typename std::result_of<F()>::type>::type
+    invoke(F func) {
         typedef typename std::result_of<F()>::type Result;
-        return invokeImpl<F, Result>(func, typename std::is_void<Result>::type());
-    }
-
-    template<typename F>
-    typename std::result_of<F()>::type invokeOnOwner(F func) {
-        typedef typename std::result_of<F()>::type Result;
-        return invokeOnOwnerImpl<F, Result>(func, typename std::is_void<Result>::type());
-    }
-
-    template<typename F>
-    int invokeOnOwnerNoThrowInt(F func, int fallback) {
-        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
-            try {
-                return func();
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: %s", e.what());
-                return fallback;
-            } catch (...) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: unknown");
-                return fallback;
-            }
-        }
-
-        std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
-        loop_->post([func, state, fallback]() {
-            try {
-                state->completeSuccess(func());
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: %s", e.what());
-                state->completeSuccess(fallback);
-            } catch (...) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: unknown");
-                state->completeSuccess(fallback);
-            }
-        });
-
-        ExecutionResult<int> result = state->wait();
-        if (!result.ok()) {
-            return fallback;
-        }
-        return result.value();
-    }
-
-    template<typename F>
-    int invokeOnOwnerNoThrowVoid(F func, int fallback) {
-        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
-            try {
-                func();
-                return 0;
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: %s", e.what());
-                return fallback;
-            } catch (...) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: unknown");
-                return fallback;
-            }
-        }
-
-        std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
-        loop_->post([func, state, fallback]() {
-            try {
-                func();
-                state->completeSuccess(0);
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: %s", e.what());
-                state->completeSuccess(fallback);
-            } catch (...) {
-                OMNI_LOG_ERROR(OWNER_THREAD_EXECUTOR_LOG_TAG,
-                               "owner_thread_callback_exception: unknown");
-                state->completeSuccess(fallback);
-            }
-        });
-
-        ExecutionResult<int> result = state->wait();
-        if (!result.ok()) {
-            return fallback;
-        }
-        return result.value();
-    }
-
-private:
-    template<typename F, typename Result>
-    Result invokeImpl(F func, std::false_type) {
         if (canRunInline()) {
             return func();
         }
 
         std::shared_ptr< SyncCallState<Result> > state(new SyncCallState<Result>());
         loop_->post([func, state]() {
-            try {
-                state->completeSuccess(func());
-            } catch (const std::exception& e) {
-                state->completeFailure(e.what());
-            } catch (...) {
-                state->completeFailure("unknown exception");
-            }
+            state->completeSuccess(func());
         });
 
         ExecutionResult<Result> result = state->wait();
         if (!result.ok()) {
-            throw std::runtime_error(result.error());
+            return Result();
         }
         return result.value();
     }
 
-    template<typename F, typename Result>
-    void invokeImpl(F func, std::true_type) {
+    template<typename F>
+    typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value,
+                           int>::type
+    invoke(F func) {
         if (canRunInline()) {
             func();
-            return;
+            return 0;
         }
 
-        std::shared_ptr< SyncCallState<void> > state(new SyncCallState<void>());
+        std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
         loop_->post([func, state]() {
-            try {
-                func();
-                state->completeSuccess();
-            } catch (const std::exception& e) {
-                state->completeFailure(e.what());
-            } catch (...) {
-                state->completeFailure("unknown exception");
-            }
+            func();
+            state->completeSuccess(0);
         });
 
-        ExecutionResult<void> result = state->wait();
+        ExecutionResult<int> result = state->wait();
         if (!result.ok()) {
-            throw std::runtime_error(result.error());
+            return -1;
         }
+        return result.value();
     }
 
-    template<typename F, typename Result>
-    Result invokeOnOwnerImpl(F func, std::false_type) {
+    template<typename F>
+    typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
+                           typename std::result_of<F()>::type>::type
+    invokeOnOwner(F func) {
+        typedef typename std::result_of<F()>::type Result;
         if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
             return func();
         }
 
         std::shared_ptr< SyncCallState<Result> > state(new SyncCallState<Result>());
         loop_->post([func, state]() {
-            try {
-                state->completeSuccess(func());
-            } catch (const std::exception& e) {
-                state->completeFailure(e.what());
-            } catch (...) {
-                state->completeFailure("unknown exception");
-            }
+            state->completeSuccess(func());
         });
 
         ExecutionResult<Result> result = state->wait();
         if (!result.ok()) {
-            throw std::runtime_error(result.error());
+            return Result();
         }
         return result.value();
     }
 
-    template<typename F, typename Result>
-    void invokeOnOwnerImpl(F func, std::true_type) {
+    template<typename F>
+    typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value,
+                           void>::type
+    invokeOnOwner(F func) {
         if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
             func();
             return;
@@ -405,20 +307,11 @@ private:
 
         std::shared_ptr< SyncCallState<void> > state(new SyncCallState<void>());
         loop_->post([func, state]() {
-            try {
-                func();
-                state->completeSuccess();
-            } catch (const std::exception& e) {
-                state->completeFailure(e.what());
-            } catch (...) {
-                state->completeFailure("unknown exception");
-            }
+            func();
+            state->completeSuccess();
         });
 
         ExecutionResult<void> result = state->wait();
-        if (!result.ok()) {
-            throw std::runtime_error(result.error());
-        }
     }
 
     EventLoop* loop_;

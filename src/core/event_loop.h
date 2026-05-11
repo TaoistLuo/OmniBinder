@@ -150,7 +150,7 @@ private:
     void destroyBackend();
 
     // 处理 eventfd 上的唤醒通知
-    void handleWakeup(int fd, uint32_t events);
+    void onWakeup(int fd, uint32_t events);
 
     // 执行所有待处理的投递回调
     void processPendingFunctors();

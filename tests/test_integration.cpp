@@ -78,7 +78,7 @@ static void* serverThread(void* arg) {
 
     int ret = ctx->runtime.init("127.0.0.1", ctx->sm_port);
     if (ret != 0) {
-        fprintf(stderr, "Server: failed to init client\n");
+        fprintf(stderr, "Server: failed to init runtime\n");
         return NULL;
     }
 
