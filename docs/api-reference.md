@@ -399,54 +399,7 @@ if (runtime.getStats(stats) == 0) {
 
 `include/omnibinder/service.h`
 
-Service 是所有 Stub / 业务服务的基类。当前除了服务名、端口、接口元数据之外，也支持声明服务级 SHM 配置。
-
-```cpp
-namespace omnibinder {
-
-class Service {
-public:
-    explicit Service(const std::string& name);
-    virtual ~Service();
-
-    const std::string& name() const;
-    uint16_t port() const;
-    void setPort(uint16_t p);
-
-    void setShmConfig(const ShmConfig& config);
-    ShmConfig shmConfig() const;
-
-    virtual const char* serviceName() const = 0;
-    virtual const InterfaceInfo& interfaceInfo() const = 0;
-};
-
-} // namespace omnibinder
-```
-
-#### 服务级 SHM 配置示例
-
-```cpp
-class SensorService : public omnibinder::Service {
-public:
-    SensorService() : Service("SensorService") {
-        setShmConfig(omnibinder::ShmConfig(8 * 1024, 16 * 1024));
-    }
-};
-```
-
-说明：
-
-- 如果不调用 `setShmConfig()`，则服务使用默认 `4KB / 4KB`
-- 如果调用 `setShmConfig()`，该配置会：
-  - 用于服务端创建 SHM transport
-  - 写入 `ServiceInfo.shm_config`
-  - 在客户端 lookup 后用于创建客户端侧 SHM transport
-
-### 2.3.1 调用契约
-
-`include/omnibinder/service.h`
-
-所有服务端骨架（Stub）的基类。IDL 生成的 Stub 类继承此基类。
+Service 是所有 Stub / 业务服务的基类。IDL 生成的 Stub 类继承此基类。当前支持服务名、端口、接口元数据，以及服务级 SHM 配置。
 
 ```cpp
 namespace omnibinder {
@@ -461,6 +414,11 @@ public:
 
     // 获取服务监听端口（注册后由框架分配）
     uint16_t port() const;
+    void setPort(uint16_t p);
+
+    // 服务级 SHM 配置
+    void setShmConfig(const ShmConfig& config);
+    ShmConfig shmConfig() const;
 
     // 获取接口信息（由 IDL 生成的子类实现）
     virtual const InterfaceInfo& interfaceInfo() const = 0;
@@ -500,6 +458,8 @@ private:
 
 } // namespace omnibinder
 ```
+
+#### 调用契约
 
 `onInvoke()` 当前采用显式返回状态码模型：
 
@@ -997,18 +957,20 @@ void on_invoke(uint32_t method_id, const omni_buffer_t* req,
     }
 }
 
-int main() {
+ int main() {
     omni_runtime_t* runtime = omni_runtime_create();
-    omni_runtime_init(client, "127.0.0.1", 9900);
+    omni_runtime_init(runtime, "127.0.0.1", 9900);
     
     omni_service_t* svc = omni_service_create("SensorService");
-    omni_service_init(svc, client, on_invoke, NULL);
+    omni_service_init(svc, runtime, on_invoke, NULL);
     
-    omni_runtime_run(client);
+    while (running) {
+        omni_runtime_poll_once(runtime, 100);
+    }
     
     omni_service_destroy(svc);
-    omni_runtime_destroy(client);
-    return 0;
+    omni_runtime_destroy(runtime);
+    return 5;
 }
 ```
 
@@ -1019,14 +981,17 @@ int main() {
 
 int main() {
     omni_runtime_t* runtime = omni_runtime_create();
-    omni_runtime_init(client, "127.0.0.1", 9900);
-    omni_runtime_run_async(client);
+    if (omni_runtime_init(runtime, "127.0.0.1", 9900) != 0) {
+        fprintf(stderr, "Failed to connect to ServiceManager\n");
+        omni_runtime_destroy(runtime);
+        return 1;
+    }
     
     // 调用服务
     omni_buffer_t* req = omni_buffer_create();
     omni_buffer_t* resp = omni_buffer_create();
     
-    int ret = omni_runtime_invoke(client, "SensorService",
+    int ret = omni_runtime_invoke(runtime, "SensorService",
                                   DEMO_SENSORSERVICE_INTERFACE_ID,
                                   demo_SensorService_METHOD_GET_LATEST_DATA,
                                   req, resp, 5000);
@@ -1039,8 +1004,8 @@ int main() {
     
     omni_buffer_destroy(req);
     omni_buffer_destroy(resp);
-    omni_runtime_stop(client);
-    omni_runtime_destroy(client);
+    omni_runtime_stop(runtime);
+    omni_runtime_destroy(runtime);
     return 0;
 }
 ```

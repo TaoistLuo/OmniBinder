@@ -206,7 +206,7 @@ int  omni_runtime_subscribe_death(omni_runtime_t* client, const char* service_na
          omni_death_callback_t callback, void* user_data);
 int  omni_runtime_unsubscribe_death(omni_runtime_t* client, const char* service_name);
 int  omni_runtime_get_stats(omni_runtime_t* client, omni_runtime_stats_t* stats);
-void omni_runtime_reset_stats(omni_runtime_t* client);
+int  omni_runtime_reset_stats(omni_runtime_t* client);
 
 /* ============================================================
  * 工具函数

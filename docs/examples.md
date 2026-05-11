@@ -12,7 +12,7 @@
 - omni-cli：查询在线服务和调用接口
 
 > 如果你需要验证 **“业务工程如何依赖 OmniBinder 的构建产物”**，请直接看
-> `examples/artifact_sensor_hmi/`。该目录是独立 CMake 工程，通过
+> `examples/artifact_examples/`。该目录是独立 CMake 工程，通过
 > `find_package(OmniBinder REQUIRED)` 和已安装的 `omni-idlc` 构建，
 > 不依赖仓库内部 target 名称。
 
@@ -337,7 +337,7 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 与 C++ 版本的关键区别：
 - 继承 Stub 基类 → 直接实现生成的 `demo_SensorService_impl_xxx(...)` 接口
 - `demo_SensorService_stub_create(user_data)` 会自动绑定这些实现，不需要手动维护回调表
-- `service.BroadcastSensorUpdate(msg)` → `demo_SensorService_broadcast_sensor_update(client, &msg)`
+- `service.BroadcastSensorUpdate(msg)` → `demo_SensorService_broadcast_sensor_update(runtime, &msg)`
 - `std::string` → `char*` + `_len` 字段，需要手动 `malloc/free`
 - 结构体需要 `_init()` / `_destroy()` 管理生命周期
 
@@ -950,7 +950,7 @@ int main() {
         return 1;
     }
 
-    myapp::MyServiceProxy proxy(client);
+    myapp::MyServiceProxy proxy(runtime);
     if (proxy.connect() != 0) {
         fprintf(stderr, "MyService not found\n");
         return 1;
@@ -1075,26 +1075,26 @@ int main(void) {
     signal(SIGINT, signal_handler);
 
     omni_runtime_t* runtime = omni_runtime_create();
-    if (omni_runtime_init(client, "127.0.0.1", 9900) != 0) {
+    if (omni_runtime_init(runtime, "127.0.0.1", 9900) != 0) {
         fprintf(stderr, "Failed to connect to ServiceManager\n");
-        omni_runtime_destroy(client);
+        omni_runtime_destroy(runtime);
         return 1;
     }
 
     /* 直接绑定生成的 impl 接口 */
     omni_service_t* svc = myapp_MyService_stub_create(NULL);
-    omni_runtime_register_service(client, svc);
-    omni_runtime_publish_topic(client, "StatusUpdate");
+    omni_runtime_register_service(runtime, svc);
+    omni_runtime_publish_topic(runtime, "StatusUpdate");
 
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {
-        omni_runtime_poll_once(client, 100);
+        omni_runtime_poll_once(runtime, 100);
     }
 
-    omni_runtime_unregister_service(client, svc);
+    omni_runtime_unregister_service(runtime, svc);
     myapp_MyService_stub_destroy(svc);
-    omni_runtime_stop(client);
-    omni_runtime_destroy(client);
+    omni_runtime_stop(runtime);
+    omni_runtime_destroy(runtime);
     return 0;
 }
 ```
@@ -1125,9 +1125,9 @@ int main(void) {
     signal(SIGINT, signal_handler);
 
     omni_runtime_t* runtime = omni_runtime_create();
-    if (omni_runtime_init(client, "127.0.0.1", 9900) != 0) {
+    if (omni_runtime_init(runtime, "127.0.0.1", 9900) != 0) {
         fprintf(stderr, "Failed to connect to ServiceManager\n");
-        omni_runtime_destroy(client);
+        omni_runtime_destroy(runtime);
         return 1;
     }
 
@@ -1159,11 +1159,11 @@ int main(void) {
     myapp_MyService_proxy_on_service_died(&proxy, on_service_died, NULL);
 
     while (g_running) {
-        omni_runtime_poll_once(client, 100);
+        omni_runtime_poll_once(runtime, 100);
     }
 
-    omni_runtime_stop(client);
-    omni_runtime_destroy(client);
+    omni_runtime_stop(runtime);
+    omni_runtime_destroy(runtime);
     return 0;
 }
 ```
@@ -1230,9 +1230,9 @@ gcc -std=c99 -I$OMNIBINDER_DIR/include \
 | 头文件 | `#include "xxx.bidl.h"` | `#include "xxx.bidl_c.h"` |
 | 库链接 | `OmniBinder::omnibinder_static` | 同左（需声明 CXX 语言） |
 | 实现服务 | 继承 `XxxStub`，重写虚函数 | 实现生成的 `xxx_impl_*` 接口，并调用 `xxx_stub_create(user_data)` |
-| 调用服务 | `XxxProxy proxy(client)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
+| 调用服务 | `XxxProxy proxy(runtime)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
 | RPC 调用 | `proxy.Method(req, &resp)` | `xxx_proxy_method(&proxy, &req, &resp)` |
-| 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(client, &msg)` |
+| 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(runtime, &msg)` |
 | 订阅 | `proxy.SubscribeTopic(lambda)` | `xxx_proxy_subscribe_topic(&proxy, callback, ud)` |
 | 死亡通知 | `proxy.OnServiceDied(lambda)` | `xxx_proxy_on_service_died(&proxy, callback, ud)` |
 | 字符串 | `std::string` | `char*` + `_len`，需手动 `malloc/free` |

@@ -541,10 +541,9 @@ int omni_runtime_get_stats(omni_runtime_t* runtime, omni_runtime_stats_t* stats)
     return 0;
 }
 
-void omni_runtime_reset_stats(omni_runtime_t* runtime) {
-    if (runtime) {
-        runtime->runtime.resetStats();
-    }
+int omni_runtime_reset_stats(omni_runtime_t* runtime) {
+    if (!runtime) return -1;
+    return runtime->runtime.resetStats();
 }
 
 /* ============================================================

@@ -133,6 +133,22 @@ bool writeInvokeErrorReply(Buffer& payload, ErrorCode error) {
         && payload.writeUint32(0);
 }
 
+Message makeInvokeErrorReply(uint32_t seq, ErrorCode error) {
+    Message reply(MessageType::MSG_INVOKE_REPLY, seq);
+    (void)writeInvokeErrorReply(reply.payload, error);
+    return reply;
+}
+
+Message makeInvokeSuccessReply(uint32_t seq, const Buffer& response) {
+    Message reply(MessageType::MSG_INVOKE_REPLY, seq);
+    reply.payload.writeInt32(0);
+    reply.payload.writeUint32(static_cast<uint32_t>(response.size()));
+    if (response.size() > 0) {
+        reply.payload.writeRaw(response.data(), response.size());
+    }
+    return reply;
+}
+
 } // namespace
 
 OmniRuntime::OmniRuntime() : impl_(new Impl()) {
@@ -200,7 +216,7 @@ void OmniRuntime::setHeartbeatInterval(uint32_t ms) { impl_->setHeartbeatInterva
 void OmniRuntime::setDefaultTimeout(uint32_t ms) { impl_->setDefaultTimeout(ms); }
 const std::string& OmniRuntime::hostId() const { return impl_->hostId(); }
 int OmniRuntime::getStats(RuntimeStats& stats) { return impl_->getStats(stats); }
-void OmniRuntime::resetStats() { impl_->resetStats(); }
+int OmniRuntime::resetStats() { return impl_->resetStats(); }
 void OmniRuntime::clearServiceCache() { impl_->clearServiceCache(); }
 void OmniRuntime::closeAllConnections() { impl_->closeAllConnections(); }
 
@@ -374,6 +390,17 @@ bool OmniRuntime::Impl::sendToSMWithinTimeout(const Message& msg, uint32_t timeo
     return sm_channel_.sendMessageWithinTimeout(msg, timeout_ms, elapsed_ms);
 }
 
+int OmniRuntime::Impl::sendSMRequestAndWaitReply(Message& msg, Message& reply) {
+    uint32_t total_timeout_ms = effectiveTimeout(0);
+    uint32_t send_elapsed_ms = 0;
+    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
+        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
+    }
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms : 0;
+    return waitForReply(msg.getSequence(), reply_timeout_ms, reply);
+}
+
 void OmniRuntime::Impl::onSMData(int fd, uint32_t events) {
     (void)fd; (void)events;
     uint8_t buf[4096];
@@ -400,19 +427,11 @@ void OmniRuntime::Impl::onSMData(int fd, uint32_t events) {
 void OmniRuntime::Impl::processSMMessages() {
     Message msg;
     while (sm_channel_.tryPopMessage(msg)) {
-        try {
-            handleSMMessage(msg);
-        } catch (const std::exception& e) {
-            OMNI_LOG_ERROR(LOG_TAG, "SM message handler threw for seq=%u: %s",
-                           msg.getSequence(), e.what());
-        } catch (...) {
-            OMNI_LOG_ERROR(LOG_TAG, "SM message handler threw for seq=%u: unknown exception",
-                           msg.getSequence());
-        }
+        onSMMessage(msg);
     }
 }
 
-void OmniRuntime::Impl::handleSMMessage(const Message& msg) {
+void OmniRuntime::Impl::onSMMessage(const Message& msg) {
     MessageType type = msg.getType();
     uint32_t seq = msg.getSequence();
 
@@ -448,15 +467,7 @@ void OmniRuntime::Impl::handleSMMessage(const Message& msg) {
         OMNI_LOG_WARN(LOG_TAG, "Service died: %s", svc_name.c_str());
         std::map<std::string, DeathCallback>::iterator it = death_callbacks_.find(svc_name);
         if (it != death_callbacks_.end() && it->second) {
-            try {
-                it->second(svc_name);
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(LOG_TAG, "death callback threw for %s: %s",
-                               svc_name.c_str(), e.what());
-            } catch (...) {
-                OMNI_LOG_ERROR(LOG_TAG, "death callback threw for %s: unknown exception",
-                               svc_name.c_str());
-            }
+            it->second(svc_name);
         }
         service_cache_.erase(svc_name);
         conn_mgr_->removeConnection(svc_name);
@@ -520,11 +531,11 @@ uint32_t OmniRuntime::Impl::effectiveTimeout(uint32_t timeout_ms) const {
 
 int OmniRuntime::Impl::registerService(Service* service) {
     return callSerialized([this, service]() -> int {
-        return registerServiceLocked(service);
+        return registerServiceInternal(service);
     });
 }
 
-int OmniRuntime::Impl::registerServiceLocked(Service* service) {
+int OmniRuntime::Impl::registerServiceInternal(Service* service) {
     if (!initialized_ || !service) {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
@@ -626,7 +637,7 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
                 while (true) {
                     int ret = e->shm_server->serverRecv(buf, sizeof(buf), client_id);
                     if (ret <= 0) break;
-                    handleShmRequest(name, e, client_id, buf, static_cast<size_t>(ret));
+                    onShmRequest(name, e, client_id, buf, static_cast<size_t>(ret));
                 }
             });
     }
@@ -715,11 +726,11 @@ void OmniRuntime::Impl::removeServiceShmFromLoop(LocalServiceEntry* entry) {
 
 int OmniRuntime::Impl::unregisterService(Service* service) {
     return callSerialized([this, service]() -> int {
-        return unregisterServiceLocked(service);
+        return unregisterServiceInternal(service);
     });
 }
 
-int OmniRuntime::Impl::unregisterServiceLocked(Service* service) {
+int OmniRuntime::Impl::unregisterServiceInternal(Service* service) {
     if (!service) return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
     
     const std::string& name = service->name();
@@ -760,15 +771,11 @@ int OmniRuntime::Impl::unregisterServiceLocked(Service* service) {
 
 int OmniRuntime::Impl::lookupService(const std::string& service_name, ServiceInfo& info) {
     return callSerialized([this, &service_name, &info]() -> int {
-        return lookupServiceLocked(service_name, info);
+        return lookupServiceInfo(service_name, info);
     });
 }
 
-int OmniRuntime::Impl::lookupServiceLocked(const std::string& service_name, ServiceInfo& info) {
-    return lookupServiceUnlocked(service_name, info);
-}
-
-int OmniRuntime::Impl::lookupServiceUnlocked(const std::string& service_name, ServiceInfo& info) {
+int OmniRuntime::Impl::lookupServiceInfo(const std::string& service_name, ServiceInfo& info) {
     std::map<std::string, ServiceInfo>::iterator cit = service_cache_.find(service_name);
     if (cit != service_cache_.end()) {
         info = cit->second;
@@ -778,17 +785,8 @@ int OmniRuntime::Impl::lookupServiceUnlocked(const std::string& service_name, Se
     Message msg(MessageType::MSG_LOOKUP, allocSequence());
     msg.payload.writeString(service_name);
 
-    uint32_t total_timeout_ms = effectiveTimeout(0);
-    uint32_t send_elapsed_ms = 0;
-    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
-
     Message reply;
-    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
-        ? total_timeout_ms - send_elapsed_ms
-        : 0;
-    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
+    int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
 
     bool found = false;
@@ -814,24 +812,15 @@ int OmniRuntime::Impl::lookupServiceUnlocked(const std::string& service_name, Se
 
 int OmniRuntime::Impl::listServices(std::vector<ServiceInfo>& services) {
     return callSerialized([this, &services]() -> int {
-        return listServicesLocked(services);
+        return listServicesInternal(services);
     });
 }
 
-int OmniRuntime::Impl::listServicesLocked(std::vector<ServiceInfo>& services) {
+int OmniRuntime::Impl::listServicesInternal(std::vector<ServiceInfo>& services) {
     Message msg(MessageType::MSG_LIST_SERVICES, allocSequence());
     
-    uint32_t total_timeout_ms = effectiveTimeout(0);
-    uint32_t send_elapsed_ms = 0;
-    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
-    
     Message reply;
-    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
-        ? total_timeout_ms - send_elapsed_ms
-        : 0;
-    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
+    int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
     
     uint32_t count = 0;
@@ -860,26 +849,17 @@ int OmniRuntime::Impl::listServicesLocked(std::vector<ServiceInfo>& services) {
 int OmniRuntime::Impl::queryInterfaces(const std::string& service_name,
                                         std::vector<InterfaceInfo>& interfaces) {
     return callSerialized([this, &service_name, &interfaces]() -> int {
-        return queryInterfacesLocked(service_name, interfaces);
+        return queryInterfacesInternal(service_name, interfaces);
     });
 }
 
-int OmniRuntime::Impl::queryInterfacesLocked(const std::string& service_name,
-                                             std::vector<InterfaceInfo>& interfaces) {
+int OmniRuntime::Impl::queryInterfacesInternal(const std::string& service_name,
+                                              std::vector<InterfaceInfo>& interfaces) {
     Message msg(MessageType::MSG_QUERY_INTERFACES, allocSequence());
     msg.payload.writeString(service_name);
     
-    uint32_t total_timeout_ms = effectiveTimeout(0);
-    uint32_t send_elapsed_ms = 0;
-    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
-    
     Message reply;
-    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
-        ? total_timeout_ms - send_elapsed_ms
-        : 0;
-    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
+    int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
     
     bool found = false;
@@ -920,17 +900,17 @@ int OmniRuntime::Impl::invoke(const std::string& service_name, uint32_t interfac
                                uint32_t method_id, const Buffer& request, Buffer& response,
                                uint32_t timeout_ms) {
     return callSerialized([this, &service_name, interface_id, method_id, &request, &response, timeout_ms]() -> int {
-        return invokeLocked(service_name, interface_id, method_id, request, response, timeout_ms);
+        return invokeInternal(service_name, interface_id, method_id, request, response, timeout_ms);
     });
 }
 
-int OmniRuntime::Impl::invokeLocked(const std::string& service_name, uint32_t interface_id,
+int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t interface_id,
                                     uint32_t method_id, const Buffer& request, Buffer& response,
                                     uint32_t timeout_ms) {
     stats_.total_rpc_calls++;
     uint32_t total_timeout_ms = effectiveTimeout(timeout_ms);
     ServiceInfo info;
-    int ret = lookupServiceUnlocked(service_name, info);
+    int ret = lookupServiceInfo(service_name, info);
     if (ret != 0) {
         stats_.total_rpc_failures++;
         return ret;
@@ -1003,15 +983,15 @@ int OmniRuntime::Impl::invokeLocked(const std::string& service_name, uint32_t in
 int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t interface_id,
                                      uint32_t method_id, const Buffer& request) {
     return callSerialized([this, &service_name, interface_id, method_id, &request]() -> int {
-        return invokeOneWayLocked(service_name, interface_id, method_id, request);
+        return invokeOneWayInternal(service_name, interface_id, method_id, request);
     });
 }
 
-int OmniRuntime::Impl::invokeOneWayLocked(const std::string& service_name, uint32_t interface_id,
+int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uint32_t interface_id,
                                           uint32_t method_id, const Buffer& request) {
     stats_.total_rpc_calls++;
     ServiceInfo info;
-    int ret = lookupServiceUnlocked(service_name, info);
+    int ret = lookupServiceInfo(service_name, info);
     if (ret != 0) {
         stats_.total_rpc_failures++;
         return ret;
@@ -1048,29 +1028,18 @@ int OmniRuntime::Impl::invokeOneWayLocked(const std::string& service_name, uint3
 int OmniRuntime::Impl::subscribeServiceDeath(const std::string& service_name,
                                                const DeathCallback& callback) {
     return callSerialized([this, &service_name, &callback]() -> int {
-        return subscribeServiceDeathLocked(service_name, callback);
+        return subscribeServiceDeathInternal(service_name, callback);
     });
 }
 
-int OmniRuntime::Impl::subscribeServiceDeathLocked(const std::string& service_name,
-                                                   const DeathCallback& callback) {
+int OmniRuntime::Impl::subscribeServiceDeathInternal(const std::string& service_name,
+                                                    const DeathCallback& callback) {
     Message msg(MessageType::MSG_SUBSCRIBE_SERVICE, allocSequence());
     msg.payload.writeString(service_name);
     
-    uint32_t total_timeout_ms = effectiveTimeout(0);
-    uint32_t send_elapsed_ms = 0;
-    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
-
     Message reply;
-    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
-        ? total_timeout_ms - send_elapsed_ms
-        : 0;
-    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
-    if (ret != 0) {
-        return ret;
-    }
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) return ret;
 
     bool accepted = false;
     if (!decodeBoolReplyPayload(reply, accepted)) {
@@ -1086,11 +1055,11 @@ int OmniRuntime::Impl::subscribeServiceDeathLocked(const std::string& service_na
 
 int OmniRuntime::Impl::unsubscribeServiceDeath(const std::string& service_name) {
     return callSerialized([this, &service_name]() -> int {
-        return unsubscribeServiceDeathLocked(service_name);
+        return unsubscribeServiceDeathInternal(service_name);
     });
 }
 
-int OmniRuntime::Impl::unsubscribeServiceDeathLocked(const std::string& service_name) {
+int OmniRuntime::Impl::unsubscribeServiceDeathInternal(const std::string& service_name) {
     Message msg(MessageType::MSG_UNSUBSCRIBE_SERVICE, allocSequence());
     msg.payload.writeString(service_name);
     sendToSM(msg);
@@ -1104,11 +1073,11 @@ int OmniRuntime::Impl::unsubscribeServiceDeathLocked(const std::string& service_
 
 int OmniRuntime::Impl::publishTopic(const std::string& topic_name) {
     return callSerialized([this, &topic_name]() -> int {
-        return publishTopicLocked(topic_name);
+        return publishTopicInternal(topic_name);
     });
 }
 
-int OmniRuntime::Impl::publishTopicLocked(const std::string& topic_name) {
+int OmniRuntime::Impl::publishTopicInternal(const std::string& topic_name) {
     if (!initialized_) {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
@@ -1141,20 +1110,9 @@ int OmniRuntime::Impl::publishTopicLocked(const std::string& topic_name) {
     }
     serializeServiceInfo(pub_info, msg.payload);
     
-    uint32_t total_timeout_ms = effectiveTimeout(0);
-    uint32_t send_elapsed_ms = 0;
-    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
-
     Message reply;
-    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
-        ? total_timeout_ms - send_elapsed_ms
-        : 0;
-    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
-    if (ret != 0) {
-        return ret;
-    }
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) return ret;
 
     bool accepted = false;
     if (!decodeBoolReplyPayload(reply, accepted)) {
@@ -1171,11 +1129,11 @@ int OmniRuntime::Impl::publishTopicLocked(const std::string& topic_name) {
 
 int OmniRuntime::Impl::broadcast(uint32_t topic_id, const Buffer& data) {
     return callSerialized([this, topic_id, &data]() -> int {
-        return broadcastLocked(topic_id, data);
+        return broadcastInternal(topic_id, data);
     });
 }
 
-int OmniRuntime::Impl::broadcastLocked(uint32_t topic_id, const Buffer& data) {
+int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) {
     Message msg(MessageType::MSG_BROADCAST, 0);
     msg.payload.writeUint32(topic_id);
     msg.payload.writeUint32(static_cast<uint32_t>(data.size()));
@@ -1233,7 +1191,46 @@ int OmniRuntime::Impl::broadcastLocked(uint32_t topic_id, const Buffer& data) {
     return 0;
 }
 
-void OmniRuntime::Impl::handleTopicBroadcastMessage(const Message& msg) {
+InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, const Message& msg,
+                                                             const char* transport_label,
+                                                             const char* service_name) {
+    InvokeDispatchResult result;
+    result.error_code = 0;
+
+    uint32_t interface_id = 0;
+    uint32_t method_id = 0;
+    Buffer request;
+    if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
+        OMNI_LOG_WARN(LOG_TAG,
+                      "malformed_invoke_payload service=%s transport=%s seq=%u err=%d",
+                      service_name, transport_label, msg.getSequence(),
+                      static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+        result.status = InvokeDispatchStatus::DECODE_FAILED;
+        result.error_code = static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+        return result;
+    }
+    if (service->interfaceInfo().interface_id != interface_id) {
+        result.status = InvokeDispatchStatus::INTERFACE_MISMATCH;
+        result.error_code = static_cast<int>(ErrorCode::ERR_INTERFACE_NOT_FOUND);
+        return result;
+    }
+
+    int invoke_status = service->onInvoke(method_id, request, result.response);
+    if (invoke_status != 0) {
+        OMNI_LOG_WARN(LOG_TAG,
+                      "invoke_failed service=%s transport=%s seq=%u method=0x%08x err=%d",
+                      service_name, transport_label, msg.getSequence(), method_id,
+                      invoke_status);
+        result.status = InvokeDispatchStatus::INVOKE_FAILED;
+        result.error_code = invoke_status;
+        return result;
+    }
+
+    result.status = InvokeDispatchStatus::SUCCESS;
+    return result;
+}
+
+void OmniRuntime::Impl::onTopicBroadcastMessage(const Message& msg) {
     uint32_t topic_id = 0;
     Buffer data;
     if (!decodeBroadcastPayload(msg, topic_id, data)) {
@@ -1248,29 +1245,18 @@ void OmniRuntime::Impl::handleTopicBroadcastMessage(const Message& msg) {
 int OmniRuntime::Impl::subscribeTopic(const std::string& topic_name,
                                        const TopicCallback& callback) {
     return callSerialized([this, &topic_name, &callback]() -> int {
-        return subscribeTopicLocked(topic_name, callback);
+        return subscribeTopicInternal(topic_name, callback);
     });
 }
 
-int OmniRuntime::Impl::subscribeTopicLocked(const std::string& topic_name,
-                                            const TopicCallback& callback) {
+int OmniRuntime::Impl::subscribeTopicInternal(const std::string& topic_name,
+                                             const TopicCallback& callback) {
     Message msg(MessageType::MSG_SUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic_name);
     
-    uint32_t total_timeout_ms = effectiveTimeout(0);
-    uint32_t send_elapsed_ms = 0;
-    if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
-
     Message reply;
-    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
-        ? total_timeout_ms - send_elapsed_ms
-        : 0;
-    int ret = waitForReply(msg.getSequence(), reply_timeout_ms, reply);
-    if (ret != 0) {
-        return ret;
-    }
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) return ret;
 
     bool accepted = false;
     if (!decodeBoolReplyPayload(reply, accepted)) {
@@ -1286,11 +1272,11 @@ int OmniRuntime::Impl::subscribeTopicLocked(const std::string& topic_name,
 
 int OmniRuntime::Impl::unsubscribeTopic(const std::string& topic_name) {
     return callSerialized([this, &topic_name]() -> int {
-        return unsubscribeTopicLocked(topic_name);
+        return unsubscribeTopicInternal(topic_name);
     });
 }
 
-int OmniRuntime::Impl::unsubscribeTopicLocked(const std::string& topic_name) {
+int OmniRuntime::Impl::unsubscribeTopicInternal(const std::string& topic_name) {
     Message msg(MessageType::MSG_UNSUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic_name);
     sendToSM(msg);
@@ -1318,15 +1304,7 @@ void OmniRuntime::Impl::onServiceAccept(const std::string& service_name,
         },
         [](LocalServiceEntry* entry, int cfd) {
             if (entry && entry->service) {
-                try {
-                    entry->service->onClientConnected("fd=" + std::to_string(cfd));
-                } catch (const std::exception& e) {
-                    OMNI_LOG_ERROR(LOG_TAG, "service onClientConnected threw for fd=%d: %s",
-                                   cfd, e.what());
-                } catch (...) {
-                    OMNI_LOG_ERROR(LOG_TAG, "service onClientConnected threw for fd=%d: unknown exception",
-                                   cfd);
-                }
+                entry->service->onClientConnected("fd=" + std::to_string(cfd));
             }
         });
 }
@@ -1344,173 +1322,64 @@ void OmniRuntime::Impl::onServiceClientData(const std::string& service_name,
         loop_,
         client_fd_to_service_,
         [this](const std::string& svc, int fd, const Message& msg) {
-            this->handleInvokeRequest(svc, fd, msg, "TCP");
+            this->onInvokeRequest(svc, fd, msg, "TCP");
         },
         [this](const std::string& svc, const Message& msg) {
-            this->handleInvokeOneWayRequest(svc, msg, "TCP");
+            this->onInvokeOneWayRequest(svc, msg, "TCP");
         },
         [this](int fd, const Message& msg) {
-            this->handleSubscribeBroadcast(fd, msg, "TCP");
+            this->onSubscribeBroadcast(fd, msg, "TCP");
         },
         [this](const std::string& svc, int fd) {
             this->removeServiceClient(svc, fd);
         },
         [](LocalServiceEntry* entry, int client_fd) {
             if (entry && entry->service) {
-                try {
-                    entry->service->onClientDisconnected("fd=" + std::to_string(client_fd));
-                } catch (const std::exception& e) {
-                    OMNI_LOG_ERROR(LOG_TAG, "service onClientDisconnected threw for fd=%d: %s",
-                                   client_fd, e.what());
-                } catch (...) {
-                    OMNI_LOG_ERROR(LOG_TAG, "service onClientDisconnected threw for fd=%d: unknown exception",
-                                   client_fd);
-                }
+                entry->service->onClientDisconnected("fd=" + std::to_string(client_fd));
             }
         });
 }
 
-void OmniRuntime::Impl::handleInvokeRequest(const std::string& service_name,
+void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name,
                                                int client_fd, const Message& msg,
                                                const char* transport_label) {
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_name);
     if (it == local_services_.end()) return;
-    
+
     Service* service = it->second->service;
     if (!service) return;
 
-    // Cache transport lookup — used in every reply path
     std::map<int, ITransport*>::iterator transport_it = it->second->client_transports.find(client_fd);
     ITransport* transport = (transport_it != it->second->client_transports.end()) ? transport_it->second : nullptr;
 
-    uint32_t interface_id = 0;
-    uint32_t method_id = 0;
-    Buffer request;
-    if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "malformed_invoke_payload service=%s transport=%s seq=%u err=%d",
-                      service_name.c_str(), transport_label, msg.getSequence(),
-                      static_cast<int>(ErrorCode::ERR_DESERIALIZE));
-        Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-        (void)writeInvokeErrorReply(reply.payload, ErrorCode::ERR_DESERIALIZE);
-        if (transport) sendOnFd(transport, reply);
-        return;
-    }
-    if (service->interfaceInfo().interface_id != interface_id) {
-        Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-        (void)writeInvokeErrorReply(reply.payload, ErrorCode::ERR_INTERFACE_NOT_FOUND);
-        if (transport) {
-            if (!sendOnFd(transport, reply)) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
-                              service_name.c_str(), client_fd, msg.getSequence(),
-                              static_cast<int>(ErrorCode::ERR_INTERFACE_NOT_FOUND));
-            }
-        }
-        return;
-    }
-    Buffer response;
-    int invoke_status = 0;
-    try {
-        invoke_status = service->onInvoke(method_id, request, response);
-    } catch (...) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "invoke_failed service=%s transport=%s seq=%u method=0x%08x err=%d",
-                      service_name.c_str(), transport_label, msg.getSequence(), method_id,
-                      static_cast<int>(ErrorCode::ERR_INVOKE_FAILED));
-        Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-        (void)writeInvokeErrorReply(reply.payload, ErrorCode::ERR_INVOKE_FAILED);
-        if (transport) {
-            if (!sendOnFd(transport, reply)) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
-                              service_name.c_str(), client_fd, msg.getSequence(),
-                              static_cast<int>(ErrorCode::ERR_INVOKE_FAILED));
-            }
-        }
-        return;
-    }
-    if (invoke_status != 0) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "invoke_failed service=%s transport=%s seq=%u method=0x%08x err=%d",
-                      service_name.c_str(), transport_label, msg.getSequence(), method_id,
-                      invoke_status);
-        Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-        (void)writeInvokeErrorReply(reply.payload, static_cast<ErrorCode>(invoke_status));
-        if (transport) {
-            if (!sendOnFd(transport, reply)) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
-                              service_name.c_str(), client_fd, msg.getSequence(),
-                              invoke_status);
-            }
-        }
-        return;
-    }
-    Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-    if (!reply.payload.writeInt32(0)
-        || !reply.payload.writeUint32(static_cast<uint32_t>(response.size()))
-        || (response.size() > 0 && !reply.payload.writeRaw(response.data(), response.size()))) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "invoke_reply_serialize_failed service=%s transport=%s seq=%u status=%d",
-                      service_name.c_str(), transport_label, msg.getSequence(),
-                      static_cast<int>(ErrorCode::ERR_SERIALIZE));
-        Message error_reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-        (void)writeInvokeErrorReply(error_reply.payload, ErrorCode::ERR_SERIALIZE);
-        if (transport) {
-            (void)sendOnFd(transport, error_reply);
-        }
-        return;
-    }
-    if (transport) {
-        if (!sendOnFd(transport, reply)) {
-            OMNI_LOG_WARN(LOG_TAG,
-                          "invoke_reply_send_failed service=%s fd=%d seq=%u status=0",
+    InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
+    if (result.status == InvokeDispatchStatus::SUCCESS) {
+        Message reply = makeInvokeSuccessReply(msg.getSequence(), result.response);
+        if (transport && !sendOnFd(transport, reply)) {
+            OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=0",
                           service_name.c_str(), client_fd, msg.getSequence());
+        }
+    } else {
+        Message reply = makeInvokeErrorReply(msg.getSequence(), static_cast<ErrorCode>(result.error_code));
+        if (transport && !sendOnFd(transport, reply)) {
+            OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
+                          service_name.c_str(), client_fd, msg.getSequence(), result.error_code);
         }
     }
 }
 
-void OmniRuntime::Impl::handleInvokeOneWayRequest(const std::string& service_name,
-                                                     const Message& msg,
-                                                     const char* transport_label) {
+void OmniRuntime::Impl::onInvokeOneWayRequest(const std::string& service_name,
+                                                      const Message& msg,
+                                                      const char* transport_label) {
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_name);
     if (it == local_services_.end()) return;
     Service* service = it->second->service;
     if (!service) return;
-    uint32_t interface_id = 0;
-    uint32_t method_id = 0;
-    Buffer request;
-    if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "malformed_invoke_payload service=%s transport=%s seq=%u oneway=1 err=%d",
-                      service_name.c_str(), transport_label, msg.getSequence(),
-                      static_cast<int>(ErrorCode::ERR_DESERIALIZE));
-        return;
-    }
-    if (service->interfaceInfo().interface_id != interface_id) {
-        return;
-    }
-    Buffer response;
-    int invoke_status = 0;
-    try {
-        invoke_status = service->onInvoke(method_id, request, response);
-    } catch (...) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "invoke_failed service=%s transport=%s seq=%u method=0x%08x oneway=1 err=%d",
-                      service_name.c_str(), transport_label, msg.getSequence(), method_id,
-                      static_cast<int>(ErrorCode::ERR_INVOKE_FAILED));
-        return;
-    }
-    if (invoke_status != 0) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "invoke_failed service=%s transport=%s seq=%u method=0x%08x oneway=1 err=%d",
-                      service_name.c_str(), transport_label, msg.getSequence(), method_id,
-                      invoke_status);
-    }
+
+    (void)dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
 }
 
-void OmniRuntime::Impl::handleSubscribeBroadcast(int client_fd, const Message& msg,
+void OmniRuntime::Impl::onSubscribeBroadcast(int client_fd, const Message& msg,
                                                  const char* transport_label) {
     uint32_t topic_id = 0;
     std::string topic_name;
@@ -1547,15 +1416,7 @@ void OmniRuntime::Impl::removeServiceClient(const std::string& service_name, int
             entry->client_recv_buffers.erase(bit);
         }
         if (entry->service) {
-            try {
-                entry->service->onClientDisconnected("fd=" + std::to_string(client_fd));
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(LOG_TAG, "service onClientDisconnected threw for fd=%d: %s",
-                               client_fd, e.what());
-            } catch (...) {
-                OMNI_LOG_ERROR(LOG_TAG, "service onClientDisconnected threw for fd=%d: unknown exception",
-                               client_fd);
-            }
+            entry->service->onClientDisconnected("fd=" + std::to_string(client_fd));
         }
     }
 }
@@ -1616,14 +1477,10 @@ void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
 }
 
 // ============================================================
-// SHM 服务端请求处理（由 eventfd 回调触发，不再轮询）
+// SHM 服务端请求处理（由 eventfd 回调触发）
 // ============================================================
 
-void OmniRuntime::Impl::pollShmServices() {
-    // 此函数已被 eventfd 回调替代，保留为空以兼容接口
-}
-
-void OmniRuntime::Impl::handleShmRequest(const std::string& service_name,
+void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                                             LocalServiceEntry* entry,
                                             uint32_t client_id,
                                             const uint8_t* data, size_t length) {
@@ -1635,172 +1492,31 @@ void OmniRuntime::Impl::handleShmRequest(const std::string& service_name,
         data,
         length,
         topic_runtime_,
-        [entry](const std::string& svc, uint32_t cid, const Message& msg) {
+        [this, entry](const std::string& svc, uint32_t cid, const Message& msg) {
             (void)svc;
-            uint32_t interface_id = 0;
-            uint32_t method_id = 0;
-            Buffer request;
-            if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "malformed_invoke_payload service=%s transport=SHM seq=%u err=%d",
-                              entry->service->serviceName(), msg.getSequence(),
-                              static_cast<int>(ErrorCode::ERR_DESERIALIZE));
-                Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-                (void)writeInvokeErrorReply(reply.payload, ErrorCode::ERR_DESERIALIZE);
-                Buffer send_buf;
-                if (!reply.serialize(send_buf)) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_serialize_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SERIALIZE));
-                    return;
-                }
-                int send_ret = entry->shm_server->serverSend(cid, send_buf.data(), send_buf.size());
-                if (send_ret <= 0) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_send_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SEND_FAILED));
-                }
-                return;
-            }
-            if (entry->service->interfaceInfo().interface_id != interface_id) {
-                Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-                (void)writeInvokeErrorReply(reply.payload, ErrorCode::ERR_INTERFACE_NOT_FOUND);
-                Buffer send_buf;
-                if (!reply.serialize(send_buf)) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_serialize_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SERIALIZE));
-                    return;
-                }
-                int send_ret = entry->shm_server->serverSend(cid, send_buf.data(), send_buf.size());
-                if (send_ret <= 0) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_send_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SEND_FAILED));
-                }
-                return;
-            }
-            Buffer response;
-            int invoke_status = 0;
-            try {
-                invoke_status = entry->service->onInvoke(method_id, request, response);
-            } catch (...) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "invoke_failed service=%s transport=SHM seq=%u method=0x%08x err=%d",
-                              entry->service->serviceName(), msg.getSequence(), method_id,
-                              static_cast<int>(ErrorCode::ERR_INVOKE_FAILED));
-                Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-                (void)writeInvokeErrorReply(reply.payload, ErrorCode::ERR_INVOKE_FAILED);
-                Buffer send_buf;
-                if (!reply.serialize(send_buf)) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_serialize_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SERIALIZE));
-                    return;
-                }
-                int send_ret = entry->shm_server->serverSend(cid, send_buf.data(), send_buf.size());
-                if (send_ret <= 0) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_send_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SEND_FAILED));
-                }
-                return;
-            }
-            if (invoke_status != 0) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "invoke_failed service=%s transport=SHM seq=%u method=0x%08x err=%d",
-                              entry->service->serviceName(), msg.getSequence(), method_id,
-                              invoke_status);
-                Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-                (void)writeInvokeErrorReply(reply.payload, static_cast<ErrorCode>(invoke_status));
-                Buffer send_buf;
-                if (!reply.serialize(send_buf)) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_serialize_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SERIALIZE));
-                    return;
-                }
-                int send_ret = entry->shm_server->serverSend(cid, send_buf.data(), send_buf.size());
-                if (send_ret <= 0) {
-                    OMNI_LOG_ERROR(LOG_TAG,
-                                   "shm_reply_send_failed service=%s client_id=%u seq=%u err=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(),
-                                   static_cast<int>(ErrorCode::ERR_SEND_FAILED));
-                }
-                return;
-            }
-            Message reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-            if (!reply.payload.writeInt32(0)
-                || !reply.payload.writeUint32(static_cast<uint32_t>(response.size()))
-                || (response.size() > 0 && !reply.payload.writeRaw(response.data(), response.size()))) {
-                OMNI_LOG_ERROR(LOG_TAG,
-                               "shm_reply_serialize_failed service=%s client_id=%u seq=%u err=%d",
-                               entry->service->serviceName(), cid, msg.getSequence(),
-                               static_cast<int>(ErrorCode::ERR_SERIALIZE));
-                Message error_reply(MessageType::MSG_INVOKE_REPLY, msg.getSequence());
-                (void)writeInvokeErrorReply(error_reply.payload, ErrorCode::ERR_SERIALIZE);
-                Buffer error_buf;
-                if (!error_reply.serialize(error_buf)) {
-                    return;
-                }
-                (void)entry->shm_server->serverSend(cid, error_buf.data(), error_buf.size());
-                return;
+            InvokeDispatchResult result = dispatchLocalInvoke(entry->service, msg, "SHM",
+                                                               entry->service->serviceName());
+            Message reply_msg;
+            if (result.status == InvokeDispatchStatus::SUCCESS) {
+                reply_msg = makeInvokeSuccessReply(msg.getSequence(), result.response);
+            } else {
+                reply_msg = makeInvokeErrorReply(msg.getSequence(), static_cast<ErrorCode>(result.error_code));
             }
             Buffer send_buf;
-            if (!reply.serialize(send_buf)) {
-                OMNI_LOG_ERROR(LOG_TAG,
-                               "shm_reply_serialize_failed service=%s client_id=%u seq=%u err=%d",
-                               entry->service->serviceName(), cid, msg.getSequence(),
-                               static_cast<int>(ErrorCode::ERR_SERIALIZE));
+            if (!reply_msg.serialize(send_buf)) {
+                OMNI_LOG_ERROR(LOG_TAG, "shm_reply_serialize_failed service=%s client_id=%u seq=%u",
+                               entry->service->serviceName(), cid, msg.getSequence());
                 return;
             }
             int send_ret = entry->shm_server->serverSend(cid, send_buf.data(), send_buf.size());
             if (send_ret <= 0) {
-                OMNI_LOG_ERROR(LOG_TAG,
-                               "shm_reply_send_failed service=%s client_id=%u seq=%u err=%d",
-                               entry->service->serviceName(), cid, msg.getSequence(),
-                               static_cast<int>(ErrorCode::ERR_SEND_FAILED));
+                OMNI_LOG_ERROR(LOG_TAG, "shm_reply_send_failed service=%s client_id=%u seq=%u",
+                               entry->service->serviceName(), cid, msg.getSequence());
             }
         },
-        [entry](const std::string& svc, const Message& msg) {
+        [this, entry](const std::string& svc, const Message& msg) {
             (void)svc;
-            uint32_t interface_id = 0;
-            uint32_t method_id = 0;
-            Buffer request;
-            if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "malformed_invoke_payload service=%s transport=SHM seq=%u oneway=1 err=%d",
-                              entry->service->serviceName(), msg.getSequence(),
-                              static_cast<int>(ErrorCode::ERR_DESERIALIZE));
-                return;
-            }
-            if (entry->service->interfaceInfo().interface_id != interface_id) {
-                return;
-            }
-            Buffer response;
-            int invoke_status = 0;
-            try {
-                invoke_status = entry->service->onInvoke(method_id, request, response);
-            } catch (...) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "invoke_failed service=%s transport=SHM seq=%u method=0x%08x oneway=1 err=%d",
-                              entry->service->serviceName(), msg.getSequence(), method_id,
-                              static_cast<int>(ErrorCode::ERR_INVOKE_FAILED));
-                return;
-            }
-            if (invoke_status != 0) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "invoke_failed service=%s transport=SHM seq=%u method=0x%08x oneway=1 err=%d",
-                              entry->service->serviceName(), msg.getSequence(), method_id,
-                              invoke_status);
-            }
+            (void)dispatchLocalInvoke(entry->service, msg, "SHM", entry->service->serviceName());
         },
         [this](const std::string& svc, uint32_t cid, const Message& msg) {
             (void)cid;
@@ -1857,7 +1573,7 @@ bool OmniRuntime::Impl::acquireInvokeConnection(const std::string& service_name,
         return true;
     }
 
-    return attempt == 0 && refreshServiceConnectionUnlocked(service_name, info, conn);
+    return attempt == 0 && refreshServiceConnection(service_name, info, conn);
 }
 
 void OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_id,
@@ -1888,8 +1604,8 @@ bool OmniRuntime::Impl::sendInvokeMessage(const std::string& service_name, const
                        static_cast<int>(ErrorCode::ERR_SEND_FAILED), attempt + 1);
     }
 
-    return attempt == 0 && refreshServiceConnectionUnlocked(service_name,
-                                                            const_cast<ServiceInfo&>(info), conn);
+    return attempt == 0 && refreshServiceConnection(service_name,
+                                                     const_cast<ServiceInfo&>(info), conn);
 }
 
 bool OmniRuntime::Impl::sendInvokeMessageWithTimeout(const std::string& service_name,
@@ -1927,8 +1643,8 @@ bool OmniRuntime::Impl::sendInvokeMessageWithTimeout(const std::string& service_
         return false;
     }
 
-    return attempt == 0 && refreshServiceConnectionUnlocked(service_name,
-                                                            const_cast<ServiceInfo&>(info), conn);
+    return attempt == 0 && refreshServiceConnection(service_name,
+                                                     const_cast<ServiceInfo&>(info), conn);
 }
 
 std::string OmniRuntime::Impl::topicPublisherServiceName(const std::string& topic_name) const {
@@ -1956,7 +1672,7 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
     return conn_mgr_->sendMessage(pub_name, sub_msg);
 }
 
-bool OmniRuntime::Impl::refreshServiceConnectionUnlocked(const std::string& service_name,
+bool OmniRuntime::Impl::refreshServiceConnection(const std::string& service_name,
                                                         ServiceInfo& info,
                                                         ServiceConnection*& conn) {
     if (!conn_mgr_) {
@@ -1966,7 +1682,7 @@ bool OmniRuntime::Impl::refreshServiceConnectionUnlocked(const std::string& serv
     conn_mgr_->removeConnection(service_name);
     service_cache_.erase(service_name);
 
-    int ret = lookupServiceUnlocked(service_name, info);
+    int ret = lookupServiceInfo(service_name, info);
     if (ret != 0) {
         return false;
     }
@@ -2184,24 +1900,26 @@ void OmniRuntime::Impl::updateConnectionStats(RuntimeStats& stats) const {
 
 int OmniRuntime::Impl::getStats(RuntimeStats& stats) {
     return callSerialized([this, &stats]() -> int {
-        return getStatsLocked(stats);
+        return getStatsInternal(stats);
     });
 }
 
-int OmniRuntime::Impl::getStatsLocked(RuntimeStats& stats) {
+int OmniRuntime::Impl::getStatsInternal(RuntimeStats& stats) {
     stats = stats_;
     updateConnectionStats(stats);
     return 0;
 }
 
-void OmniRuntime::Impl::resetStats() {
-    callSerialized([this]() {
-        resetStatsLocked();
+int OmniRuntime::Impl::resetStats() {
+    return callSerialized([this]() -> int {
+        resetStatsInternal();
+        return 0;
     });
 }
 
-void OmniRuntime::Impl::resetStatsLocked() {
+int OmniRuntime::Impl::resetStatsInternal() {
     stats_ = RuntimeStats();
+    return 0;
 }
 
 void OmniRuntime::Impl::clearServiceCache() {

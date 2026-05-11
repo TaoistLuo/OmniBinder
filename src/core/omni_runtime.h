@@ -62,6 +62,19 @@
 
 namespace omnibinder {
 
+enum class InvokeDispatchStatus {
+    SUCCESS,
+    DECODE_FAILED,
+    INTERFACE_MISMATCH,
+    INVOKE_FAILED
+};
+
+struct InvokeDispatchResult {
+    InvokeDispatchStatus status;
+    int error_code;
+    Buffer response;
+};
+
 // ============================================================
 // 本地注册服务的上下文
 // ============================================================
@@ -128,18 +141,17 @@ public:
     // --- 服务注册 ---
     int registerService(Service* service);
     int unregisterService(Service* service);
-    int registerServiceLocked(Service* service);
-    int unregisterServiceLocked(Service* service);
+    int registerServiceInternal(Service* service);
+    int unregisterServiceInternal(Service* service);
 
     // --- 服务发现 ---
     int lookupService(const std::string& service_name, ServiceInfo& info);
     int listServices(std::vector<ServiceInfo>& services);
     int queryInterfaces(const std::string& service_name,
                         std::vector<InterfaceInfo>& interfaces);
-    int lookupServiceLocked(const std::string& service_name, ServiceInfo& info);
-    int listServicesLocked(std::vector<ServiceInfo>& services);
-    int queryInterfacesLocked(const std::string& service_name,
-                              std::vector<InterfaceInfo>& interfaces);
+    int listServicesInternal(std::vector<ServiceInfo>& services);
+    int queryInterfacesInternal(const std::string& service_name,
+                                std::vector<InterfaceInfo>& interfaces);
 
     // --- 远程调用 ---
     int invoke(const std::string& service_name, uint32_t interface_id,
@@ -147,19 +159,19 @@ public:
                uint32_t timeout_ms);
     int invokeOneWay(const std::string& service_name, uint32_t interface_id,
                      uint32_t method_id, const Buffer& request);
-    int invokeLocked(const std::string& service_name, uint32_t interface_id,
-                     uint32_t method_id, const Buffer& request, Buffer& response,
-                     uint32_t timeout_ms);
-    int invokeOneWayLocked(const std::string& service_name, uint32_t interface_id,
-                           uint32_t method_id, const Buffer& request);
+    int invokeInternal(const std::string& service_name, uint32_t interface_id,
+                       uint32_t method_id, const Buffer& request, Buffer& response,
+                       uint32_t timeout_ms);
+    int invokeOneWayInternal(const std::string& service_name, uint32_t interface_id,
+                             uint32_t method_id, const Buffer& request);
 
     // --- 死亡通知 ---
     int subscribeServiceDeath(const std::string& service_name,
                               const DeathCallback& callback);
     int unsubscribeServiceDeath(const std::string& service_name);
-    int subscribeServiceDeathLocked(const std::string& service_name,
-                                    const DeathCallback& callback);
-    int unsubscribeServiceDeathLocked(const std::string& service_name);
+    int subscribeServiceDeathInternal(const std::string& service_name,
+                                      const DeathCallback& callback);
+    int unsubscribeServiceDeathInternal(const std::string& service_name);
 
     // --- 话题 ---
     int publishTopic(const std::string& topic_name);
@@ -167,11 +179,11 @@ public:
     int subscribeTopic(const std::string& topic_name,
                        const TopicCallback& callback);
     int unsubscribeTopic(const std::string& topic_name);
-    int publishTopicLocked(const std::string& topic_name);
-    int broadcastLocked(uint32_t topic_id, const Buffer& data);
-    int subscribeTopicLocked(const std::string& topic_name,
-                             const TopicCallback& callback);
-    int unsubscribeTopicLocked(const std::string& topic_name);
+    int publishTopicInternal(const std::string& topic_name);
+    int broadcastInternal(uint32_t topic_id, const Buffer& data);
+    int subscribeTopicInternal(const std::string& topic_name,
+                               const TopicCallback& callback);
+    int unsubscribeTopicInternal(const std::string& topic_name);
 
     // --- 配置 ---
     void setRegisterHost(const std::string& host);
@@ -180,9 +192,9 @@ public:
     void setDefaultTimeout(uint32_t timeout_ms);
     const std::string& hostId() const;
     int getStats(RuntimeStats& stats);
-    void resetStats();
-    int getStatsLocked(RuntimeStats& stats);
-    void resetStatsLocked();
+    int resetStats();
+    int getStatsInternal(RuntimeStats& stats);
+    int resetStatsInternal();
     void clearServiceCache();
     void closeAllConnections();
     void setOwner(OmniRuntime* owner) { owner_ = owner; }
@@ -195,9 +207,10 @@ private:
     bool sendToSM(const Message& msg);
     bool sendToSMWithinTimeout(const Message& msg, uint32_t timeout_ms,
                                uint32_t* elapsed_ms);
+    int sendSMRequestAndWaitReply(Message& msg, Message& reply);
     void onSMData(int fd, uint32_t events);
     void processSMMessages();
-    void handleSMMessage(const Message& msg);
+    void onSMMessage(const Message& msg);
 
     // --- 同步等待 ---
     uint32_t allocSequence();
@@ -209,18 +222,20 @@ private:
                          uint32_t events);
     void onServiceClientData(const std::string& service_name, int client_fd,
                              uint32_t events);
-    void handleInvokeRequest(const std::string& service_name, int client_fd,
-                             const Message& msg, const char* transport_label);
-    void handleInvokeOneWayRequest(const std::string& service_name,
-                                   const Message& msg, const char* transport_label);
-    void handleSubscribeBroadcast(int client_fd, const Message& msg,
-                                  const char* transport_label);
-    void handleTopicBroadcastMessage(const Message& msg);
+    void onInvokeRequest(const std::string& service_name, int client_fd,
+                          const Message& msg, const char* transport_label);
+    void onInvokeOneWayRequest(const std::string& service_name,
+                                const Message& msg, const char* transport_label);
+    void onSubscribeBroadcast(int client_fd, const Message& msg,
+                               const char* transport_label);
+    void onTopicBroadcastMessage(const Message& msg);
     void removeServiceClient(const std::string& service_name, int client_fd);
 
-    // --- SHM 服务端处理 ---
-    void pollShmServices();
-    void handleShmRequest(const std::string& service_name, LocalServiceEntry* entry,
+    InvokeDispatchResult dispatchLocalInvoke(Service* service, const Message& msg,
+                                             const char* transport_label,
+                                             const char* service_name);
+
+    void onShmRequest(const std::string& service_name, LocalServiceEntry* entry,
                           uint32_t client_id, const uint8_t* data, size_t length);
 
     // --- ConnectionManager 回调 ---
@@ -235,10 +250,6 @@ private:
     void captureOwnerThread();
     template<typename F>
     typename std::result_of<F()>::type callSerialized(F func);
-    template<typename F, typename Result>
-    Result callSerializedDispatch(F func, std::false_type);
-    template<typename F, typename Result>
-    Result callSerializedDispatch(F func, std::true_type);
     bool sendOnFd(ITransport* transport, const Message& msg);
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
     int initializeServiceListener(LocalServiceEntry* entry, Service* service,
@@ -266,11 +277,11 @@ private:
                                       int attempt, bool log_failure, uint32_t interface_id,
                                       uint32_t method_id, uint32_t timeout_ms,
                                       uint32_t* elapsed_ms);
-    int lookupServiceUnlocked(const std::string& service_name, ServiceInfo& info);
+    int lookupServiceInfo(const std::string& service_name, ServiceInfo& info);
     std::string topicPublisherServiceName(const std::string& topic_name) const;
     bool ensureTopicPublisherConnection(const std::string& topic_name, const ServiceInfo& pub_info);
-    bool refreshServiceConnectionUnlocked(const std::string& service_name, ServiceInfo& info,
-                                          ServiceConnection*& conn);
+    bool refreshServiceConnection(const std::string& service_name, ServiceInfo& info,
+                                  ServiceConnection*& conn);
     int reconnectServiceManager();
     int restoreControlPlaneState();
     int reconnectServiceManagerIfNeeded();
@@ -324,24 +335,7 @@ typename std::result_of<F()>::type OmniRuntime::Impl::callSerialized(F func) {
         std::lock_guard<std::mutex> lock(api_mutex_);
         return func();
     }
-    typedef typename std::result_of<F()>::type Result;
-    return callSerializedDispatch<F, Result>(func, typename std::is_void<Result>::type());
-}
-
-template<typename F, typename Result>
-Result OmniRuntime::Impl::callSerializedDispatch(F func, std::false_type) {
-    return static_cast<Result>(owner_executor_.invokeOnOwnerNoThrowInt(func,
-        static_cast<int>(ErrorCode::ERR_INVOKE_FAILED)));
-}
-
-template<typename F, typename Result>
-Result OmniRuntime::Impl::callSerializedDispatch(F func, std::true_type) {
-    const int status = owner_executor_.invokeOnOwnerNoThrowVoid(
-        func, static_cast<int>(ErrorCode::ERR_INVOKE_FAILED));
-    if (status != 0) {
-        throw std::runtime_error("owner-thread callback failed");
-    }
-    return;
+    return owner_executor_.invokeOnOwner(func);
 }
 
 } // namespace omnibinder

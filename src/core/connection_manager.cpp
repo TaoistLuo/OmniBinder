@@ -340,15 +340,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                     conn->connected = false;
                     loop_.removeFd(conn->transport->fd());
                     if (disconnect_cb_) {
-                        try {
-                            disconnect_cb_(service_name);
-                        } catch (const std::exception& e) {
-                            OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: %s",
-                                           service_name.c_str(), e.what());
-                        } catch (...) {
-                            OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: unknown exception",
-                                           service_name.c_str());
-                        }
+                        disconnect_cb_(service_name);
                     }
                 }
                 break;
@@ -361,15 +353,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                 conn->connected = false;
                 loop_.removeFd(conn->transport->fd());
                 if (disconnect_cb_) {
-                    try {
-                        disconnect_cb_(service_name);
-                    } catch (const std::exception& e) {
-                        OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: %s",
-                                       service_name.c_str(), e.what());
-                    } catch (...) {
-                        OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: unknown exception",
-                                       service_name.c_str());
-                    }
+                    disconnect_cb_(service_name);
                 }
                 break;
             }
@@ -392,15 +376,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         conn->connected = false;
         loop_.removeFd(conn->transport->fd());
         if (disconnect_cb_) {
-            try {
-                disconnect_cb_(service_name);
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: %s",
-                               service_name.c_str(), e.what());
-            } catch (...) {
-                OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: unknown exception",
-                               service_name.c_str());
-            }
+            disconnect_cb_(service_name);
         }
         return;
     }
@@ -418,15 +394,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         conn->connected = false;
         loop_.removeFd(conn->transport->fd());
         if (disconnect_cb_) {
-            try {
-                disconnect_cb_(service_name);
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: %s",
-                               service_name.c_str(), e.what());
-            } catch (...) {
-                OMNI_LOG_ERROR(LOG_TAG, "disconnect callback threw for %s: unknown exception",
-                               service_name.c_str());
-            }
+            disconnect_cb_(service_name);
         }
         return;
     }
@@ -484,19 +452,7 @@ void ConnectionManager::processMessages(ServiceConnection* conn) {
 
         // 回调处理消息
         if (message_cb_) {
-            try {
-                message_cb_(conn->service_name, msg);
-            } catch (const std::exception& e) {
-                OMNI_LOG_ERROR(LOG_TAG, "message callback threw for %s: %s",
-                               conn->service_name.c_str(), e.what());
-                conn->connected = false;
-                return;
-            } catch (...) {
-                OMNI_LOG_ERROR(LOG_TAG, "message callback threw for %s: unknown exception",
-                               conn->service_name.c_str());
-                conn->connected = false;
-                return;
-            }
+            message_cb_(conn->service_name, msg);
         }
     }
 
