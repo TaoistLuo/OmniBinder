@@ -79,14 +79,12 @@ struct ShmSpinLock {
 
     void init() { lock = 0; }
     void acquire() {
-        while (__sync_lock_test_and_set(&lock, 1)) {
-#if defined(__x86_64__) || defined(__i386__)
-            __asm__ __volatile__("pause");
-#endif
+        while (platform::spinLockTestAndSet(&lock)) {
+            platform::spinWaitHint();
         }
     }
     void release() {
-        __sync_lock_release(&lock);
+        platform::spinLockRelease(&lock);
     }
 };
 

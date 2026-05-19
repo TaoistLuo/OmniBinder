@@ -4,10 +4,10 @@
 #include "event_loop.h"
 #include "omnibinder/log.h"
 
-#include <pthread.h>
-
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <condition_variable>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -102,14 +102,10 @@ public:
     SyncCallState()
         : done_(false)
         , result_(NULL) {
-        pthread_mutex_init(&mutex_, NULL);
-        pthread_cond_init(&cond_, NULL);
     }
 
     ~SyncCallState() {
         delete result_;
-        pthread_cond_destroy(&cond_);
-        pthread_mutex_destroy(&mutex_);
     }
 
     void completeSuccess(const T& value) {
@@ -121,29 +117,25 @@ public:
     }
 
     ExecutionResult<T> wait() {
-        pthread_mutex_lock(&mutex_);
-        while (!done_) {
-            pthread_cond_wait(&cond_, &mutex_);
-        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait(lock, [this]{ return done_; });
         ExecutionResult<T> result = *result_;
-        pthread_mutex_unlock(&mutex_);
         return result;
     }
 
 private:
     void complete(const ExecutionResult<T>& result) {
-        pthread_mutex_lock(&mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!done_) {
             delete result_;
             result_ = new ExecutionResult<T>(result);
             done_ = true;
-            pthread_cond_signal(&cond_);
+            cond_.notify_one();
         }
-        pthread_mutex_unlock(&mutex_);
     }
 
-    pthread_mutex_t mutex_;
-    pthread_cond_t cond_;
+    std::mutex mutex_;
+    std::condition_variable cond_;
     bool done_;
     ExecutionResult<T>* result_;
 };
@@ -154,14 +146,10 @@ public:
     SyncCallState()
         : done_(false)
         , result_(NULL) {
-        pthread_mutex_init(&mutex_, NULL);
-        pthread_cond_init(&cond_, NULL);
     }
 
     ~SyncCallState() {
         delete result_;
-        pthread_cond_destroy(&cond_);
-        pthread_mutex_destroy(&mutex_);
     }
 
     void completeSuccess() {
@@ -173,29 +161,25 @@ public:
     }
 
     ExecutionResult<void> wait() {
-        pthread_mutex_lock(&mutex_);
-        while (!done_) {
-            pthread_cond_wait(&cond_, &mutex_);
-        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait(lock, [this]{ return done_; });
         ExecutionResult<void> result = *result_;
-        pthread_mutex_unlock(&mutex_);
         return result;
     }
 
 private:
     void complete(const ExecutionResult<void>& result) {
-        pthread_mutex_lock(&mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!done_) {
             delete result_;
             result_ = new ExecutionResult<void>(result);
             done_ = true;
-            pthread_cond_signal(&cond_);
+            cond_.notify_one();
         }
-        pthread_mutex_unlock(&mutex_);
     }
 
-    pthread_mutex_t mutex_;
-    pthread_cond_t cond_;
+    std::mutex mutex_;
+    std::condition_variable cond_;
     bool done_;
     ExecutionResult<void>* result_;
 };

@@ -683,6 +683,83 @@ void sleepMs(uint32_t ms) {
     nanosleep(&ts, NULL);
 }
 
+int udsSend(int fd, const void* data, size_t len) {
+    ssize_t n = ::send(fd, data, len, 0);
+    return static_cast<int>(n);
+}
+
+int udsRecv(int fd, void* buf, size_t len, bool wait_all) {
+    int flags = wait_all ? MSG_WAITALL : 0;
+    ssize_t n = ::recv(fd, buf, len, flags);
+    return static_cast<int>(n);
+}
+
+bool udsPollReadable(int fd, uint32_t timeout_ms) {
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int ret = ::poll(&pfd, 1, static_cast<int>(timeout_ms));
+    return ret > 0 && (pfd.revents & POLLIN);
+}
+
+bool checkSocketConnected(SocketFd fd, int* out_error) {
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
+        if (out_error) *out_error = errno;
+        return false;
+    }
+    if (out_error) *out_error = so_error;
+    return so_error == 0;
+}
+
+uint32_t popcount32(uint32_t value) {
+    return static_cast<uint32_t>(__builtin_popcount(value));
+}
+
+void setupSignalHandlers(SignalHandler handler) {
+    signal(SIGINT, handler);
+    signal(SIGTERM, handler);
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
+#endif
+}
+
+void memoryBarrier() {
+    __sync_synchronize();
+}
+
+bool atomicCompareSwap(volatile uint32_t* ptr, uint32_t expected, uint32_t desired) {
+    return __sync_bool_compare_and_swap(ptr, expected, desired);
+}
+
+uint32_t atomicFetchAdd(volatile uint32_t* ptr, uint32_t value) {
+    return __sync_fetch_and_add(ptr, value);
+}
+
+uint32_t atomicFetchSub(volatile uint32_t* ptr, uint32_t value) {
+    return __sync_fetch_and_sub(ptr, value);
+}
+
+uint32_t atomicFetchAnd(volatile uint32_t* ptr, uint32_t value) {
+    return __sync_fetch_and_and(ptr, value);
+}
+
+bool spinLockTestAndSet(volatile uint32_t* lock) {
+    return __sync_lock_test_and_set(lock, 1) != 0;
+}
+
+void spinLockRelease(volatile uint32_t* lock) {
+    __sync_lock_release(lock);
+}
+
+void spinWaitHint() {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ __volatile__("pause");
+#endif
+}
+
 } // namespace platform
 } // namespace omnibinder
 
@@ -1009,6 +1086,84 @@ std::string getHostName() {
 
 void sleepMs(uint32_t ms) {
     ::Sleep(ms);
+}
+
+int udsSend(int fd, const void* data, size_t len) {
+    int n = ::send(static_cast<SOCKET>(fd), static_cast<const char*>(data), static_cast<int>(len), 0);
+    return n;
+}
+
+int udsRecv(int fd, void* buf, size_t len, bool wait_all) {
+    int flags = wait_all ? MSG_WAITALL : 0;
+    int n = ::recv(static_cast<SOCKET>(fd), static_cast<char*>(buf), static_cast<int>(len), flags);
+    return n;
+}
+
+bool udsPollReadable(int fd, uint32_t timeout_ms) {
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(static_cast<SOCKET>(fd), &read_fds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int ret = select(0, &read_fds, NULL, NULL, &tv);
+    return ret > 0 && FD_ISSET(static_cast<SOCKET>(fd), &read_fds);
+}
+
+bool checkSocketConnected(SocketFd fd, int* out_error) {
+    int so_error = 0;
+    int len = sizeof(so_error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR,
+                   reinterpret_cast<char*>(&so_error), &len) != 0) {
+        if (out_error) *out_error = WSAGetLastError();
+        return false;
+    }
+    if (out_error) *out_error = so_error;
+    return so_error == 0;
+}
+
+uint32_t popcount32(uint32_t value) {
+    value = value - ((value >> 1) & 0x55555555);
+    value = (value & 0x33333333) + ((value >> 2) & 0x33333333);
+    return (((value + (value >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+}
+
+void setupSignalHandlers(SignalHandler handler) {
+    signal(SIGINT, handler);
+    signal(SIGTERM, handler);
+}
+
+void memoryBarrier() {
+    MemoryBarrier();
+}
+
+bool atomicCompareSwap(volatile uint32_t* ptr, uint32_t expected, uint32_t desired) {
+    return InterlockedCompareExchange(ptr, desired, expected) == expected;
+}
+
+uint32_t atomicFetchAdd(volatile uint32_t* ptr, uint32_t value) {
+    return InterlockedExchangeAdd(ptr, value);
+}
+
+uint32_t atomicFetchSub(volatile uint32_t* ptr, uint32_t value) {
+    return InterlockedExchangeAdd(ptr, -static_cast<LONG>(value));
+}
+
+uint32_t atomicFetchAnd(volatile uint32_t* ptr, uint32_t value) {
+    return InterlockedAnd(ptr, value);
+}
+
+bool spinLockTestAndSet(volatile uint32_t* lock) {
+    return InterlockedExchange(lock, 1) != 0;
+}
+
+void spinLockRelease(volatile uint32_t* lock) {
+    *lock = 0;
+    MemoryBarrier();
+}
+
+void spinWaitHint() {
+    YieldProcessor();
 }
 
 } // namespace platform

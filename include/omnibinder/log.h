@@ -37,7 +37,13 @@
 #include <cstdio>
 #include <cstdarg>
 #include <ctime>
-#include <sys/time.h>
+#include <chrono>
+
+#ifdef _WIN32
+    #define OMNI_LOCALTIME(t, tm_buf) localtime_s(&(tm_buf), &(t))
+#else
+    #define OMNI_LOCALTIME(t, tm_buf) localtime_r(&(t), &(tm_buf))
+#endif
 
 namespace omnibinder {
 
@@ -83,14 +89,16 @@ inline void logPrint(LogLevel level, const char* tag, const char* fmt, ...) {
     if (level < globalLogLevel()) return;
 
     if (globalTimestampEnabled()) {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
+        auto now = std::chrono::system_clock::now();
+        auto time_t_now = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
         struct tm tm_buf;
-        localtime_r(&tv.tv_sec, &tm_buf);
+        OMNI_LOCALTIME(time_t_now, tm_buf);
         fprintf(stderr, "[%04d-%02d-%02d %02d:%02d:%02d.%03d][%s][%s] ",
                 tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
                 tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
-                static_cast<int>(tv.tv_usec / 1000),
+                static_cast<int>(ms.count()),
                 logLevelStr(level), tag);
     } else {
         fprintf(stderr, "[%s][%s] ", logLevelStr(level), tag);

@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * @file        event_loop.h
  * @brief       单线程事件循环
- * @details     基于 epoll（Linux）的单线程事件循环实现，支持 fd 事件监听（读/写/错误）、
+ * @details     单线程事件循环实现，支持 fd 事件监听（读/写/错误）、
  *              一次性和周期性定时器、以及通过 eventfd 实现的跨线程回调投递。
  *              OmniRuntime 和 ServiceManager 的核心驱动引擎。
  *
@@ -41,6 +41,8 @@
 #include <mutex>
 #include <atomic>
 
+namespace omnibinder { namespace platform { class EventBackend; } }
+
 namespace omnibinder {
 
 // ============================================================
@@ -51,7 +53,7 @@ namespace omnibinder {
 //   - 定时器（一次性和周期性）
 //   - 跨线程投递回调（通过 eventfd 唤醒）
 //
-// Linux 使用 epoll，Windows 使用 select（桩实现）
+// 通过 EventBackend 接口实现平台无关
 // ============================================================
 
 class EventLoop {
@@ -160,24 +162,24 @@ private:
     // 处理到期的定时器，返回距下一个定时器到期的毫秒数（-1 表示无定时器）
     int processTimers();
 
-    // 计算 epoll_wait 的超时值
+    // 计算 poll 超时值（考虑定时器）
     int calculateTimeout(int requested_timeout_ms);
 
     // 唤醒事件循环
     void wakeup();
 
-    // 将内部事件标志转换为平台 epoll 事件
-    static uint32_t toPlatformEvents(uint32_t events);
+    // 将内部事件标志转换为平台事件
+    static uint32_t toBackendEvents(uint32_t events);
 
-    // 将平台 epoll 事件转换为内部事件标志
-    static uint32_t fromPlatformEvents(uint32_t epoll_events);
+    // 将平台事件转换为内部事件标志
+    static uint32_t fromBackendEvents(uint32_t backend_events);
 
     // ============================================================
     // 成员变量
     // ============================================================
 
     std::atomic<bool>           running_;
-    int                         epoll_fd_;
+    platform::EventBackend*     backend_;
     int                         wakeup_fd_;
 
     // fd -> FdEntry 映射

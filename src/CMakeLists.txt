@@ -23,6 +23,8 @@ set(OMNIBINDER_SOURCES
 
     # platform
     platform/platform.cpp
+    platform/event_backend_linux.cpp
+    platform/event_backend_win.cpp
 )
 
 # 创建静态库和共享库
