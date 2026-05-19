@@ -75,7 +75,17 @@ OmniBinder covers both **service management** and **service-to-service data path
 - `OmniRuntime` exposes thread-safe public APIs
 - the internal runtime is serialized by a single owner event loop
 - callbacks (such as topic callbacks and death callbacks) run on the owner event-loop thread by default
-- see the [threading model document](docs/threading-model.md) for concurrency details
+- synchronous reply wait only processes fd/timer events, not new pending API functors
+- see the [threading model document](docs/threading-model.md) for `run()` / `pollOnce()` / `stop()` concurrency details
+
+### Error handling model
+
+- Buffer write APIs return `bool`
+- Buffer read APIs use `tryReadXxx(out)` returning `bool`
+- server-side `onInvoke()` returns `int` error codes
+- parameter deserialization failure typically returns `ERR_DESERIALIZE`
+- response serialization failure typically returns `ERR_SERIALIZE`
+- the runtime main path no longer relies on C++ exceptions to propagate ordinary protocol errors
 
 ---
 
@@ -91,22 +101,22 @@ The following data highlights typical OmniBinder latency on the **same-host SHM 
 
 | Test case | Samples | Average | 95% case | 99% case | Notes |
 |---|---:|---:|---:|---:|---|
-| RPC Echo (0 bytes) | 1000 | 68.8 us | 96 us | 130 us | Empty payload, mostly protocol and scheduling overhead |
-| RPC Echo (256 bytes) | 1000 | 69.1 us | 97 us | 133 us | Common small-payload RPC |
-| RPC Echo (1024 bytes) | 1000 | 69.1 us | 102 us | 143 us | 1 KB payload |
-| RPC Echo (4096 bytes) | 1000 | 73.9 us | 107 us | 137 us | 4 KB payload, measured with enlarged SHM ring |
-| RPC Echo (8192 bytes) | 1000 | 91.9 us | 125 us | 169 us | 8 KB payload, measured with enlarged SHM ring |
-| RPC Add (2 x int32) | 1000 | 66.5 us | 101 us | 133 us | Small compute-style RPC |
-| Topic pub/sub (64 bytes) | 1000 | 42.4 us | 76 us | 104 us | Small broadcast payload |
-| Topic pub/sub (256 bytes) | 1000 | 41.8 us | 74 us | 93 us | Common small broadcast payload |
-| Topic pub/sub (1024 bytes) | 1000 | 38.4 us | 71 us | 89 us | 1 KB broadcast payload |
-| Topic pub/sub (8192 bytes) | 1000 | 54.8 us | 89 us | 114 us | 8 KB broadcast payload |
+| RPC Echo (0 bytes) | 1000 | 68.5 us | 85 us | 101 us | Empty payload, mostly protocol and scheduling overhead |
+| RPC Echo (256 bytes) | 1000 | 68.3 us | 86 us | 110 us | Common small-payload RPC |
+| RPC Echo (1024 bytes) | 1000 | 70.5 us | 89 us | 109 us | 1 KB payload |
+| RPC Echo (4096 bytes) | 1000 | 74.2 us | 97 us | 122 us | 4 KB payload, measured with enlarged SHM ring |
+| RPC Echo (8192 bytes) | 1000 | 86.4 us | 111 us | 138 us | 8 KB payload, measured with enlarged SHM ring |
+| RPC Add (2 x int32) | 1000 | 73.6 us | 93 us | 109 us | Small compute-style RPC |
+| Topic pub/sub (64 bytes) | 1000 | 28.4 us | 52 us | 69 us | Small broadcast payload |
+| Topic pub/sub (256 bytes) | 1000 | 29.4 us | 55 us | 72 us | Common small broadcast payload |
+| Topic pub/sub (1024 bytes) | 1000 | 29.2 us | 54 us | 72 us | 1 KB broadcast payload |
+| Topic pub/sub (8192 bytes) | 1000 | 38.6 us | 64 us | 84 us | 8 KB broadcast payload |
 
 Based on the full report:
 
-- **Common 0~1024 byte RPC** averages around **66.5~69.1 us**
-- **4096~8192 byte RPC payloads** average around **73.9~91.9 us** under enlarged SHM-ring configuration
-- **Topic pub/sub** averages around **38.4~54.8 us**
+- **Common 0~1024 byte RPC** averages around **68.3~70.5 us**
+- **4096~8192 byte RPC payloads** average around **74.2~86.4 us** under enlarged SHM-ring configuration
+- **Topic pub/sub** averages around **28.4~38.6 us**
 
 > **Performance note:** the current SHM path uses an `eventfd + EventLoop` event-driven model.
 > The latency numbers mainly reflect serialization, shared-memory copies, eventfd wakeups, epoll scheduling, and application-side handling.
@@ -197,12 +207,13 @@ If you want to verify **how a downstream business project consumes OmniBinder bu
 ```bash
 cmake --install build
 
-./examples/artifact_sensor_hmi/scripts/build_downstream_example.sh
-./examples/artifact_sensor_hmi/scripts/run_cpp_stack.sh
+cmake -S examples/artifact_examples -B build/example_artifacts \
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+cmake --build build/example_artifacts -j$(nproc)
 ```
 
-That example provides both `sensor_cpp` / `hmi_cpp` and `sensor_c` / `hmi_c` stacks.
-It demonstrates HMI-side RPC calls, topic subscription, and death-notification handling when the sensor service exits.
+That example provides both C and CPP versions.
+It demonstrates service-to-service RPC calls, topic subscription, and death-notification handling when the sensor service exits.
 
 The built-in demo in `examples/sensor_service.bidl` / `examples/example_cpp/*` / `examples/example_c/*` has also been expanded into a fuller capability matrix covering:
 
@@ -458,11 +469,20 @@ Useful log keywords include:
 
 | Document | Description |
 |---|---|
-| [Examples Guide](docs/examples.en.md) | Full server/client examples, cross-board communication examples, and downstream build examples |
-| [IDL Specification](docs/idl-specification.en.md) | `.bidl` syntax, type system, and code-generation rules |
-| [omni-cli Usage Guide](docs/omni-tool-usage.en.md) | CLI usage, JSON mode, and service inspection examples |
-| [Downstream Sensor/HMI Example](examples/artifact_sensor_hmi/README.en.md) | How to build a standalone downstream business project with installed OmniBinder artifacts |
-| [Performance Report](docs/performance-report.md) | Detailed RPC and topic latency data |
+| [Architecture Design](docs/architecture.md) | System architecture, component descriptions, communication flows, threading model |
+| [Internal Architecture](docs/architecture-internals.md) | Internal runtime details for secondary developers, data flows, memory model |
+| [Communication Protocol](docs/protocol.md) | Binary protocol format, message types, serialization rules, communication sequences |
+| [API Reference](docs/api-reference.md) | Complete API for OmniRuntime / Service / Buffer and other core classes |
+| [IDL Specification](docs/idl-specification.md) | `.bidl` syntax, type system, and code-generation rules |
+| [IDL Specification (EN)](docs/idl-specification.en.md) | English version of the IDL specification |
+| [ARM Cross-Compilation Guide](docs/cross-compiling-arm.md) | Host/Target separated build, ARM toolchain, deployment recommendations |
+| [omni-cli Usage Guide](docs/omni-tool-usage.md) | CLI usage, JSON mode, and service inspection examples |
+| [omni-cli Usage Guide (EN)](docs/omni-tool-usage.en.md) | English version of the omni-cli guide |
+| [Testing Guide](docs/testing-guide.md) | Test case descriptions, startup methods, recommended execution |
+| [Examples Guide](docs/examples.md) | Complete server/client examples, cross-board communication examples |
+| [Examples Guide (EN)](docs/examples.en.md) | English version of the examples guide |
+| [Downstream Example](examples/artifact_examples/README.md) | Building downstream projects with installed OmniBinder artifacts |
+| [Performance Report](docs/performance-report.md) | RPC and topic latency test data (microsecond level) |
 
 The Chinese documentation remains available in the original `.md` files.
 

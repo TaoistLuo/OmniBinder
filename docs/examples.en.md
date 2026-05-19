@@ -11,7 +11,7 @@ This document shows end-to-end OmniBinder usage examples, including:
 - `omni-cli` usage for service inspection and invocation
 
 > If you want to verify **how a business project consumes OmniBinder artifacts**, start with
-> `examples/artifact_sensor_hmi/`. That directory is a standalone CMake project that uses
+> `examples/artifact_examples/`. That directory is a standalone CMake project that uses
 > `find_package(OmniBinder REQUIRED)` and an installed `omni-idlc`, instead of depending on internal repo targets.
 
 ---

@@ -102,9 +102,9 @@ callSerialized(lambda)                               // 串行化入口（保证
         │  loop_->post(lambda) ──────► owner event loop 执行
         │  state.wait()  ←────────── 阻塞等结果（mutex + condvar）
         ▼
-invokeLocked(service_name, iface, method, request, response, timeout)
+invokeInternal(service_name, iface, method, request, response, timeout)
   │
-  ├── 1. lookupServiceUnlocked(service_name, info)
+  ├── 1. lookupServiceInfo(service_name, info)
   │     │
   │     │  查本地缓存 service_cache_
   │     │  ├── 缓存命中 → 直接返回 ServiceInfo
@@ -149,7 +149,7 @@ invokeLocked(service_name, iface, method, request, response, timeout)
   │     │  sendInvokeMessageWithTimeout(service_name, msg, info, conn, timeout)
   │     │    conn_mgr_->sendMessageWithinTimeout(name, msg, timeout, &elapsed)
   │     │      transport->send(serialized_data)
-  │     │    发送失败 + attempt==0 → refreshServiceConnectionUnlocked → 重试一次
+  │     │    发送失败 + attempt==0 → refreshServiceConnection → 重试一次
   │     ▼
   │
   └── 5. 等待回复
@@ -172,8 +172,8 @@ invokeLocked(service_name, iface, method, request, response, timeout)
 |------|------|
 | `invoke()` | `omni_runtime.cpp:919` |
 | `callSerialized()` | `omni_runtime.h:322` |
-| `invokeLocked()` | `omni_runtime.cpp:927` |
-| `lookupServiceUnlocked()` | `omni_runtime.cpp:771` |
+| `invokeInternal()` | `omni_runtime.cpp:927` |
+| `lookupServiceInfo()` | `omni_runtime.cpp:771` |
 | `acquireInvokeConnection()` | `omni_runtime.cpp:1852` |
 | `populateInvokeMessage()` | `omni_runtime.cpp:1863` |
 | `sendInvokeMessageWithTimeout()` | `omni_runtime.cpp:1895` |
@@ -229,7 +229,7 @@ handleShmRequest(service_name, entry, client_id, data, len)  // SHM
   │       MSG_INVOKE_REPLY(seq, status=0, response_length, response_data)
   │     invoke_status != 0 (失败):
   │       MSG_INVOKE_REPLY(seq, status=invoke_status)
-  │     异常:
+  │     失败:
   │       MSG_INVOKE_REPLY(seq, status=ERR_INVOKE_FAILED)
   │
   └── 5. 发送回复
@@ -275,7 +275,7 @@ EventLoop epoll 触发 fd 可读
 waitForReply 返回 → decodeInvokeReplyPayload
   │  解析 status 和 response data
   ▼
-invokeLocked 返回结果给调用方
+invokeInternal 返回结果给调用方
 ```
 
 **涉及代码位置**：
@@ -295,9 +295,9 @@ invokeLocked 返回结果给调用方
 **客户端**：
 
 ```
-invokeOneWayLocked(service_name, iface, method, request)
+invokeOneWayInternal(service_name, iface, method, request)
   │
-  ├── lookupServiceUnlocked(...)      // 同步 RPC 一样
+  ├── lookupServiceInfo(...)          // 同步 RPC 一样
   ├── acquireInvokeConnection(...)    // 同步 RPC 一样
   ├── 构造 MSG_INVOKE_ONEWAY 消息
   ├── sendInvokeMessage(...)          // 发送
@@ -321,7 +321,7 @@ handleInvokeOneWayRequest(service_name, msg, "TCP")
 | 函数 | 文件 |
 |------|------|
 | `invokeOneWay()` | `omni_runtime.cpp:1003` |
-| `invokeOneWayLocked()` | `omni_runtime.cpp:1010` |
+| `invokeOneWayInternal()` | `omni_runtime.cpp:1010` |
 | `handleInvokeOneWayRequest()` | `omni_runtime.cpp:1474` |
 
 ---
@@ -339,7 +339,7 @@ handleInvokeOneWayRequest(service_name, msg, "TCP")
 runtime.publishTopic("SensorUpdate")
   │
   ▼
-publishTopicLocked("SensorUpdate")
+publishTopicInternal("SensorUpdate")
   │
   ├── 1. 构造 MSG_PUBLISH_TOPIC 消息
   │     payload = topic_name + ServiceInfo
@@ -380,7 +380,7 @@ handlePublishTopic(conn, msg)
 runtime.subscribeTopic("SensorUpdate", callback)
   │
   ▼
-subscribeTopicLocked("SensorUpdate", callback)
+subscribeTopicInternal("SensorUpdate", callback)
   │
   ├── 1. 发 MSG_SUBSCRIBE_TOPIC 给 ServiceManager
   │
@@ -451,7 +451,7 @@ service.BroadcastSensorUpdate(data)                  // 生成代码
 runtime.broadcast(topic_id, data)
   │
   ▼
-broadcastLocked(topic_id, data)
+broadcastInternal(topic_id, data)
   │
   ├── 1. 构造 MSG_BROADCAST 消息
   │     payload = topic_id + data_length + data
@@ -501,12 +501,12 @@ callback(data)                                       // 用户回调
 
 | 函数 | 文件 |
 |------|------|
-| `publishTopicLocked()` | `omni_runtime.cpp:1111` |
-| `subscribeTopicLocked()` | `omni_runtime.cpp:1255` |
+| `publishTopicInternal()` | `omni_runtime.cpp:1111` |
+| `subscribeTopicInternal()` | `omni_runtime.cpp:1255` |
 | `handleSMMessage()` → `MSG_TOPIC_PUBLISHER_NOTIFY` | `omni_runtime.cpp:465` |
 | `ensureTopicPublisherConnection()` | `omni_runtime.cpp:1938` |
 | `handleSubscribeBroadcast()` | `omni_runtime.cpp:1513` |
-| `broadcastLocked()` | `omni_runtime.cpp:1178` |
+| `broadcastInternal()` | `omni_runtime.cpp:1178` |
 | `onDirectMessage()` → `MSG_BROADCAST` | `omni_runtime.cpp:1584` |
 | `handleTopicBroadcastMessage()` | `omni_runtime.cpp:1236` |
 | SM `handlePublishTopic()` | `service_manager/main.cpp:584` |
@@ -534,7 +534,7 @@ platform::getMachineId()                              // platform.cpp:636
   svc_info.host_id = host_id_                         // 塞入 ServiceInfo 发给 SM
 
 客户端查找时：
-  lookupServiceUnlocked → 从 SM 拿到 ServiceInfo（含 remote host_id）
+  lookupServiceInfo → 从 SM 拿到 ServiceInfo（含 remote host_id）
 
 客户端建连接时：
   ConnectionManager::getOrCreateConnection(local_host_id, remote_host_id, ...)
