@@ -211,6 +211,31 @@ void udsClose(int fd);
 // 删除 UDS 路径
 void udsUnlink(const std::string& path);
 
+// 发送普通数据（不带 fd）
+int udsSend(int fd, const void* data, size_t len);
+
+// 接收普通数据（默认等待所有数据）
+int udsRecv(int fd, void* buf, size_t len, bool wait_all = true);
+
+// 等待 fd 可读
+bool udsPollReadable(int fd, uint32_t timeout_ms);
+
+// ============================================================
+// Socket 辅助
+// ============================================================
+
+// 检查 socket 连接是否完成（用于异步 connect）
+bool checkSocketConnected(SocketFd fd, int* out_error);
+
+// ============================================================
+// 信号处理
+// ============================================================
+
+typedef void (*SignalHandler)(int);
+
+// 注册信号处理器（SIGINT, SIGTERM）
+void setupSignalHandlers(SignalHandler handler);
+
 // ============================================================
 // 系统信息
 // ============================================================
@@ -226,6 +251,35 @@ std::string getHostName();
 
 // 休眠指定毫秒数
 void sleepMs(uint32_t ms);
+
+// 32位 popcount（计算二进制中1的个数）
+uint32_t popcount32(uint32_t value);
+
+// ============================================================
+// 原子操作（用于共享内存无锁编程）
+// ============================================================
+
+// 内存屏障
+void memoryBarrier();
+
+// 原子比较并交换（返回是否成功）
+bool atomicCompareSwap(volatile uint32_t* ptr, uint32_t expected, uint32_t desired);
+
+// 原子加法，返回旧值
+uint32_t atomicFetchAdd(volatile uint32_t* ptr, uint32_t value);
+
+// 原子减法，返回旧值
+uint32_t atomicFetchSub(volatile uint32_t* ptr, uint32_t value);
+
+// 原子 AND，返回旧值
+uint32_t atomicFetchAnd(volatile uint32_t* ptr, uint32_t value);
+
+// 自旋锁操作
+bool spinLockTestAndSet(volatile uint32_t* lock);
+void spinLockRelease(volatile uint32_t* lock);
+
+// CPU 自旋等待优化（x86 pause 指令等）
+void spinWaitHint();
 
 } // namespace platform
 } // namespace omnibinder

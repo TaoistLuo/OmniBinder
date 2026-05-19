@@ -23,7 +23,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <csignal>
 #include <string>
 #include <map>
 #include <vector>
@@ -927,11 +926,7 @@ int main(int argc, char* argv[]) {
     omnibinder::g_app = &app;
 
     // Set up signal handlers
-    signal(SIGINT, omnibinder::signalHandler);
-    signal(SIGTERM, omnibinder::signalHandler);
-#ifdef SIGPIPE
-    signal(SIGPIPE, SIG_IGN);  // Ignore SIGPIPE for socket writes
-#endif
+    omnibinder::platform::setupSignalHandlers(omnibinder::signalHandler);
 
     if (!app.init(host, port)) {
         OMNI_LOG_ERROR(TAG, "Failed to initialize ServiceManager");

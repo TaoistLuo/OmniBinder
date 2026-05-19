@@ -193,32 +193,15 @@ bool TcpTransport::checkConnectComplete()
         return state_ == ConnectionState::CONNECTED;
     }
 
-    // Check for socket-level error to determine if connect succeeded
     int so_error = 0;
-#ifdef OMNIBINDER_LINUX
-    socklen_t len = sizeof(so_error);
-    if (getsockopt(fd_, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "getsockopt SO_ERROR failed on fd=%d: %s",
-                         static_cast<int>(fd_), strerror(errno));
+    if (!platform::checkSocketConnected(fd_, &so_error)) {
+        if (so_error == 0) {
+            OMNI_LOG_ERROR(LOG_TAG, "getsockopt SO_ERROR failed on fd=%d",
+                             static_cast<int>(fd_));
+        }
         state_ = ConnectionState::ERROR;
         return false;
     }
-#elif defined(OMNIBINDER_WINDOWS)
-    int len = sizeof(so_error);
-    if (getsockopt(fd_, SOL_SOCKET, SO_ERROR,
-               reinterpret_cast<char*>(&so_error), &len) != 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "getsockopt SO_ERROR failed on fd=%d",
-                         static_cast<int>(fd_));
-        state_ = ConnectionState::ERROR;
-        return false;
-    }
-#else
-    // Fallback: try a zero-byte send to check connection
-    char dummy = 0;
-    if (::send(fd_, &dummy, 0, 0) < 0) {
-        so_error = errno;
-    }
-#endif
 
     if (so_error == 0) {
         state_ = ConnectionState::CONNECTED;

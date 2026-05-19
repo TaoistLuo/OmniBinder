@@ -4,11 +4,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <algorithm>
-#include <poll.h>
-
-#if defined(__GNUC__)
-#define OMNI_POPCOUNT32 __builtin_popcount
-#endif
 
 #define LOG_TAG "ShmTransport"
 
@@ -42,16 +37,7 @@ std::string generateShmName(const std::string& service_name)
 
 uint32_t ShmTransport::countBits(uint32_t value) const
 {
-#if defined(OMNI_POPCOUNT32)
-    return static_cast<uint32_t>(OMNI_POPCOUNT32(value));
-#else
-    uint32_t count = 0;
-    while (value) {
-        count += value & 1u;
-        value >>= 1;
-    }
-    return count;
-#endif
+    return platform::popcount32(value);
 }
 
 // ============================================================
@@ -171,7 +157,7 @@ bool ShmTransport::initServer()
     eventfd_enabled_ = true;
 
     // Mark as ready for clients
-    __sync_synchronize();
+    platform::memoryBarrier();
     ctrl_->ready_flag = 1;
 
     OMNI_LOG_DEBUG(LOG_TAG, "Server eventfd enabled: req_eventfd=%d, uds=%s",
@@ -212,7 +198,7 @@ bool ShmTransport::initClient()
 
     uint32_t slot = ctrl_->max_clients;
     for (uint32_t i = 0; i < ctrl_->max_clients; ++i) {
-        if (__sync_bool_compare_and_swap(&ctrl_->slots[i].active, 0, 1)) {
+        if (platform::atomicCompareSwap(&ctrl_->slots[i].active, 0, 1)) {
             slot = i;
             break;
         }
@@ -229,8 +215,8 @@ bool ShmTransport::initClient()
     }
 
     client_id_ = slot;
-    __sync_fetch_and_add(&ctrl_->active_clients, 1);
-    __sync_synchronize();
+    platform::atomicFetchAdd(&ctrl_->active_clients, 1);
+    platform::memoryBarrier();
 
     // Exchange eventfds via UDS if server supports it
     if (ctrl_->reserved[0] & SHM_FEATURE_EVENTFD) {
@@ -244,8 +230,8 @@ bool ShmTransport::initClient()
         } else {
             // Send our client_id
             uint32_t cid = client_id_;
-            ssize_t n = ::send(uds_fd, &cid, sizeof(cid), 0);
-            if (n != sizeof(cid)) {
+            int n = platform::udsSend(uds_fd, &cid, sizeof(cid));
+            if (n != static_cast<int>(sizeof(cid))) {
                 OMNI_LOG_WARN(LOG_TAG, "UDS send client_id failed for '%s', falling back from SHM",
                                 shm_name_.c_str());
                 platform::udsClose(uds_fd);
@@ -253,13 +239,7 @@ bool ShmTransport::initClient()
                 return false;
             } else {
                 // Wait for server to accept and send fds (with short timeout)
-                struct pollfd pfd;
-                pfd.fd = uds_fd;
-                pfd.events = POLLIN;
-                pfd.revents = 0;
-                int poll_ret = ::poll(&pfd, 1, 100);  // 100ms timeout
-
-                if (poll_ret > 0 && (pfd.revents & POLLIN)) {
+                if (platform::udsPollReadable(uds_fd, 100)) {
                     // Receive 2 fds: [req_eventfd, resp_eventfd]
                     int fds[2] = {-1, -1};
                     if (platform::udsRecvFds(uds_fd, fds, 2, NULL, 0, NULL)) {
@@ -383,7 +363,7 @@ uint32_t ShmTransport::ringWrite(ShmRingHeader* ring, uint8_t* ring_data,
         memcpy(ring_data, data + first, to_write - first);
     }
 
-    __sync_synchronize();
+    platform::memoryBarrier();
     ring->write_pos = (w + to_write) % cap;
 
     return to_write;
@@ -408,7 +388,7 @@ uint32_t ShmTransport::ringRead(ShmRingHeader* ring, const uint8_t* ring_data,
         memcpy(buf + first, ring_data, to_read - first);
     }
 
-    __sync_synchronize();
+    platform::memoryBarrier();
     ring->read_pos = (r + to_read) % cap;
 
     return to_read;
@@ -425,9 +405,9 @@ void ShmTransport::cleanup()
         releaseResponseSlot(client_id_);
         ctrl_->slots[client_id_].active = 0;
         if (ctrl_->active_clients > 0) {
-            __sync_fetch_and_sub(&ctrl_->active_clients, 1);
+            platform::atomicFetchSub(&ctrl_->active_clients, 1);
         }
-        __sync_synchronize();
+        platform::memoryBarrier();
     }
 
     // Close eventfds
@@ -497,7 +477,7 @@ bool ShmTransport::allocateResponseSlot(uint32_t slot)
                              shm_name_.c_str(), slot);
             return false;
         }
-    } while (!__sync_bool_compare_and_swap(&ctrl_->response_bitmap, old_bitmap, old_bitmap | mask));
+    } while (!platform::atomicCompareSwap(&ctrl_->response_bitmap, old_bitmap, old_bitmap | mask));
 
     ctrl_->slots[slot].response_capacity = ctrl_->resp_ring_capacity;
     ctrl_->slots[slot].response_offset = static_cast<uint32_t>(slot * responseBlockSize());
@@ -516,7 +496,7 @@ void ShmTransport::releaseResponseSlot(uint32_t slot)
         return;
     }
 
-    __sync_fetch_and_and(&ctrl_->response_bitmap, ~(1u << slot));
+    platform::atomicFetchAnd(&ctrl_->response_bitmap, ~(1u << slot));
     ctrl_->slots[slot].response_offset = 0;
     ctrl_->slots[slot].response_capacity = 0;
 }
@@ -639,7 +619,7 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
 
     if (msg_len == 0) {
         // Zero-length message: consume the prefix
-        __sync_synchronize();
+        platform::memoryBarrier();
         resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
         return 0;
     }
@@ -656,7 +636,7 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
     }
 
     resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
-    __sync_synchronize();
+    platform::memoryBarrier();
 
     uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len);
     if (read_bytes != msg_len) {
@@ -784,7 +764,7 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
     }
 
     req_ring->read_pos = (r + sizeof(uint32_t) * 2) % cap;
-    __sync_synchronize();
+    platform::memoryBarrier();
 
     out_client_id = client_id;
 
@@ -901,7 +881,7 @@ bool ShmTransport::waitReady(uint32_t timeout_ms)
 
     int64_t start = platform::currentTimeMs();
     while (true) {
-        __sync_synchronize();
+        platform::memoryBarrier();
         if (ctrl_ && ctrl_->ready_flag != 0) {
             return true;
         }
@@ -977,9 +957,9 @@ void ShmTransport::onUdsClientConnect()
 
     // Read client_id from the client
     uint32_t client_id = 0;
-    ssize_t n = ::recv(client_fd, &client_id, sizeof(client_id), MSG_WAITALL);
-    if (n != sizeof(client_id)) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: failed to read client_id (got %zd bytes)", n);
+    int n = platform::udsRecv(client_fd, &client_id, sizeof(client_id));
+    if (n != static_cast<int>(sizeof(client_id))) {
+        OMNI_LOG_WARN(LOG_TAG, "UDS: failed to read client_id (got %d bytes)", n);
         platform::udsClose(client_fd);
         return;
     }

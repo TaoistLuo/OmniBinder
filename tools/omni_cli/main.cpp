@@ -9,7 +9,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
-#include <sys/time.h>
+#include <chrono>
 
 // 全局 IDL 解析上下文
 static omnic::ParseContext* g_parse_ctx = NULL;
@@ -287,19 +287,17 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     }
 
     // 记录开始时间
-    struct timeval start_time, end_time;
-    gettimeofday(&start_time, NULL);
+    auto start_time = std::chrono::steady_clock::now();
 
     // Invoke the method
     omnibinder::Buffer response;
     ret = runtime.invoke(info.name.c_str(), iface_id, method_id, request, response);
     
     // 记录结束时间
-    gettimeofday(&end_time, NULL);
+    auto end_time = std::chrono::steady_clock::now();
     
     // 计算耗时（毫秒）
-    double elapsed_ms = (end_time.tv_sec - start_time.tv_sec) * 1000.0 +
-                        (end_time.tv_usec - start_time.tv_usec) / 1000.0;
+    double elapsed_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
     
     if (ret != 0) {
         fprintf(stderr, "Error: Invoke failed: %s\n",
