@@ -345,7 +345,7 @@ public:
     int getStats(RuntimeStats& stats);
 
     // 重置运行时统计计数器
-    void resetStats();
+    int resetStats();
 
 private:
     // 禁止拷贝

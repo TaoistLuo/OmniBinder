@@ -221,11 +221,14 @@ reply wait 期间只处理：
 
 ### 6.7 错误处理边界
 
-当前实现采用“主路径显式状态 + 边界捕获异常”的模型：
+当前实现采用**纯错误码模型**，完全不依赖 C++ 异常：
 
 - Buffer / Message / invoke 主路径：使用 `bool` 或错误码
 - `Service::onInvoke()`：显式返回 `int`
-- owner-thread / event-loop / fd callback 边界：允许捕获异常，但必须记录日志并转换为错误状态
+- owner-thread / event-loop / fd callback 边界：通过返回值传播错误，不抛出异常
+
+所有业务回调（`onInvoke`、`onClientConnected`、`onClientDisconnected` 等）均不应抛出异常。
+如果业务代码抛出未捕获异常，程序将直接终止（`std::terminate`）。
 
 ## 7. TopicRuntime
 

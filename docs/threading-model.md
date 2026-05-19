@@ -87,7 +87,7 @@
 - 不建议在 `TopicCallback`、`DeathCallback`、服务端 `onInvoke()`、`onStart()`、`onStop()` 等 owner event-loop 线程回调中，再对同一个 `OmniRuntime` 发起**同步阻塞 API**（如 `invoke()`、`lookupService()`、`subscribeTopic()`）
 - 回调中应尽量只做轻量处理，必要时把后续同步工作转交给其他线程或异步任务
 
-当前 owner-thread 桥接路径中的异常不会再被伪装成成功；边界层会记录错误并返回 fallback status。
+当前实现采用纯错误码模型，不依赖 C++ 异常。所有业务回调（`onInvoke`、`onClientConnected`、`onClientDisconnected` 等）均不应抛出异常。如果业务代码抛出未捕获异常，程序将直接终止。
 
 ---
 

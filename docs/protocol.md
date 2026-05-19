@@ -368,7 +368,7 @@ status:
 - `ERR_METHOD_NOT_FOUND`：方法不存在
 - `ERR_DESERIALIZE`：参数反序列化失败
 - `ERR_SERIALIZE`：响应序列化失败
-- `ERR_INVOKE_FAILED`：调用边界异常或内部执行失败
+- `ERR_INVOKE_FAILED`：调用失败或内部执行错误
 
 `MSG_INVOKE_REPLY` 的 `status` 字段是当前运行时显式错误传播的正式协议出口，不再依赖内部 side-channel。
 ```
