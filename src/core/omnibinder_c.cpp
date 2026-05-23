@@ -477,6 +477,41 @@ int omni_runtime_invoke_oneway(omni_runtime_t* runtime, const char* service_name
     return runtime->runtime.invokeOneWay(service_name, interface_id, method_id, request->buf);
 }
 
+int omni_runtime_connect_service(omni_runtime_t* runtime, const char* service_name) {
+    if (!runtime || !service_name) return -1;
+    return runtime->runtime.connectService(service_name);
+}
+
+int omni_runtime_disconnect_service(omni_runtime_t* runtime, const char* service_name) {
+    if (!runtime || !service_name) return -1;
+    return runtime->runtime.disconnectService(service_name);
+}
+
+int omni_runtime_is_service_connected(const omni_runtime_t* runtime, const char* service_name) {
+    if (!runtime || !service_name) return 0;
+    return runtime->runtime.isServiceConnected(service_name) ? 1 : 0;
+}
+
+void omni_runtime_enable_auto_reconnect(omni_runtime_t* runtime, const char* service_name, int enable) {
+    if (!runtime || !service_name) return;
+    runtime->runtime.enableAutoReconnect(service_name, enable != 0);
+}
+
+void omni_runtime_set_reconnect_interval(omni_runtime_t* runtime, const char* service_name, uint32_t interval_ms) {
+    if (!runtime || !service_name) return;
+    runtime->runtime.setReconnectInterval(service_name, interval_ms);
+}
+
+void omni_runtime_start_heartbeat(omni_runtime_t* runtime, const char* service_name, uint32_t interval_ms, uint32_t timeout_ms) {
+    if (!runtime || !service_name) return;
+    runtime->runtime.startHeartbeat(service_name, interval_ms, timeout_ms);
+}
+
+void omni_runtime_stop_heartbeat(omni_runtime_t* runtime, const char* service_name) {
+    if (!runtime || !service_name) return;
+    runtime->runtime.stopHeartbeat(service_name);
+}
+
 int omni_runtime_publish_topic(omni_runtime_t* runtime, const char* topic_name) {
     if (!runtime) return -1;
     return runtime->runtime.publishTopic(topic_name);

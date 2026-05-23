@@ -660,3 +660,175 @@ Subscriber
 - 可定位的核心文件
 - 可追踪的完整数据流
 - 可扩展的实现基础
+
+## 17. 连接管理架构
+
+### 17.1 概述
+
+连接管理模块负责：
+- 主动建立和断开与远程服务的连接
+- 自动重连机制（指数退避策略）
+- 心跳检测（及时发现服务异常）
+
+### 17.2 核心 API
+
+```cpp
+class OmniRuntime {
+    // 连接管理
+    int connectService(const std::string& service_name);
+    int disconnectService(const std::string& service_name);
+    bool isServiceConnected(const std::string& service_name) const;
+    
+    // 自动重连
+    void enableAutoReconnect(const std::string& service_name, bool enable = true);
+    void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
+    
+    // 心跳检测
+    void startHeartbeat(const std::string& service_name, uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+    void stopHeartbeat(const std::string& service_name);
+};
+```
+
+### 17.3 ServiceProxyBase 基类
+
+生成的 Proxy 类继承自 `ServiceProxyBase`，提供统一的连接管理接口：
+
+```cpp
+class ServiceProxyBase {
+public:
+    int connect();           // 查询服务 + 建立连接 + 注册死亡通知
+    void disconnect();       // 断开连接 + 停止心跳
+    bool isConnected() const;
+    void enableAutoReconnect(bool enable = true);
+    void setReconnectInterval(uint32_t interval_ms);
+    void startHeartbeat(uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+    void stopHeartbeat();
+};
+```
+
+### 17.4 自动重连机制
+
+#### 触发条件
+
+1. **服务死亡通知**：SM 发送 `MSG_DEATH_NOTIFY`
+2. **心跳超时**：心跳 ACK 超时未收到
+
+#### 重连流程
+
+```
+触发重连
+    │
+    ├── 清除缓存（service_cache_）
+    ├── 移除连接（conn_mgr_->removeConnection）
+    │
+    └── scheduleReconnect(interval_ms)
+            │
+            └── 定时器触发 tryReconnectService
+                    │
+                    ├── connectServiceInternal
+                    │       │
+                    │       ├── lookupServiceInfo（查询 SM 获取最新信息）
+                    │       │
+                    │       └── getOrCreateConnection（建立连接）
+                    │
+                    ├── 成功 → 重置重试计数
+                    │
+                    └── 失败 → 递增延迟重试（指数退避）
+```
+
+#### 指数退避策略
+
+```cpp
+uint32_t delay_ms = interval_ms * (1u << (current_retry < 5 ? current_retry : 5));
+```
+
+- 第 1 次重试：interval_ms * 1
+- 第 2 次重试：interval_ms * 2
+- 第 3 次重试：interval_ms * 4
+- 第 4 次重试：interval_ms * 8
+- 第 5 次及以后：interval_ms * 32（最大延迟）
+
+### 17.5 心跳机制
+
+#### 工作流程
+
+```
+客户端                                     服务端
+  │                                          │
+  ├── startHeartbeat(interval, timeout)       │
+  │       │                                   │
+  │       └── 启动定时器                       │
+  │               │                           │
+  │               ├── sendHeartbeatToService() │
+  │               │       │                   │
+  │               │       └── MSG_HEARTBEAT ──>│
+  │               │                           ├── 自动响应
+  │               │       MSG_HEARTBEAT_ACK <──┤
+  │               │       │                   │
+  │               │       └── 更新 last_ack    │
+  │               │                           │
+  │               └── checkHeartbeatTimeout()  │
+  │                       │                   │
+  │                       ├── 未超时: 继续     │
+  │                       │                   │
+  │                       └── 超时:            │
+  │                               ├── 清除缓存 │
+  │                               ├── 移除连接 │
+  │                               └── 触发重连 │
+```
+
+#### 服务端自动响应
+
+`ServiceHostRuntime` 自动响应 `MSG_HEARTBEAT`，无需业务代码干预：
+
+```cpp
+if (msg.getType() == MessageType::MSG_HEARTBEAT) {
+    Message ack(MessageType::MSG_HEARTBEAT_ACK, msg.getSequence());
+    // 发送 ACK 响应
+}
+```
+
+### 17.6 生成代码结构
+
+生成的 Proxy 类继承自 `ServiceProxyBase`，基类提供连接管理、自动重连、心跳等通用功能：
+
+```cpp
+class SensorServiceProxy : public omnibinder::ServiceProxyBase {
+public:
+    explicit SensorServiceProxy(OmniRuntime& runtime)
+        : ServiceProxyBase(runtime, "SensorService") {}
+
+    // 业务方法（仅生成这些）
+    int GetData(SensorData* out) {
+        Buffer req, resp;
+        int ret = runtime_.invoke("SensorService", 0x..., 0x..., req, resp, 0);
+        if (ret != 0) return ret;
+        if (!out) return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+        // ... 反序列化 resp 到 out
+        return 0;
+    }
+};
+```
+
+### 17.7 使用示例
+
+```cpp
+// 创建 Proxy
+demo::SensorServiceProxy proxy(runtime);
+
+// 连接服务（建立连接 + 注册死亡通知）
+proxy.connect();
+
+// 启用自动重连
+proxy.enableAutoReconnect(true);
+
+// 可选：启动心跳（检测服务存活）
+proxy.startHeartbeat(5000, 10000);  // 5秒间隔，10秒超时
+
+// 调用方法（直接使用已建立的连接）
+SensorData data;
+proxy.GetData(&data);
+
+// 断开连接（自动停止心跳）
+proxy.disconnect();
+```

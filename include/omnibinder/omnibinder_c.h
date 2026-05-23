@@ -193,6 +193,15 @@ int  omni_runtime_invoke_oneway(omni_runtime_t* client, const char* service_name
          uint32_t interface_id, uint32_t method_id,
          const omni_buffer_t* request);
 
+/* 连接管理 */
+int  omni_runtime_connect_service(omni_runtime_t* client, const char* service_name);
+int  omni_runtime_disconnect_service(omni_runtime_t* client, const char* service_name);
+int  omni_runtime_is_service_connected(const omni_runtime_t* client, const char* service_name);
+void omni_runtime_enable_auto_reconnect(omni_runtime_t* client, const char* service_name, int enable);
+void omni_runtime_set_reconnect_interval(omni_runtime_t* client, const char* service_name, uint32_t interval_ms);
+void omni_runtime_start_heartbeat(omni_runtime_t* client, const char* service_name, uint32_t interval_ms, uint32_t timeout_ms);
+void omni_runtime_stop_heartbeat(omni_runtime_t* client, const char* service_name);
+
 /* 话题 */
 int  omni_runtime_publish_topic(omni_runtime_t* client, const char* topic_name);
 int  omni_runtime_broadcast(omni_runtime_t* client, uint32_t topic_id,

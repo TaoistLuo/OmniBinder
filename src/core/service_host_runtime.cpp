@@ -150,6 +150,19 @@ void ServiceHostRuntime::processServiceClientMessages(const std::string& service
             on_invoke(service_name, client_fd, msg);
         } else if (msg.getType() == MessageType::MSG_INVOKE_ONEWAY) {
             on_invoke_oneway(service_name, msg);
+        } else if (msg.getType() == MessageType::MSG_HEARTBEAT) {
+            Message ack(MessageType::MSG_HEARTBEAT_ACK, msg.getSequence());
+            Buffer buf;
+            if (ack.serialize(buf)) {
+                ITransport* transport = nullptr;
+                std::map<int, ITransport*>::iterator tit = entry->client_transports.find(client_fd);
+                if (tit != entry->client_transports.end()) {
+                    transport = tit->second;
+                }
+                if (transport) {
+                    transport->send(buf.data(), buf.size());
+                }
+            }
         } else if (msg.getType() == MessageType::MSG_SUBSCRIBE_BROADCAST) {
             on_subscribe_broadcast(client_fd, msg);
         } else if (msg.getType() == MessageType::MSG_BROADCAST) {
@@ -200,6 +213,7 @@ void ServiceHostRuntime::onShmRequest(const std::string& service_name,
         on_invoke(service_name, client_id, msg);
     } else if (type == MessageType::MSG_INVOKE_ONEWAY) {
         on_invoke_oneway(service_name, msg);
+    } else if (type == MessageType::MSG_HEARTBEAT) {
     } else if (type == MessageType::MSG_SUBSCRIBE_BROADCAST) {
         on_subscribe_broadcast(service_name, client_id, msg);
     } else if (type == MessageType::MSG_BROADCAST) {

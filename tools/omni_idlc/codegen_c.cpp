@@ -1211,14 +1211,17 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
 
     // proxy_connect
     os << "int " << prefix << "_proxy_connect(" << prefix << "_proxy* p) {\n";
-    os << "    /* Verify service exists via a dummy invoke or lookup */\n";
-    os << "    p->connected = 1;\n";
-    os << "    return 0;\n";
+    os << "    int ret = omni_runtime_connect_service(p->runtime, \"" << svc.name << "\");\n";
+    os << "    if (ret == 0) p->connected = 1;\n";
+    os << "    return ret;\n";
     os << "}\n\n";
 
     // proxy_disconnect
     os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p) {\n";
-    os << "    p->connected = 0;\n";
+    os << "    if (p->connected) {\n";
+    os << "        omni_runtime_disconnect_service(p->runtime, \"" << svc.name << "\");\n";
+    os << "        p->connected = 0;\n";
+    os << "    }\n";
     os << "}\n\n";
 
     // Method proxies
