@@ -68,6 +68,8 @@ void EventLoop::run()
         pollOnce(-1);
     }
 
+    processPendingFunctors();
+
     OMNI_LOG_INFO(LOG_TAG, "EventLoop stopped");
 }
 

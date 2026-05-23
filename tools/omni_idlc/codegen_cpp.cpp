@@ -298,6 +298,7 @@ void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std:
     os << "#ifndef " << guard << "\n";
     os << "#define " << guard << "\n\n";
     os << "#include <omnibinder/omnibinder.h>\n";
+    os << "#include <omnibinder/proxy_base.h>\n";
     os << "#include <string>\n#include <vector>\n#include <functional>\n\n";
     
     // 生成被导入文件的 #include
@@ -384,13 +385,11 @@ void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
 }
 
 void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
-    os << "class " << svc.name << "Proxy {\n";
+    os << "class " << svc.name << "Proxy : public omnibinder::ServiceProxyBase {\n";
     os << "public:\n";
-    os << "    explicit " << svc.name << "Proxy(omnibinder::OmniRuntime& runtime);\n";
-    os << "    ~" << svc.name << "Proxy();\n";
-    os << "    int connect();\n";
-    os << "    void disconnect();\n";
-    os << "    bool isConnected() const;\n\n";
+    os << "    explicit " << svc.name << "Proxy(omnibinder::OmniRuntime& runtime)\n";
+    os << "        : ServiceProxyBase(runtime, \"" << svc.name << "\") {}\n";
+    os << "    ~" << svc.name << "Proxy() {}\n\n";
     
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
@@ -414,12 +413,10 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
         os << "    void Subscribe" << svc.publishes[i] << "(const std::function<void(const " << svc.publishes[i] << "&)>& callback);\n";
     }
-    os << "    void OnServiceDied(const std::function<void()>& callback);\n";
     
-    os << "\nprivate:\n";
-    os << "    omnibinder::OmniRuntime& runtime_;\n";
-    os << "    bool connected_;\n";
-    os << "    std::function<void()> death_callback_;\n";
+    os << "\n    // Inherited from ServiceProxyBase: connect(), disconnect(), isConnected(),\n";
+    os << "    //   enableAutoReconnect(), startHeartbeat(), stopHeartbeat(), OnServiceDied()\n";
+    
     os << "};\n\n";
 }
 
@@ -532,18 +529,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "}\n\n";
         }
         
-        // Proxy implementation
-os << svc.name << "Proxy::" << svc.name << "Proxy(omnibinder::OmniRuntime& runtime)\n";
-        os << "    : runtime_(runtime), connected_(false) {}\n\n";
-        os << svc.name << "Proxy::~" << svc.name << "Proxy() { disconnect(); }\n\n";
-        os << "int " << svc.name << "Proxy::connect() {\n";
-        os << "    omnibinder::ServiceInfo info;\n";
-        os << "    int ret = runtime_.lookupService(\"" << svc.name << "\", info);\n";
-        os << "    if (ret == 0) connected_ = true;\n";
-        os << "    return ret;\n}\n\n";
-        os << "void " << svc.name << "Proxy::disconnect() { connected_ = false; }\n";
-        os << "bool " << svc.name << "Proxy::isConnected() const { return connected_; }\n\n";
-        
+        // Proxy implementation - methods only (connect/disconnect inherited from ServiceProxyBase)
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
@@ -588,13 +574,6 @@ os << svc.name << "Proxy::" << svc.name << "Proxy(omnibinder::OmniRuntime& runti
             os << "        callback(msg);\n";
             os << "    });\n}\n\n";
         }
-        
-        os << "void " << svc.name << "Proxy::OnServiceDied(const std::function<void()>& callback) {\n";
-        os << "    death_callback_ = callback;\n";
-        os << "    runtime_.subscribeServiceDeath(\"" << svc.name << "\", [this](const std::string&) {\n";
-        os << "        connected_ = false;\n";
-        os << "        if (death_callback_) death_callback_();\n";
-        os << "    });\n}\n\n";
     }
     
     os << "} // namespace " << pkg_ << "\n";

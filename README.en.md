@@ -64,6 +64,9 @@ OmniBinder covers both **service management** and **service-to-service data path
 - **Remote method invocation (RPC)** — synchronous request/response and one-way calls
 - **Publish/subscribe broadcast** — topic-based broadcast with real-time subscribers
 - **Death notification** — automatic notification when a service exits unexpectedly
+- **Proactive connection management** — Proxy provides `connect()`/`disconnect()` for explicit service connections
+- **Auto-reconnect** — automatic reconnection on service recovery with configurable exponential backoff
+- **Heartbeat detection** — periodic heartbeat for service liveness detection, auto-triggers reconnect on timeout
 - **Automatic transport selection** — SHM for same-host communication, TCP for cross-host communication
 - **Per-service SHM configuration** — default small SHM rings (`4KB / 4KB`) with optional per-service enlargement
 - **IDL code generation** — generate Stub/Proxy code from `.bidl` files

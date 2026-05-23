@@ -222,7 +222,7 @@ int main(int argc, char* argv[]) {
     proxy.RequestLatestDataAsync(async_req, &ack);
     std::printf("RequestLatestDataAsync => code=%d message=%s\n", ack.code, ack.message.c_str());
 
-    // 注册服务死亡通知：这是客户端侧连接状态通知，不是向服务注册业务回调。
+    // 注册服务死亡通知：感知服务异常退出（自动重连已默认开启）
     proxy.OnServiceDied([]() {
         std::printf("\n!!! [DeathNotify] SensorService has DIED !!!\n\n");
     });

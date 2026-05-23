@@ -202,6 +202,14 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_sm_reconnect.cpp)
     set_tests_properties(test_sm_reconnect PROPERTIES TIMEOUT 120)
 endif()
 
+add_executable(test_heartbeat_reconnect test_heartbeat_reconnect.cpp)
+target_link_libraries(test_heartbeat_reconnect PRIVATE omnibinder_static pthread gtest gtest_main)
+add_dependencies(test_heartbeat_reconnect service_manager)
+add_test(NAME test_heartbeat_reconnect COMMAND test_heartbeat_reconnect
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(test_heartbeat_reconnect PROPERTIES TIMEOUT 120)
+
 # ============================================================
 # 性能测试与稳定性测试（保留原有格式，需要输出报告）
 # ============================================================
@@ -234,6 +242,21 @@ add_test(NAME test_transient_disconnect_recovery COMMAND test_transient_disconne
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
+
+# Prevent parallel execution of tests that start SM subprocesses using the same
+# hardcoded ports (19902, 19910, 19912, 19931, 19933). Both soak_runner and
+# transient_disconnect_recovery invoke other test binaries as subprocesses,
+# which would collide with the standalone CTest registrations of those same binaries.
+set_tests_properties(
+    test_full_integration
+    test_control_plane_and_fallback
+    test_performance
+    test_error_logging
+    test_threadsafe_client_and_reconnect
+    test_transient_disconnect_recovery
+    test_soak_runner
+    PROPERTIES RESOURCE_LOCK sm_port_lock
+)
 
 # ============================================================
 # Python 测试

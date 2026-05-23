@@ -153,6 +153,21 @@ public:
     int queryInterfacesInternal(const std::string& service_name,
                                 std::vector<InterfaceInfo>& interfaces);
 
+    // --- 连接管理 ---
+    int connectService(const std::string& service_name);
+    int disconnectService(const std::string& service_name);
+    bool isServiceConnected(const std::string& service_name);
+    void enableAutoReconnect(const std::string& service_name, bool enable);
+    void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
+    void startHeartbeat(const std::string& service_name, uint32_t interval_ms, uint32_t timeout_ms);
+    void stopHeartbeat(const std::string& service_name);
+    int connectServiceInternal(const std::string& service_name);
+    int disconnectServiceInternal(const std::string& service_name);
+    void tryReconnectService(const std::string& service_name);
+    void scheduleReconnect(const std::string& service_name, uint32_t delay_ms);
+    void sendHeartbeatToService(const std::string& service_name);
+    void checkHeartbeatTimeout(const std::string& service_name);
+
     // --- 远程调用 ---
     int invoke(const std::string& service_name, uint32_t interface_id,
                uint32_t method_id, const Buffer& request, Buffer& response,
@@ -310,6 +325,31 @@ private:
     // 死亡回调: service_name -> DeathCallback
     std::map<std::string, DeathCallback> death_callbacks_;
 
+    // 自动重连配置
+    struct ReconnectConfig {
+        bool enabled;
+        uint32_t interval_ms;
+        uint32_t max_retries;
+        uint32_t current_retry;
+        uint32_t timer_id;
+        
+        ReconnectConfig() : enabled(true), interval_ms(1000), 
+                           max_retries(0), current_retry(0), timer_id(0) {}
+    };
+    std::map<std::string, ReconnectConfig> reconnect_configs_;
+
+    struct HeartbeatState {
+        uint32_t interval_ms;
+        uint32_t timeout_ms;
+        uint32_t timer_id;
+        int64_t last_ack_time;
+        bool pending;
+        
+        HeartbeatState() : interval_ms(5000), timeout_ms(10000), 
+                          timer_id(0), last_ack_time(0), pending(false) {}
+    };
+    std::map<std::string, HeartbeatState> heartbeat_states_;
+
     TopicRuntime     topic_runtime_;
 
     std::string     host_id_;
@@ -321,7 +361,6 @@ private:
     std::atomic<bool> running_;
     bool            initialized_;
     OmniRuntime* owner_;
-    std::mutex      lifecycle_mutex_;
     std::mutex      api_mutex_;
     std::atomic<bool> loop_driver_active_;
     std::atomic<bool> sm_reconnect_needed_;

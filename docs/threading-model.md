@@ -184,3 +184,30 @@ while (running) {
 - 想最省心：一个线程 `run()`，其他线程安全调用 API
 - 想自己驱动：在外部循环里调用 `pollOnce()`
 - 想避免风险：不要在同一个 runtime 的回调里再发同步阻塞 API
+
+## 7. 连接管理线程模型
+
+### 7.1 连接操作
+
+- `connectService()` / `disconnectService()` 通过 `callSerialized` 在 owner event-loop 串行执行
+- 连接建立过程中同步等待 SM 回复（`sendSMRequestAndWaitReply`）
+- `isServiceConnected()` 可从任意线程调用（`ConnectionManager::getConnection` 是线程安全的）
+
+### 7.2 自动重连
+
+- 服务死亡时通过 `scheduleReconnect` 在 event-loop 上注册定时器
+- 重连定时器回调在 event-loop 线程执行
+- 重连过程中会查询 SM（`lookupServiceInfo`），同步等待回复
+
+### 7.3 心跳
+
+- 心跳定时器在 event-loop 线程执行
+- 心跳消息通过 `conn_mgr_->sendMessage` 发送（线程安全）
+- 心跳响应（`MSG_HEARTBEAT_ACK`）在 event-loop 线程处理
+- 心跳超时检测在 event-loop 线程执行
+
+### 7.4 Proxy 基类
+
+- `ServiceProxyBase::connect()` 内部调用 `callSerialized`，线程安全
+- `enableAutoReconnect()` / `startHeartbeat()` 通过 `callSerialized` 串行执行
+- 死亡通知回调（`onServiceDeath`）在 event-loop 线程执行

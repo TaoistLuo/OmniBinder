@@ -76,6 +76,14 @@ public:
     int listServices(std::vector<ServiceInfo>& services);
     int queryInterfaces(const std::string& service_name, std::vector<InterfaceInfo>& interfaces);
 
+    int connectService(const std::string& service_name);
+    int disconnectService(const std::string& service_name);
+    bool isServiceConnected(const std::string& service_name) const;
+    void enableAutoReconnect(const std::string& service_name, bool enable = true);
+    void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
+    void startHeartbeat(const std::string& service_name, uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+    void stopHeartbeat(const std::string& service_name);
+
     int invoke(const std::string& service_name, uint32_t interface_id, uint32_t method_id,
                const Buffer& request, Buffer& response, uint32_t timeout_ms = 0);
     int invokeOneWay(const std::string& service_name, uint32_t interface_id, uint32_t method_id,

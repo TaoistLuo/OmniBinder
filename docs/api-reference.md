@@ -269,6 +269,43 @@ public:
     int queryInterfaces(const std::string& service_name,
                         std::vector<InterfaceInfo>& interfaces);
 
+    // ---- 连接管理 ----
+
+    // 连接到远程服务（建立连接并缓存服务信息）
+    // service_name: 目标服务名
+    // 返回: 0 成功，负值为错误码
+    int connectService(const std::string& service_name);
+
+    // 断开与远程服务的连接
+    // service_name: 目标服务名
+    // 返回: 0 成功，负值为错误码
+    int disconnectService(const std::string& service_name);
+
+    // 检查是否已连接到远程服务
+    // service_name: 目标服务名
+    // 返回: true 已连接，false 未连接
+    bool isServiceConnected(const std::string& service_name) const;
+
+    // 启用自动重连
+    // service_name: 目标服务名
+    // enable: true 启用，false 禁用
+    void enableAutoReconnect(const std::string& service_name, bool enable = true);
+
+    // 设置重连间隔
+    // service_name: 目标服务名
+    // interval_ms: 重连间隔（毫秒）
+    void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
+
+    // 启动心跳检测
+    // service_name: 目标服务名
+    // interval_ms: 心跳间隔（毫秒，默认 5000）
+    // timeout_ms: 心跳超时（毫秒，默认 10000）
+    void startHeartbeat(const std::string& service_name, uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+
+    // 停止心跳检测
+    // service_name: 目标服务名
+    void stopHeartbeat(const std::string& service_name);
+
     // ---- 服务调用 ----
 
     // 调用远程服务方法（同步阻塞）

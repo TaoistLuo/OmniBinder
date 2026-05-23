@@ -584,3 +584,63 @@ ConnectionManager::getOrCreateConnection()
 | `service_manager/main.cpp` | ServiceManager：服务注册、查找、topic 关系管理 |
 | `src/core/message.cpp` | Message 序列化/反序列化 |
 | `include/omnibinder/types.h` | `ServiceInfo` 定义（含 host_id） |
+| `include/omnibinder/proxy_base.h` | ServiceProxyBase 基类 |
+| `src/core/service_host_runtime.cpp` | 服务端消息分发，含心跳自动响应 |
+
+---
+
+## 连接管理调用链路
+
+### 主动连接（Proxy::connect）
+
+```
+Proxy::connect()
+    │
+    └── ServiceProxyBase::connect()
+        │
+        ├── runtime_.connectService(service_name)
+        │       │
+        │       ├── lookupServiceInfo()     // 查询 SM 获取 ServiceInfo
+        │       │       ├── 检查 service_cache_
+        │       │       └── 未命中则查询 SM
+        │       │
+        │       └── conn_mgr_->getOrCreateConnection()  // 建立 SHM/TCP 连接
+        │
+        └── runtime_.subscribeServiceDeath()  // 注册死亡通知
+```
+
+### 自动重连
+
+```
+服务死亡 / 心跳超时
+    │
+    ├── service_cache_.erase(service_name)
+    ├── conn_mgr_->removeConnection(service_name)
+    │
+    └── scheduleReconnect(interval_ms)
+        │
+        └── 定时器触发
+            │
+            └── tryReconnectService(service_name)
+                │
+                └── connectServiceInternal()
+                    ├── lookupServiceInfo()   // 查询 SM 获取最新信息
+                    └── getOrCreateConnection()  // 建立新连接
+```
+
+### 心跳流程
+
+```
+startHeartbeat(interval, timeout)
+    │
+    └── 启动定时器
+        │
+        ├── sendHeartbeatToService()
+        │       └── MSG_HEARTBEAT → 服务端
+        │               │
+        │               └── ServiceHostRuntime 自动响应 MSG_HEARTBEAT_ACK
+        │
+        └── checkHeartbeatTimeout()
+            ├── 更新 last_ack_time
+            └── 超时: 清除缓存 + 移除连接 + 触发重连
+```
