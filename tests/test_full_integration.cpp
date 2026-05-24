@@ -185,6 +185,7 @@ TEST_F(FullIntegrationTest, InvokeViaShmAdd) {
     ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0) << "client init failed";
     Buffer req; req.writeInt32(100); req.writeInt32(200);
     Buffer resp;
+    ASSERT_EQ(c.connectService("CalcService"), 0);
     ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ADD, req, resp, 5000), 0) << "invoke add failed";
     EXPECT_EQ(mustRead<int32_t>(resp, &Buffer::tryReadInt32), 300);
     c.stop();
@@ -195,6 +196,7 @@ TEST_F(FullIntegrationTest, InvokeViaShmEcho) {
     ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0) << "client init failed";
     Buffer req; req.writeString("SHM echo test");
     Buffer resp;
+    ASSERT_EQ(c.connectService("CalcService"), 0);
     ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ECHO, req, resp, 5000), 0) << "invoke echo failed";
     EXPECT_EQ(mustReadString(resp), "SHM echo test");
     c.stop();
@@ -206,6 +208,7 @@ TEST_F(FullIntegrationTest, InterfaceMismatchIsRejected) {
     int before = srv_.service.invokeCount();
     Buffer req; req.writeInt32(1); req.writeInt32(2);
     Buffer resp;
+    ASSERT_EQ(c.connectService("CalcService"), 0);
     EXPECT_EQ(c.invoke("CalcService", IFACE_ID + 1, METHOD_ADD, req, resp, 5000),
               static_cast<int>(ErrorCode::ERR_INTERFACE_NOT_FOUND));
     EXPECT_EQ(srv_.service.invokeCount(), before);
@@ -217,6 +220,7 @@ TEST_F(FullIntegrationTest, InterfaceMismatchOnewayIsRejected) {
     ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0) << "client init failed";
     int before = srv_.service.invokeCount();
     Buffer req; req.writeInt32(7); req.writeInt32(8);
+    ASSERT_EQ(c.connectService("CalcService"), 0);
     EXPECT_EQ(c.invokeOneWay("CalcService", IFACE_ID + 1, METHOD_ADD, req), 0);
     for (int i = 0; i < 10; ++i) {
         srv_.runtime.pollOnce(20);
@@ -266,6 +270,7 @@ TEST_F(FullIntegrationTest, ThreeClientsConcurrentInvoke) {
         }
         Buffer req; req.writeInt32(a->a); req.writeInt32(a->b);
         Buffer resp;
+        c.connectService("CalcService");
         a->result->ret = c.invoke("CalcService", IFACE_ID, METHOD_ADD, req, resp, 5000);
         if (a->result->ret == 0) {
             a->result->result = mustRead<int32_t>(resp, &Buffer::tryReadInt32);
@@ -296,6 +301,7 @@ TEST_F(FullIntegrationTest, SequentialMultiClientInvoke) {
         for (int i = 0; i < 5; i++) {
             Buffer req; req.writeInt32(c * 100 + i); req.writeInt32(1);
             Buffer resp;
+            ASSERT_EQ(runtime.connectService("CalcService"), 0);
             int ret = runtime.invoke("CalcService", IFACE_ID, METHOD_ADD, req, resp, 5000);
             ASSERT_EQ(ret, 0) << "sequential invoke failed";
             ASSERT_EQ(mustRead<int32_t>(resp, &Buffer::tryReadInt32), c * 100 + i + 1);

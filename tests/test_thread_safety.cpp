@@ -87,6 +87,7 @@ static void concurrentInvoke(OmniRuntime& runtime, int thread_id, int iterations
     for (int i = 0; i < iterations; i++) {
         Buffer request, response;
         request.writeInt32(thread_id * 1000 + i);
+        ASSERT_EQ(runtime.connectService("TestService"), 0);
         int ret = runtime.invoke("TestService", IFACE_ID, METHOD_ECHO, request, response, 5000);
         if (ret == 0) success_count++;
         else failure_count++;

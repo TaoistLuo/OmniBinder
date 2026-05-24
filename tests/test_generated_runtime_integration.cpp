@@ -332,6 +332,7 @@ int main() {
     OmniRuntime sub_runtime;
     assert(sub_runtime.init("127.0.0.1", SM_PORT_REQ) == 0);
     demo::ItemServiceProxy proxy(sub_runtime);
+    assert(proxy.connect() == 0);
     std::atomic<int> topic_hits(0);
     proxy.SubscribeItemTopic([&topic_hits](const demo::ItemTopic&) { topic_hits++; });
     TcpTransport broadcast_rogue;
@@ -368,6 +369,7 @@ int main() {
     OmniRuntime client_runtime;
     assert(client_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     demo::ItemServiceProxy reply_proxy(client_runtime);
+    assert(reply_proxy.connect() == 0);
     demo::Item input;
     input.id = 77;
     demo::Item result;
@@ -401,6 +403,7 @@ int main() {
     OmniRuntime client_status_runtime;
     assert(client_status_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     demo::ItemServiceProxy status_proxy(client_status_runtime);
+    assert(status_proxy.connect() == 0);
     demo::Item status_input;
     status_input.id = 78;
     demo::Item status_result;
@@ -433,6 +436,7 @@ int main() {
     OmniRuntime client_length_runtime;
     assert(client_length_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     demo::ItemServiceProxy length_proxy(client_length_runtime);
+    assert(length_proxy.connect() == 0);
     demo::Item length_input;
     length_input.id = 79;
     demo::Item length_result;
@@ -716,6 +720,7 @@ int main() {
     assert(omni_runtime_init(sub_runtime, "127.0.0.1", SM_PORT_REQ) == 0);
     demo_ItemService_proxy proxy;
     demo_ItemService_proxy_init(&proxy, sub_runtime);
+    assert(demo_ItemService_proxy_connect(&proxy) == 0);
     std::atomic<int> topic_hits(0);
     demo_ItemService_proxy_subscribe_item_topic(&proxy, topicCallback, &topic_hits);
     omnibinder::TcpTransport broadcast_rogue;
@@ -754,6 +759,7 @@ int main() {
     assert(omni_runtime_init(client_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     demo_ItemService_proxy reply_proxy;
     demo_ItemService_proxy_init(&reply_proxy, client_runtime);
+    assert(demo_ItemService_proxy_connect(&reply_proxy) == 0);
     struct demo_Item input;
     demo_Item_init(&input);
     input.id = 88;
@@ -793,6 +799,7 @@ int main() {
     assert(omni_runtime_init(client_status_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     demo_ItemService_proxy status_proxy;
     demo_ItemService_proxy_init(&status_proxy, client_status_runtime);
+    assert(demo_ItemService_proxy_connect(&status_proxy) == 0);
     struct demo_Item status_input;
     demo_Item_init(&status_input);
     status_input.id = 89;
@@ -832,6 +839,7 @@ int main() {
     assert(omni_runtime_init(client_length_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     demo_ItemService_proxy length_proxy;
     demo_ItemService_proxy_init(&length_proxy, client_length_runtime);
+    assert(demo_ItemService_proxy_connect(&length_proxy) == 0);
     struct demo_Item length_input;
     demo_Item_init(&length_input);
     length_input.id = 90;

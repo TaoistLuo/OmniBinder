@@ -897,6 +897,14 @@ int main(int argc, char* argv[]) {
             stopSM(sm_pid);
             return 1;
         }
+        if (runtime.connectService("PerfService") != 0) {
+            fprintf(stderr, "FATAL: connectService PerfService failed\n");
+            runtime.stop();
+            srv.should_stop = true;
+            pthread_join(srv_tid, NULL);
+            stopSM(sm_pid);
+            return 1;
+        }
 
         // 不同 payload 大小的 Echo 测试
         int payload_sizes[] = {0, 64, 256, 1024, 4096, 8192};

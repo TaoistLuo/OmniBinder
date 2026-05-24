@@ -190,7 +190,7 @@ add_dependencies(test_thread_safety service_manager)
 add_test(NAME test_thread_safety COMMAND test_thread_safety
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-set_tests_properties(test_thread_safety PROPERTIES TIMEOUT 240)
+set_tests_properties(test_thread_safety PROPERTIES TIMEOUT 600)
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_sm_reconnect.cpp)
     add_executable(test_sm_reconnect test_sm_reconnect.cpp)

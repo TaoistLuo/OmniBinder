@@ -557,6 +557,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     req.writeInt32(5);
     req.writeInt32(9);
     Buffer resp;
+    ASSERT_EQ(probe.connectService("FallbackService"), 0);
     ASSERT_EQ(probe.invoke("FallbackService", IFACE_ID, METHOD_ADD, req, resp, 5000), 0);
     EXPECT_EQ(mustRead<int32_t>(resp, &Buffer::tryReadInt32), 14);
 
@@ -601,6 +602,7 @@ TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
     int32_t sum = 0;
+    ASSERT_EQ(checker.connectService("OwnedService"), 0);
     ASSERT_TRUE(invokeOwnedService(checker, 20, 22, sum));
     EXPECT_EQ(sum, 42);
     checker.stop();
@@ -624,6 +626,7 @@ TEST_F(ControlPlaneTest, MalformedSubscribeBroadcastDoesNotCrashService) {
 
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
+    ASSERT_EQ(checker.connectService("OwnedService"), 0);
     int32_t sum = 0;
     ASSERT_TRUE(invokeOwnedService(checker, 1, 2, sum));
     EXPECT_EQ(sum, 3);
@@ -668,6 +671,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
 
     OmniRuntime probe;
     ASSERT_EQ(probe.init("127.0.0.1", SM_PORT), 0);
+    ASSERT_EQ(probe.connectService("SlowReadService"), 0);
     Buffer req;
     std::vector<uint8_t> payload(16 * 1024, 0x5A);
     req.writeRaw(payload.data(), payload.size());

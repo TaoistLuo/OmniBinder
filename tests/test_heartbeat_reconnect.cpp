@@ -187,6 +187,7 @@ TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME))
         << "Service not registered with ServiceManager";
+    ASSERT_EQ(rt.connectService(SERVICE_NAME), 0) << "connectService failed";
 
     ASSERT_TRUE(tryEchoRpc(rt, SERVICE_NAME, "pre-death"))
         << "Initial RPC should succeed while service is alive";
