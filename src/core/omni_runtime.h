@@ -279,24 +279,11 @@ private:
     void cleanupPendingServiceRegistration(LocalServiceEntry* entry);
     void removeServiceListenerFromLoop(LocalServiceEntry* entry);
     void removeServiceShmFromLoop(LocalServiceEntry* entry);
-    bool acquireInvokeConnection(const std::string& service_name, ServiceInfo& info,
-                                 int attempt, ServiceConnection*& conn);
     void populateInvokeMessage(Message& msg, uint32_t interface_id, uint32_t method_id,
-                               const Buffer& request) const;
-    bool sendInvokeMessage(const std::string& service_name, const Message& msg,
-                            const ServiceInfo& info, ServiceConnection*& conn,
-                            int attempt, bool log_failure, uint32_t interface_id,
-                            uint32_t method_id);
-    bool sendInvokeMessageWithTimeout(const std::string& service_name, const Message& msg,
-                                      const ServiceInfo& info, ServiceConnection*& conn,
-                                      int attempt, bool log_failure, uint32_t interface_id,
-                                      uint32_t method_id, uint32_t timeout_ms,
-                                      uint32_t* elapsed_ms);
+                                const Buffer& request) const;
     int lookupServiceInfo(const std::string& service_name, ServiceInfo& info);
     std::string topicPublisherServiceName(const std::string& topic_name) const;
     bool ensureTopicPublisherConnection(const std::string& topic_name, const ServiceInfo& pub_info);
-    bool refreshServiceConnection(const std::string& service_name, ServiceInfo& info,
-                                  ServiceConnection*& conn);
     int reconnectServiceManager();
     int restoreControlPlaneState();
     int reconnectServiceManagerIfNeeded();

@@ -1176,75 +1176,65 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
                                     uint32_t timeout_ms) {
     stats_.total_rpc_calls++;
     uint32_t total_timeout_ms = effectiveTimeout(timeout_ms);
-    ServiceInfo info;
-    int ret = lookupServiceInfo(service_name, info);
+
+    ServiceConnection* conn = conn_mgr_->getConnection(service_name);
+    if (!conn) {
+        stats_.total_rpc_failures++;
+        return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
+    }
+
+    uint32_t seq = allocSequence();
+    Message msg(MessageType::MSG_INVOKE, seq);
+    populateInvokeMessage(msg, interface_id, method_id, request);
+
+    uint32_t send_elapsed_ms = 0;
+    if (!conn_mgr_->sendMessageWithinTimeout(service_name, msg, total_timeout_ms, &send_elapsed_ms)) {
+        if (send_elapsed_ms >= total_timeout_ms) {
+            stats_.total_rpc_timeouts++;
+            stats_.total_rpc_failures++;
+            OMNI_LOG_WARN(LOG_TAG,
+                          "rpc_send_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u",
+                          service_name.c_str(), interface_id, method_id, total_timeout_ms);
+            return static_cast<int>(ErrorCode::ERR_TIMEOUT);
+        }
+        stats_.connection_errors++;
+        stats_.total_rpc_failures++;
+        OMNI_LOG_ERROR(LOG_TAG,
+                       "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d",
+                       service_name.c_str(), interface_id, method_id,
+                       static_cast<int>(ErrorCode::ERR_SEND_FAILED));
+        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
+    }
+
+    uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
+        ? total_timeout_ms - send_elapsed_ms
+        : 0;
+
+    Message reply;
+    int ret = waitForReply(seq, reply_timeout_ms, reply);
     if (ret != 0) {
+        if (ret == static_cast<int>(ErrorCode::ERR_TIMEOUT)) {
+            stats_.total_rpc_timeouts++;
+            OMNI_LOG_WARN(LOG_TAG,
+                          "rpc_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u err=%d",
+                          service_name.c_str(), interface_id, method_id,
+                          total_timeout_ms, ret);
+        }
         stats_.total_rpc_failures++;
         return ret;
     }
 
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        ServiceConnection* conn = NULL;
-        if (!acquireInvokeConnection(service_name, info, attempt, conn)) {
-            stats_.connection_errors++;
-            stats_.total_rpc_failures++;
-            return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
-        }
-
-        uint32_t seq = allocSequence();
-        Message msg(MessageType::MSG_INVOKE, seq);
-        populateInvokeMessage(msg, interface_id, method_id, request);
-
-        uint32_t send_elapsed_ms = 0;
-
-        if (!sendInvokeMessageWithTimeout(service_name, msg, info, conn, attempt, true,
-                                          interface_id, method_id, total_timeout_ms,
-                                          &send_elapsed_ms)) {
-            if (send_elapsed_ms >= total_timeout_ms) {
-                stats_.total_rpc_timeouts++;
-                stats_.total_rpc_failures++;
-                OMNI_LOG_WARN(LOG_TAG,
-                              "rpc_send_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u",
-                              service_name.c_str(), interface_id, method_id, total_timeout_ms);
-                return static_cast<int>(ErrorCode::ERR_TIMEOUT);
-            }
-            stats_.total_rpc_failures++;
-            return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-        }
-
-        uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms
-            ? total_timeout_ms - send_elapsed_ms
-            : 0;
-
-        Message reply;
-        ret = waitForReply(seq, reply_timeout_ms, reply);
-        if (ret != 0) {
-            if (ret == static_cast<int>(ErrorCode::ERR_TIMEOUT)) {
-                stats_.total_rpc_timeouts++;
-                OMNI_LOG_WARN(LOG_TAG,
-                              "rpc_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u err=%d",
-                              service_name.c_str(), interface_id, method_id,
-                              total_timeout_ms, ret);
-            }
-            stats_.total_rpc_failures++;
-            return ret;
-        }
-
-        int32_t status = 0;
-        if (!decodeInvokeReplyPayload(reply, status, response)) {
-            stats_.total_rpc_failures++;
-            return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
-        }
-        if (status != 0) {
-            stats_.total_rpc_failures++;
-            return status;
-        }
-        stats_.total_rpc_success++;
-        return 0;
+    int32_t status = 0;
+    if (!decodeInvokeReplyPayload(reply, status, response)) {
+        stats_.total_rpc_failures++;
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
-
-    stats_.total_rpc_failures++;
-    return static_cast<int>(ErrorCode::ERR_INVOKE_FAILED);
+    if (status != 0) {
+        stats_.total_rpc_failures++;
+        return status;
+    }
+    stats_.total_rpc_success++;
+    return 0;
 }
 
 int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t interface_id,
@@ -1257,35 +1247,27 @@ int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t in
 int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uint32_t interface_id,
                                           uint32_t method_id, const Buffer& request) {
     stats_.total_rpc_calls++;
-    ServiceInfo info;
-    int ret = lookupServiceInfo(service_name, info);
-    if (ret != 0) {
+
+    ServiceConnection* conn = conn_mgr_->getConnection(service_name);
+    if (!conn) {
         stats_.total_rpc_failures++;
-        return ret;
+        return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
 
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        ServiceConnection* conn = NULL;
-        if (!acquireInvokeConnection(service_name, info, attempt, conn)) {
-            stats_.connection_errors++;
-            stats_.total_rpc_failures++;
-            return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
-        }
+    Message msg(MessageType::MSG_INVOKE_ONEWAY, allocSequence());
+    populateInvokeMessage(msg, interface_id, method_id, request);
 
-        Message msg(MessageType::MSG_INVOKE_ONEWAY, allocSequence());
-        populateInvokeMessage(msg, interface_id, method_id, request);
-
-        if (!sendInvokeMessage(service_name, msg, info, conn, attempt, false,
-                               interface_id, method_id)) {
-            stats_.total_rpc_failures++;
-            return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-        }
-        stats_.total_rpc_success++;
-        return 0;
+    if (!conn_mgr_->sendMessage(service_name, msg)) {
+        stats_.connection_errors++;
+        stats_.total_rpc_failures++;
+        OMNI_LOG_ERROR(LOG_TAG,
+                       "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d",
+                       service_name.c_str(), interface_id, method_id,
+                       static_cast<int>(ErrorCode::ERR_SEND_FAILED));
+        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
-
-    stats_.total_rpc_failures++;
-    return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
+    stats_.total_rpc_success++;
+    return 0;
 }
 
 // ============================================================
@@ -1740,6 +1722,10 @@ void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
     OMNI_LOG_WARN(LOG_TAG, "Direct connection to %s lost", service_name.c_str());
     stats_.connection_errors++;
     service_cache_.erase(service_name);
+    if (conn_mgr_) {
+        conn_mgr_->removeConnection(service_name);
+    }
+    stopHeartbeat(service_name);
     
     // Trigger reconnect if auto-reconnect is enabled for this service
     std::map<std::string, ReconnectConfig>::iterator rc_it = reconnect_configs_.find(service_name);
@@ -1847,17 +1833,6 @@ bool OmniRuntime::Impl::sendOnFd(ITransport* transport, const Message& msg) {
     return platform::socketSendAll(transport->fd(), buf.data(), buf.size(), effectiveTimeout(0), NULL);
 }
 
-bool OmniRuntime::Impl::acquireInvokeConnection(const std::string& service_name, ServiceInfo& info,
-                                                int attempt, ServiceConnection*& conn) {
-    conn = conn_mgr_->getOrCreateConnection(
-        service_name, info.host, info.port, info.host_id, info.shm_name, info.shm_config);
-    if (conn) {
-        return true;
-    }
-
-    return attempt == 0 && refreshServiceConnection(service_name, info, conn);
-}
-
 void OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_id,
                                               uint32_t method_id, const Buffer& request) const {
     if (!msg.payload.writeUint32(interface_id)
@@ -1868,65 +1843,6 @@ void OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_i
                        "invoke_payload_serialize_failed iface=0x%08x method=0x%08x err=%d",
                        interface_id, method_id, static_cast<int>(ErrorCode::ERR_SERIALIZE));
     }
-}
-
-bool OmniRuntime::Impl::sendInvokeMessage(const std::string& service_name, const Message& msg,
-                                          const ServiceInfo& info, ServiceConnection*& conn,
-                                          int attempt, bool log_failure,
-                                          uint32_t interface_id, uint32_t method_id) {
-    if (conn_mgr_->sendMessage(service_name, msg)) {
-        return true;
-    }
-
-    stats_.connection_errors++;
-    if (log_failure) {
-        OMNI_LOG_ERROR(LOG_TAG,
-                       "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d attempt=%d",
-                       service_name.c_str(), interface_id, method_id,
-                       static_cast<int>(ErrorCode::ERR_SEND_FAILED), attempt + 1);
-    }
-
-    return attempt == 0 && refreshServiceConnection(service_name,
-                                                     const_cast<ServiceInfo&>(info), conn);
-}
-
-bool OmniRuntime::Impl::sendInvokeMessageWithTimeout(const std::string& service_name,
-                                                     const Message& msg,
-                                                     const ServiceInfo& info,
-                                                     ServiceConnection*& conn,
-                                                     int attempt,
-                                                     bool log_failure,
-                                                     uint32_t interface_id,
-                                                     uint32_t method_id,
-                                                     uint32_t timeout_ms,
-                                                     uint32_t* elapsed_ms) {
-    if (elapsed_ms) {
-        *elapsed_ms = 0;
-    }
-
-    if (conn_mgr_->sendMessageWithinTimeout(service_name, msg, timeout_ms, elapsed_ms)) {
-        return true;
-    }
-
-    stats_.connection_errors++;
-    if (log_failure) {
-        bool timed_out = elapsed_ms && *elapsed_ms >= timeout_ms;
-        OMNI_LOG_ERROR(LOG_TAG,
-                       timed_out
-                           ? "rpc_send_timeout service=%s iface=0x%08x method=0x%08x err=%d attempt=%d"
-                           : "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d attempt=%d",
-                       service_name.c_str(), interface_id, method_id,
-                       timed_out ? static_cast<int>(ErrorCode::ERR_TIMEOUT)
-                                 : static_cast<int>(ErrorCode::ERR_SEND_FAILED),
-                       attempt + 1);
-    }
-
-    if (elapsed_ms && *elapsed_ms >= timeout_ms) {
-        return false;
-    }
-
-    return attempt == 0 && refreshServiceConnection(service_name,
-                                                     const_cast<ServiceInfo&>(info), conn);
 }
 
 std::string OmniRuntime::Impl::topicPublisherServiceName(const std::string& topic_name) const {
@@ -1952,26 +1868,6 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
                     topic_name.c_str(), dataChannelKindName(conn->transport->type()),
                     pub_name.c_str());
     return conn_mgr_->sendMessage(pub_name, sub_msg);
-}
-
-bool OmniRuntime::Impl::refreshServiceConnection(const std::string& service_name,
-                                                        ServiceInfo& info,
-                                                        ServiceConnection*& conn) {
-    if (!conn_mgr_) {
-        return false;
-    }
-
-    conn_mgr_->removeConnection(service_name);
-    service_cache_.erase(service_name);
-
-    int ret = lookupServiceInfo(service_name, info);
-    if (ret != 0) {
-        return false;
-    }
-
-    conn = conn_mgr_->getOrCreateConnection(
-        service_name, info.host, info.port, info.host_id, info.shm_name, info.shm_config);
-    return conn != NULL;
 }
 
 void OmniRuntime::Impl::setHeartbeatInterval(uint32_t ms) {

@@ -236,6 +236,7 @@ TEST_F(IntegrationTest, InvokeAdd) {
     request.writeInt32(25);
 
     Buffer response;
+    ASSERT_EQ(runtime.connectService("TestService"), 0);
     ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
                         request, response, 5000), 0);
     ASSERT_GE(response.size(), 4u);
@@ -252,6 +253,7 @@ TEST_F(IntegrationTest, InvokeEcho) {
     request.writeString("Hello OmniBinder!");
 
     Buffer response;
+    ASSERT_EQ(runtime.connectService("TestService"), 0);
     ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ECHO,
                         request, response, 5000), 0);
     EXPECT_GT(response.size(), 0u);
@@ -271,6 +273,7 @@ TEST_F(IntegrationTest, MultipleInvocations) {
         request.writeInt32(100);
 
         Buffer response;
+        ASSERT_EQ(runtime.connectService("TestService"), 0);
         ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
                             request, response, 5000), 0);
         EXPECT_EQ(mustRead<int32_t>(response, &Buffer::tryReadInt32), i + 100);

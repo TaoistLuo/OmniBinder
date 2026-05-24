@@ -132,6 +132,10 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
 
     bool recovered = false;
     for (int i = 0; i < 80 && !recovered; ++i) {
+        if (runtime.connectService("LogService") != 0) {
+            usleep(100000);
+            continue;
+        }
         Buffer ok_req, ok_resp;
         const char* payload = "reconnect-ok";
         ok_req.writeRaw(payload, strlen(payload));

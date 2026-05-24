@@ -168,6 +168,7 @@ TEST_F(CApiTest, RegisterInvokeAndStats) {
     ASSERT_NE(resp, nullptr);
     omni_buffer_write_string(req, "rpc-through-c-api", 17);
 
+    ASSERT_EQ(omni_runtime_connect_service(runtime, "CService"), 0);
     ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO, req, resp, 3000), 0);
 
     uint32_t len = 0;
@@ -197,6 +198,7 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     omni_runtime_t* runtime = omni_runtime_create();
     ASSERT_NE(runtime, nullptr);
     ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
+    ASSERT_EQ(omni_runtime_connect_service(runtime, "CService"), 0);
 
     omni_buffer_t* req = omni_buffer_create();
     omni_buffer_t* resp = omni_buffer_create();

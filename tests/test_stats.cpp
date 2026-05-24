@@ -76,6 +76,7 @@ TEST_F(StatsTest, InvokeUpdatesRpcCount) {
 
     OmniRuntime client_rt;
     ASSERT_EQ(client_rt.init("127.0.0.1", SM_PORT), 0);
+    ASSERT_EQ(client_rt.connectService("TestService"), 0);
 
     for (int i = 0; i < 3; i++) {
         Buffer req, resp;

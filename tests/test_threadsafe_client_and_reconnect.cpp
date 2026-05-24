@@ -110,6 +110,7 @@ pthread_t ThreadsafeClientAndReconnectTest::server_tid_ = 0;
 TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentInvokeSameClient) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    ASSERT_EQ(runtime.connectService("ThreadSafeService"), 0);
 
     pthread_t tids[6];
     ClientThreadArg args[6];
@@ -142,6 +143,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, SmRestartRecoverySameClient) {
         Buffer req, resp;
         const char* payload = "after-restart";
         req.writeRaw(payload, strlen(payload));
+        if (runtime.connectService("ThreadSafeService") != 0) continue;
         int ret = runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, req, resp, 3000);
         if (ret == 0) {
             std::string result(reinterpret_cast<const char*>(resp.data()), resp.size());
@@ -160,6 +162,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
     Buffer warm_req, warm_resp;
     const char* warm_payload = "before-server-restart";
     warm_req.writeRaw(warm_payload, strlen(warm_payload));
+    ASSERT_EQ(runtime.connectService("ThreadSafeService"), 0);
     ASSERT_EQ(runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, warm_req, warm_resp, 3000), 0);
 
     server_ctx_->should_stop = true;
@@ -175,6 +178,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
     for (int i = 0; i < 80 && !server_recovered; ++i) {
         runtime.clearServiceCache();
         runtime.closeAllConnections();
+        if (runtime.connectService("ThreadSafeService") != 0) continue;
 
         Buffer req, resp;
         const char* payload = "after-server-restart";

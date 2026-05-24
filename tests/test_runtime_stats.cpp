@@ -99,6 +99,7 @@ TEST_F(RuntimeStatsTest, SuccessfulCallsUpdateStats) {
         Buffer req, resp;
         const char* payload = "stats-ok";
         req.writeRaw(payload, strlen(payload));
+        ASSERT_EQ(runtime.connectService("StatsService"), 0);
         ASSERT_EQ(runtime.invoke("StatsService", IFACE_ID, METHOD_ECHO, req, resp, 3000), 0);
     }
     RuntimeStats stats;
