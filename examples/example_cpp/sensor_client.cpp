@@ -1,6 +1,6 @@
 #include "sensor_service.bidl.h"
 #include <omnibinder/runtime.h>
-#include "platform/platform.h"
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -51,7 +51,8 @@ int main(int argc, char* argv[]) {
         else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) sm_port = (uint16_t)atoi(argv[++i]);
     }
 
-    omnibinder::platform::setupSignalHandlers(signalHandler);
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
 
     std::printf("=== SensorClient (C++ Client) Starting ===\n");
     std::printf("ServiceManager: %s:%u\n", sm_host, sm_port);

@@ -1,6 +1,6 @@
 #include "sensor_service.bidl.h"
 #include <omnibinder/runtime.h>
-#include "platform/platform.h"
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -162,7 +162,8 @@ int main(int argc, char* argv[]) {
         else if (strcmp(argv[i], "--register-host") == 0 && i + 1 < argc) register_host = argv[++i];
     }
 
-    omnibinder::platform::setupSignalHandlers(signalHandler);
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
     srand((unsigned)time(NULL));
 
     std::printf("=== SensorService (C++ Server) Starting ===\n");
