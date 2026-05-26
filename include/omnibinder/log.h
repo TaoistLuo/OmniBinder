@@ -48,11 +48,13 @@
 namespace omnibinder {
 
 enum class LogLevel {
-    LOG_DEBUG = 0,
-    LOG_INFO  = 1,
-    LOG_WARN  = 2,
-    LOG_ERROR = 3,
-    LOG_NONE  = 4,
+    LOG_FATAL    = 0, // 致命错误，整个系统终止
+    LOG_ERROR    = 1, // 普通功能错误，但不影响信息运行
+    LOG_WARN     = 2, // 告警
+    LOG_INFO     = 3, // 重要信息
+    LOG_DEBUG    = 4, // 调试信息
+    LOG_VERBOSE  = 5, // 很频繁的打印
+    LOG_OFF      = 6,
 };
 
 // 全局日志级别（可在运行时修改）
@@ -77,16 +79,18 @@ inline void enableTimestamp(bool enable) {
 
 inline const char* logLevelStr(LogLevel level) {
     switch (level) {
-    case LogLevel::LOG_DEBUG: return "D";
-    case LogLevel::LOG_INFO:  return "I";
-    case LogLevel::LOG_WARN:  return "W";
+    case LogLevel::LOG_FATAL: return "F";
     case LogLevel::LOG_ERROR: return "E";
+    case LogLevel::LOG_WARN:  return "W";
+    case LogLevel::LOG_INFO:  return "I";
+    case LogLevel::LOG_DEBUG: return "D";
+    case LogLevel::LOG_VERBOSE: return "V";
     default:                  return "?????";
     }
 }
 
 inline void logPrint(LogLevel level, const char* tag, const char* fmt, ...) {
-    if (level < globalLogLevel()) return;
+    if (level > globalLogLevel()) return;
 
     if (globalTimestampEnabled()) {
         auto now = std::chrono::system_clock::now();
@@ -113,13 +117,17 @@ inline void logPrint(LogLevel level, const char* tag, const char* fmt, ...) {
 
 } // namespace omnibinder
 
-#define OMNI_LOG_DEBUG(tag, ...) \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_DEBUG, tag, __VA_ARGS__)
-#define OMNI_LOG_INFO(tag, ...)  \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_INFO,  tag, __VA_ARGS__)
-#define OMNI_LOG_WARN(tag, ...)  \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_WARN,  tag, __VA_ARGS__)
+#define OMNI_LOG_FATAL(tag, ...) \
+    omnibinder::logPrint(omnibinder::LogLevel::LOG_FATAL, tag, __VA_ARGS__)
 #define OMNI_LOG_ERROR(tag, ...) \
     omnibinder::logPrint(omnibinder::LogLevel::LOG_ERROR, tag, __VA_ARGS__)
+#define OMNI_LOG_WARN(tag, ...)  \
+    omnibinder::logPrint(omnibinder::LogLevel::LOG_WARN,  tag, __VA_ARGS__)
+#define OMNI_LOG_INFO(tag, ...)  \
+    omnibinder::logPrint(omnibinder::LogLevel::LOG_INFO,  tag, __VA_ARGS__)
+#define OMNI_LOG_DEBUG(tag, ...) \
+    omnibinder::logPrint(omnibinder::LogLevel::LOG_DEBUG, tag, __VA_ARGS__)
+#define OMNI_LOG_VERBOSE(tag, ...) \
+    omnibinder::logPrint(omnibinder::LogLevel::LOG_VERBOSE, tag, __VA_ARGS__)
 
 #endif // OMNIOMNI_LOG_H

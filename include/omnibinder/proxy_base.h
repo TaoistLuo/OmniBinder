@@ -22,6 +22,7 @@ public:
         if (ret == 0) {
             connected_.store(true, std::memory_order_release);
             enableAutoReconnect(true);
+            startHeartbeat();
             runtime_.subscribeServiceDeath(service_name_,
                 [this](const std::string&) { this->onServiceDeath(); });
         }

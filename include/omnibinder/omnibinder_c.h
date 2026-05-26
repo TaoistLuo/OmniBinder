@@ -170,14 +170,25 @@ omni_runtime_t* omni_runtime_create(void);
 void           omni_runtime_destroy(omni_runtime_t* client);
 
 int  omni_runtime_init(omni_runtime_t* client, const char* sm_host, uint16_t sm_port);
+void omni_runtime_run(omni_runtime_t* client);
 void omni_runtime_poll_once(omni_runtime_t* client, int timeout_ms);
 void omni_runtime_stop(omni_runtime_t* client);
+int  omni_runtime_is_running(const omni_runtime_t* client);
 
 /** 设置当前 runtime 下服务默认注册到 ServiceManager 的可达地址 */
 void omni_runtime_set_register_host(omni_runtime_t* client, const char* host);
 
 /** 获取当前 runtime 默认注册到 ServiceManager 的可达地址。返回内部字符串指针。 */
 const char* omni_runtime_get_register_host(const omni_runtime_t* client);
+
+/** 设置向 ServiceManager 发送心跳的间隔（毫秒） */
+void omni_runtime_set_heartbeat_interval(omni_runtime_t* client, uint32_t interval_ms);
+
+/** 设置 RPC 调用的默认超时时间（毫秒） */
+void omni_runtime_set_default_timeout(omni_runtime_t* client, uint32_t timeout_ms);
+
+/** 获取当前 runtime 的主机标识符。返回内部字符串指针。 */
+const char* omni_runtime_host_id(const omni_runtime_t* client);
 
 /* 服务注册/注销 */
 int  omni_runtime_register_service(omni_runtime_t* client, omni_service_t* svc);
