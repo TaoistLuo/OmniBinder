@@ -837,7 +837,7 @@ int main(int argc, char* argv[]) {
     }
 
     // 关闭框架日志，避免干扰性能测量
-    setLogLevel(LogLevel::LOG_ERROR);
+    setLogLevel(omnibinder::LOG_ERROR);
 
     printf("=== OmniBinder Performance Benchmark ===\n\n");
 

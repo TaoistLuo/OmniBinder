@@ -79,7 +79,7 @@ protected:
         unlink(log_path_);
         FILE* log_fp = freopen(log_path_, "w", stderr);
         ASSERT_NE(log_fp, nullptr);
-        setLogLevel(LogLevel::LOG_DEBUG);
+        setLogLevel(omnibinder::LOG_DEBUG);
 
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19933", "--log-level", "0");
         ASSERT_GT(sm_pid_, 0);

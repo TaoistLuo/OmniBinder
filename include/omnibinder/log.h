@@ -1,12 +1,11 @@
 /**************************************************************************************************
  * @file        log.h
- * @brief       简单的日志实现
- * @details     提供轻量级的日志输出功能，支持 DEBUG/INFO/WARN/ERROR 四个级别，
- *              可在运行时通过 setLogLevel() 动态调整。支持可选的时间戳输出。
- *              通过 OMNI_LOG_DEBUG/INFO/WARN/ERROR 宏简化调用，输出到 stderr。
+ * @brief       轻量级 C/C++ 双兼容日志
+ * @details     C 和 C++ 均可用。性能关键：级别检查在宏中展开为直接全局变量比较，过滤日志零开销。
+ *              支持 FATAL/ERROR/WARN/INFO/DEBUG/VERBOSE 六个级别，运行时动态调整。
  *
  * @author      taoist.luo
- * @version     1.0.0
+ * @version     2.0.0
  * @date        2025-02-11
  *
  * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)
@@ -31,103 +30,137 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *************************************************************************************************/
-#ifndef OMNIOMNI_LOG_H
-#define OMNIOMNI_LOG_H
+#ifndef OMNIBINDER_LOG_H
+#define OMNIBINDER_LOG_H
 
-#include <cstdio>
-#include <cstdarg>
-#include <ctime>
-#include <chrono>
+#include <stdio.h>
+#include <stdarg.h>
 
-#ifdef _WIN32
-    #define OMNI_LOCALTIME(t, tm_buf) localtime_s(&(tm_buf), &(t))
-#else
-    #define OMNI_LOCALTIME(t, tm_buf) localtime_r(&(t), &(tm_buf))
+#ifdef __cplusplus
+extern "C" {
 #endif
+
+/* ============================================================
+ * 日志级别 (C enum, C++ 也有对应的常量)
+ * ============================================================ */
+typedef enum {
+    OMNI_LOG_FATAL   = 0,  /* 致命错误 */
+    OMNI_LOG_ERROR   = 1,  /* 功能错误 */
+    OMNI_LOG_WARN    = 2,  /* 告警 */
+    OMNI_LOG_INFO    = 3,  /* 重要信息 */
+    OMNI_LOG_DEBUG   = 4,  /* 调试信息 */
+    OMNI_LOG_VERBOSE = 5,  /* 详细日志 */
+    OMNI_LOG_OFF     = 6   /* 关闭日志 (仅 set, 不用于打印) */
+} omni_log_level_t;
+
+/* ============================================================
+ * 全局状态 — 直接可读，宏内零开销过滤
+ * ============================================================ */
+extern omni_log_level_t g_omni_log_level;       /* 当前日志级别 */
+extern int              g_omni_log_timestamp;    /* 时间戳开关 (1=开 0=关) */
+
+/* ============================================================
+ * C API (C++ 也通过宏调用这些函数)
+ * ============================================================ */
+void omni_log_set_level(omni_log_level_t level);
+void omni_log_enable_timestamp(int enable);
+const char* omni_log_level_str(omni_log_level_t level);
+
+/* 格式化打印（变参版本，供上层封装） */
+void omni_log_vprint(omni_log_level_t level, const char* tag,
+                     const char* fmt, va_list args);
+
+/* 格式化打印 */
+void omni_log_print(omni_log_level_t level, const char* tag,
+                    const char* fmt, ...);
+
+#ifdef __cplusplus
+}  /* extern "C" */
+#endif
+
+/* ============================================================
+ * 日志宏 — C 和 C++ 均可使用
+ *
+ * 性能关键：级别检查展开为直接全局变量比较，无函数调用开销。
+ * 仅当日志级别足够低时才进入 omni_log_print() 进行格式化。
+ * ============================================================ */
+/* ##__VA_ARGS__ (GNU extension): 当 __VA_ARGS__ 为空时移除前置逗号，
+ * 允许 OMNI_LOG_INFO("tag", "fmt") 无额外变参的写法。 */
+#define OMNI_LOG_FATAL(tag, ...) \
+    do { if (OMNI_LOG_FATAL <= g_omni_log_level) \
+        omni_log_print(OMNI_LOG_FATAL, tag, ##__VA_ARGS__); } while(0)
+
+#define OMNI_LOG_ERROR(tag, ...) \
+    do { if (OMNI_LOG_ERROR <= g_omni_log_level) \
+        omni_log_print(OMNI_LOG_ERROR, tag, ##__VA_ARGS__); } while(0)
+
+#define OMNI_LOG_WARN(tag, ...) \
+    do { if (OMNI_LOG_WARN <= g_omni_log_level) \
+        omni_log_print(OMNI_LOG_WARN,  tag, ##__VA_ARGS__); } while(0)
+
+#define OMNI_LOG_INFO(tag, ...) \
+    do { if (OMNI_LOG_INFO <= g_omni_log_level) \
+        omni_log_print(OMNI_LOG_INFO,  tag, ##__VA_ARGS__); } while(0)
+
+#define OMNI_LOG_DEBUG(tag, ...) \
+    do { if (OMNI_LOG_DEBUG <= g_omni_log_level) \
+        omni_log_print(OMNI_LOG_DEBUG, tag, ##__VA_ARGS__); } while(0)
+
+#define OMNI_LOG_VERBOSE(tag, ...) \
+    do { if (OMNI_LOG_VERBOSE <= g_omni_log_level) \
+        omni_log_print(OMNI_LOG_VERBOSE, tag, ##__VA_ARGS__); } while(0)
+
+/* ============================================================
+ * C++ 兼容层 — 保留原有 namespace + enum class 风格
+ *
+ * 以下代码仅在 C++ 编译时生效。所有包装函数均为 inline，编译后
+ * 与直接使用 C API 完全一致（零额外开销）。
+ * ============================================================ */
+#ifdef __cplusplus
 
 namespace omnibinder {
 
-enum class LogLevel {
-    LOG_FATAL    = 0, // 致命错误，整个系统终止
-    LOG_ERROR    = 1, // 普通功能错误，但不影响信息运行
-    LOG_WARN     = 2, // 告警
-    LOG_INFO     = 3, // 重要信息
-    LOG_DEBUG    = 4, // 调试信息
-    LOG_VERBOSE  = 5, // 很频繁的打印
-    LOG_OFF      = 6,
-};
+/* 类型别名，与旧代码兼容 */
+using LogLevel = omni_log_level_t;
 
-// 全局日志级别（可在运行时修改）
+/* 常量别名 */
+constexpr LogLevel LOG_FATAL   = OMNI_LOG_FATAL;
+constexpr LogLevel LOG_ERROR   = OMNI_LOG_ERROR;
+constexpr LogLevel LOG_WARN    = OMNI_LOG_WARN;
+constexpr LogLevel LOG_INFO    = OMNI_LOG_INFO;
+constexpr LogLevel LOG_DEBUG   = OMNI_LOG_DEBUG;
+constexpr LogLevel LOG_VERBOSE = OMNI_LOG_VERBOSE;
+constexpr LogLevel LOG_OFF     = OMNI_LOG_OFF;
+
+/* 与旧实现兼容的静态级别访问器 */
 inline LogLevel& globalLogLevel() {
-    static LogLevel level = LogLevel::LOG_INFO;
-    return level;
-}
-
-inline void setLogLevel(LogLevel level) {
-    globalLogLevel() = level;
-}
-
-// 全局时间戳开关（默认关闭，保持向后兼容）
-inline bool& globalTimestampEnabled() {
-    static bool enabled = true;
-    return enabled;
-}
-
-inline void enableTimestamp(bool enable) {
-    globalTimestampEnabled() = enable;
+    return g_omni_log_level;
 }
 
 inline const char* logLevelStr(LogLevel level) {
-    switch (level) {
-    case LogLevel::LOG_FATAL: return "F";
-    case LogLevel::LOG_ERROR: return "E";
-    case LogLevel::LOG_WARN:  return "W";
-    case LogLevel::LOG_INFO:  return "I";
-    case LogLevel::LOG_DEBUG: return "D";
-    case LogLevel::LOG_VERBOSE: return "V";
-    default:                  return "?????";
-    }
+    return omni_log_level_str(level);
 }
 
-inline void logPrint(LogLevel level, const char* tag, const char* fmt, ...) {
-    if (level > globalLogLevel()) return;
+/* 包装函数 — 编译后与直接调用 C API 无差异 */
+inline void setLogLevel(LogLevel level) {
+    omni_log_set_level(level);
+}
 
-    if (globalTimestampEnabled()) {
-        auto now = std::chrono::system_clock::now();
-        auto time_t_now = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()) % 1000;
-        struct tm tm_buf;
-        OMNI_LOCALTIME(time_t_now, tm_buf);
-        fprintf(stderr, "[%04d-%02d-%02d %02d:%02d:%02d.%03d][%s][%s] ",
-                tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
-                tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
-                static_cast<int>(ms.count()),
-                logLevelStr(level), tag);
-    } else {
-        fprintf(stderr, "[%s][%s] ", logLevelStr(level), tag);
-    }
+inline void enableTimestamp(bool enable) {
+    omni_log_enable_timestamp(enable ? 1 : 0);
+}
 
+inline void logPrint(LogLevel level, const char* tag, const char* fmt, ...)
+{
+    if (level > g_omni_log_level) return;
     va_list args;
     va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
+    omni_log_vprint(level, tag, fmt, args);
     va_end(args);
-    fprintf(stderr, "\n");
 }
 
-} // namespace omnibinder
+} /* namespace omnibinder */
 
-#define OMNI_LOG_FATAL(tag, ...) \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_FATAL, tag, __VA_ARGS__)
-#define OMNI_LOG_ERROR(tag, ...) \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_ERROR, tag, __VA_ARGS__)
-#define OMNI_LOG_WARN(tag, ...)  \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_WARN,  tag, __VA_ARGS__)
-#define OMNI_LOG_INFO(tag, ...)  \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_INFO,  tag, __VA_ARGS__)
-#define OMNI_LOG_DEBUG(tag, ...) \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_DEBUG, tag, __VA_ARGS__)
-#define OMNI_LOG_VERBOSE(tag, ...) \
-    omnibinder::logPrint(omnibinder::LogLevel::LOG_VERBOSE, tag, __VA_ARGS__)
+#endif /* __cplusplus */
 
-#endif // OMNIOMNI_LOG_H
+#endif /* OMNIBINDER_LOG_H */

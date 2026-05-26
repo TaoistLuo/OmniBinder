@@ -2,6 +2,7 @@
 
 set(OMNIBINDER_SOURCES
     # core
+    core/log.cpp
     core/buffer.cpp
     core/message.cpp
     core/error.cpp
