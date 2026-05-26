@@ -914,7 +914,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Set log level
-    if (log_level >= 0 && log_level <= 4) {
+    if (log_level >= 0 && log_level <= 5) {
         omnibinder::setLogLevel(static_cast<omnibinder::LogLevel>(log_level));
     }
 

@@ -203,6 +203,12 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
                 service_name, omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
         return 1;
     }
+    ret = runtime.connectService(service_name);
+    if(ret != 0){
+        fprintf(stderr, "Error: Cannot connect service '%s': %s\n",
+                service_name, omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
+        return 1;
+    }
 
     // Find the method
     uint32_t iface_id = 0;

@@ -806,11 +806,20 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
     os << "typedef struct " << prefix << "_proxy {\n";
     os << "    omni_runtime_t* runtime;\n";
     os << "    int connected;\n";
+    os << "    int auto_reconnect_enabled;\n";
+    os << "    uint32_t reconnect_interval_ms;\n";
+    os << "    void (*death_callback)(void* user_data);\n";
+    os << "    void* death_user_data;\n";
     os << "} " << prefix << "_proxy;\n\n";
 
     os << "void " << prefix << "_proxy_init(" << prefix << "_proxy* p, omni_runtime_t* runtime);\n";
     os << "int  " << prefix << "_proxy_connect(" << prefix << "_proxy* p);\n";
-    os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p);\n\n";
+    os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p);\n";
+    os << "int  " << prefix << "_proxy_is_connected(const " << prefix << "_proxy* p);\n";
+    os << "void " << prefix << "_proxy_enable_auto_reconnect(" << prefix << "_proxy* p, int enable);\n";
+    os << "void " << prefix << "_proxy_set_reconnect_interval(" << prefix << "_proxy* p, uint32_t interval_ms);\n";
+    os << "void " << prefix << "_proxy_start_heartbeat(" << prefix << "_proxy* p, uint32_t interval_ms, uint32_t timeout_ms);\n";
+    os << "void " << prefix << "_proxy_stop_heartbeat(" << prefix << "_proxy* p);\n\n";
 
     // Method proxies
     for (size_t i = 0; i < svc.methods.size(); ++i) {
@@ -1203,25 +1212,74 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
     std::string prefix = pkg_ + "_" + svc.name;
     uint32_t iface_id = fnv1a_hash(pkg_ + "." + svc.name);
 
+    os << "static void " << prefix << "_internal_death_cb(const char* service_name, void* user_data) {\n";
+    os << "    (void)service_name;\n";
+    os << "    " << prefix << "_proxy* p = (" << prefix << "_proxy*)user_data;\n";
+    os << "    p->connected = 0;\n";
+    os << "    if (p->death_callback) {\n";
+    os << "        p->death_callback(p->death_user_data);\n";
+    os << "    }\n";
+    os << "}\n\n";
+
     // proxy_init
     os << "void " << prefix << "_proxy_init(" << prefix << "_proxy* p, omni_runtime_t* runtime) {\n";
     os << "    p->runtime = runtime;\n";
     os << "    p->connected = 0;\n";
+    os << "    p->auto_reconnect_enabled = 0;\n";
+    os << "    p->reconnect_interval_ms = 1000;\n";
+    os << "    p->death_callback = NULL;\n";
+    os << "    p->death_user_data = NULL;\n";
     os << "}\n\n";
 
     // proxy_connect
     os << "int " << prefix << "_proxy_connect(" << prefix << "_proxy* p) {\n";
     os << "    int ret = omni_runtime_connect_service(p->runtime, \"" << svc.name << "\");\n";
-    os << "    if (ret == 0) p->connected = 1;\n";
+    os << "    if (ret == 0) {\n";
+    os << "        p->connected = 1;\n";
+    os << "        omni_runtime_enable_auto_reconnect(p->runtime, \"" << svc.name << "\", 1);\n";
+    os << "        p->auto_reconnect_enabled = 1;\n";
+    os << "        omni_runtime_start_heartbeat(p->runtime, \"" << svc.name << "\", 5000, 10000);\n";
+    os << "        omni_runtime_subscribe_death(p->runtime, \"" << svc.name << "\",\n";
+    os << "            " << prefix << "_internal_death_cb, p);\n";
+    os << "    }\n";
     os << "    return ret;\n";
     os << "}\n\n";
 
     // proxy_disconnect
     os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p) {\n";
     os << "    if (p->connected) {\n";
+    os << "        omni_runtime_stop_heartbeat(p->runtime, \"" << svc.name << "\");\n";
+    os << "        omni_runtime_unsubscribe_death(p->runtime, \"" << svc.name << "\");\n";
     os << "        omni_runtime_disconnect_service(p->runtime, \"" << svc.name << "\");\n";
     os << "        p->connected = 0;\n";
     os << "    }\n";
+    os << "}\n\n";
+
+    // proxy_is_connected
+    os << "int " << prefix << "_proxy_is_connected(const " << prefix << "_proxy* p) {\n";
+    os << "    return p->connected;\n";
+    os << "}\n\n";
+
+    // proxy_enable_auto_reconnect
+    os << "void " << prefix << "_proxy_enable_auto_reconnect(" << prefix << "_proxy* p, int enable) {\n";
+    os << "    omni_runtime_enable_auto_reconnect(p->runtime, \"" << svc.name << "\", enable);\n";
+    os << "    p->auto_reconnect_enabled = enable;\n";
+    os << "}\n\n";
+
+    // proxy_set_reconnect_interval
+    os << "void " << prefix << "_proxy_set_reconnect_interval(" << prefix << "_proxy* p, uint32_t interval_ms) {\n";
+    os << "    omni_runtime_set_reconnect_interval(p->runtime, \"" << svc.name << "\", interval_ms);\n";
+    os << "    p->reconnect_interval_ms = interval_ms;\n";
+    os << "}\n\n";
+
+    // proxy_start_heartbeat
+    os << "void " << prefix << "_proxy_start_heartbeat(" << prefix << "_proxy* p, uint32_t interval_ms, uint32_t timeout_ms) {\n";
+    os << "    omni_runtime_start_heartbeat(p->runtime, \"" << svc.name << "\", interval_ms, timeout_ms);\n";
+    os << "}\n\n";
+
+    // proxy_stop_heartbeat
+    os << "void " << prefix << "_proxy_stop_heartbeat(" << prefix << "_proxy* p) {\n";
+    os << "    omni_runtime_stop_heartbeat(p->runtime, \"" << svc.name << "\");\n";
     os << "}\n\n";
 
     // Method proxies
@@ -1360,27 +1418,11 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
         os << "}\n\n";
     }
 
-    // Death notification
-    os << "typedef struct " << prefix << "_death_ctx {\n";
-    os << "    void (*callback)(void* user_data);\n";
-    os << "    void* user_data;\n";
-    os << "} " << prefix << "_death_ctx;\n\n";
-
-    os << "static void " << prefix << "_death_cb(const char* service_name, void* user_data) {\n";
-    os << "    " << prefix << "_death_ctx* ctx = (" << prefix << "_death_ctx*)user_data;\n";
-    os << "    (void)service_name;\n";
-    os << "    if (ctx->callback) ctx->callback(ctx->user_data);\n";
-    os << "}\n\n";
-
     os << "void " << prefix << "_proxy_on_service_died(" << prefix << "_proxy* p,\n";
     os << "    void (*callback)(void* user_data), void* user_data)\n";
     os << "{\n";
-    os << "    " << prefix << "_death_ctx* ctx = (" << prefix << "_death_ctx*)malloc(\n";
-    os << "        sizeof(" << prefix << "_death_ctx));\n";
-    os << "    ctx->callback = callback;\n";
-    os << "    ctx->user_data = user_data;\n";
-    os << "    omni_runtime_subscribe_death(p->runtime, \"" << svc.name << "\",\n";
-    os << "        " << prefix << "_death_cb, ctx);\n";
+    os << "    p->death_callback = callback;\n";
+    os << "    p->death_user_data = user_data;\n";
     os << "}\n\n";
 }
 
