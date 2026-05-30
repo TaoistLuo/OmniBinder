@@ -893,8 +893,8 @@ TEST(IdlCompilerTest, CodegenCppMethodArraysUseRecursiveBufferLogic) {
     ASSERT_TRUE(cpp.find("if (!response.writeString(result[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(blobs.size()))) return false;") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!req.writeBytes(blobs[i0])) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32((*out)[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!resp.tryReadString((*out)[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!resp.tryReadString(out[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(") == std::string::npos);
     ASSERT_TRUE(cpp.find("resp.read()") == std::string::npos);
@@ -935,7 +935,7 @@ TEST(IdlCompilerTest, CodegenCppCustomArraysUseRecursiveCustomLogic) {
     ASSERT_TRUE(cpp.find("if (!result[i0].serialize(response)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(items.size()))) return false;") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!items[i0].serialize(req)) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!(*out)[i0].deserialize(resp)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!out[i0].deserialize(resp)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(items)") == std::string::npos);
     ASSERT_TRUE(cpp.find("response.write(result)") == std::string::npos);
@@ -975,7 +975,7 @@ TEST(IdlCompilerTest, CodegenCppNestedArraysUseDistinctLoopDepths) {
     ASSERT_TRUE(cpp.find("if (!buf.tryReadInt32(matrix[i0][i1])) return false;") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(matrix.size()))) return false;") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!req.writeInt32(matrix[i0][i1])) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32((*out)[i0][i1])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0][i1])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(matrix)") == std::string::npos);
     ASSERT_TRUE(cpp.find("resp.read()") == std::string::npos);
@@ -1086,10 +1086,9 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
 
     ASSERT_TRUE(cpp.find("if (!input.deserialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!msg.deserialize(buf)) return;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("GuardedServiceProxy::echo(const AllTypes& input, AllTypes* out)") != std::string::npos);
+    ASSERT_TRUE(cpp.find("GuardedServiceProxy::echo(const AllTypes& input, AllTypes& out)") != std::string::npos);
     ASSERT_TRUE(cpp.find("int ret = runtime_.invoke(\"GuardedService\"") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (ret != 0) return ret;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!out) return static_cast<int>(omnibinder::ErrorCode::ERR_INVALID_PARAM);") != std::string::npos);
     ASSERT_TRUE(cpp.find("return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
     ASSERT_TRUE(c_header.find("int demo_Inner_deserialize(demo_Inner* self, omni_buffer_t* buf);") != std::string::npos);

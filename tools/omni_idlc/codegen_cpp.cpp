@@ -405,7 +405,7 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
             if (m.has_param) {
                 os << ", ";
             }
-            os << cppTypeName(m.return_type) << "* out";
+            os << cppTypeName(m.return_type) << "& out";
         }
         os << ");\n";
     }
@@ -496,9 +496,9 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
                                      os);
             }
             if (!m.return_type.isVoid()) {
-                os << "        " << cppTypeName(m.return_type) << " result = " << m.name << "(";
+                os << "        " << cppTypeName(m.return_type) << " result = this->" << m.name << "(";
             } else {
-                os << "        " << m.name << "(";
+                os << "        this->" << m.name << "(";
             }
             if (m.has_param) os << m.param.name;
             os << ");\n";
@@ -545,7 +545,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
                 if (m.has_param) {
                     os << ", ";
                 }
-                os << cppTypeName(m.return_type) << "* out";
+            os << cppTypeName(m.return_type) << "& out";
             }
             os << ") {\n";
             os << "    omnibinder::Buffer req, resp;\n";
@@ -555,8 +555,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "    int ret = runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, req, resp, 0);\n";
             os << "    if (ret != 0) return ret;\n";
             if (!m.return_type.isVoid()) {
-                os << "    if (!out) return static_cast<int>(omnibinder::ErrorCode::ERR_INVALID_PARAM);\n";
-                emitDeserializeValue(m.return_type, "(*out)", "resp", "    ", 0,
+                emitDeserializeValue(m.return_type, "out", "resp", "    ", 0,
                                      "return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);",
                                      os);
             }
