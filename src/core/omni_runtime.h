@@ -90,8 +90,13 @@ struct LocalServiceEntry {
     // fd -> recv buffer for each accepted client
     std::map<int, Buffer*>      client_recv_buffers;
 
+    bool     diag_enabled;
+    uint32_t diag_topic_id;
+
     LocalServiceEntry()
-        : service(NULL), server(NULL), shm_server(NULL), port(0) {}
+        : service(NULL), server(NULL), shm_server(NULL), port(0)
+        , diag_enabled(false), diag_topic_id(0)
+        {}
 
     ~LocalServiceEntry() {
         for (std::map<int, ITransport*>::iterator it = client_transports.begin();
@@ -213,6 +218,9 @@ public:
     void clearServiceCache();
     void closeAllConnections();
     void setOwner(OmniRuntime* owner) { owner_ = owner; }
+
+    int enableDiagnostic(const std::string& service_name);
+    int disableDiagnostic(const std::string& service_name);
 
 private:
     Impl(const Impl&);
@@ -353,6 +361,7 @@ private:
     std::atomic<bool> sm_reconnect_needed_;
     RuntimeStats stats_;
     OwnerThreadExecutor owner_executor_;
+    int diag_active_count_;
 };
 
 template<typename F>

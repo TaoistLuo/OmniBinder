@@ -108,6 +108,9 @@ public:
     void clearServiceCache();
     void closeAllConnections();
 
+    int enableDiagnostic(const std::string& service_name);
+    int disableDiagnostic(const std::string& service_name);
+
 private:
     OmniRuntime(const OmniRuntime&);
     OmniRuntime& operator=(const OmniRuntime&);

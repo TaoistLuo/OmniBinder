@@ -10,6 +10,8 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <csignal>
+#include <map>
 
 // 全局 IDL 解析上下文
 static omnic::ParseContext* g_parse_ctx = NULL;
@@ -28,6 +30,8 @@ static void printUsage(const char* prog) {
     printf("  call <service> <method> [params]\n");
     printf("                      Call a service method\n");
     printf("                      params: hex string (without --idl) or JSON (with --idl)\n");
+    printf("  watch <service> [--filter <method|topic>]\n");
+    printf("                      Watch diagnostic data from a service\n");
 }
 
 static int cmdList(omnibinder::OmniRuntime& runtime) {
@@ -343,11 +347,283 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     return 0;
 }
 
+static volatile bool g_watch_running = true;
+static void watch_sigint_handler(int) { g_watch_running = false; }
+
+static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, const char* filter) {
+    omnibinder::ServiceInfo info;
+    int ret = runtime.lookupService(service_name, info);
+    if (ret != 0) {
+        fprintf(stderr, "Error: Service not found: %s\n", service_name);
+        return 1;
+    }
+
+    std::map<uint64_t, const omnibinder::MethodInfo*> method_map;
+    for (size_t i = 0; i < info.interfaces.size(); ++i) {
+        for (size_t j = 0; j < info.interfaces[i].methods.size(); ++j) {
+            uint64_t key = (static_cast<uint64_t>(info.interfaces[i].interface_id) << 32)
+                         | info.interfaces[i].methods[j].method_id;
+            method_map[key] = &info.interfaces[i].methods[j];
+        }
+    }
+
+    ret = runtime.connectService(service_name);
+    if (ret != 0) {
+        fprintf(stderr, "Error: Cannot connect to %s\n", service_name);
+        return 1;
+    }
+    ret = runtime.enableDiagnostic(service_name);
+    if (ret != 0) {
+        fprintf(stderr, "Error: Failed to enable diagnostic (status=%d)\n", ret);
+        return 1;
+    }
+    printf("Diagnostic enabled on %s. Press Ctrl+C to stop.\n", service_name);
+
+    std::string diag_topic = "__diag__" + std::string(service_name);
+    std::map<uint32_t, uint64_t> req_timestamps;
+    std::map<uint32_t, const omnibinder::MethodInfo*> pending_methods;
+
+    runtime.subscribeTopic(diag_topic,
+        [&method_map, &req_timestamps, &pending_methods, &info, filter](uint32_t, const omnibinder::Buffer& data) {
+
+        const size_t DIAG_HDR = 19;
+        if (data.size() < DIAG_HDR) {
+            return;
+        }
+
+        const uint8_t* p = data.data();
+        uint8_t direction = p[0];
+        uint64_t ts_us = 0;
+        for (int i = 0; i < 8; ++i) {
+            ts_us = (ts_us << 8) | p[1 + i];
+        }
+        uint16_t orig_type = static_cast<uint16_t>(p[9]) | (static_cast<uint16_t>(p[10]) << 8);
+        uint32_t orig_seq  = static_cast<uint32_t>(p[11]) | (static_cast<uint32_t>(p[12]) << 8)
+                           | (static_cast<uint32_t>(p[13]) << 16) | (static_cast<uint32_t>(p[14]) << 24);
+        uint32_t orig_len  = static_cast<uint32_t>(p[15]) | (static_cast<uint32_t>(p[16]) << 8)
+                           | (static_cast<uint32_t>(p[17]) << 16) | (static_cast<uint32_t>(p[18]) << 24);
+
+        const char* dir_str = "?";
+        switch (direction) {
+        case 0: dir_str = "REQUEST  "; break;
+        case 1: dir_str = "RESPONSE "; break;
+        case 2: dir_str = "ONE_WAY  "; break;
+        case 3: dir_str = "SUBSCRIBE"; break;
+        case 4: dir_str = "BROADCAST"; break;
+        }
+
+        uint64_t latency_us = 0;
+        if (direction == 0) {
+            req_timestamps[orig_seq] = ts_us;
+        } else if (direction == 1) {
+            auto it = req_timestamps.find(orig_seq);
+            if (it != req_timestamps.end()) {
+                latency_us = ts_us - it->second;
+                req_timestamps.erase(it);
+            }
+        }
+
+        std::string method_name = "?";
+        uint32_t param_len = 0, resp_len = 0;
+        int32_t resp_status = 0;
+        const omnibinder::MethodInfo* pm = nullptr;
+
+        if (g_parse_ctx && orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
+            const uint8_t* payload = p + DIAG_HDR;
+            if (orig_type == 0x0100 && orig_len >= 12) {
+                uint32_t iface_id = static_cast<uint32_t>(payload[0])
+                    | (static_cast<uint32_t>(payload[1]) << 8)
+                    | (static_cast<uint32_t>(payload[2]) << 16)
+                    | (static_cast<uint32_t>(payload[3]) << 24);
+                uint32_t meth_id  = static_cast<uint32_t>(payload[4])
+                    | (static_cast<uint32_t>(payload[5]) << 8)
+                    | (static_cast<uint32_t>(payload[6]) << 16)
+                    | (static_cast<uint32_t>(payload[7]) << 24);
+                param_len = static_cast<uint32_t>(payload[8])
+                    | (static_cast<uint32_t>(payload[9]) << 8)
+                    | (static_cast<uint32_t>(payload[10]) << 16)
+                    | (static_cast<uint32_t>(payload[11]) << 24);
+                auto mit = method_map.find((static_cast<uint64_t>(iface_id) << 32) | meth_id);
+                if (mit != method_map.end()) {
+                    method_name = mit->second->name;
+                    pm = mit->second;
+                    pending_methods[orig_seq] = mit->second;
+                }
+            } else if (orig_type == 0x0101 && direction == 1 && orig_len >= 8) {
+                resp_status = static_cast<int32_t>(
+                    static_cast<uint32_t>(payload[0]) | (static_cast<uint32_t>(payload[1]) << 8)
+                    | (static_cast<uint32_t>(payload[2]) << 16) | (static_cast<uint32_t>(payload[3]) << 24));
+                resp_len = static_cast<uint32_t>(payload[4]) | (static_cast<uint32_t>(payload[5]) << 8)
+                    | (static_cast<uint32_t>(payload[6]) << 16) | (static_cast<uint32_t>(payload[7]) << 24);
+                auto pm_it = pending_methods.find(orig_seq);
+                if (pm_it != pending_methods.end()) {
+                    pm = pm_it->second;
+                    method_name = pm->name;
+                    pending_methods.erase(pm_it);
+                }
+            }
+        }
+        if (direction == 4) {
+            method_name = "broadcast";
+        } else if (direction == 3) {
+            method_name = "subscribe";
+        }
+        if (filter && filter[0] && method_name != "?" && strcmp(method_name.c_str(), filter) != 0) {
+            return;
+        }
+
+        char line[512];
+        int off = snprintf(line, sizeof(line), "%s %s.%s() seq=%u len=%u",
+                           dir_str, info.name.c_str(), method_name.c_str(), orig_seq, orig_len);
+        if (direction == 1 && latency_us > 0) {
+            if (latency_us >= 1000) {
+                off += snprintf(line + off, sizeof(line) - off, " (%.2f ms)", latency_us / 1000.0);
+            } else {
+                off += snprintf(line + off, sizeof(line) - off, " (%llu us)", (unsigned long long)latency_us);
+            }
+        }
+        // OMNI_LOG_INFO("Watch", "%s", line);
+
+        if (g_parse_ctx && orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
+            const uint8_t* payload = p + DIAG_HDR;
+
+            if (orig_type == 0x0100 && orig_len >= 12 && pm) {
+                char detail[512];
+                off = snprintf(detail, sizeof(detail), "  %s.%s(", info.name.c_str(), pm->name.c_str());
+                if (!pm->param_types.empty() && param_len > 0) {
+                    omnic::TypeRef paramType;
+                    if (omni_cli::findTypeRef(g_parse_ctx, pm->param_types, g_idl_package, paramType)) {
+                        omnibinder::Buffer param_buf;
+                        param_buf.assign(payload + 12, param_len);
+                        type_codec::TypeCodec codec(*g_parse_ctx);
+                        simple_json::Value jsonOut;
+                        if (codec.decodeFromBuffer(param_buf, paramType, g_idl_package, jsonOut)) {
+                            if (paramType.primitive == omnic::TYPE_CUSTOM) {
+                                off += snprintf(detail + off, sizeof(detail) - off, "%s",
+                                               jsonOut.toString(true, 1).c_str());
+                            } else {
+                                off += snprintf(detail + off, sizeof(detail) - off, "%s: %s",
+                                               pm->param_types.c_str(), jsonOut.toString(false, 0).c_str());
+                            }
+                        } else {
+                            off += snprintf(detail + off, sizeof(detail) - off, "...");
+                        }
+                    } else {
+                        off += snprintf(detail + off, sizeof(detail) - off, "...");
+                    }
+                }
+                snprintf(detail + off, sizeof(detail) - off, ")");
+                OMNI_LOG_INFO("Watch", "%s  \n%s",line, detail);
+
+            } else if (orig_type == 0x0101 && direction == 1 && orig_len >= 8) {
+                char detail[512];
+                off = snprintf(detail, sizeof(detail), "  -> status=%d", resp_status);
+                if (resp_len > 0 && pm && !pm->return_type.empty() && pm->return_type != "void") {
+                    omnic::TypeRef retType;
+                    if (omni_cli::findTypeRef(g_parse_ctx, pm->return_type, g_idl_package, retType)) {
+                        omnibinder::Buffer resp_buf;
+                        resp_buf.assign(payload + 8, resp_len);
+                        type_codec::TypeCodec codec(*g_parse_ctx);
+                        simple_json::Value jsonOut;
+                        if (codec.decodeFromBuffer(resp_buf, retType, g_idl_package, jsonOut)) {
+                            if (retType.primitive == omnic::TYPE_CUSTOM) {
+                                off += snprintf(detail + off, sizeof(detail) - off, " %s",
+                                               jsonOut.toString(true, 1).c_str());
+                            } else {
+                                off += snprintf(detail + off, sizeof(detail) - off, " %s: %s",
+                                               pm->return_type.c_str(), jsonOut.toString(false, 0).c_str());
+                            }
+                        }
+                    }
+                }
+                OMNI_LOG_INFO("Watch", "%s  \n%s",line, detail);
+
+            } else if (orig_type == 0x0110 && orig_len >= 8) {
+                uint32_t data_len = static_cast<uint32_t>(payload[4])
+                    | (static_cast<uint32_t>(payload[5]) << 8)
+                    | (static_cast<uint32_t>(payload[6]) << 16)
+                    | (static_cast<uint32_t>(payload[7]) << 24);
+                if (data_len > 0) {
+                    omnibinder::Buffer data_buf;
+                    data_buf.assign(payload + 8, data_len);
+                    bool decoded = false;
+                    for (const auto& pkg : g_parse_ctx->loaded_packages) {
+                        for (size_t k = 0; k < pkg.second.topics.size(); ++k) {
+                            const omnic::TopicDef& tdef = pkg.second.topics[k];
+                            omnic::StructDef synth;
+                            synth.name = tdef.name;
+                            synth.fields = tdef.fields;
+                            g_parse_ctx->loaded_packages[pkg.first].structs.push_back(synth);
+                            omnic::TypeRef msgType;
+                            msgType.primitive = omnic::TYPE_CUSTOM;
+                            msgType.custom_name = tdef.name;
+                            type_codec::TypeCodec codec(*g_parse_ctx);
+                            simple_json::Value jsonOut;
+                            if (codec.decodeFromBuffer(data_buf, msgType, pkg.first, jsonOut)) {
+                                OMNI_LOG_INFO("Watch", "%s\n  %s %s",line,
+                                              tdef.name.c_str(), jsonOut.toString(true, 1).c_str());
+                                decoded = true;
+                            }
+                            g_parse_ctx->loaded_packages[pkg.first].structs.pop_back();
+                            if (decoded) {
+                                break;
+                            }
+                        }
+                        if (decoded) {
+                            break;
+                        }
+                    }
+                    if (!decoded) {
+                        char hex[256];
+                        int hoff = 0;
+                        uint32_t d = data_len > 64 ? 64 : data_len;
+                        for (uint32_t i = 0; i < d; ++i) {
+                            hoff += snprintf(hex + hoff, sizeof(hex) - hoff, "%02x ", payload[i]);
+                        }
+                        OMNI_LOG_INFO("Watch", "%s \n  HEX: %s", hex);
+                    }
+                }
+            } else {
+                char hex[256];
+                int hoff = 0;
+                uint32_t d = orig_len > 64 ? 64 : orig_len;
+                for (uint32_t i = 0; i < d; ++i) {
+                    hoff += snprintf(hex + hoff, sizeof(hex) - hoff, "%02x ", payload[i]);
+                }
+                OMNI_LOG_INFO("Watch", "%s \n  HEX: %s",line, hex);
+            }
+        } else if (orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
+            const uint8_t* payload = p + DIAG_HDR;
+            char hex[256];
+            int hoff = 0;
+            uint32_t d = orig_len > 128 ? 128 : orig_len;
+            for (uint32_t i = 0; i < d; ++i) {
+                hoff += snprintf(hex + hoff, sizeof(hex) - hoff, "%02x ", payload[i]);
+            }
+            if (orig_len > 128) {
+                snprintf(hex + hoff, sizeof(hex) - hoff, "...");
+            }
+            OMNI_LOG_INFO("Watch", "%s \n  HEX: %s",line, hex);
+        }
+    });
+
+    signal(SIGINT, watch_sigint_handler);
+    signal(SIGTERM, watch_sigint_handler);
+    while (g_watch_running) {
+        runtime.pollOnce(100);
+    }
+    runtime.unsubscribeTopic(diag_topic);
+    runtime.disableDiagnostic(service_name);
+    printf("\nDiagnostic watch stopped.\n");
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     const char* host = "127.0.0.1";
     uint16_t port = 9900;
     const char* idl_file = NULL;
-    const char* positional[4] = {NULL, NULL, NULL, NULL};
+    const char* diag_filter = NULL;
+    const char* positional[5] = {NULL, NULL, NULL, NULL, NULL};
     int pos_count = 0;
     
     // Parse arguments
@@ -358,10 +634,12 @@ int main(int argc, char* argv[]) {
             port = static_cast<uint16_t>(atoi(argv[++i]));
         } else if (strcmp(argv[i], "--idl") == 0 && i + 1 < argc) {
             idl_file = argv[++i];
+        } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+            diag_filter = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0) {
             printUsage(argv[0]);
             return 0;
-        } else if (pos_count < 4) {
+        } else if (pos_count < 5) {
             positional[pos_count++] = argv[i];
         }
     }
@@ -425,6 +703,9 @@ int main(int argc, char* argv[]) {
         } else {
             result = cmdCall(runtime, positional[1], positional[2], positional[3]);
         }
+    } else if (strcmp(command, "watch") == 0) {
+        if (!positional[1]) { fprintf(stderr, "Error: 'watch' requires <service>\n"); result = 1; }
+        else result = cmdWatch(runtime, positional[1], diag_filter);
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);
         result = 1;

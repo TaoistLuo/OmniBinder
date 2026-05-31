@@ -667,6 +667,12 @@ int64_t currentTimeMs() {
     return static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
 }
 
+int64_t currentTimeUs() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return static_cast<int64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
+}
+
 std::string getHostName() {
     char buf[256];
     if (gethostname(buf, sizeof(buf)) == 0) {

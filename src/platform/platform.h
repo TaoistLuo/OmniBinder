@@ -245,8 +245,7 @@ std::string getMachineId();
 
 // 获取当前时间戳（毫秒）
 int64_t currentTimeMs();
-
-// 获取主机名
+int64_t currentTimeUs();
 std::string getHostName();
 
 // 休眠指定毫秒数
