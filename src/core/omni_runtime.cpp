@@ -22,6 +22,23 @@ const char* dataChannelKindName(TransportType type) {
     return type == TransportType::SHM ? "SHM" : "TCP";
 }
 
+const uint32_t OMNI_DIAG_IFACE_ID = 0x4F4E4944;
+
+static void diag_serialize_event(Buffer& buf, uint8_t direction, const Message& msg) {
+    uint64_t ts_us = static_cast<uint64_t>(platform::currentTimeUs());
+    buf.writeUint8(direction);
+    uint8_t ts_buf[8];
+    for (int i = 7; i >= 0; --i) {
+        ts_buf[i] = static_cast<uint8_t>(ts_us); 
+        ts_us >>= 8; 
+    }
+    buf.writeRaw(ts_buf, 8);
+    buf.writeUint16(static_cast<uint16_t>(msg.getType()));
+    buf.writeUint32(msg.getSequence());
+    buf.writeUint32(static_cast<uint32_t>(msg.payload.size()));
+    if (msg.payload.size() > 0) buf.writeRaw(msg.payload.data(), msg.payload.size());
+}
+
 bool decodeInvokePayload(const Message& msg,
                          uint32_t& interface_id,
                          uint32_t& method_id,
@@ -241,6 +258,8 @@ int OmniRuntime::getStats(RuntimeStats& stats) { return impl_->getStats(stats); 
 int OmniRuntime::resetStats() { return impl_->resetStats(); }
 void OmniRuntime::clearServiceCache() { impl_->clearServiceCache(); }
 void OmniRuntime::closeAllConnections() { impl_->closeAllConnections(); }
+int OmniRuntime::enableDiagnostic(const std::string& service_name) { return impl_->enableDiagnostic(service_name); }
+int OmniRuntime::disableDiagnostic(const std::string& service_name) { return impl_->disableDiagnostic(service_name); }
 
 // ============================================================
 // Impl 构造/析构
@@ -260,6 +279,7 @@ OmniRuntime::Impl::Impl()
     , owner_(NULL)
     , loop_driver_active_(false)
     , sm_reconnect_needed_(false)
+    , diag_active_count_(0)
 {
 }
 
@@ -1390,6 +1410,23 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
         msg.payload.writeRaw(data.data(), data.size());
     }
 
+    // Diagnostic BROADCAST hook (skip for diag topics to prevent recursion)
+    if (diag_active_count_ > 0) {
+        bool is_diag_topic = false;
+        for (auto& kv : local_services_) {
+            if (kv.second->diag_topic_id == topic_id) { is_diag_topic = true; break; }
+        }
+        if (!is_diag_topic) {
+            for (auto& kv : local_services_) {
+                if (kv.second->diag_enabled && kv.second->diag_topic_id != 0) {
+                    Buffer diag_buf;
+                    diag_serialize_event(diag_buf, 4, msg);
+                    broadcastInternal(kv.second->diag_topic_id, diag_buf);
+                }
+            }
+        }
+    }
+
     Buffer send_buf;
     msg.serialize(send_buf);
     
@@ -1441,8 +1478,77 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
 }
 
 InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, const Message& msg,
-                                                             const char* transport_label,
-                                                             const char* service_name) {
+                                                            const char* transport_label,
+                                                            const char* service_name) {
+    // Diagnostic intercept
+    {
+        uint32_t diag_iface_id = 0;
+        uint32_t diag_method_id = 0;
+        uint32_t diag_payload_len = 0;
+        BufferView check_buf(msg.payload.data(), msg.payload.size());
+        if (check_buf.tryReadUint32(diag_iface_id) && check_buf.tryReadUint32(diag_method_id)
+            && check_buf.tryReadUint32(diag_payload_len)) {
+            if (diag_iface_id == OMNI_DIAG_IFACE_ID) {
+                Buffer request;
+                if (diag_payload_len > 0) {
+                    if (!request.writeRaw(check_buf.data() + check_buf.readPosition(), diag_payload_len)) {
+                        InvokeDispatchResult result;
+                        result.status = InvokeDispatchStatus::DECODE_FAILED;
+                        result.error_code = static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+                        return result;
+                    }
+                }
+                InvokeDispatchResult result;
+                result.status = InvokeDispatchStatus::SUCCESS;
+                result.error_code = 0;
+                LocalServiceEntry* entry = nullptr;
+                for (auto& kv : local_services_) { if (kv.second->service == service) { entry = kv.second; break; } }
+                if (!entry) {
+                    result.status = InvokeDispatchStatus::INVOKE_FAILED;
+                    result.error_code = static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
+                    return result;
+                }
+                bool enable = (request.size() >= 1 && request.data()[0] != 0);
+                if (!enable && diag_active_count_ == 0) {
+                    result.response.writeUint8(0);
+                    return result;
+                }
+                if (enable && !entry->diag_enabled) {
+                    std::string diag_topic = "__diag__" + std::string(service_name);
+                    auto tid_it = topic_runtime_.published_topics.find(diag_topic);
+                    if (tid_it == topic_runtime_.published_topics.end()) {
+                        int pub_ret = publishTopicInternal(diag_topic);
+                        if (pub_ret != 0) {
+                            result.status = InvokeDispatchStatus::INVOKE_FAILED;
+                            result.error_code = pub_ret;
+                        } else {
+                            tid_it = topic_runtime_.published_topics.find(diag_topic);
+                        }
+                    }
+                    if (tid_it != topic_runtime_.published_topics.end()) {
+                        entry->diag_topic_id = tid_it->second;
+                        entry->diag_enabled = true;
+                        diag_active_count_++;
+                        OMNI_LOG_INFO(LOG_TAG, "diag_enabled service=%s topic=%s topic_id=0x%08x",
+                                      service_name, diag_topic.c_str(), entry->diag_topic_id);
+                        result.response.writeUint8(0);
+                    } else {
+                        result.status = InvokeDispatchStatus::INVOKE_FAILED;
+                        result.error_code = -1;
+                    }
+                } else if (!enable) {
+                    entry->diag_enabled = false;
+                    entry->diag_topic_id = 0;
+                    OMNI_LOG_INFO(LOG_TAG, "diag_disabled service=%s", service_name);
+                    result.response.writeUint8(0);
+                } else {
+                    result.response.writeUint8(0);
+                }
+                return result;
+            }
+        }
+    }
+
     InvokeDispatchResult result;
     result.error_code = 0;
 
@@ -1590,13 +1696,19 @@ void OmniRuntime::Impl::onServiceClientData(const std::string& service_name,
 }
 
 void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name,
-                                               int client_fd, const Message& msg,
-                                               const char* transport_label) {
+                                        int client_fd, const Message& msg,
+                                        const char* transport_label) {
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_name);
     if (it == local_services_.end()) return;
 
     Service* service = it->second->service;
     if (!service) return;
+
+    if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
+        Buffer diag_buf;
+        diag_serialize_event(diag_buf, 0, msg);
+        broadcastInternal(it->second->diag_topic_id, diag_buf);
+    }
 
     std::map<int, ITransport*>::iterator transport_it = it->second->client_transports.find(client_fd);
     ITransport* transport = (transport_it != it->second->client_transports.end()) ? transport_it->second : nullptr;
@@ -1604,12 +1716,22 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name,
     InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
     if (result.status == InvokeDispatchStatus::SUCCESS) {
         Message reply = makeInvokeSuccessReply(msg.getSequence(), result.response);
+        if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
+            Buffer diag_buf;
+            diag_serialize_event(diag_buf, 1, reply);
+            broadcastInternal(it->second->diag_topic_id, diag_buf);
+        }
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=0",
                           service_name.c_str(), client_fd, msg.getSequence());
         }
     } else {
         Message reply = makeInvokeErrorReply(msg.getSequence(), static_cast<ErrorCode>(result.error_code));
+        if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
+            Buffer diag_buf;
+            diag_serialize_event(diag_buf, 1, reply);
+            broadcastInternal(it->second->diag_topic_id, diag_buf);
+        }
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
                           service_name.c_str(), client_fd, msg.getSequence(), result.error_code);
@@ -1624,6 +1746,11 @@ void OmniRuntime::Impl::onInvokeOneWayRequest(const std::string& service_name,
     if (it == local_services_.end()) return;
     Service* service = it->second->service;
     if (!service) return;
+    if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
+        Buffer diag_buf;
+        diag_serialize_event(diag_buf, 2, msg);
+        broadcastInternal(it->second->diag_topic_id, diag_buf);
+    }
 
     (void)dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
 }
@@ -1639,7 +1766,17 @@ void OmniRuntime::Impl::onSubscribeBroadcast(int client_fd, const Message& msg,
                       msg.getSequence(), static_cast<int>(ErrorCode::ERR_DESERIALIZE));
         return;
     }
-    
+    {
+        std::map<int, std::string>::iterator fd_it = client_fd_to_service_.find(client_fd);
+        if (fd_it != client_fd_to_service_.end()) {
+            std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(fd_it->second);
+            if (eit != local_services_.end() && eit->second->diag_enabled && eit->second->diag_topic_id != 0) {
+                Buffer diag_buf;
+                diag_serialize_event(diag_buf, 3, msg);
+                broadcastInternal(eit->second->diag_topic_id, diag_buf);
+            }
+        }
+    }
     topic_runtime_.addTcpSubscriber(topic_id, client_fd);
     OMNI_LOG_INFO(LOG_TAG, "Broadcast subscriber fd=%d added for topic %s (id=0x%08x)",
                     client_fd, topic_name.c_str(), topic_id);
@@ -1762,6 +1899,11 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
         topic_runtime_,
         [this, entry](const std::string& svc, uint32_t cid, const Message& msg) {
             (void)svc;
+            if (entry->diag_enabled && entry->diag_topic_id != 0) {
+                Buffer diag_buf;
+                diag_serialize_event(diag_buf, 0, msg);
+                broadcastInternal(entry->diag_topic_id, diag_buf);
+            }
             InvokeDispatchResult result = dispatchLocalInvoke(entry->service, msg, "SHM",
                                                                entry->service->serviceName());
             Message reply_msg;
@@ -1769,6 +1911,11 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                 reply_msg = makeInvokeSuccessReply(msg.getSequence(), result.response);
             } else {
                 reply_msg = makeInvokeErrorReply(msg.getSequence(), static_cast<ErrorCode>(result.error_code));
+            }
+            if (entry->diag_enabled && entry->diag_topic_id != 0) {
+                Buffer diag_buf;
+                diag_serialize_event(diag_buf, 1, reply_msg);
+                broadcastInternal(entry->diag_topic_id, diag_buf);
             }
             Buffer send_buf;
             if (!reply_msg.serialize(send_buf)) {
@@ -1784,6 +1931,11 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
         },
         [this, entry](const std::string& svc, const Message& msg) {
             (void)svc;
+            if (entry->diag_enabled && entry->diag_topic_id != 0) {
+                Buffer diag_buf;
+                diag_serialize_event(diag_buf, 2, msg);
+                broadcastInternal(entry->diag_topic_id, diag_buf);
+            }
             (void)dispatchLocalInvoke(entry->service, msg, "SHM", entry->service->serviceName());
         },
         [this](const std::string& svc, uint32_t cid, const Message& msg) {
@@ -1796,6 +1948,14 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                               msg.getSequence(), svc.c_str(),
                               static_cast<int>(ErrorCode::ERR_DESERIALIZE));
                 return;
+            }
+            {
+                std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(svc);
+                if (eit != local_services_.end() && eit->second->diag_enabled && eit->second->diag_topic_id != 0) {
+                    Buffer diag_buf;
+                    diag_serialize_event(diag_buf, 3, msg);
+                    broadcastInternal(eit->second->diag_topic_id, diag_buf);
+                }
             }
             topic_runtime_.addShmSubscriberService(topic_id, svc);
             OMNI_LOG_INFO(LOG_TAG, "SHM broadcast subscriber for topic %s (0x%08x) on %s",
@@ -2108,6 +2268,24 @@ void OmniRuntime::Impl::closeAllConnections() {
     if (conn_mgr_) {
         conn_mgr_->closeAll();
     }
+}
+
+int OmniRuntime::Impl::enableDiagnostic(const std::string& service_name) {
+    Buffer req, resp;
+    req.writeUint8(1);
+    int ret = invoke(service_name, OMNI_DIAG_IFACE_ID, 1, req, resp, 3000);
+    if (ret != 0) return ret;
+    if (resp.size() >= 1) return resp.data()[0];
+    return -1;
+}
+
+int OmniRuntime::Impl::disableDiagnostic(const std::string& service_name) {
+    Buffer req, resp;
+    req.writeUint8(0);
+    int ret = invoke(service_name, OMNI_DIAG_IFACE_ID, 1, req, resp, 3000);
+    if (ret != 0) return ret;
+    if (resp.size() >= 1) return resp.data()[0];
+    return -1;
 }
 
 

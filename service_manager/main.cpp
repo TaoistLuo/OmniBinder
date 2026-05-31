@@ -893,7 +893,7 @@ static void printUsage(const char* prog) {
 int main(int argc, char* argv[]) {
     std::string host = "0.0.0.0";
     uint16_t port = omnibinder::DEFAULT_SM_PORT;
-    int log_level = 1;
+    int log_level = OMNI_LOG_INFO;
 
     // Parse command line arguments
     for (int i = 1; i < argc; ++i) {
