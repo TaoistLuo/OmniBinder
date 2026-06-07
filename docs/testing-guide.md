@@ -8,7 +8,11 @@
 
 ## 2. 最重要的执行原则
 
-### 2.1 优先使用 CTest
+### 2.1 平台支持
+
+测试在 Linux 和 Windows 上均可编译运行。仅 `test_generated_runtime_integration` 因依赖 g++ 编译流水线在 Windows 上不可用。
+
+### 2.2 优先使用 CTest
 
 推荐优先使用：
 

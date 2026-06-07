@@ -223,8 +223,10 @@ setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
 
 ### 5.5 SHM 事件驱动
 
-当前 SHM 已使用 `eventfd + EventLoop`：
+当前 SHM 使用事件驱动通知：
 
+- **Linux**: `eventfd + epoll`，通过 AF_UNIX (SCM_RIGHTS) 交换 fd
+- **Windows**: Named Pipe + IOCP overlapped ReadFile，通过 TCP loopback 交换 pipe 名称
 - client 写 request 后通知服务端 `req_eventfd`
 - server 写 response 后通知客户端 `resp_eventfd`
 
