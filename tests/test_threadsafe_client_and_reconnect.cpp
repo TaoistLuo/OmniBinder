@@ -2,7 +2,8 @@
 #include "test_common.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 #include <vector>
 
 using namespace omnibinder;
@@ -49,20 +50,19 @@ struct ClientThreadArg {
     ClientThreadArg() : runtime(NULL), thread_index(0), iterations(0), done(false), failures(0) {}
 };
 
-static void* tsClientServerThread(void* arg) {
+static void tsClientServerThread(void* arg) {
     TsClientServerCtx* ctx = static_cast<TsClientServerCtx*>(arg);
     int ret = ctx->runtime.init("127.0.0.1", SM_PORT);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
-static void* concurrentInvokeThread(void* arg) {
+static void concurrentInvokeThread(void* arg) {
     ClientThreadArg* ctx = static_cast<ClientThreadArg*>(arg);
     for (int i = 0; i < ctx->iterations; ++i) {
         Buffer req, resp;
@@ -75,14 +75,13 @@ static void* concurrentInvokeThread(void* arg) {
         if (result != payload) ctx->failures++;
     }
     ctx->done = true;
-    return NULL;
 }
 
 class ThreadsafeClientAndReconnectTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static TsClientServerCtx* server_ctx_;
-    static pthread_t server_tid_;
+    static std::thread server_tid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19931", "--log-level", "3");
@@ -90,38 +89,38 @@ protected:
         ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
         server_ctx_ = new TsClientServerCtx();
-        ASSERT_EQ(pthread_create(&server_tid_, NULL, tsClientServerThread, server_ctx_), 0);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) usleep(100000);
+        server_tid_ = std::thread(tsClientServerThread, server_ctx_);
+        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
         ASSERT_TRUE(server_ctx_->registered);
     }
 
     static void TearDownTestSuite() {
         server_ctx_->should_stop = true;
-        pthread_join(server_tid_, NULL);
+        server_tid_.join();
         delete server_ctx_;
         stopProcess(sm_pid_);
     }
 };
 
-pid_t ThreadsafeClientAndReconnectTest::sm_pid_ = 0;
+TestPid ThreadsafeClientAndReconnectTest::sm_pid_ = 0;
 TsClientServerCtx* ThreadsafeClientAndReconnectTest::server_ctx_ = nullptr;
-pthread_t ThreadsafeClientAndReconnectTest::server_tid_ = 0;
+std::thread ThreadsafeClientAndReconnectTest::server_tid_;
 
 TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentInvokeSameClient) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
     ASSERT_EQ(runtime.connectService("ThreadSafeService"), 0);
 
-    pthread_t tids[6];
+    std::thread tids[6];
     ClientThreadArg args[6];
     for (int i = 0; i < 6; ++i) {
         args[i].runtime = &runtime;
         args[i].thread_index = i;
         args[i].iterations = 40;
-        ASSERT_EQ(pthread_create(&tids[i], NULL, concurrentInvokeThread, &args[i]), 0);
+        tids[i] = std::thread(concurrentInvokeThread, &args[i]);
     }
     for (int i = 0; i < 6; ++i) {
-        pthread_join(tids[i], NULL);
+        tids[i].join();
         EXPECT_TRUE(args[i].done);
         EXPECT_EQ(args[i].failures, 0);
     }
@@ -133,7 +132,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, SmRestartRecoverySameClient) {
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
 
     stopProcess(sm_pid_);
-    usleep(300000);
+    std::this_thread::sleep_for(std::chrono::microseconds(300000));
     sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19931", "--log-level", "3");
     ASSERT_GT(sm_pid_, 0);
     ASSERT_TRUE(waitPortReady(SM_PORT, 30));
@@ -149,7 +148,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, SmRestartRecoverySameClient) {
             std::string result(reinterpret_cast<const char*>(resp.data()), resp.size());
             if (result == payload) recovered = true;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(recovered);
     runtime.stop();
@@ -166,12 +165,12 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
     ASSERT_EQ(runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, warm_req, warm_resp, 3000), 0);
 
     server_ctx_->should_stop = true;
-    pthread_join(server_tid_, NULL);
+    server_tid_.join();
     delete server_ctx_;
 
     server_ctx_ = new TsClientServerCtx();
-    ASSERT_EQ(pthread_create(&server_tid_, NULL, tsClientServerThread, server_ctx_), 0);
-    for (int i = 0; i < 80 && !server_ctx_->registered; ++i) usleep(100000);
+    server_tid_ = std::thread(tsClientServerThread, server_ctx_);
+    for (int i = 0; i < 80 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     ASSERT_TRUE(server_ctx_->registered);
 
     bool server_recovered = false;
@@ -188,7 +187,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
             std::string result(reinterpret_cast<const char*>(resp.data()), resp.size());
             if (result == payload) server_recovered = true;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(server_recovered);
     runtime.stop();

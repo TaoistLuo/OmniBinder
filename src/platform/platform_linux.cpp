@@ -1,3 +1,5 @@
+#ifdef OMNIBINDER_LINUX
+
 #include "platform/platform.h"
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
@@ -8,7 +10,6 @@
 #include <fstream>
 #include <sstream>
 
-#ifdef OMNIBINDER_LINUX
 
 #include <sys/time.h>
 #include <sys/un.h>
@@ -300,6 +301,16 @@ int createEventFd() {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create eventfd: %s", strerror(errno));
     }
     return efd;
+}
+
+int createNamedEventFd(const std::string& /*name*/) {
+    // Linux: eventfd is anonymous; cross-process sharing via UDS SCM_RIGHTS.
+    return createEventFd();
+}
+
+int openNamedEventFd(const std::string& /*name*/) {
+    // Linux: fd exchange happens via UDS, not by name.
+    return -1;
 }
 
 bool eventFdNotify(int efd) {
@@ -667,12 +678,6 @@ int64_t currentTimeMs() {
     return static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
 }
 
-int64_t currentTimeUs() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return static_cast<int64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
-}
-
 std::string getHostName() {
     char buf[256];
     if (gethostname(buf, sizeof(buf)) == 0) {
@@ -720,6 +725,18 @@ bool checkSocketConnected(SocketFd fd, int* out_error) {
     return so_error == 0;
 }
 
+int64_t currentTimeUs() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return static_cast<int64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
+}
+void getLocalTime(struct tm* out_tm, int* out_ms) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    localtime_r(&tv.tv_sec, out_tm);
+    if (out_ms) *out_ms = static_cast<int>(tv.tv_usec / 1000);
+}
+
 uint32_t popcount32(uint32_t value) {
     return static_cast<uint32_t>(__builtin_popcount(value));
 }
@@ -730,6 +747,10 @@ void setupSignalHandlers(SignalHandler handler) {
 #ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
 #endif
+}
+
+bool isUdsAvailable() {
+    return true;
 }
 
 void memoryBarrier() {
@@ -769,410 +790,4 @@ void spinWaitHint() {
 } // namespace platform
 } // namespace omnibinder
 
-#elif defined(OMNIBINDER_WINDOWS)
-
-// Windows 桩实现 - 后续完善
-namespace omnibinder {
-namespace platform {
-
-bool netInit() {
-    WSADATA wsa;
-    return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
-}
-
-void netCleanup() {
-    WSACleanup();
-}
-
-SocketFd createTcpSocket() {
-    return socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-}
-
-bool setNonBlocking(SocketFd fd) {
-    u_long mode = 1;
-    return ioctlsocket(fd, FIONBIO, &mode) == 0;
-}
-
-bool setReuseAddr(SocketFd fd) {
-    int opt = 1;
-    return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
-                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
-}
-
-bool setTcpNoDelay(SocketFd fd) {
-    int opt = 1;
-    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
-                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
-}
-
-bool setKeepAlive(SocketFd fd) {
-    int opt = 1;
-    return setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE,
-                      reinterpret_cast<const char*>(&opt), sizeof(opt)) == 0;
-}
-
-bool bindSocket(SocketFd fd, const std::string& host, uint16_t port) {
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (host.empty() || host == "0.0.0.0") {
-        addr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-        if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
-            OMNI_LOG_ERROR(LOG_TAG, "Invalid address: %s", host.c_str());
-            return false;
-        }
-    }
-    return bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
-}
-
-bool listenSocket(SocketFd fd, int backlog) {
-    return listen(fd, backlog) == 0;
-}
-
-SocketFd acceptSocket(SocketFd fd, std::string& remote_host, uint16_t& remote_port) {
-    struct sockaddr_in addr;
-    int addr_len = sizeof(addr);
-    SocketFd client_fd = accept(fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len);
-    if (client_fd == INVALID_SOCKET) {
-        return INVALID_SOCKET_FD;
-    }
-    char ip_buf[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &addr.sin_addr, ip_buf, sizeof(ip_buf));
-    remote_host = ip_buf;
-    remote_port = ntohs(addr.sin_port);
-    return client_fd;
-}
-
-int connectSocket(SocketFd fd, const std::string& host, uint16_t port) {
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
-        // Try DNS resolution
-        struct addrinfo hints, *result;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%u", port);
-        if (getaddrinfo(host.c_str(), port_str, &hints, &result) != 0) {
-            OMNI_LOG_ERROR(LOG_TAG, "Cannot resolve host: %s", host.c_str());
-            return -1;
-        }
-        memcpy(&addr, result->ai_addr, result->ai_addrlen);
-        freeaddrinfo(result);
-    }
-    int ret = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-    if (ret == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return 1;
-        return -1;
-    }
-    return 0;
-}
-
-int socketSend(SocketFd fd, const void* data, size_t length) {
-    return send(fd, static_cast<const char*>(data), static_cast<int>(length), 0);
-}
-
-int socketRecv(SocketFd fd, void* buf, size_t buf_size) {
-    return recv(fd, static_cast<char*>(buf), static_cast<int>(buf_size), 0);
-}
-
-void closeSocket(SocketFd fd) {
-    if (fd != INVALID_SOCKET_FD) {
-        closesocket(fd);
-    }
-}
-
-uint16_t getSocketPort(SocketFd fd) {
-    struct sockaddr_in addr;
-    int addr_len = sizeof(addr);
-    if (getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) == 0) {
-        return ntohs(addr.sin_port);
-    }
-    return 0;
-}
-
-std::string getSocketAddress(SocketFd fd) {
-    struct sockaddr_in addr;
-    int addr_len = sizeof(addr);
-    if (getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) != 0) {
-        return "";
-    }
-
-    char ip_buf[INET_ADDRSTRLEN];
-    if (inet_ntop(AF_INET, &addr.sin_addr, ip_buf, sizeof(ip_buf)) == NULL) {
-        return "";
-    }
-    return std::string(ip_buf);
-}
-
-int getSocketError() {
-    return WSAGetLastError();
-}
-
-bool isWouldBlock(int error_code) {
-    return error_code == WSAEWOULDBLOCK;
-}
-
-bool isInProgress(int error_code) {
-    return error_code == WSAEWOULDBLOCK;
-}
-
-bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
-    fd_set write_fds;
-    fd_set except_fds;
-    FD_ZERO(&write_fds);
-    FD_ZERO(&except_fds);
-    FD_SET(fd, &write_fds);
-    FD_SET(fd, &except_fds);
-
-    struct timeval tv;
-    tv.tv_sec = static_cast<long>(timeout_ms / 1000);
-    tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
-    int ret = select(static_cast<int>(fd) + 1, NULL, &write_fds, &except_fds, &tv);
-    if (ret <= 0) {
-        return false;
-    }
-
-    if (FD_ISSET(fd, &except_fds)) {
-        return false;
-    }
-
-    return FD_ISSET(fd, &write_fds) != 0;
-}
-
-// Windows eventfd 模拟（使用 pipe 或 socket pair）
-int createEventFd() {
-    // Windows 使用自连接的 UDP socket 模拟
-    SocketFd fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd == INVALID_SOCKET) return -1;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-
-    if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
-        closesocket(fd);
-        return -1;
-    }
-
-    int addr_len = sizeof(addr);
-    getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len);
-    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
-        closesocket(fd);
-        return -1;
-    }
-
-    u_long mode = 1;
-    ioctlsocket(fd, FIONBIO, &mode);
-
-    return static_cast<int>(fd);
-}
-
-bool eventFdNotify(int efd) {
-    char c = 1;
-    return send(static_cast<SocketFd>(efd), &c, 1, 0) == 1;
-}
-
-bool eventFdConsume(int efd) {
-    char buf[64];
-    return recv(static_cast<SocketFd>(efd), buf, sizeof(buf), 0) > 0;
-}
-
-void closeEventFd(int efd) {
-    if (efd >= 0) {
-        closesocket(static_cast<SocketFd>(efd));
-    }
-}
-
-// Windows 共享内存（使用 Named File Mapping）
-void* shmCreate(const std::string& name, size_t size, bool create) {
-    std::string map_name = "Local\\omnibinder_" + name;
-    HANDLE hMap;
-    if (create) {
-        hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-                                  0, static_cast<DWORD>(size), map_name.c_str());
-    } else {
-        hMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, map_name.c_str());
-    }
-    if (!hMap) return NULL;
-
-    void* addr = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
-    // 注意：这里不关闭 hMap，因为关闭后映射仍然有效
-    // 但需要在某处保存 hMap 以便后续清理
-    return addr;
-}
-
-void shmDetach(void* addr, size_t /*size*/) {
-    if (addr) {
-        UnmapViewOfFile(addr);
-    }
-}
-
-void shmUnlink(const std::string& /*name*/) {
-    // Windows 的 file mapping 在所有句柄关闭后自动删除
-}
-
-SemHandle semCreate(const std::string& name, unsigned int initial_value) {
-    std::string sem_name = "Local\\omnibinder_sem_" + name;
-    HANDLE sem = CreateSemaphoreA(NULL, initial_value, 0x7FFFFFFF, sem_name.c_str());
-    return static_cast<SemHandle>(sem);
-}
-
-SemHandle semOpen(const std::string& name) {
-    std::string sem_name = "Local\\omnibinder_sem_" + name;
-    HANDLE sem = OpenSemaphoreA(SEMAPHORE_ALL_ACCESS, FALSE, sem_name.c_str());
-    return static_cast<SemHandle>(sem);
-}
-
-bool semWait(SemHandle sem, uint32_t timeout_ms) {
-    if (!sem) return false;
-    DWORD t = (timeout_ms == 0) ? 0 : timeout_ms;
-    return WaitForSingleObject(static_cast<HANDLE>(sem), t) == WAIT_OBJECT_0;
-}
-
-bool semPost(SemHandle sem) {
-    if (!sem) return false;
-    return ReleaseSemaphore(static_cast<HANDLE>(sem), 1, NULL) != 0;
-}
-
-void semClose(SemHandle sem) {
-    if (sem) {
-        CloseHandle(static_cast<HANDLE>(sem));
-    }
-}
-
-void semUnlink(const std::string& /*name*/) {
-    // Windows 信号量在所有句柄关闭后自动删除
-}
-
-std::string getMachineId() {
-    // 读取 Windows MachineGuid
-    HKEY hKey;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
-                      "SOFTWARE\\Microsoft\\Cryptography",
-                      0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
-        char buf[256];
-        DWORD buf_size = sizeof(buf);
-        if (RegQueryValueExA(hKey, "MachineGuid", NULL, NULL,
-                             reinterpret_cast<LPBYTE>(buf), &buf_size) == ERROR_SUCCESS) {
-            RegCloseKey(hKey);
-            return std::string(buf);
-        }
-        RegCloseKey(hKey);
-    }
-    return getHostName();
-}
-
-int64_t currentTimeMs() {
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    ULARGE_INTEGER uli;
-    uli.LowPart = ft.dwLowDateTime;
-    uli.HighPart = ft.dwHighDateTime;
-    // Windows FILETIME 是从 1601-01-01 开始的 100ns 间隔
-    // 转换为 Unix 毫秒
-    return static_cast<int64_t>((uli.QuadPart - 116444736000000000ULL) / 10000);
-}
-
-std::string getHostName() {
-    char buf[256];
-    if (gethostname(buf, sizeof(buf)) == 0) {
-        return std::string(buf);
-    }
-    return "unknown";
-}
-
-void sleepMs(uint32_t ms) {
-    ::Sleep(ms);
-}
-
-int udsSend(int fd, const void* data, size_t len) {
-    int n = ::send(static_cast<SOCKET>(fd), static_cast<const char*>(data), static_cast<int>(len), 0);
-    return n;
-}
-
-int udsRecv(int fd, void* buf, size_t len, bool wait_all) {
-    int flags = wait_all ? MSG_WAITALL : 0;
-    int n = ::recv(static_cast<SOCKET>(fd), static_cast<char*>(buf), static_cast<int>(len), flags);
-    return n;
-}
-
-bool udsPollReadable(int fd, uint32_t timeout_ms) {
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
-    FD_SET(static_cast<SOCKET>(fd), &read_fds);
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    int ret = select(0, &read_fds, NULL, NULL, &tv);
-    return ret > 0 && FD_ISSET(static_cast<SOCKET>(fd), &read_fds);
-}
-
-bool checkSocketConnected(SocketFd fd, int* out_error) {
-    int so_error = 0;
-    int len = sizeof(so_error);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR,
-                   reinterpret_cast<char*>(&so_error), &len) != 0) {
-        if (out_error) *out_error = WSAGetLastError();
-        return false;
-    }
-    if (out_error) *out_error = so_error;
-    return so_error == 0;
-}
-
-uint32_t popcount32(uint32_t value) {
-    value = value - ((value >> 1) & 0x55555555);
-    value = (value & 0x33333333) + ((value >> 2) & 0x33333333);
-    return (((value + (value >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
-}
-
-void setupSignalHandlers(SignalHandler handler) {
-    signal(SIGINT, handler);
-    signal(SIGTERM, handler);
-}
-
-void memoryBarrier() {
-    MemoryBarrier();
-}
-
-bool atomicCompareSwap(volatile uint32_t* ptr, uint32_t expected, uint32_t desired) {
-    return InterlockedCompareExchange(ptr, desired, expected) == expected;
-}
-
-uint32_t atomicFetchAdd(volatile uint32_t* ptr, uint32_t value) {
-    return InterlockedExchangeAdd(ptr, value);
-}
-
-uint32_t atomicFetchSub(volatile uint32_t* ptr, uint32_t value) {
-    return InterlockedExchangeAdd(ptr, -static_cast<LONG>(value));
-}
-
-uint32_t atomicFetchAnd(volatile uint32_t* ptr, uint32_t value) {
-    return InterlockedAnd(ptr, value);
-}
-
-bool spinLockTestAndSet(volatile uint32_t* lock) {
-    return InterlockedExchange(lock, 1) != 0;
-}
-
-void spinLockRelease(volatile uint32_t* lock) {
-    *lock = 0;
-    MemoryBarrier();
-}
-
-void spinWaitHint() {
-    YieldProcessor();
-}
-
-} // namespace platform
-} // namespace omnibinder
-
-#endif // OMNIBINDER_WINDOWS
+#endif // OMNIBINDER_LINUX

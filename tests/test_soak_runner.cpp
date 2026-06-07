@@ -2,8 +2,15 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#ifdef _WIN32
+#define WIFEXITED(x) 1
+#define WEXITSTATUS(x) (x)
+#include <windows.h>
+#define usleep(us) Sleep((us)/1000)
+#else
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #define TEST(name) printf("  TEST %-42s ", #name); fflush(stdout)
 #define PASS() printf("PASS\n"); fflush(stdout)

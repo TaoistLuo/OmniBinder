@@ -1,7 +1,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#ifdef _WIN32
+// Windows: system() returns exit code directly
+#define WIFEXITED(x) 1
+#define WEXITSTATUS(x) (x)
+#else
 #include <sys/wait.h>
+#endif
 
 #define TEST(name) printf("  TEST %-42s ", #name); fflush(stdout)
 #define PASS() printf("PASS\n"); fflush(stdout)

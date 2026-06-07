@@ -2,15 +2,15 @@
  * @file        log.c
  * @brief       日志实现 (C++ 编译, C 链接)
  * @details     omni_log_print / omni_log_vprint 的实现。
- *              使用 POSIX gettimeofday 获取时间戳，避免 C++ chrono 依赖。
+ *              通过 platform::getLocalTime 获取本地时间，平台无关。
  *
  * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)
  * MIT License
  */
 #include "omnibinder/log.h"
+#include "platform/platform.h"
 
 #include <time.h>
-#include <sys/time.h>
 
 /* ============================================================
  * 全局状态 — 定义
@@ -52,14 +52,13 @@ void omni_log_vprint(omni_log_level_t level, const char* tag,
     if (level > g_omni_log_level) return;
 
     if (g_omni_log_timestamp) {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
         struct tm tm_buf;
-        localtime_r(&tv.tv_sec, &tm_buf);
+        int ms = 0;
+        omnibinder::platform::getLocalTime(&tm_buf, &ms);
         fprintf(stderr, "[%04d-%02d-%02d %02d:%02d:%02d.%03d][%s][%s] ",
                 tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
                 tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
-                (int)(tv.tv_usec / 1000),
+                ms,
                 omni_log_level_str(level), tag);
     } else {
         fprintf(stderr, "[%s][%s] ", omni_log_level_str(level), tag);

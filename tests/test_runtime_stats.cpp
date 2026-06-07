@@ -2,7 +2,8 @@
 #include "test_common.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -39,24 +40,23 @@ struct RuntimeStatsServerCtx {
     RuntimeStatsServerCtx() : registered(false), should_stop(false) {}
 };
 
-static void* rtStatsServerThread(void* arg) {
+static void rtStatsServerThread(void* arg) {
     RuntimeStatsServerCtx* ctx = static_cast<RuntimeStatsServerCtx*>(arg);
     int ret = ctx->runtime.init("127.0.0.1", SM_PORT);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 class RuntimeStatsTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static RuntimeStatsServerCtx* server_ctx_;
-    static pthread_t server_tid_;
+    static std::thread server_tid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19932", "--log-level", "3");
@@ -64,22 +64,22 @@ protected:
         ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
         server_ctx_ = new RuntimeStatsServerCtx();
-        ASSERT_EQ(pthread_create(&server_tid_, NULL, rtStatsServerThread, server_ctx_), 0);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) usleep(100000);
+        server_tid_ = std::thread(rtStatsServerThread, server_ctx_);
+        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
         ASSERT_TRUE(server_ctx_->registered);
     }
 
     static void TearDownTestSuite() {
         server_ctx_->should_stop = true;
-        pthread_join(server_tid_, NULL);
+        server_tid_.join();
         delete server_ctx_;
         stopProcess(sm_pid_);
     }
 };
 
-pid_t RuntimeStatsTest::sm_pid_ = 0;
+TestPid RuntimeStatsTest::sm_pid_ = 0;
 RuntimeStatsServerCtx* RuntimeStatsTest::server_ctx_ = nullptr;
-pthread_t RuntimeStatsTest::server_tid_ = 0;
+std::thread RuntimeStatsTest::server_tid_;
 
 TEST_F(RuntimeStatsTest, InitialStatsZero) {
     OmniRuntime runtime;

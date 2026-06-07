@@ -65,6 +65,13 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #include <windows.h>
+    // Undefine Windows macros that conflict with C++ symbols
+    #ifdef ERROR
+        #undef ERROR
+    #endif
+    #ifdef IGNORE
+        #undef IGNORE
+    #endif
 
     typedef SOCKET SocketFd;
     const SocketFd INVALID_SOCKET_FD = INVALID_SOCKET;
@@ -141,8 +148,18 @@ bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms);
 // 事件通知（用于跨线程唤醒 EventLoop）
 // ============================================================
 
-// 创建事件通知 fd
+// 创建事件通知 fd（单进程内唤醒）
 int createEventFd();
+
+// 创建命名事件通知 fd，name 用于跨进程共享
+// Linux:  忽略 name，等价 createEventFd()
+// Windows: 以 name 创建命名管道，对端通过 openNamedEventFd(name) 打开
+int createNamedEventFd(const std::string& name);
+
+// 打开已存在的命名事件通知 fd（跨进程）
+// Linux:  未使用（UDS SCM_RIGHTS 传递 fd，不需要按名打开）
+// Windows: 通过 name 打开对端进程创建的命名管道
+int openNamedEventFd(const std::string& name);
 
 // 写入事件（唤醒）
 bool eventFdNotify(int efd);
@@ -237,6 +254,14 @@ typedef void (*SignalHandler)(int);
 void setupSignalHandlers(SignalHandler handler);
 
 // ============================================================
+// 平台能力查询 — 业务层通过此 API 查询平台特性，无需 #ifdef
+// ============================================================
+
+// 是否支持 Unix Domain Socket（用于 SHM eventfd 交换）
+// Windows 返回 false，Linux/macOS 返回 true
+bool isUdsAvailable();
+
+// ============================================================
 // 系统信息
 // ============================================================
 
@@ -247,6 +272,11 @@ std::string getMachineId();
 int64_t currentTimeMs();
 int64_t currentTimeUs();
 std::string getHostName();
+
+// 获取当前本地时间（分解为 tm + 毫秒）
+// out_tm: 输出本地时间
+// out_ms: 输出毫秒部分 (0-999)
+void getLocalTime(struct tm* out_tm, int* out_ms);
 
 // 休眠指定毫秒数
 void sleepMs(uint32_t ms);

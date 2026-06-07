@@ -93,25 +93,82 @@ target_include_directories(test_omni_cli_type_codec PRIVATE
 target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_omni_cli_type_codec COMMAND test_omni_cli_type_codec)
 
+# ============================================================
+# 集成测试 — pthread 已替换为 std::thread，Windows 可编译
+# ============================================================
+
 add_executable(test_stats test_stats.cpp)
-target_link_libraries(test_stats PRIVATE omnibinder_static pthread gtest gtest_main)
+target_link_libraries(test_stats PRIVATE omnibinder_static gtest gtest_main)
 add_dependencies(test_stats service_manager)
-add_test(NAME test_stats COMMAND test_stats
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
+add_test(NAME test_stats COMMAND test_stats WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_stats PROPERTIES TIMEOUT 120)
 
 add_executable(test_c_api test_c_api.cpp)
-target_link_libraries(test_c_api PRIVATE omnibinder_static pthread gtest gtest_main)
+target_link_libraries(test_c_api PRIVATE omnibinder_static gtest gtest_main)
 add_dependencies(test_c_api service_manager)
-add_test(NAME test_c_api COMMAND test_c_api
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
+add_test(NAME test_c_api COMMAND test_c_api WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_c_api PROPERTIES TIMEOUT 120)
 
+add_executable(test_integration test_integration.cpp)
+target_link_libraries(test_integration PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_integration service_manager)
+add_test(NAME test_integration COMMAND test_integration WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_integration PROPERTIES TIMEOUT 60)
+
+add_executable(test_threadsafe_client_and_reconnect test_threadsafe_client_and_reconnect.cpp)
+target_link_libraries(test_threadsafe_client_and_reconnect PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_threadsafe_client_and_reconnect service_manager)
+add_test(NAME test_threadsafe_client_and_reconnect COMMAND test_threadsafe_client_and_reconnect WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_threadsafe_client_and_reconnect PROPERTIES TIMEOUT 120)
+
+add_executable(test_runtime_stats test_runtime_stats.cpp)
+target_link_libraries(test_runtime_stats PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_runtime_stats service_manager)
+add_test(NAME test_runtime_stats COMMAND test_runtime_stats WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_runtime_stats PROPERTIES TIMEOUT 120)
+
+add_executable(test_error_logging test_error_logging.cpp)
+target_link_libraries(test_error_logging PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_error_logging service_manager)
+add_test(NAME test_error_logging COMMAND test_error_logging WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_error_logging PROPERTIES TIMEOUT 120)
+
+add_executable(test_thread_safety test_thread_safety.cpp)
+target_link_libraries(test_thread_safety PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_thread_safety service_manager)
+add_test(NAME test_thread_safety COMMAND test_thread_safety WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_thread_safety PROPERTIES TIMEOUT 600)
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_sm_reconnect.cpp)
+    add_executable(test_sm_reconnect test_sm_reconnect.cpp)
+    target_link_libraries(test_sm_reconnect PRIVATE omnibinder_static gtest gtest_main)
+    add_dependencies(test_sm_reconnect service_manager)
+    add_test(NAME test_sm_reconnect COMMAND test_sm_reconnect WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_sm_reconnect PROPERTIES TIMEOUT 120)
+endif()
+
+add_executable(test_control_plane_and_fallback test_control_plane_and_fallback.cpp)
+target_link_libraries(test_control_plane_and_fallback PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_control_plane_and_fallback service_manager)
+add_test(NAME test_control_plane_and_fallback COMMAND test_control_plane_and_fallback WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_control_plane_and_fallback PROPERTIES TIMEOUT 600)
+
+add_executable(test_full_integration test_full_integration.cpp)
+target_link_libraries(test_full_integration PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_full_integration service_manager)
+add_test(NAME test_full_integration COMMAND test_full_integration WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_full_integration PROPERTIES TIMEOUT 90)
+
+add_executable(test_heartbeat_reconnect test_heartbeat_reconnect.cpp)
+target_link_libraries(test_heartbeat_reconnect PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_heartbeat_reconnect service_manager)
+add_test(NAME test_heartbeat_reconnect COMMAND test_heartbeat_reconnect WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_heartbeat_reconnect PROPERTIES TIMEOUT 120)
+
 # ============================================================
-# 集成测试（使用 GTest，需要 service_manager）
+# 集成测试 — 依赖 POSIX fork() 的测试，仅 Linux 编译
 # ============================================================
+if(NOT WIN32)
 
 add_executable(test_generated_runtime_integration
     test_generated_runtime_integration.cpp
@@ -129,93 +186,19 @@ target_compile_definitions(test_generated_runtime_integration PRIVATE
     OMNI_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     OMNI_BUILD_DIR="${CMAKE_BINARY_DIR}"
 )
-target_link_libraries(test_generated_runtime_integration PRIVATE omnibinder_static pthread gtest gtest_main)
+target_link_libraries(test_generated_runtime_integration PRIVATE omnibinder_static gtest gtest_main)
 add_dependencies(test_generated_runtime_integration service_manager)
-add_test(NAME test_generated_runtime_integration COMMAND test_generated_runtime_integration
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
+add_test(NAME test_generated_runtime_integration COMMAND test_generated_runtime_integration WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_generated_runtime_integration PROPERTIES TIMEOUT 300)
 
-add_executable(test_integration test_integration.cpp)
-target_link_libraries(test_integration PRIVATE omnibinder_static gtest gtest_main)
-add_dependencies(test_integration service_manager)
-add_test(NAME test_integration COMMAND test_integration
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_integration PROPERTIES TIMEOUT 60)
-
-add_executable(test_full_integration test_full_integration.cpp)
-target_link_libraries(test_full_integration PRIVATE omnibinder_static pthread gtest gtest_main)
-add_dependencies(test_full_integration service_manager)
-add_test(NAME test_full_integration COMMAND test_full_integration
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_full_integration PROPERTIES TIMEOUT 90)
-
-add_executable(test_control_plane_and_fallback test_control_plane_and_fallback.cpp)
-target_link_libraries(test_control_plane_and_fallback PRIVATE omnibinder_static pthread gtest gtest_main)
-add_dependencies(test_control_plane_and_fallback service_manager)
-add_test(NAME test_control_plane_and_fallback COMMAND test_control_plane_and_fallback
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_control_plane_and_fallback PROPERTIES TIMEOUT 600)
-
-add_executable(test_threadsafe_client_and_reconnect test_threadsafe_client_and_reconnect.cpp)
-target_link_libraries(test_threadsafe_client_and_reconnect PRIVATE omnibinder_static pthread gtest gtest_main)
-add_dependencies(test_threadsafe_client_and_reconnect service_manager)
-add_test(NAME test_threadsafe_client_and_reconnect COMMAND test_threadsafe_client_and_reconnect
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_threadsafe_client_and_reconnect PROPERTIES TIMEOUT 120)
-
-add_executable(test_runtime_stats test_runtime_stats.cpp)
-target_link_libraries(test_runtime_stats PRIVATE omnibinder_static pthread gtest gtest_main)
-add_dependencies(test_runtime_stats service_manager)
-add_test(NAME test_runtime_stats COMMAND test_runtime_stats
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_runtime_stats PROPERTIES TIMEOUT 120)
-
-add_executable(test_error_logging test_error_logging.cpp)
-target_link_libraries(test_error_logging PRIVATE omnibinder_static pthread gtest gtest_main)
-add_dependencies(test_error_logging service_manager)
-add_test(NAME test_error_logging COMMAND test_error_logging
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_error_logging PROPERTIES TIMEOUT 120)
-
-add_executable(test_thread_safety test_thread_safety.cpp)
-target_link_libraries(test_thread_safety PRIVATE omnibinder_static pthread gtest gtest_main)
-add_dependencies(test_thread_safety service_manager)
-add_test(NAME test_thread_safety COMMAND test_thread_safety
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_thread_safety PROPERTIES TIMEOUT 600)
-
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_sm_reconnect.cpp)
-    add_executable(test_sm_reconnect test_sm_reconnect.cpp)
-    target_link_libraries(test_sm_reconnect PRIVATE omnibinder_static pthread gtest gtest_main)
-    add_dependencies(test_sm_reconnect service_manager)
-    add_test(NAME test_sm_reconnect COMMAND test_sm_reconnect
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-    )
-    set_tests_properties(test_sm_reconnect PROPERTIES TIMEOUT 120)
 endif()
 
-add_executable(test_heartbeat_reconnect test_heartbeat_reconnect.cpp)
-target_link_libraries(test_heartbeat_reconnect PRIVATE omnibinder_static pthread gtest gtest_main)
-add_dependencies(test_heartbeat_reconnect service_manager)
-add_test(NAME test_heartbeat_reconnect COMMAND test_heartbeat_reconnect
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_heartbeat_reconnect PROPERTIES TIMEOUT 120)
-
 # ============================================================
-# 性能测试与稳定性测试（保留原有格式，需要输出报告）
+# 性能测试与稳定性测试
 # ============================================================
 
 add_executable(test_performance test_performance.cpp)
-target_link_libraries(test_performance PRIVATE omnibinder_static pthread)
+target_link_libraries(test_performance PRIVATE omnibinder_static)
 add_dependencies(test_performance service_manager)
 add_test(NAME test_performance COMMAND test_performance
     --report ${CMAKE_SOURCE_DIR}/docs/performance-report.md
@@ -225,38 +208,35 @@ set_tests_properties(test_performance PROPERTIES TIMEOUT 120)
 
 add_executable(test_soak_runner test_soak_runner.cpp)
 add_dependencies(test_soak_runner
+    test_performance
     test_full_integration
     test_control_plane_and_fallback
     test_threadsafe_client_and_reconnect
-    test_performance
 )
-add_test(NAME test_soak_runner COMMAND test_soak_runner 2
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
+add_test(NAME test_soak_runner COMMAND test_soak_runner 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_soak_runner PROPERTIES TIMEOUT 900)
 
 add_executable(test_transient_disconnect_recovery test_transient_disconnect_recovery.cpp)
-target_link_libraries(test_transient_disconnect_recovery PRIVATE omnibinder_static pthread)
+target_link_libraries(test_transient_disconnect_recovery PRIVATE omnibinder_static)
 add_dependencies(test_transient_disconnect_recovery service_manager)
-add_test(NAME test_transient_disconnect_recovery COMMAND test_transient_disconnect_recovery
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
+add_test(NAME test_transient_disconnect_recovery COMMAND test_transient_disconnect_recovery WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
 
-# Prevent parallel execution of tests that start SM subprocesses using the same
-# hardcoded ports (19902, 19910, 19912, 19931, 19933). Both soak_runner and
-# transient_disconnect_recovery invoke other test binaries as subprocesses,
-# which would collide with the standalone CTest registrations of those same binaries.
 set_tests_properties(
-    test_full_integration
-    test_control_plane_and_fallback
     test_performance
-    test_error_logging
-    test_threadsafe_client_and_reconnect
     test_transient_disconnect_recovery
     test_soak_runner
     PROPERTIES RESOURCE_LOCK sm_port_lock
 )
+if(NOT WIN32)
+set_tests_properties(
+    test_full_integration
+    test_control_plane_and_fallback
+    test_error_logging
+    test_threadsafe_client_and_reconnect
+    PROPERTIES RESOURCE_LOCK sm_port_lock
+)
+endif()
 
 # ============================================================
 # Python 测试

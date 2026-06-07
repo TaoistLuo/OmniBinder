@@ -2,7 +2,8 @@
 #include "test_common.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -39,24 +40,23 @@ struct SmReconnectServerCtx {
     SmReconnectServerCtx() : registered(false), should_stop(false) {}
 };
 
-static void* smReconnectServerThread(void* arg) {
+static void smReconnectServerThread(void* arg) {
     SmReconnectServerCtx* ctx = static_cast<SmReconnectServerCtx*>(arg);
     int ret = ctx->runtime.init("127.0.0.1", SM_PORT);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 class SmReconnectTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static SmReconnectServerCtx* server_ctx_;
-    static pthread_t server_tid_;
+    static std::thread server_tid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19916", "--log-level", "3");
@@ -64,22 +64,22 @@ protected:
         ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
         server_ctx_ = new SmReconnectServerCtx();
-        ASSERT_EQ(pthread_create(&server_tid_, NULL, smReconnectServerThread, server_ctx_), 0);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) usleep(100000);
+        server_tid_ = std::thread(smReconnectServerThread, server_ctx_);
+        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
         ASSERT_TRUE(server_ctx_->registered);
     }
 
     static void TearDownTestSuite() {
         server_ctx_->should_stop = true;
-        pthread_join(server_tid_, NULL);
+        server_tid_.join();
         delete server_ctx_;
         stopProcess(sm_pid_);
     }
 };
 
-pid_t SmReconnectTest::sm_pid_ = 0;
+TestPid SmReconnectTest::sm_pid_ = 0;
 SmReconnectServerCtx* SmReconnectTest::server_ctx_ = nullptr;
-pthread_t SmReconnectTest::server_tid_ = 0;
+std::thread SmReconnectTest::server_tid_;
 
 TEST_F(SmReconnectTest, InitialLookupAndInvoke) {
     OmniRuntime runtime;
@@ -100,7 +100,7 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
 
     stopProcess(sm_pid_);
-    usleep(300000);
+    std::this_thread::sleep_for(std::chrono::microseconds(300000));
     sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19916", "--log-level", "3");
     ASSERT_GT(sm_pid_, 0);
     ASSERT_TRUE(waitPortReady(SM_PORT, 30));
@@ -119,7 +119,7 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
                 recovered = true;
             }
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(recovered);
     runtime.stop();

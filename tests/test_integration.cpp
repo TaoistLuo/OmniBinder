@@ -10,7 +10,8 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
 #include <omnibinder/omnibinder.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -73,20 +74,20 @@ struct ServerContext {
     ServerContext() : registered(false), should_stop(false), sm_port(0) {}
 };
 
-static void* serverThread(void* arg) {
+static void serverThread(void* arg) {
     ServerContext* ctx = static_cast<ServerContext*>(arg);
 
     int ret = ctx->runtime.init("127.0.0.1", ctx->sm_port);
     if (ret != 0) {
         fprintf(stderr, "Server: failed to init runtime\n");
-        return NULL;
+        return;
     }
 
     ret = ctx->runtime.registerService(&ctx->service);
     if (ret != 0) {
         fprintf(stderr, "Server: failed to register service\n");
         ctx->runtime.stop();
-        return NULL;
+        return;
     }
 
     ctx->registered = true;
@@ -98,7 +99,6 @@ static void* serverThread(void* arg) {
 
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 // ============================================================
@@ -106,9 +106,9 @@ static void* serverThread(void* arg) {
 // ============================================================
 class IntegrationTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static ServerContext* server_ctx_;
-    static pthread_t server_tid_;
+    static std::thread server_tid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19901", "--log-level", "3");
@@ -118,11 +118,11 @@ protected:
         // Start server in background thread
         server_ctx_ = new ServerContext();
         server_ctx_->sm_port = SM_PORT;
-        ASSERT_EQ(pthread_create(&server_tid_, NULL, serverThread, server_ctx_), 0);
+        server_tid_ = std::thread(serverThread, server_ctx_);
 
         // Wait for service to be registered
         for (int i = 0; i < 50 && !server_ctx_->registered; i++) {
-            usleep(100000);
+            std::this_thread::sleep_for(std::chrono::microseconds(100000));
         }
         ASSERT_TRUE(server_ctx_->registered);
     }
@@ -130,10 +130,10 @@ protected:
     static void TearDownTestSuite() {
         if (server_ctx_) {
             server_ctx_->should_stop = true;
-            pthread_join(server_tid_, NULL);
+            server_tid_.join();
 
             // Verify service is gone after unregister
-            usleep(200000);
+            std::this_thread::sleep_for(std::chrono::microseconds(200000));
             OmniRuntime runtime;
             if (runtime.init("127.0.0.1", SM_PORT) == 0) {
                 ServiceInfo info;
@@ -148,9 +148,9 @@ protected:
     }
 };
 
-pid_t IntegrationTest::sm_pid_ = 0;
+TestPid IntegrationTest::sm_pid_ = 0;
 ServerContext* IntegrationTest::server_ctx_ = nullptr;
-pthread_t IntegrationTest::server_tid_ = 0;
+std::thread IntegrationTest::server_tid_;
 
 // ============================================================
 // Tests

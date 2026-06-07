@@ -84,7 +84,8 @@ static const std::string kCppHarnessTemplate = R"CPP(
 #include <cassert>
 #include <cstdio>
 #include <cstring>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 #include <signal.h>
 #include <string>
 #include <sys/wait.h>
@@ -116,7 +117,7 @@ static bool connectTcp(TcpTransport& transport, const std::string& host, uint16_
         for (int i = 0; i < 100; ++i) {
             transport.checkConnectComplete();
             if (transport.state() == ConnectionState::CONNECTED) return true;
-            usleep(10000);
+            std::this_thread::sleep_for(std::chrono::microseconds(10000));
         }
         return false;
     }
@@ -148,7 +149,7 @@ static bool recvFullMessage(TcpTransport& transport, Message& msg, int timeout_m
                 }
             }
         }
-        usleep(20000);
+        std::this_thread::sleep_for(std::chrono::microseconds(20000));
     }
     return false;
 }
@@ -194,7 +195,7 @@ static void stopSM(pid_t pid) {
         for (int i = 0; i < 20; ++i) {
             pid_t ret = waitpid(pid, &status, WNOHANG);
             if (ret == pid) return;
-            usleep(100000);
+            std::this_thread::sleep_for(std::chrono::microseconds(100000));
         }
         kill(pid, SIGKILL);
         waitpid(pid, &status, 0);
@@ -208,7 +209,7 @@ static bool waitSM(uint16_t port) {
             probe.stop();
             return true;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     return false;
 }
@@ -233,16 +234,15 @@ struct ServerCtx {
     ServerCtx() : registered(false), should_stop(false) {}
 };
 
-static void* serverThread(void* arg) {
+static void serverThread(void* arg) {
     ServerCtx* ctx = static_cast<ServerCtx*>(arg);
-    if (ctx->runtime.init("127.0.0.1", SM_PORT_REQ) != 0) return NULL;
-    if (ctx->runtime.registerService(&ctx->service) != 0) { ctx->runtime.stop(); return NULL; }
+    if (ctx->runtime.init("127.0.0.1", SM_PORT_REQ) != 0) return;
+    if (ctx->runtime.registerService(&ctx->service) != 0) { ctx->runtime.stop(); return; }
     ctx->runtime.publishTopic("ItemTopic");
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(20);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 enum RawReplyMode {
@@ -260,18 +260,18 @@ struct RawReplyCtx {
     RawReplyCtx() : port(0), ready(false), done(false), mode(RAW_REPLY_EMPTY_SUCCESS) {}
 };
 
-static void* rawReplyThread(void* arg) {
+static void rawReplyThread(void* arg) {
     RawReplyCtx* ctx = static_cast<RawReplyCtx*>(arg);
     int port = ctx->server.listen("127.0.0.1", 0);
-    if (port <= 0) return NULL;
+    if (port <= 0) return;
     ctx->port = static_cast<uint16_t>(port);
     ctx->ready = true;
     ITransport* accepted = NULL;
     for (int i = 0; i < 100 && !accepted; ++i) {
         accepted = ctx->server.accept();
-        if (!accepted) usleep(50000);
+        if (!accepted) std::this_thread::sleep_for(std::chrono::microseconds(50000));
     }
-    if (!accepted) { ctx->done = true; return NULL; }
+    if (!accepted) { ctx->done = true; return; }
     uint8_t buf[4096];
     for (int i = 0; i < 100; ++i) {
         int ret = accepted->recv(buf, sizeof(buf));
@@ -294,11 +294,10 @@ static void* rawReplyThread(void* arg) {
             accepted->send(out.data(), out.size());
             break;
         }
-        usleep(20000);
+        std::this_thread::sleep_for(std::chrono::microseconds(20000));
     }
     delete accepted;
     ctx->done = true;
-    return NULL;
 }
 
 int main() {
@@ -308,9 +307,9 @@ int main() {
     assert(waitSM(SM_PORT_REQ));
 
     ServerCtx server;
-    pthread_t server_tid = 0;
-    assert(pthread_create(&server_tid, NULL, serverThread, &server) == 0);
-    for (int i = 0; i < 50 && !server.registered; ++i) usleep(100000);
+    std::thread server_tid;
+    server_tid = std::thread(serverThread, &server);
+    for (int i = 0; i < 50 && !server.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(server.registered);
 
     TcpTransport rogue;
@@ -340,13 +339,13 @@ int main() {
     Message bad_broadcast(MessageType::MSG_BROADCAST, 9002);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
     assert(sendMessage(broadcast_rogue, bad_broadcast));
-    for (int i = 0; i < 20; ++i) { sub_runtime.pollOnce(20); usleep(10000); }
+    for (int i = 0; i < 20; ++i) { sub_runtime.pollOnce(20); std::this_thread::sleep_for(std::chrono::microseconds(10000)); }
     assert(topic_hits.load() == 0);
     broadcast_rogue.close();
     sub_runtime.stop();
 
     server.should_stop = true;
-    pthread_join(server_tid, NULL);
+    server_tid.join();
     stopSM(sm_req);
 
     pid_t sm_reply = startSM(SM_PORT_REPLY);
@@ -355,9 +354,9 @@ int main() {
 
     RawReplyCtx raw_ctx;
     raw_ctx.mode = RAW_REPLY_EMPTY_SUCCESS;
-    pthread_t raw_tid = 0;
-    assert(pthread_create(&raw_tid, NULL, rawReplyThread, &raw_ctx) == 0);
-    for (int i = 0; i < 50 && !raw_ctx.ready; ++i) usleep(100000);
+    std::thread raw_tid;
+    raw_tid = std::thread(rawReplyThread, &raw_ctx);
+    for (int i = 0; i < 50 && !raw_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_ctx.ready);
 
     OmniRuntime reg_runtime;
@@ -380,7 +379,7 @@ int main() {
     reg_runtime.stop();
     sm_conn.close();
 
-    pthread_join(raw_tid, NULL);
+    raw_tid.join();
     stopSM(sm_reply);
 
     pid_t sm_reply_truncated_status = startSM(SM_PORT_REPLY);
@@ -389,9 +388,9 @@ int main() {
 
     RawReplyCtx raw_status_ctx;
     raw_status_ctx.mode = RAW_REPLY_TRUNCATED_STATUS;
-    pthread_t raw_status_tid = 0;
-    assert(pthread_create(&raw_status_tid, NULL, rawReplyThread, &raw_status_ctx) == 0);
-    for (int i = 0; i < 50 && !raw_status_ctx.ready; ++i) usleep(100000);
+    std::thread raw_status_tid;
+    raw_status_tid = std::thread(rawReplyThread, &raw_status_ctx);
+    for (int i = 0; i < 50 && !raw_status_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_status_ctx.ready);
 
     OmniRuntime reg_status_runtime;
@@ -413,7 +412,7 @@ int main() {
     reg_status_runtime.stop();
     sm_status_conn.close();
 
-    pthread_join(raw_status_tid, NULL);
+    raw_status_tid.join();
     stopSM(sm_reply_truncated_status);
 
     pid_t sm_reply_truncated_length = startSM(SM_PORT_REPLY);
@@ -422,9 +421,9 @@ int main() {
 
     RawReplyCtx raw_length_ctx;
     raw_length_ctx.mode = RAW_REPLY_TRUNCATED_LENGTH;
-    pthread_t raw_length_tid = 0;
-    assert(pthread_create(&raw_length_tid, NULL, rawReplyThread, &raw_length_ctx) == 0);
-    for (int i = 0; i < 50 && !raw_length_ctx.ready; ++i) usleep(100000);
+    std::thread raw_length_tid;
+    raw_length_tid = std::thread(rawReplyThread, &raw_length_ctx);
+    for (int i = 0; i < 50 && !raw_length_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_length_ctx.ready);
 
     OmniRuntime reg_length_runtime;
@@ -446,7 +445,7 @@ int main() {
     reg_length_runtime.stop();
     sm_length_conn.close();
 
-    pthread_join(raw_length_tid, NULL);
+    raw_length_tid.join();
     stopSM(sm_reply_truncated_length);
     return 0;
 }
@@ -461,7 +460,8 @@ static const std::string kCHarnessTemplate = R"CPP(
 #include <cassert>
 #include <cstdio>
 #include <cstring>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 #include <signal.h>
 #include <string>
 #include <sys/wait.h>
@@ -491,7 +491,7 @@ static bool connectTcp(omnibinder::TcpTransport& transport, const std::string& h
         for (int i = 0; i < 100; ++i) {
             transport.checkConnectComplete();
             if (transport.state() == omnibinder::ConnectionState::CONNECTED) return true;
-            usleep(10000);
+            std::this_thread::sleep_for(std::chrono::microseconds(10000));
         }
         return false;
     }
@@ -523,7 +523,7 @@ static bool recvFullMessage(omnibinder::TcpTransport& transport, omnibinder::Mes
                 }
             }
         }
-        usleep(20000);
+        std::this_thread::sleep_for(std::chrono::microseconds(20000));
     }
     return false;
 }
@@ -569,7 +569,7 @@ static void stopSM(pid_t pid) {
         for (int i = 0; i < 20; ++i) {
             pid_t ret = waitpid(pid, &status, WNOHANG);
             if (ret == pid) return;
-            usleep(100000);
+            std::this_thread::sleep_for(std::chrono::microseconds(100000));
         }
         kill(pid, SIGKILL);
         waitpid(pid, &status, 0);
@@ -585,7 +585,7 @@ static bool waitSM(uint16_t port) {
             return true;
         }
         omni_runtime_destroy(probe);
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     return false;
 }
@@ -605,7 +605,7 @@ static void cEchoItem(const struct demo_Item* item, struct demo_Item* result, vo
     result->id = item->id;
 }
 
-static void* serverThread(void* arg) {
+static void serverThread(void* arg) {
     ServerCtx* ctx = static_cast<ServerCtx*>(arg);
     ctx->runtime = omni_runtime_create();
     assert(omni_runtime_init(ctx->runtime, "127.0.0.1", SM_PORT_REQ) == 0);
@@ -623,7 +623,6 @@ static void* serverThread(void* arg) {
     demo_ItemService_stub_destroy(ctx->service);
     omni_runtime_stop(ctx->runtime);
     omni_runtime_destroy(ctx->runtime);
-    return NULL;
 }
 
 enum RawReplyMode {
@@ -641,18 +640,18 @@ struct RawReplyCtx {
     RawReplyCtx() : port(0), ready(false), done(false), mode(RAW_REPLY_EMPTY_SUCCESS) {}
 };
 
-static void* rawReplyThread(void* arg) {
+static void rawReplyThread(void* arg) {
     RawReplyCtx* ctx = static_cast<RawReplyCtx*>(arg);
     int port = ctx->server.listen("127.0.0.1", 0);
-    if (port <= 0) return NULL;
+    if (port <= 0) return;
     ctx->port = static_cast<uint16_t>(port);
     ctx->ready = true;
     omnibinder::ITransport* accepted = NULL;
     for (int i = 0; i < 100 && !accepted; ++i) {
         accepted = ctx->server.accept();
-        if (!accepted) usleep(50000);
+        if (!accepted) std::this_thread::sleep_for(std::chrono::microseconds(50000));
     }
-    if (!accepted) { ctx->done = true; return NULL; }
+    if (!accepted) { ctx->done = true; return; }
     uint8_t buf[4096];
     for (int i = 0; i < 100; ++i) {
         int ret = accepted->recv(buf, sizeof(buf));
@@ -675,11 +674,10 @@ static void* rawReplyThread(void* arg) {
             accepted->send(out.data(), out.size());
             break;
         }
-        usleep(20000);
+        std::this_thread::sleep_for(std::chrono::microseconds(20000));
     }
     delete accepted;
     ctx->done = true;
-    return NULL;
 }
 
 static void topicCallback(const demo_ItemTopic* msg, void* user_data) {
@@ -695,9 +693,9 @@ int main() {
     assert(waitSM(SM_PORT_REQ));
 
     ServerCtx server;
-    pthread_t server_tid = 0;
-    assert(pthread_create(&server_tid, NULL, serverThread, &server) == 0);
-    for (int i = 0; i < 50 && !server.registered; ++i) usleep(100000);
+    std::thread server_tid;
+    server_tid = std::thread(serverThread, &server);
+    for (int i = 0; i < 50 && !server.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(server.registered);
 
     omnibinder::TcpTransport rogue;
@@ -728,14 +726,14 @@ int main() {
     omnibinder::Message bad_broadcast(omnibinder::MessageType::MSG_BROADCAST, 9202);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
     assert(sendMessage(broadcast_rogue, bad_broadcast));
-    for (int i = 0; i < 20; ++i) { omni_runtime_poll_once(sub_runtime, 20); usleep(10000); }
+    for (int i = 0; i < 20; ++i) { omni_runtime_poll_once(sub_runtime, 20); std::this_thread::sleep_for(std::chrono::microseconds(10000)); }
     assert(topic_hits.load() == 0);
     broadcast_rogue.close();
     omni_runtime_stop(sub_runtime);
     omni_runtime_destroy(sub_runtime);
 
     server.should_stop = true;
-    pthread_join(server_tid, NULL);
+    server_tid.join();
     stopSM(sm_req);
 
     pid_t sm_reply = startSM(SM_PORT_REPLY);
@@ -744,9 +742,9 @@ int main() {
 
     RawReplyCtx raw_ctx;
     raw_ctx.mode = RAW_REPLY_EMPTY_SUCCESS;
-    pthread_t raw_tid = 0;
-    assert(pthread_create(&raw_tid, NULL, rawReplyThread, &raw_ctx) == 0);
-    for (int i = 0; i < 50 && !raw_ctx.ready; ++i) usleep(100000);
+    std::thread raw_tid;
+    raw_tid = std::thread(rawReplyThread, &raw_ctx);
+    for (int i = 0; i < 50 && !raw_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_ctx.ready);
 
     omni_runtime_t* reg_runtime = omni_runtime_create();
@@ -775,7 +773,7 @@ int main() {
     omni_runtime_destroy(reg_runtime);
     sm_conn.close();
 
-    pthread_join(raw_tid, NULL);
+    raw_tid.join();
     stopSM(sm_reply);
 
     pid_t sm_reply_truncated_status = startSM(SM_PORT_REPLY);
@@ -784,9 +782,9 @@ int main() {
 
     RawReplyCtx raw_status_ctx;
     raw_status_ctx.mode = RAW_REPLY_TRUNCATED_STATUS;
-    pthread_t raw_status_tid = 0;
-    assert(pthread_create(&raw_status_tid, NULL, rawReplyThread, &raw_status_ctx) == 0);
-    for (int i = 0; i < 50 && !raw_status_ctx.ready; ++i) usleep(100000);
+    std::thread raw_status_tid;
+    raw_status_tid = std::thread(rawReplyThread, &raw_status_ctx);
+    for (int i = 0; i < 50 && !raw_status_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_status_ctx.ready);
 
     omni_runtime_t* reg_status_runtime = omni_runtime_create();
@@ -815,7 +813,7 @@ int main() {
     omni_runtime_destroy(reg_status_runtime);
     sm_status_conn.close();
 
-    pthread_join(raw_status_tid, NULL);
+    raw_status_tid.join();
     stopSM(sm_reply_truncated_status);
 
     pid_t sm_reply_truncated_length = startSM(SM_PORT_REPLY);
@@ -824,9 +822,9 @@ int main() {
 
     RawReplyCtx raw_length_ctx;
     raw_length_ctx.mode = RAW_REPLY_TRUNCATED_LENGTH;
-    pthread_t raw_length_tid = 0;
-    assert(pthread_create(&raw_length_tid, NULL, rawReplyThread, &raw_length_ctx) == 0);
-    for (int i = 0; i < 50 && !raw_length_ctx.ready; ++i) usleep(100000);
+    std::thread raw_length_tid;
+    raw_length_tid = std::thread(rawReplyThread, &raw_length_ctx);
+    for (int i = 0; i < 50 && !raw_length_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_length_ctx.ready);
 
     omni_runtime_t* reg_length_runtime = omni_runtime_create();
@@ -855,7 +853,7 @@ int main() {
     omni_runtime_destroy(reg_length_runtime);
     sm_length_conn.close();
 
-    pthread_join(raw_length_tid, NULL);
+    raw_length_tid.join();
     stopSM(sm_reply_truncated_length);
     return 0;
 }
@@ -881,7 +879,7 @@ protected:
 
     static void SetUpTestSuite() {
         system("pkill -f 'service_manager --port 1996' 2>/dev/null || true");
-        usleep(200000);
+        std::this_thread::sleep_for(std::chrono::microseconds(200000));
 
         char dir_template[] = "/tmp/omnibinder_generated_runtime_XXXXXX";
         char* dir_path = mkdtemp(dir_template);

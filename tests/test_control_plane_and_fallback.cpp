@@ -5,12 +5,9 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
-#include <unistd.h>
+#include <thread>
+#include <chrono>
 #include <signal.h>
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <sys/mman.h>
-#include <pthread.h>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -43,47 +40,15 @@ static bool tryDecodeInvokeReplyForTest(const Message& msg, int32_t& status, Buf
     return true;
 }
 
-static pid_t startSM(uint16_t port) {
-    char kill_cmd[128];
-    snprintf(kill_cmd, sizeof(kill_cmd), "pkill -f 'service_manager --port %u' >/dev/null 2>&1 || true", port);
-    int kill_rc = system(kill_cmd);
-    (void)kill_rc;
-    usleep(100000);
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%u", port);
-        const char* paths[] = {
-            "./target/bin/service_manager",
-            "./build/target/bin/service_manager",
-            "./service_manager/service_manager",
-            NULL
-        };
-        for (int i = 0; paths[i]; ++i) {
-            execl(paths[i], "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
-        }
-        _exit(1);
-    }
-    return pid;
+static TestPid startSM(uint16_t port) {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", port);
+    return test::startProcess("target/bin/service_manager",
+                               "--port", port_str, "--log-level", "3");
 }
 
-static void stopSM(pid_t pid) {
-    if (pid > 0) {
-        kill(pid, SIGTERM);
-        int status;
-        for (int i = 0; i < 20; ++i) {
-            pid_t ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) {
-                return;
-            }
-            usleep(100000);
-        }
-        if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-        }
-    }
+static void stopSM(TestPid pid) {
+    test::stopProcess(pid);
 }
 
 static bool waitSM(uint16_t port, int retries) {
@@ -93,7 +58,7 @@ static bool waitSM(uint16_t port, int retries) {
             probe.stop();
             return true;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     return false;
 }
@@ -109,7 +74,7 @@ static bool connectTcp(TcpTransport& transport, const std::string& host, uint16_
             if (transport.state() == ConnectionState::CONNECTED) {
                 return true;
             }
-            usleep(10000);
+            std::this_thread::sleep_for(std::chrono::microseconds(10000));
         }
         return false;
     }
@@ -139,7 +104,7 @@ static bool recvMessage(TcpTransport& transport, Message& msg, int timeout_ms) {
             }
             return true;
         }
-        usleep(20000);
+        std::this_thread::sleep_for(std::chrono::microseconds(20000));
     }
     return false;
 }
@@ -167,7 +132,7 @@ static bool recvFullMessage(TcpTransport& transport, Message& msg, int timeout_m
                 }
             }
         }
-        usleep(5000);
+        std::this_thread::sleep_for(std::chrono::microseconds(5000));
     }
     return false;
 }
@@ -183,7 +148,7 @@ static bool sendFullMessage(TcpTransport& transport, const Message& msg, int tim
             return false;
         }
         if (ret == 0) {
-            usleep(5000);
+            std::this_thread::sleep_for(std::chrono::microseconds(5000));
             continue;
         }
         sent += static_cast<size_t>(ret);
@@ -281,14 +246,14 @@ struct OwnedServerCtx {
     OwnedServerCtx() : registered(false), should_stop(false) {}
 };
 
-static void* ownedServerThread(void* arg) {
+static void ownedServerThread(void* arg) {
     OwnedServerCtx* ctx = static_cast<OwnedServerCtx*>(arg);
     if (ctx->runtime.init("127.0.0.1", SM_PORT) != 0) {
-        return NULL;
+        return;
     }
     if (ctx->runtime.registerService(&ctx->service) != 0) {
         ctx->runtime.stop();
-        return NULL;
+        return;
     }
     ctx->registered = true;
     while (!ctx->should_stop) {
@@ -296,7 +261,6 @@ static void* ownedServerThread(void* arg) {
     }
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 class FallbackService : public Service {
@@ -336,14 +300,14 @@ struct FallbackServerCtx {
     FallbackServerCtx() : registered(false), should_stop(false) {}
 };
 
-static void* fallbackServerThread(void* arg) {
+static void fallbackServerThread(void* arg) {
     FallbackServerCtx* ctx = static_cast<FallbackServerCtx*>(arg);
     if (ctx->runtime.init("127.0.0.1", SM_PORT) != 0) {
-        return NULL;
+        return;
     }
     if (ctx->runtime.registerService(&ctx->service) != 0) {
         ctx->runtime.stop();
-        return NULL;
+        return;
     }
     ctx->registered = true;
     while (!ctx->should_stop) {
@@ -351,7 +315,6 @@ static void* fallbackServerThread(void* arg) {
     }
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 struct DelayedReadServiceCtx {
@@ -362,11 +325,11 @@ struct DelayedReadServiceCtx {
     DelayedReadServiceCtx() : port(0), ready(false), done(false) {}
 };
 
-static void* delayedReadServiceThread(void* arg) {
+static void delayedReadServiceThread(void* arg) {
     DelayedReadServiceCtx* ctx = static_cast<DelayedReadServiceCtx*>(arg);
     int port = ctx->server.listen("127.0.0.1", 0);
     if (port <= 0) {
-        return NULL;
+        return;
     }
     ctx->port = static_cast<uint16_t>(port);
     ctx->ready = true;
@@ -375,17 +338,18 @@ static void* delayedReadServiceThread(void* arg) {
     for (int i = 0; i < 100 && !accepted; ++i) {
         accepted = ctx->server.accept();
         if (!accepted) {
-            usleep(50000);
+            std::this_thread::sleep_for(std::chrono::microseconds(50000));
         }
     }
     if (!accepted) {
         ctx->done = true;
-        return NULL;
+        return;
     }
 
     int rcvbuf = 4096;
-    setsockopt(accepted->fd(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-    usleep(300000);
+    setsockopt(accepted->fd(), SOL_SOCKET, SO_RCVBUF,
+               reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
+    std::this_thread::sleep_for(std::chrono::microseconds(300000));
 
     Buffer input;
     std::vector<uint8_t> buf(65536);
@@ -412,10 +376,10 @@ static void* delayedReadServiceThread(void* arg) {
                                 delete accepted;
                                 ctx->server.close();
                                 ctx->done = true;
-                                return NULL;
+                                return;
                             }
                             if (n == 0) {
-                                usleep(10000);
+                                std::this_thread::sleep_for(std::chrono::microseconds(10000));
                                 continue;
                             }
                             sent += static_cast<size_t>(n);
@@ -426,7 +390,7 @@ static void* delayedReadServiceThread(void* arg) {
             }
         }
         if (!replied) {
-            usleep(10000);
+            std::this_thread::sleep_for(std::chrono::microseconds(10000));
         }
     }
 
@@ -434,35 +398,34 @@ static void* delayedReadServiceThread(void* arg) {
     delete accepted;
     ctx->server.close();
     ctx->done = true;
-    return NULL;
 }
 
 class ControlPlaneTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static OwnedServerCtx owned_ctx_;
-    static pthread_t owned_tid_;
+    static std::thread owned_tid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startSM(SM_PORT);
         ASSERT_GT(sm_pid_, 0);
         ASSERT_TRUE(waitSM(SM_PORT, 30));
 
-        ASSERT_EQ(pthread_create(&owned_tid_, NULL, ownedServerThread, &owned_ctx_), 0);
-        for (int i = 0; i < 50 && !owned_ctx_.registered; ++i) usleep(100000);
+        owned_tid_ = std::thread(ownedServerThread, &owned_ctx_);
+        for (int i = 0; i < 50 && !owned_ctx_.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
         ASSERT_TRUE(owned_ctx_.registered);
     }
 
     static void TearDownTestSuite() {
         owned_ctx_.should_stop = true;
-        pthread_join(owned_tid_, NULL);
+        owned_tid_.join();
         stopSM(sm_pid_);
     }
 };
 
-pid_t ControlPlaneTest::sm_pid_ = 0;
+TestPid ControlPlaneTest::sm_pid_ = 0;
 OwnedServerCtx ControlPlaneTest::owned_ctx_;
-pthread_t ControlPlaneTest::owned_tid_ = 0;
+std::thread ControlPlaneTest::owned_tid_;
 
 TEST_F(ControlPlaneTest, IllegalUnregisterRejected) {
     TcpTransport rogue;
@@ -537,9 +500,9 @@ TEST_F(ControlPlaneTest, IllegalPublishTopicRejected) {
 
 TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     FallbackServerCtx fallback_ctx;
-    pthread_t fallback_tid = 0;
-    ASSERT_EQ(pthread_create(&fallback_tid, NULL, fallbackServerThread, &fallback_ctx), 0);
-    for (int i = 0; i < 50 && !fallback_ctx.registered; ++i) usleep(100000);
+    std::thread fallback_tid;
+    fallback_tid = std::thread(fallbackServerThread, &fallback_ctx);
+    for (int i = 0; i < 50 && !fallback_ctx.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     ASSERT_TRUE(fallback_ctx.registered);
 
     OmniRuntime probe;
@@ -548,7 +511,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     ASSERT_EQ(probe.lookupService("FallbackService", info), 0);
     ASSERT_EQ(info.port, fallback_ctx.service.port());
     ASSERT_FALSE(info.shm_name.empty());
-    ASSERT_EQ(::shm_unlink(info.shm_name.c_str()), 0);
+    omnibinder::platform::shmUnlink(info.shm_name);
 
     probe.clearServiceCache();
     probe.closeAllConnections();
@@ -563,7 +526,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
 
     probe.stop();
     fallback_ctx.should_stop = true;
-    pthread_join(fallback_tid, NULL);
+    fallback_tid.join();
 }
 
 TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
@@ -622,7 +585,7 @@ TEST_F(ControlPlaneTest, MalformedSubscribeBroadcastDoesNotCrashService) {
     bad_broadcast.payload.writeUint32(0x99887766u);
     ASSERT_TRUE(sendMessage(rogue, bad_broadcast));
 
-    usleep(100000);
+    std::this_thread::sleep_for(std::chrono::microseconds(100000));
 
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
@@ -660,9 +623,9 @@ TEST_F(ControlPlaneTest, ListServicesLargeReplyHandlesPartialSend) {
 
 TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     DelayedReadServiceCtx delayed_ctx;
-    pthread_t delayed_tid = 0;
-    ASSERT_EQ(pthread_create(&delayed_tid, NULL, delayedReadServiceThread, &delayed_ctx), 0);
-    for (int i = 0; i < 50 && !delayed_ctx.ready; ++i) usleep(100000);
+    std::thread delayed_tid;
+    delayed_tid = std::thread(delayedReadServiceThread, &delayed_ctx);
+    for (int i = 0; i < 50 && !delayed_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     ASSERT_TRUE(delayed_ctx.ready);
 
     TcpTransport registrant;
@@ -681,7 +644,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
 
     probe.stop();
     registrant.close();
-    pthread_join(delayed_tid, NULL);
+    delayed_tid.join();
 }
 
 TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
@@ -689,7 +652,8 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     int rcvbuf = 4096;
-    setsockopt(rogue.fd(), SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    setsockopt(rogue.fd(), SOL_SOCKET, SO_RCVBUF,
+               reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
 
     std::vector<uint8_t> payload(512 * 1024, 0x6B);
     Message invoke(MessageType::MSG_INVOKE, 3002);
@@ -699,7 +663,7 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     invoke.payload.writeRaw(payload.data(), payload.size());
     ASSERT_TRUE(sendFullMessage(rogue, invoke, 10000));
 
-    usleep(300000);
+    std::this_thread::sleep_for(std::chrono::microseconds(300000));
 
     Message reply;
     ASSERT_TRUE(recvFullMessage(rogue, reply, 15000));

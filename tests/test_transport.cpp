@@ -77,7 +77,8 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
     ASSERT_NE(accepted, nullptr);
 
     int sndbuf = 4096;
-    ASSERT_EQ(setsockopt(client.fd(), SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)), 0);
+    ASSERT_EQ(setsockopt(client.fd(), SOL_SOCKET, SO_SNDBUF,
+                         reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf)), 0);
 
     std::vector<uint8_t> payload(4 * 1024 * 1024, 0x5A);
     int sent = -1;
