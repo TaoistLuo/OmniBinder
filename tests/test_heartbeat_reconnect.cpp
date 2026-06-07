@@ -14,9 +14,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
 #include <atomic>
 #include <string>
 
@@ -54,32 +51,9 @@ private:
 };
 
 // ============================================================
-// Forked service helpers
+// Program path (saved from argv[0] for startProcess)
 // ============================================================
-static void runServiceLoop(uint16_t sm_port) {
-    OmniRuntime rt;
-    if (rt.init("127.0.0.1", sm_port) != 0) _exit(1);
-    HrtbtTestService svc(SERVICE_NAME);
-    if (rt.registerService(&svc) != 0) { rt.stop(); _exit(1); }
-    while (true) { rt.pollOnce(100); }
-}
-
-static pid_t forkServiceProcess(uint16_t sm_port) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        runServiceLoop(sm_port);
-        _exit(0);
-    }
-    return pid;
-}
-
-static void killServiceProcess(pid_t& pid) {
-    if (pid <= 0) return;
-    kill(pid, SIGKILL);
-    int status = 0;
-    waitpid(pid, &status, 0);
-    pid = 0;
-}
+static const char* g_program_path = nullptr;
 
 // ============================================================
 // Wait helpers — pollOnce-based, no sleep()
@@ -112,7 +86,7 @@ static bool tryEchoRpc(OmniRuntime& rt, const std::string& svc_name,
 // ============================================================
 class HeartbeatReconnectTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager",
@@ -130,7 +104,7 @@ protected:
     }
 };
 
-pid_t HeartbeatReconnectTest::sm_pid_ = 0;
+TestPid HeartbeatReconnectTest::sm_pid_ = 0;
 
 // ============================================================
 // Test 1 — HeartbeatTimeoutDetected
@@ -139,8 +113,8 @@ pid_t HeartbeatReconnectTest::sm_pid_ = 0;
 //   OnServiceDied callback fires within 2 s.
 // ============================================================
 TEST_F(HeartbeatReconnectTest, HeartbeatTimeoutDetected) {
-    pid_t svc_pid = forkServiceProcess(SM_PORT);
-    ASSERT_GT(svc_pid, 0) << "forkServiceProcess failed";
+    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
+    ASSERT_GT(svc_pid, 0) << "Failed to start service child";
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
@@ -160,7 +134,7 @@ TEST_F(HeartbeatReconnectTest, HeartbeatTimeoutDetected) {
 
     for (int i = 0; i < 5; ++i) rt.pollOnce(50);
 
-    killServiceProcess(svc_pid);
+    stopProcess(svc_pid);
 
     for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
         rt.pollOnce(50);
@@ -180,8 +154,8 @@ TEST_F(HeartbeatReconnectTest, HeartbeatTimeoutDetected) {
 //   restart service → verify reconnect + RPC works.
 // ============================================================
 TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
-    pid_t svc_pid = forkServiceProcess(SM_PORT);
-    ASSERT_GT(svc_pid, 0) << "forkServiceProcess failed";
+    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
+    ASSERT_GT(svc_pid, 0) << "Failed to start service child";
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
@@ -203,7 +177,7 @@ TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
     proxy.startHeartbeat(200, 500);
     for (int i = 0; i < 5; ++i) rt.pollOnce(50);
 
-    killServiceProcess(svc_pid);
+    stopProcess(svc_pid);
 
     for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
         rt.pollOnce(50);
@@ -211,7 +185,7 @@ TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
     ASSERT_TRUE(death_fired.load(std::memory_order_acquire))
         << "Death should be detected via heartbeat after kill";
 
-    svc_pid = forkServiceProcess(SM_PORT);
+    svc_pid = startProcess(g_program_path, "--child-service", "19950");
     ASSERT_GT(svc_pid, 0) << "Restarting service process failed";
 
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME, 80))
@@ -228,7 +202,7 @@ TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
     EXPECT_TRUE(rt.isServiceConnected(SERVICE_NAME))
         << "Runtime should report service as connected after auto-reconnect";
 
-    killServiceProcess(svc_pid);
+    stopProcess(svc_pid);
     rt.stop();
 }
 
@@ -239,8 +213,8 @@ TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
 //   notifies → verify callback fires.
 // ============================================================
 TEST_F(HeartbeatReconnectTest, OnServiceDiedCallbackFires) {
-    pid_t svc_pid = forkServiceProcess(SM_PORT);
-    ASSERT_GT(svc_pid, 0) << "forkServiceProcess failed";
+    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
+    ASSERT_GT(svc_pid, 0) << "Failed to start service child";
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
@@ -256,7 +230,7 @@ TEST_F(HeartbeatReconnectTest, OnServiceDiedCallbackFires) {
         death_fired.store(true, std::memory_order_release);
     });
 
-    killServiceProcess(svc_pid);
+    stopProcess(svc_pid);
 
     for (int i = 0; i < 150 && !death_fired.load(std::memory_order_acquire); ++i) {
         rt.pollOnce(100);
@@ -276,8 +250,8 @@ TEST_F(HeartbeatReconnectTest, OnServiceDiedCallbackFires) {
 //   is re-established and heartbeat still detects death.
 // ============================================================
 TEST_F(HeartbeatReconnectTest, DirectDisconnectTriggersReconnect) {
-    pid_t svc_pid = forkServiceProcess(SM_PORT);
-    ASSERT_GT(svc_pid, 0) << "forkServiceProcess failed";
+    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
+    ASSERT_GT(svc_pid, 0) << "Failed to start service child";
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
@@ -305,7 +279,7 @@ TEST_F(HeartbeatReconnectTest, DirectDisconnectTriggersReconnect) {
         death_fired.store(true, std::memory_order_release);
     });
 
-    killServiceProcess(svc_pid);
+    stopProcess(svc_pid);
 
     for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
         rt.pollOnce(50);
@@ -323,8 +297,8 @@ TEST_F(HeartbeatReconnectTest, DirectDisconnectTriggersReconnect) {
 //   crash), isConnected() true.
 // ============================================================
 TEST_F(HeartbeatReconnectTest, DisconnectCleansUpState) {
-    pid_t svc_pid = forkServiceProcess(SM_PORT);
-    ASSERT_GT(svc_pid, 0) << "forkServiceProcess failed";
+    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
+    ASSERT_GT(svc_pid, 0) << "Failed to start service child";
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
@@ -350,7 +324,7 @@ TEST_F(HeartbeatReconnectTest, DisconnectCleansUpState) {
         death_fired.store(true, std::memory_order_release);
     });
 
-    killServiceProcess(svc_pid);
+    stopProcess(svc_pid);
 
     for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
         rt.pollOnce(50);
@@ -360,4 +334,21 @@ TEST_F(HeartbeatReconnectTest, DisconnectCleansUpState) {
         << "confirming no stale heartbeat state";
 
     rt.stop();
+}
+
+int main(int argc, char** argv) {
+    g_program_path = argv[0];
+
+    if (argc >= 3 && strcmp(argv[1], "--child-service") == 0) {
+        uint16_t port = (uint16_t)atoi(argv[2]);
+        OmniRuntime rt;
+        if (rt.init("127.0.0.1", port) != 0) return 1;
+        HrtbtTestService svc(SERVICE_NAME);
+        if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
+        while (true) { rt.pollOnce(100); }
+        return 0;
+    }
+
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

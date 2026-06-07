@@ -23,7 +23,8 @@ set(OMNIBINDER_SOURCES
     transport/transport_factory.cpp
 
     # platform
-    platform/platform.cpp
+    platform/platform_linux.cpp
+    platform/platform_win.cpp
     platform/event_backend_linux.cpp
     platform/event_backend_win.cpp
 )

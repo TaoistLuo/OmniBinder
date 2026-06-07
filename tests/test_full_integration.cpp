@@ -14,10 +14,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 #include <vector>
 #include <string>
 #include <atomic>
@@ -29,6 +27,8 @@ static const uint32_t METHOD_ADD = fnv1a_32("Add");
 static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
 static const uint32_t IFACE_ID = fnv1a_32("CalcService");
 static const uint16_t SM_PORT = 19902;
+
+static const char* g_program_path = nullptr;
 
 // ============================================================
 // Test service: CalcService
@@ -77,19 +77,18 @@ struct ServerContext {
     ServerContext() : registered(false), should_stop(false), sm_port(0) {}
 };
 
-static void* serverThread(void* arg) {
+static void serverThread(void* arg) {
     ServerContext* ctx = static_cast<ServerContext*>(arg);
     int ret = ctx->runtime.init("127.0.0.1", ctx->sm_port);
-    if (ret != 0) { fprintf(stderr, "Server: init failed (%d)\n", ret); return NULL; }
+    if (ret != 0) { fprintf(stderr, "Server: init failed (%d)\n", ret); return; }
     ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) { fprintf(stderr, "Server: register failed (%d)\n", ret); ctx->runtime.stop(); return NULL; }
+    if (ret != 0) { fprintf(stderr, "Server: register failed (%d)\n", ret); ctx->runtime.stop(); return; }
     ctx->registered = true;
     while (!ctx->should_stop) {
         ctx->runtime.pollOnce(20);
     }
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 // ============================================================
@@ -97,9 +96,9 @@ static void* serverThread(void* arg) {
 // ============================================================
 class FullIntegrationTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static ServerContext srv_;
-    static pthread_t srv_tid_;
+    static std::thread srv_tid_;
 
     static void SetUpTestSuite() {
         unlink("/dev/shm/binder_CalcService");
@@ -109,18 +108,18 @@ protected:
         ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
         srv_.sm_port = SM_PORT;
-        ASSERT_EQ(pthread_create(&srv_tid_, NULL, serverThread, &srv_), 0);
+        srv_tid_ = std::thread(serverThread, &srv_);
 
-        for (int i = 0; i < 50 && !srv_.registered; i++) usleep(100000);
+        for (int i = 0; i < 50 && !srv_.registered; i++) std::this_thread::sleep_for(std::chrono::microseconds(100000));
         ASSERT_TRUE(srv_.registered);
     }
 
     static void TearDownTestSuite() {
         srv_.should_stop = true;
-        pthread_join(srv_tid_, NULL);
+        srv_tid_.join();
 
         // Verify service is gone after unregister
-        usleep(200000);
+        std::this_thread::sleep_for(std::chrono::microseconds(200000));
         OmniRuntime c;
         if (c.init("127.0.0.1", SM_PORT) == 0) {
             ServiceInfo info;
@@ -132,9 +131,9 @@ protected:
     }
 };
 
-pid_t FullIntegrationTest::sm_pid_ = 0;
+TestPid FullIntegrationTest::sm_pid_ = 0;
 ServerContext FullIntegrationTest::srv_;
-pthread_t FullIntegrationTest::srv_tid_ = 0;
+std::thread FullIntegrationTest::srv_tid_;
 
 // ============================================================
 // Test Group 1: Dual-channel initialization
@@ -224,7 +223,7 @@ TEST_F(FullIntegrationTest, InterfaceMismatchOnewayIsRejected) {
     EXPECT_EQ(c.invokeOneWay("CalcService", IFACE_ID + 1, METHOD_ADD, req), 0);
     for (int i = 0; i < 10; ++i) {
         srv_.runtime.pollOnce(20);
-        usleep(10000);
+        std::this_thread::sleep_for(std::chrono::microseconds(10000));
     }
     EXPECT_EQ(srv_.service.invokeCount(), before);
     c.stop();
@@ -242,7 +241,7 @@ TEST_F(FullIntegrationTest, ThreeClientsConcurrentInvoke) {
     };
 
     ClientResult results[3];
-    pthread_t tids[3];
+    std::thread tids[3];
 
     struct ThreadArg {
         uint16_t port;
@@ -261,12 +260,12 @@ TEST_F(FullIntegrationTest, ThreeClientsConcurrentInvoke) {
         results[i].done = false;
     }
 
-    auto clientFn = [](void* arg) -> void* {
+    auto clientFn = [](void* arg) {
         ThreadArg* a = static_cast<ThreadArg*>(arg);
         OmniRuntime c;
         if (c.init("127.0.0.1", a->port) != 0) {
             a->result->done = true;
-            return NULL;
+            return;
         }
         Buffer req; req.writeInt32(a->a); req.writeInt32(a->b);
         Buffer resp;
@@ -277,14 +276,13 @@ TEST_F(FullIntegrationTest, ThreeClientsConcurrentInvoke) {
         }
         c.stop();
         a->result->done = true;
-        return NULL;
     };
 
     for (int i = 0; i < 3; i++) {
-        pthread_create(&tids[i], NULL, clientFn, &args[i]);
+        tids[i] = std::thread(clientFn, &args[i]);
     }
     for (int i = 0; i < 3; i++) {
-        pthread_join(tids[i], NULL);
+        tids[i].join();
     }
 
     for (int i = 0; i < 3; i++) {
@@ -384,32 +382,10 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
 // ============================================================
 
 TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
-    // Fork a child that registers "EphemeralService", subscribe to its death,
-    // then kill the child and verify notification.
-    pid_t child = fork();
-    if (child == 0) {
-        // Child process: register a service and run until killed
-        class EphService : public Service {
-        public:
-            EphService() : Service("EphemeralService") {
-                iface_.interface_id = fnv1a_32("EphemeralService");
-                iface_.name = "EphemeralService";
-            }
-            const char* serviceName() const override { return "EphemeralService"; }
-            const InterfaceInfo& interfaceInfo() const override { return iface_; }
-        protected:
-            int onInvoke(uint32_t, const Buffer&, Buffer&) override { return 0; }
-        private:
-            InterfaceInfo iface_;
-        };
-
-        OmniRuntime c;
-        if (c.init("127.0.0.1", SM_PORT) != 0) _exit(1);
-        EphService svc;
-        if (c.registerService(&svc) != 0) { c.stop(); _exit(1); }
-        while (true) { c.pollOnce(50); }
-        _exit(0);
-    }
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", SM_PORT);
+    TestPid child = startProcess(g_program_path, "--child-death", port_str, "EphemeralService");
+    ASSERT_GT(child, 0) << "Failed to start ephemeral service child";
 
     // Parent: wait for EphemeralService to appear
     OmniRuntime watcher;
@@ -422,7 +398,7 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
             found = true;
             break;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     ASSERT_TRUE(found) << "EphemeralService not found";
 
@@ -435,10 +411,7 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
         });
     ASSERT_EQ(ret, 0) << "subscribeServiceDeath failed";
 
-    // Kill the child
-    kill(child, SIGKILL);
-    int status;
-    waitpid(child, &status, 0);
+    stopProcess(child);
 
     // Wait for death notification (SM heartbeat timeout ~10s, wait up to 15s)
     for (int i = 0; i < 150 && !death_received; i++) {
@@ -450,29 +423,10 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
 }
 
 TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
-    pid_t child = fork();
-    if (child == 0) {
-        class EphService2 : public Service {
-        public:
-            EphService2() : Service("EphemeralService2") {
-                iface_.interface_id = fnv1a_32("EphemeralService2");
-                iface_.name = "EphemeralService2";
-            }
-            const char* serviceName() const override { return "EphemeralService2"; }
-            const InterfaceInfo& interfaceInfo() const override { return iface_; }
-        protected:
-            int onInvoke(uint32_t, const Buffer&, Buffer&) override { return 0; }
-        private:
-            InterfaceInfo iface_;
-        };
-
-        OmniRuntime c;
-        if (c.init("127.0.0.1", SM_PORT) != 0) _exit(1);
-        EphService2 svc;
-        if (c.registerService(&svc) != 0) { c.stop(); _exit(1); }
-        while (true) { c.pollOnce(50); }
-        _exit(0);
-    }
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", SM_PORT);
+    TestPid child = startProcess(g_program_path, "--child-death", port_str, "EphemeralService2");
+    ASSERT_GT(child, 0) << "Failed to start ephemeral service2 child";
 
     OmniRuntime watcher;
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0) << "watcher init failed";
@@ -484,7 +438,7 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
             found = true;
             break;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     ASSERT_TRUE(found) << "EphemeralService2 not found";
 
@@ -499,9 +453,7 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
     ret = watcher.unsubscribeServiceDeath("EphemeralService2");
     ASSERT_EQ(ret, 0) << "unsubscribeServiceDeath failed";
 
-    kill(child, SIGKILL);
-    int status;
-    waitpid(child, &status, 0);
+    stopProcess(child);
 
     for (int i = 0; i < 80 && !death_received; i++) {
         watcher.pollOnce(100);
@@ -517,4 +469,37 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
 
 TEST_F(FullIntegrationTest, InvokeCountAccumulated) {
     ASSERT_GT(srv_.service.invokeCount(), 0);
+}
+
+int main(int argc, char** argv) {
+    g_program_path = argv[0];
+
+    if (argc >= 4 && strcmp(argv[1], "--child-death") == 0) {
+        uint16_t port = (uint16_t)atoi(argv[2]);
+        const char* svc_name = argv[3];
+
+        class EphService : public Service {
+        public:
+            explicit EphService(const std::string& n) : Service(n) {
+                iface_.interface_id = fnv1a_32(n.c_str());
+                iface_.name = n;
+            }
+            const char* serviceName() const override { return iface_.name.c_str(); }
+            const InterfaceInfo& interfaceInfo() const override { return iface_; }
+        protected:
+            int onInvoke(uint32_t, const Buffer&, Buffer&) override { return 0; }
+        private:
+            InterfaceInfo iface_;
+        };
+
+        OmniRuntime c;
+        if (c.init("127.0.0.1", port) != 0) return 1;
+        EphService svc(svc_name);
+        if (c.registerService(&svc) != 0) { c.stop(); return 1; }
+        while (true) { c.pollOnce(50); }
+        return 0;
+    }
+
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }

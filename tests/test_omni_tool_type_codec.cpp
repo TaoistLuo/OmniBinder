@@ -12,7 +12,12 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#ifdef _WIN32
+#include <direct.h>
+#define mkdtemp(p) (_mkdir("omnibinder_tmp") == 0 ? (char*)"omnibinder_tmp" : NULL)
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
 using namespace omnic;

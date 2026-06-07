@@ -5,6 +5,11 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
+#ifdef _WIN32
+// SHM transport test requires UDS (Unix Domain Sockets) which
+// are not available on Windows. The test is disabled.
+int main() { return 0; }
+#else
 #include <poll.h>
 
 using namespace omnibinder;
@@ -213,3 +218,4 @@ TEST_F(ShmTransportTest, RecvReturnsZeroWhenNoData) {
     client.close();
     server.close();
 }
+#endif // _WIN32

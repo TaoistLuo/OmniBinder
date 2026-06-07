@@ -2,7 +2,7 @@
 #include "test_common.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
-#include <pthread.h>
+#include <thread>
 #include <utility>
 
 using namespace omnibinder;
@@ -43,7 +43,7 @@ public:
 
 class StatsTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager");
@@ -56,7 +56,7 @@ protected:
     }
 };
 
-pid_t StatsTest::sm_pid_ = 0;
+TestPid StatsTest::sm_pid_ = 0;
 
 TEST_F(StatsTest, InvokeUpdatesRpcCount) {
     OmniRuntime server_rt;
@@ -65,14 +65,12 @@ TEST_F(StatsTest, InvokeUpdatesRpcCount) {
     ASSERT_EQ(server_rt.registerService(&svc), 0);
 
     volatile bool server_should_stop = false;
-    pthread_t server_tid;
-    auto serverLoop = [](void* arg) -> void* {
+    auto serverLoop = [](void* arg) {
         auto* ctx = static_cast<std::pair<OmniRuntime*, volatile bool*>*>(arg);
         while (!*ctx->second) ctx->first->pollOnce(50);
-        return NULL;
     };
     std::pair<OmniRuntime*, volatile bool*> server_ctx(&server_rt, &server_should_stop);
-    ASSERT_EQ(pthread_create(&server_tid, NULL, serverLoop, &server_ctx), 0);
+    std::thread server_tid(serverLoop, &server_ctx);
 
     OmniRuntime client_rt;
     ASSERT_EQ(client_rt.init("127.0.0.1", SM_PORT), 0);
@@ -91,7 +89,7 @@ TEST_F(StatsTest, InvokeUpdatesRpcCount) {
     EXPECT_GE(stats.total_rpc_success, 3u);
 
     server_should_stop = true;
-    pthread_join(server_tid, NULL);
+    server_tid.join();
     client_rt.stop();
     server_rt.stop();
 }

@@ -679,7 +679,7 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
                                              size_t req_ring_capacity, size_t resp_ring_capacity) {
     entry->shm_name = generateShmName(name);
     entry->shm_server = new ShmTransport(entry->shm_name, true,
-                                         req_ring_capacity, resp_ring_capacity);
+                                          req_ring_capacity, resp_ring_capacity);
     if (entry->shm_server->state() != ConnectionState::CONNECTED) {
         OMNI_LOG_WARN(LOG_TAG, "Failed to create SHM for service %s, SHM disabled",
                         name.c_str());
@@ -1890,6 +1890,23 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                                             uint32_t client_id,
                                             const uint8_t* data, size_t length) {
     if (!entry || !entry->service) return;
+
+    // Handle MSG_HEARTBEAT on the SHM path — the TCP path handles this
+    // in ServiceHostRuntime::handleClientData(), but the SHM callback
+    // path has no equivalent handler, so we must send the ACK here.
+    if (length >= MESSAGE_HEADER_SIZE) {
+        MessageHeader hdr;
+        if (Message::parseHeader(data, length, hdr)
+            && Message::validateHeader(hdr)
+            && hdr.type == static_cast<uint16_t>(MessageType::MSG_HEARTBEAT)) {
+            Message ack(MessageType::MSG_HEARTBEAT_ACK, hdr.sequence);
+            Buffer ack_buf;
+            if (ack.serialize(ack_buf) && entry->shm_server) {
+                entry->shm_server->serverSend(client_id, ack_buf.data(), ack_buf.size());
+            }
+            return;
+        }
+    }
 
     service_host_runtime_.onShmRequest(
         service_name,

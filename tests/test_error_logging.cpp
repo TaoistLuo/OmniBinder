@@ -3,7 +3,8 @@
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
 #include <omnibinder/log.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -40,17 +41,16 @@ struct ErrorLogServerCtx {
     ErrorLogServerCtx() : registered(false), should_stop(false) {}
 };
 
-static void* errorLogServerThread(void* arg) {
+static void errorLogServerThread(void* arg) {
     ErrorLogServerCtx* ctx = static_cast<ErrorLogServerCtx*>(arg);
     int ret = ctx->runtime.init("127.0.0.1", SM_PORT);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 static std::string readFile(const char* path) {
@@ -69,9 +69,9 @@ static std::string readFile(const char* path) {
 
 class ErrorLoggingTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static ErrorLogServerCtx* server_ctx_;
-    static pthread_t server_tid_;
+    static std::thread server_tid_;
     static const char* log_path_;
 
     static void SetUpTestSuite() {
@@ -86,22 +86,22 @@ protected:
         ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
         server_ctx_ = new ErrorLogServerCtx();
-        ASSERT_EQ(pthread_create(&server_tid_, NULL, errorLogServerThread, server_ctx_), 0);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) usleep(100000);
+        server_tid_ = std::thread(errorLogServerThread, server_ctx_);
+        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
         ASSERT_TRUE(server_ctx_->registered);
     }
 
     static void TearDownTestSuite() {
         server_ctx_->should_stop = true;
-        pthread_join(server_tid_, NULL);
+        server_tid_.join();
         delete server_ctx_;
         stopProcess(sm_pid_);
     }
 };
 
-pid_t ErrorLoggingTest::sm_pid_ = 0;
+TestPid ErrorLoggingTest::sm_pid_ = 0;
 ErrorLogServerCtx* ErrorLoggingTest::server_ctx_ = nullptr;
-pthread_t ErrorLoggingTest::server_tid_ = 0;
+std::thread ErrorLoggingTest::server_tid_;
 const char* ErrorLoggingTest::log_path_ = nullptr;
 
 TEST_F(ErrorLoggingTest, SmConnectFailureLog) {
@@ -119,10 +119,8 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
     int ret = runtime.invoke("MissingService", IFACE_ID, METHOD_ECHO, req, resp, 1000);
     EXPECT_NE(ret, 0);
 
-    kill(sm_pid_, SIGKILL);
-    int wstatus = 0;
-    waitpid(sm_pid_, &wstatus, 0);
-    usleep(100000);
+    stopProcess(sm_pid_);
+    std::this_thread::sleep_for(std::chrono::microseconds(100000));
     for (int i = 0; i < 30; ++i) {
         runtime.pollOnce(50);
     }
@@ -133,7 +131,7 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
     bool recovered = false;
     for (int i = 0; i < 80 && !recovered; ++i) {
         if (runtime.connectService("LogService") != 0) {
-            usleep(100000);
+            std::this_thread::sleep_for(std::chrono::microseconds(100000));
             continue;
         }
         Buffer ok_req, ok_resp;
@@ -144,7 +142,7 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
             std::string result(reinterpret_cast<const char*>(ok_resp.data()), ok_resp.size());
             if (result == payload) recovered = true;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(recovered);
     runtime.stop();

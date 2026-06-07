@@ -11,7 +11,12 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#ifdef _WIN32
+#include <io.h>
+#include <direct.h>
+#else
 #include <unistd.h>
+#endif
 
 using namespace omnic;
 
@@ -1102,10 +1107,15 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
 }
 
 TEST(IdlCompilerTest, CodegenCCustomStructNamingIsForwardDeclSafe) {
+#ifdef _WIN32
+    std::string dir = "omni-idlc_test_codegen_c_custom";
+    mkdir(dir.c_str());
+#else
     char dir_template[] = "/tmp/omni-idlc_test_codegen_c_custom_XXXXXX";
     char* dir_path = mkdtemp(dir_template);
     ASSERT_TRUE(dir_path != NULL);
     std::string dir(dir_path);
+#endif
 
     const std::string common_src =
         "package common;\n"

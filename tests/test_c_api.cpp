@@ -1,7 +1,8 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
 #include <omnibinder/omnibinder_c.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 
 using namespace omnibinder::test;
 
@@ -39,24 +40,23 @@ struct CApiServerCtx {
     CApiServerCtx() : runtime(NULL), service(NULL), registered(false), should_stop(false) {}
 };
 
-static void* cApiServerThread(void* arg) {
+static void cApiServerThread(void* arg) {
     CApiServerCtx* ctx = static_cast<CApiServerCtx*>(arg);
     int ret = omni_runtime_init(ctx->runtime, "127.0.0.1", SM_PORT);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ret = omni_runtime_register_service(ctx->runtime, ctx->service);
-    if (ret != 0) return NULL;
+    if (ret != 0) return;
     ctx->registered = true;
     while (!ctx->should_stop) omni_runtime_poll_once(ctx->runtime, 20);
     omni_runtime_unregister_service(ctx->runtime, ctx->service);
     omni_runtime_stop(ctx->runtime);
-    return NULL;
 }
 
 class CApiTest : public ::testing::Test {
 protected:
-    static pid_t sm_pid_;
+    static TestPid sm_pid_;
     static CApiServerCtx* server_ctx_;
-    static pthread_t server_tid_;
+    static std::thread server_tid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19941", "--log-level", "3");
@@ -72,14 +72,14 @@ protected:
         omni_service_add_method_ex(server_ctx_->service, METHOD_GET_NAME, "GetName", "", "std::string");
         omni_service_add_method_ex(server_ctx_->service, METHOD_ECHO_BYTES, "EchoBytes", "std::vector<uint8_t>", "std::vector<uint8_t>");
 
-        ASSERT_EQ(pthread_create(&server_tid_, NULL, cApiServerThread, server_ctx_), 0);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) usleep(100000);
+        server_tid_ = std::thread(cApiServerThread, server_ctx_);
+        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
         ASSERT_TRUE(server_ctx_->registered);
     }
 
     static void TearDownTestSuite() {
         server_ctx_->should_stop = true;
-        pthread_join(server_tid_, NULL);
+        server_tid_.join();
         omni_service_destroy(server_ctx_->service);
         omni_runtime_destroy(server_ctx_->runtime);
         delete server_ctx_;
@@ -87,9 +87,9 @@ protected:
     }
 };
 
-pid_t CApiTest::sm_pid_ = 0;
+TestPid CApiTest::sm_pid_ = 0;
 CApiServerCtx* CApiTest::server_ctx_ = nullptr;
-pthread_t CApiTest::server_tid_ = 0;
+std::thread CApiTest::server_tid_;
 
 TEST_F(CApiTest, BufferRoundtripAndHash) {
     omni_buffer_t* buf = omni_buffer_create();

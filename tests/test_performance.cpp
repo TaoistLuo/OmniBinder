@@ -7,18 +7,22 @@
 // 输出: 控制台统计报告 + docs/performance-report.md
 
 #include <omnibinder/omnibinder.h>
+#include "platform/platform.h"
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
+#include <csignal>
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
 #include <cassert>
 #include <cmath>
 #include <cerrno>
-#include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <pthread.h>
+#include <thread>
+#include <chrono>
 #include <vector>
 #include <string>
+#include <cstring>
 #include <atomic>
 #include <algorithm>
 #include <numeric>
@@ -178,8 +182,8 @@ protected:
             int32_t b = mustRead<int32_t>(req, &Buffer::tryReadInt32);
             if (!response.writeInt32(a + b)) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
         }
-        return 0;
-    }
+    return 0;
+}
 private:
     InterfaceInfo iface_;
 };
@@ -224,18 +228,18 @@ struct ServerContext {
         , topic_ready(false) {}
 };
 
-static void* serverThread(void* arg) {
+static void serverThread(void* arg) {
     ServerContext* ctx = static_cast<ServerContext*>(arg);
     int ret = ctx->runtime.init("127.0.0.1", ctx->sm_port);
     if (ret != 0) {
         fprintf(stderr, "Server: init failed (%d)\n", ret);
-        return NULL;
+        return;
     }
     ret = ctx->runtime.registerService(&ctx->service);
     if (ret != 0) {
         fprintf(stderr, "Server: register failed (%d)\n", ret);
         ctx->runtime.stop();
-        return NULL;
+        return;
     }
     ctx->registered = true;
 
@@ -258,122 +262,68 @@ static void* serverThread(void* arg) {
             ctx->topic_send_time_us.store(nowUs());
             ctx->runtime.broadcast(perf_topic_id, buf);
         }
-        // 驱动服务端 EventLoop，使控制面、TCP、eventfd 等事件得到处理。
-        // 当前 SHM 已是 eventfd 事件驱动，这里的 1ms 只是 benchmark 线程
-        // 主动让出 CPU 并及时处理待办事件，而不是旧轮询模型中的“等待 SHM 请求”。
         ctx->runtime.pollOnce(1);
     }
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
 // ============================================================
-// SM 进程管理
+// SM 进程管理 (cross-platform)
 // ============================================================
-static pid_t startSM(uint16_t port) {
-    char kill_cmd[128];
-    snprintf(kill_cmd, sizeof(kill_cmd), "pkill -f 'service_manager --port %u' >/dev/null 2>&1 || true", port);
-    int kill_rc = system(kill_cmd);
-    (void)kill_rc;
-    usleep(100000);
-
-    // 通过 /proc/self/exe 推断 SM 可执行文件的绝对路径
-    char self_path[1024] = {0};
-    ssize_t len = readlink("/proc/self/exe", self_path, sizeof(self_path) - 1);
-    std::string sm_path;
-    if (len > 0) {
-        self_path[len] = '\0';
-        std::string exe_dir(self_path);
-        size_t pos = exe_dir.rfind('/');
-        if (pos != std::string::npos) {
-            exe_dir = exe_dir.substr(0, pos);
-            // 从 tests/ 目录回退到 build 根目录
-            pos = exe_dir.rfind('/');
-            if (pos != std::string::npos) {
-                sm_path = exe_dir.substr(0, pos) + "/service_manager/service_manager";
-            }
-        }
-    }
-
-    // 检查文件是否存在
-    if (sm_path.empty() || access(sm_path.c_str(), X_OK) != 0) {
-        // 回退到相对路径
-        const char* fallbacks[] = {
-            "./build/target/bin/service_manager",
-            "./target/bin/service_manager",
-            "./service_manager/service_manager",
-            "../service_manager/service_manager",
-            NULL
-        };
-        sm_path.clear();
-        for (int i = 0; fallbacks[i]; i++) {
-            if (access(fallbacks[i], X_OK) == 0) {
-                sm_path = fallbacks[i];
-                break;
-            }
-        }
-    }
-
-    if (sm_path.empty()) {
-        fprintf(stderr, "FATAL: Could not find service_manager binary\n");
-        return -1;
-    }
-
+static intptr_t startSM(uint16_t port) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%u", port);
-
+#ifdef _WIN32
+    std::string cmd = std::string("target\\bin\\service_manager.exe --port ")
+                    + port_str + " --log-level 3";
+    STARTUPINFOA si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+        return -1;
+    CloseHandle(pi.hThread);
+    return reinterpret_cast<intptr_t>(pi.hProcess);
+#else
     pid_t pid = fork();
     if (pid == 0) {
-        execl(sm_path.c_str(), "service_manager", "--port", port_str,
-              "--log-level", "3", (char*)NULL);
-        fprintf(stderr, "FATAL: execl(%s) failed: %s\n", sm_path.c_str(), strerror(errno));
+        execl("target/bin/service_manager", "service_manager",
+              "--port", port_str, "--log-level", "3", (char*)NULL);
         _exit(1);
     }
-
-    if (pid < 0) {
-        fprintf(stderr, "FATAL: fork() failed\n");
-        return -1;
-    }
-
-    // 检查子进程是否立即退出（exec 失败）
-    usleep(50000);  // 50ms
-    int status;
-    pid_t ret = waitpid(pid, &status, WNOHANG);
-    if (ret == pid) {
-        fprintf(stderr, "FATAL: SM process exited immediately (status=%d)\n", status);
-        return -1;
-    }
-
-    return pid;
+    return static_cast<intptr_t>(pid);
+#endif
 }
 
-static void stopSM(pid_t pid) {
-    if (pid > 0) {
-        kill(pid, SIGTERM);
-        int s;
-        for (int i = 0; i < 20; ++i) {
-            pid_t ret = waitpid(pid, &s, WNOHANG);
-            if (ret == pid) {
-                return;
-            }
-            usleep(100000);
-        }
-        if (kill(pid, 0) == 0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &s, 0);
-        }
-    }
+static void stopSM(intptr_t pid) {
+    if (pid <= 0) return;
+#ifdef _WIN32
+    TerminateProcess(reinterpret_cast<HANDLE>(pid), 0);
+    WaitForSingleObject(reinterpret_cast<HANDLE>(pid), 5000);
+    CloseHandle(reinterpret_cast<HANDLE>(pid));
+#else
+    kill(static_cast<pid_t>(pid), SIGTERM);
+    int s = 0;
+    waitpid(static_cast<pid_t>(pid), &s, 0);
+#endif
 }
 
 static bool waitSM(uint16_t port, int retries) {
-    for (int i = 0; i < retries; i++) {
-        OmniRuntime probe;
-        if (probe.init("127.0.0.1", port) == 0) {
-            probe.stop();
-            return true;
+    for (int i = 0; i < retries; ++i) {
+        omnibinder::platform::netInit();
+        SocketFd fd = omnibinder::platform::createTcpSocket();
+        if (fd != INVALID_SOCKET_FD) {
+            struct sockaddr_in addr;
+            memset(&addr, 0, sizeof(addr));
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(port);
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            int r = ::connect(fd, (struct sockaddr*)&addr, sizeof(addr));
+            omnibinder::platform::closeSocket(fd);
+            if (r == 0) return true;
         }
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     return false;
 }
@@ -495,19 +445,19 @@ struct TopicPublisherContext {
         , send_time_us(0) {}
 };
 
-static void* topicPublisherThread(void* arg) {
+static void topicPublisherThread(void* arg) {
     TopicPublisherContext* ctx = static_cast<TopicPublisherContext*>(arg);
     if (ctx->runtime.init("127.0.0.1", SM_PORT) != 0) {
-        return NULL;
+        return;
     }
     if (ctx->runtime.registerService(&ctx->service) != 0) {
         ctx->runtime.stop();
-        return NULL;
+        return;
     }
     if (ctx->runtime.publishTopic("PerfTopic") != 0) {
         ctx->runtime.unregisterService(&ctx->service);
         ctx->runtime.stop();
-        return NULL;
+        return;
     }
     ctx->ready = true;
 
@@ -529,13 +479,12 @@ static void* topicPublisherThread(void* arg) {
     ctx->ready = false;
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
-    return NULL;
 }
 
-static void* topicSubscriberThread(void* arg) {
+static void topicSubscriberThread(void* arg) {
     TopicSubscriberContext* ctx = static_cast<TopicSubscriberContext*>(arg);
     if (ctx->runtime.init("127.0.0.1", SM_PORT) != 0) {
-        return NULL;
+        return;
     }
 
     int ret = ctx->runtime.subscribeTopic("PerfTopic",
@@ -562,7 +511,7 @@ static void* topicSubscriberThread(void* arg) {
         });
     if (ret != 0) {
         ctx->runtime.stop();
-        return NULL;
+        return;
     }
 
     ctx->ready = true;
@@ -573,7 +522,6 @@ static void* topicSubscriberThread(void* arg) {
     ctx->ready = false;
     ctx->runtime.unsubscribeTopic("PerfTopic");
     ctx->runtime.stop();
-    return NULL;
 }
 
 static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) {
@@ -584,16 +532,13 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     TopicPublisherContext pub_ctx;
     pub_ctx.payload.assign(static_cast<size_t>(payload_size), 0xCD);
     pub_ctx.pending_seq.store(0);
-    pthread_t pub_tid;
-    if (pthread_create(&pub_tid, NULL, topicPublisherThread, &pub_ctx) != 0) {
-        fprintf(stderr, "Topic publisher thread create failed\n");
-        return stats;
-    }
-    for (int i = 0; i < 50 && !pub_ctx.ready; ++i) usleep(100000);
+    std::thread pub_tid;
+    pub_tid = std::thread(topicPublisherThread, &pub_ctx);
+    for (int i = 0; i < 50 && !pub_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     if (!pub_ctx.ready) {
         fprintf(stderr, "Topic publisher thread not ready\n");
         pub_ctx.should_stop = true;
-        pthread_join(pub_tid, NULL);
+        pub_tid.join();
         return stats;
     }
 
@@ -601,23 +546,18 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     ctx.expected_payload_size = payload_size;
     TopicSubscriberContext sub_ctx;
     sub_ctx.bench = &ctx;
-    pthread_t sub_tid;
-    if (pthread_create(&sub_tid, NULL, topicSubscriberThread, &sub_ctx) != 0) {
-        fprintf(stderr, "Topic subscriber thread create failed\n");
-        pub_ctx.should_stop = true;
-        pthread_join(pub_tid, NULL);
-        return stats;
-    }
-    for (int i = 0; i < 50 && !sub_ctx.ready; ++i) usleep(100000);
+    std::thread sub_tid;
+    sub_tid = std::thread(topicSubscriberThread, &sub_ctx);
+    for (int i = 0; i < 50 && !sub_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     if (!sub_ctx.ready) {
         fprintf(stderr, "Topic subscriber thread not ready\n");
         sub_ctx.should_stop = true;
-        pthread_join(sub_tid, NULL);
+        sub_tid.join();
         pub_ctx.should_stop = true;
-        pthread_join(pub_tid, NULL);
+        pub_tid.join();
         return stats;
     }
-    for (int i = 0; i < 30; i++) usleep(5000);
+    for (int i = 0; i < 30; i++) std::this_thread::sleep_for(std::chrono::microseconds(5000));
 
     const uint32_t topic_timeout_ms = 2000;
     auto waitForSequence = [&ctx, topic_timeout_ms](uint32_t seq) -> bool {
@@ -627,7 +567,7 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
             if (ctx.received_seq.load(std::memory_order_acquire) == seq) {
                 return true;
             }
-            usleep(50);
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
         return ctx.received_seq.load(std::memory_order_acquire) == seq;
     };
@@ -643,9 +583,9 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     if (!subscriber_ready) {
         fprintf(stderr, "Topic subscriber never received preflight broadcast\n");
         sub_ctx.should_stop = true;
-        pthread_join(sub_tid, NULL);
+        sub_tid.join();
         pub_ctx.should_stop = true;
-        pthread_join(pub_tid, NULL);
+        pub_tid.join();
         return stats;
     }
     for (int i = 0; i < warmup; i++) {
@@ -656,9 +596,9 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
         if (!waitForSequence(seq)) {
             fprintf(stderr, "Topic warmup timed out (payload=%d, seq=%u)\n", payload_size, seq);
             sub_ctx.should_stop = true;
-            pthread_join(sub_tid, NULL);
+            sub_tid.join();
             pub_ctx.should_stop = true;
-            pthread_join(pub_tid, NULL);
+            pub_tid.join();
             return stats;
         }
     }
@@ -676,9 +616,9 @@ static LatencyStats benchTopicLatency(int payload_size, int warmup, int rounds) 
     }
 
     sub_ctx.should_stop = true;
-    pthread_join(sub_tid, NULL);
+    sub_tid.join();
     pub_ctx.should_stop = true;
-    pthread_join(pub_tid, NULL);
+    pub_tid.join();
     return stats;
 }
 
@@ -846,7 +786,7 @@ int main(int argc, char* argv[]) {
 
     // 启动 SM
     printf("Starting ServiceManager on port %u...\n", SM_PORT);
-    pid_t sm_pid = startSM(SM_PORT);
+    intptr_t sm_pid = startSM(SM_PORT);
     if (sm_pid <= 0) {
         fprintf(stderr, "FATAL: Failed to fork SM process\n");
         return 1;
@@ -856,29 +796,25 @@ int main(int argc, char* argv[]) {
         stopSM(sm_pid);
         return 1;
     }
-    printf("ServiceManager ready (pid=%d)\n\n", sm_pid);
+    printf("ServiceManager ready (pid=%d)\n\n", static_cast<int>(sm_pid));
 
     // 启动服务端线程
     ServerContext srv;
     srv.sm_port = SM_PORT;
-    pthread_t srv_tid;
-    if (pthread_create(&srv_tid, NULL, serverThread, &srv) != 0) {
-        fprintf(stderr, "FATAL: Failed to create server thread\n");
-        stopSM(sm_pid);
-        return 1;
-    }
-    for (int i = 0; i < 50 && !srv.registered; i++) usleep(100000);
+    std::thread srv_tid;
+    srv_tid = std::thread(serverThread, &srv);
+    for (int i = 0; i < 50 && !srv.registered; i++) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     if (!srv.registered) {
         fprintf(stderr, "FATAL: PerfService failed to register\n");
         srv.should_stop = true;
-        pthread_join(srv_tid, NULL);
+        srv_tid.join();
         stopSM(sm_pid);
         return 1;
     }
     printf("PerfService registered on port %u\n\n", srv.service.port());
 
     // 等待话题发布完成
-    usleep(200000);
+    std::this_thread::sleep_for(std::chrono::microseconds(200000));
 
     std::vector<LatencyStats> all_stats;
 
@@ -893,7 +829,7 @@ int main(int argc, char* argv[]) {
         if (init_ret != 0) {
             fprintf(stderr, "FATAL: RPC client init failed (%d)\n", init_ret);
             srv.should_stop = true;
-            pthread_join(srv_tid, NULL);
+            srv_tid.join();
             stopSM(sm_pid);
             return 1;
         }
@@ -901,7 +837,7 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "FATAL: connectService PerfService failed\n");
             runtime.stop();
             srv.should_stop = true;
-            pthread_join(srv_tid, NULL);
+            srv_tid.join();
             stopSM(sm_pid);
             return 1;
         }
@@ -980,7 +916,9 @@ int main(int argc, char* argv[]) {
     // 清理
     // ============================================================
     printf("\nCleaning up...\n");
-    kill(sm_pid, SIGKILL);
+    srv.should_stop = true;
+    srv_tid.join();
+    stopSM(sm_pid);
     printf("\n=== Performance benchmark completed ===\n");
     fflush(stdout);
     fflush(stderr);
