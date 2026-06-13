@@ -57,6 +57,7 @@ class Service;
 
 typedef std::function<void(const std::string& service_name)> DeathCallback;
 typedef std::function<void(uint32_t topic_id, const Buffer& data)> TopicCallback;
+typedef std::function<void(uint32_t topic_id, ErrorCode error, const Buffer& raw_data)> TopicErrorCallback;
 
 class OmniRuntime {
 public:
@@ -85,16 +86,18 @@ public:
     void stopHeartbeat(const std::string& service_name);
 
     int invoke(const std::string& service_name, uint32_t interface_id, uint32_t method_id,
-               const Buffer& request, Buffer& response, uint32_t timeout_ms = 0);
+               uint32_t idl_hash, const Buffer& request, Buffer& response,
+               uint32_t timeout_ms = 0);
     int invokeOneWay(const std::string& service_name, uint32_t interface_id, uint32_t method_id,
-                     const Buffer& request);
+                     uint32_t idl_hash, const Buffer& request);
 
     int subscribeServiceDeath(const std::string& service_name, const DeathCallback& callback);
     int unsubscribeServiceDeath(const std::string& service_name);
 
     int publishTopic(const std::string& topic_name);
     int broadcast(uint32_t topic_id, const Buffer& data);
-    int subscribeTopic(const std::string& topic_name, const TopicCallback& callback);
+    int subscribeTopic(const std::string& topic_name, const TopicCallback& on_message,
+                       const TopicErrorCallback& on_error);
     int unsubscribeTopic(const std::string& topic_name);
 
     void setRegisterHost(const std::string& host);

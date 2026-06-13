@@ -282,6 +282,30 @@ bool TopicManager::hasPublisher(const std::string& topic) const
     return it != topics_.end() && it->second.publisher_fd >= 0;
 }
 
+bool TopicManager::getIdlHash(const std::string& topic, uint32_t& idl_hash) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = topics_.find(topic);
+    if (it == topics_.end() || it->second.publisher_fd < 0) {
+        return false;
+    }
+    idl_hash = it->second.idl_hash;
+    return true;
+}
+
+bool TopicManager::setIdlHash(const std::string& topic, uint32_t idl_hash)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = topics_.find(topic);
+    if (it == topics_.end() || it->second.publisher_fd < 0) {
+        return false;
+    }
+    it->second.idl_hash = idl_hash;
+    return true;
+}
+
 std::vector<std::string> TopicManager::listTopics() const
 {
     std::lock_guard<std::mutex> lock(mutex_);

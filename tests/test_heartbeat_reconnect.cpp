@@ -73,7 +73,7 @@ static bool tryEchoRpc(OmniRuntime& rt, const std::string& svc_name,
     Buffer req;
     req.writeString(payload);
     Buffer resp;
-    int ret = rt.invoke(svc_name, IFACE_ID, METHOD_ECHO, req, resp, 3000);
+    int ret = rt.invoke(svc_name, IFACE_ID, METHOD_ECHO, 0, req, resp, 3000);
     if (ret != 0) return false;
     std::string result;
     Buffer resp_buf(resp.data(), resp.size());

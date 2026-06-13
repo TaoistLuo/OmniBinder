@@ -66,6 +66,7 @@ enum class InvokeDispatchStatus {
     SUCCESS,
     DECODE_FAILED,
     INTERFACE_MISMATCH,
+    IDL_MISMATCH,
     INVOKE_FAILED
 };
 
@@ -175,15 +176,15 @@ public:
 
     // --- 远程调用 ---
     int invoke(const std::string& service_name, uint32_t interface_id,
-               uint32_t method_id, const Buffer& request, Buffer& response,
-               uint32_t timeout_ms);
+               uint32_t method_id, uint32_t idl_hash, const Buffer& request,
+               Buffer& response, uint32_t timeout_ms);
     int invokeOneWay(const std::string& service_name, uint32_t interface_id,
-                     uint32_t method_id, const Buffer& request);
+                     uint32_t method_id, uint32_t idl_hash, const Buffer& request);
     int invokeInternal(const std::string& service_name, uint32_t interface_id,
-                       uint32_t method_id, const Buffer& request, Buffer& response,
-                       uint32_t timeout_ms);
+                       uint32_t method_id, uint32_t idl_hash, const Buffer& request,
+                       Buffer& response, uint32_t timeout_ms);
     int invokeOneWayInternal(const std::string& service_name, uint32_t interface_id,
-                             uint32_t method_id, const Buffer& request);
+                             uint32_t method_id, uint32_t idl_hash, const Buffer& request);
 
     // --- 死亡通知 ---
     int subscribeServiceDeath(const std::string& service_name,
@@ -196,8 +197,8 @@ public:
     // --- 话题 ---
     int publishTopic(const std::string& topic_name);
     int broadcast(uint32_t topic_id, const Buffer& data);
-    int subscribeTopic(const std::string& topic_name,
-                       const TopicCallback& callback);
+    int subscribeTopic(const std::string& topic_name, const TopicCallback& on_message,
+                       const TopicErrorCallback& on_error);
     int unsubscribeTopic(const std::string& topic_name);
     int publishTopicInternal(const std::string& topic_name);
     int broadcastInternal(uint32_t topic_id, const Buffer& data);
@@ -288,7 +289,7 @@ private:
     void removeServiceListenerFromLoop(LocalServiceEntry* entry);
     void removeServiceShmFromLoop(LocalServiceEntry* entry);
     void populateInvokeMessage(Message& msg, uint32_t interface_id, uint32_t method_id,
-                                const Buffer& request) const;
+                                uint32_t idl_hash, const Buffer& request) const;
     int lookupServiceInfo(const std::string& service_name, ServiceInfo& info);
     std::string topicPublisherServiceName(const std::string& topic_name) const;
     bool ensureTopicPublisherConnection(const std::string& topic_name, const ServiceInfo& pub_info);

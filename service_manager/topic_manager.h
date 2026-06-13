@@ -52,8 +52,9 @@ struct TopicEntry {
     ServiceInfo publisher_info;  // Publisher's connection info (host:port)
     int publisher_fd;            // Publisher's control connection fd
     std::set<int> subscriber_fds;
+    uint32_t idl_hash;           // Publisher's IDL hash for this topic
 
-    TopicEntry() : publisher_fd(-1) {}
+    TopicEntry() : publisher_fd(-1), idl_hash(0) {}
 };
 
 // ============================================================
@@ -106,6 +107,14 @@ public:
     // Get the publisher info for a topic.
     // Returns true if the topic has a publisher.
     bool getPublisher(const std::string& topic, ServiceInfo& publisher_info) const;
+
+    // Get the publisher's IDL hash for a topic.
+    // Returns true if the topic has a publisher.
+    bool getIdlHash(const std::string& topic, uint32_t& idl_hash) const;
+
+    // Set the publisher's IDL hash for a topic.
+    // Returns true if the topic exists and has a publisher.
+    bool setIdlHash(const std::string& topic, uint32_t idl_hash);
 
     // Check if a topic has a publisher.
     bool hasPublisher(const std::string& topic) const;

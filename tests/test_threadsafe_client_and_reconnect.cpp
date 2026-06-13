@@ -69,7 +69,7 @@ static void concurrentInvokeThread(void* arg) {
         char payload[64];
         snprintf(payload, sizeof(payload), "thread-%d-iter-%d", ctx->thread_index, i);
         req.writeRaw(payload, strlen(payload));
-        int ret = ctx->runtime->invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, req, resp, 5000);
+        int ret = ctx->runtime->invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, 0, req, resp, 5000);
         if (ret != 0) { ctx->failures++; continue; }
         std::string result(reinterpret_cast<const char*>(resp.data()), resp.size());
         if (result != payload) ctx->failures++;
@@ -143,7 +143,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, SmRestartRecoverySameClient) {
         const char* payload = "after-restart";
         req.writeRaw(payload, strlen(payload));
         if (runtime.connectService("ThreadSafeService") != 0) continue;
-        int ret = runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, req, resp, 3000);
+        int ret = runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000);
         if (ret == 0) {
             std::string result(reinterpret_cast<const char*>(resp.data()), resp.size());
             if (result == payload) recovered = true;
@@ -162,7 +162,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
     const char* warm_payload = "before-server-restart";
     warm_req.writeRaw(warm_payload, strlen(warm_payload));
     ASSERT_EQ(runtime.connectService("ThreadSafeService"), 0);
-    ASSERT_EQ(runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, warm_req, warm_resp, 3000), 0);
+    ASSERT_EQ(runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, 0, warm_req, warm_resp, 3000), 0);
 
     server_ctx_->should_stop = true;
     server_tid_.join();
@@ -182,7 +182,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
         Buffer req, resp;
         const char* payload = "after-server-restart";
         req.writeRaw(payload, strlen(payload));
-        int ret = runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, req, resp, 3000);
+        int ret = runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000);
         if (ret == 0) {
             std::string result(reinterpret_cast<const char*>(resp.data()), resp.size());
             if (result == payload) server_recovered = true;

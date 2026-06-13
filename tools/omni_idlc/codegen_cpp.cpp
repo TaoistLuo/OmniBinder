@@ -454,6 +454,15 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "    return true;\n}\n\n";
     }
     
+    // Topic IDL hash constants (for runtime IDL compatibility verification)
+    for (size_t i = 0; i < ast.topics.size(); ++i) {
+        const TopicDef& t = ast.topics[i];
+        uint32_t topic_hash = computeTopicHash(t, ast);
+        os << "static const uint32_t s_" << t.name << "_topic_idl_hash = 0x"
+           << std::hex << topic_hash << std::dec << "u;\n";
+    }
+    if (!ast.topics.empty()) os << "\n";
+    
     // Service Stub implementation
     for (size_t si = 0; si < ast.services.size(); ++si) {
         const ServiceDef& svc = ast.services[si];
@@ -475,9 +484,12 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             // 生成返回类型字符串
             std::string return_type_str = cppTypeName(m.return_type);
             
-            os << "        s_" << svc.name << "_info.methods.push_back(omnibinder::MethodInfo(0x" 
+            uint32_t idl_hash = computeMethodHash(m, ast);
+            os << "        { omnibinder::MethodInfo mi(0x" 
                << std::hex << mid << std::dec << "u, \"" << m.name << "\", \""
-               << param_type_str << "\", \"" << return_type_str << "\"));\n";
+               << param_type_str << "\", \"" << return_type_str
+               << "\"); mi.idl_hash = 0x" << std::hex << idl_hash << std::dec
+               << "u; s_" << svc.name << "_info.methods.push_back(mi); }\n";
         }
         os << "        s_" << svc.name << "_info_init = true;\n";
         os << "    }\n    return s_" << svc.name << "_info;\n}\n\n";
@@ -533,6 +545,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
+            uint32_t idl_hash = computeMethodHash(m, ast);
             os << "int " << svc.name << "Proxy::" << m.name << "(";
             if (m.has_param) {
                 if (isReferenceType(m.param.type)) {
@@ -552,7 +565,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             if (m.has_param) {
                 emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0, os);
             }
-            os << "    int ret = runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, req, resp, 0);\n";
+            os << "    int ret = runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
             os << "    if (ret != 0) return ret;\n";
             if (!m.return_type.isVoid()) {
                 emitDeserializeValue(m.return_type, "out", "resp", "    ", 0,
@@ -571,7 +584,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "        omnibinder::Buffer buf(data.data(), data.size());\n";
             os << "        if (!msg.deserialize(buf)) return;\n";
             os << "        callback(msg);\n";
-            os << "    });\n}\n\n";
+            os << "    }, nullptr);\n}\n\n";
         }
     }
     

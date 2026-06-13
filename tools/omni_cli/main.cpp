@@ -301,7 +301,7 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
 
     // Invoke the method
     omnibinder::Buffer response;
-    ret = runtime.invoke(info.name.c_str(), iface_id, method_id, request, response);
+    ret = runtime.invoke(info.name.c_str(), iface_id, method_id, 0, request, response);
     
     // 记录结束时间
     auto end_time = std::chrono::steady_clock::now();
@@ -605,7 +605,7 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
             }
             OMNI_LOG_INFO("Watch", "%s \n  HEX: %s",line, hex);
         }
-    });
+    }, nullptr);
 
     signal(SIGINT, watch_sigint_handler);
     signal(SIGTERM, watch_sigint_handler);

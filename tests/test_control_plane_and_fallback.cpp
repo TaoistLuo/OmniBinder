@@ -196,7 +196,7 @@ static bool invokeOwnedService(OmniRuntime& runtime, int32_t a, int32_t b, int32
     req.writeInt32(a);
     req.writeInt32(b);
     Buffer resp;
-    int ret = runtime.invoke("OwnedService", IFACE_ID, METHOD_ADD, req, resp, 5000);
+    int ret = runtime.invoke("OwnedService", IFACE_ID, METHOD_ADD, 0, req, resp, 5000);
     if (ret != 0 || resp.size() < sizeof(int32_t)) {
         return false;
     }
@@ -210,7 +210,9 @@ public:
         iface_.interface_id = IFACE_ID;
         iface_.name = "OwnedService";
         iface_.methods.push_back(MethodInfo(METHOD_ADD, "Add"));
+        iface_.methods.back().idl_hash = 0x5ADD0001u;
         iface_.methods.push_back(MethodInfo(METHOD_ECHO, "Echo"));
+        iface_.methods.back().idl_hash = 0x5EC00001u;
     }
     const char* serviceName() const override { return "OwnedService"; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
@@ -521,7 +523,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     req.writeInt32(9);
     Buffer resp;
     ASSERT_EQ(probe.connectService("FallbackService"), 0);
-    ASSERT_EQ(probe.invoke("FallbackService", IFACE_ID, METHOD_ADD, req, resp, 5000), 0);
+    ASSERT_EQ(probe.invoke("FallbackService", IFACE_ID, METHOD_ADD, 0, req, resp, 5000), 0);
     EXPECT_EQ(mustRead<int32_t>(resp, &Buffer::tryReadInt32), 14);
 
     probe.stop();
@@ -639,7 +641,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     std::vector<uint8_t> payload(16 * 1024, 0x5A);
     req.writeRaw(payload.data(), payload.size());
     Buffer resp;
-    ASSERT_EQ(probe.invoke("SlowReadService", IFACE_ID, METHOD_ADD, req, resp, 30000), 0);
+    ASSERT_EQ(probe.invoke("SlowReadService", IFACE_ID, METHOD_ADD, 0, req, resp, 30000), 0);
     EXPECT_EQ(resp.size(), 0u);
 
     probe.stop();
@@ -658,6 +660,7 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     std::vector<uint8_t> payload(512 * 1024, 0x6B);
     Message invoke(MessageType::MSG_INVOKE, 3002);
     invoke.payload.writeUint32(IFACE_ID);
+    invoke.payload.writeUint32(0x5EC00001u);  // idl_hash matching OwnedService::METHOD_ECHO
     invoke.payload.writeUint32(METHOD_ECHO);
     invoke.payload.writeUint32(static_cast<uint32_t>(payload.size()));
     invoke.payload.writeRaw(payload.data(), payload.size());

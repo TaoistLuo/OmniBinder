@@ -170,6 +170,12 @@ set_tests_properties(test_heartbeat_reconnect PROPERTIES TIMEOUT 120)
 # ============================================================
 if(NOT WIN32)
 
+add_executable(test_idl_mismatch test_idl_mismatch.cpp)
+target_link_libraries(test_idl_mismatch PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_idl_mismatch service_manager)
+add_test(NAME test_idl_mismatch COMMAND test_idl_mismatch WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_idl_mismatch PROPERTIES TIMEOUT 60)
+
 add_executable(test_generated_runtime_integration
     test_generated_runtime_integration.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp

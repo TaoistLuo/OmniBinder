@@ -21,9 +21,23 @@ void TopicRuntime::forgetSubscription(const std::string& topic_name) {
     std::map<std::string, uint32_t>::iterator id_it = topic_name_to_id_.find(topic_name);
     if (id_it != topic_name_to_id_.end()) {
         callbacks_by_id_.erase(id_it->second);
+        error_callbacks_.erase(id_it->second);
     }
     callbacks_.erase(topic_name);
     topic_name_to_id_.erase(topic_name);
+}
+
+void TopicRuntime::setErrorCallback(const std::string& topic_name, const TopicErrorCallback& cb) {
+    uint32_t topic_id = fnv1a_32(topic_name);
+    error_callbacks_[topic_id] = cb;
+}
+
+void TopicRuntime::notifyError(uint32_t topic_id, ErrorCode error) {
+    Buffer empty;
+    std::map<uint32_t, TopicErrorCallback>::iterator it = error_callbacks_.find(topic_id);
+    if (it != error_callbacks_.end()) {
+        it->second(topic_id, error, empty);
+    }
 }
 
 void TopicRuntime::rememberPublishedTopic(const std::string& topic_name, uint32_t topic_id,

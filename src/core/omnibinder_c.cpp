@@ -486,7 +486,7 @@ int omni_runtime_invoke(omni_runtime_t* runtime, const char* service_name,
     uint32_t timeout_ms)
 {
     if (!runtime || !request || !response) return -1;
-    return runtime->runtime.invoke(service_name, interface_id, method_id,
+    return runtime->runtime.invoke(service_name, interface_id, method_id, 0,
                                  request->buf, response->buf, timeout_ms);
 }
 
@@ -495,7 +495,7 @@ int omni_runtime_invoke_oneway(omni_runtime_t* runtime, const char* service_name
     const omni_buffer_t* request)
 {
     if (!runtime || !request) return -1;
-    return runtime->runtime.invokeOneWay(service_name, interface_id, method_id, request->buf);
+    return runtime->runtime.invokeOneWay(service_name, interface_id, method_id, 0, request->buf);
 }
 
 int omni_runtime_connect_service(omni_runtime_t* runtime, const char* service_name) {
@@ -554,7 +554,7 @@ int omni_runtime_subscribe_topic(omni_runtime_t* runtime, const char* topic_name
             omni_buffer_t wrap;
             wrap.buf = omnibinder::Buffer(data.data(), data.size());
             callback(topic_id, &wrap, user_data);
-        });
+        }, nullptr);
 }
 
 int omni_runtime_unsubscribe_topic(omni_runtime_t* runtime, const char* topic_name) {

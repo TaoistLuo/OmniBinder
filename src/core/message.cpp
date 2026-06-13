@@ -178,7 +178,8 @@ void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
         if (!buf.writeUint32(info.methods[i].method_id)
             || !buf.writeString(info.methods[i].name)
             || !buf.writeString(info.methods[i].param_types)
-            || !buf.writeString(info.methods[i].return_type)) {
+            || !buf.writeString(info.methods[i].return_type)
+            || !buf.writeUint32(info.methods[i].idl_hash)) {
             return;
         }
     }
