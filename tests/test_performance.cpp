@@ -274,6 +274,7 @@ static void serverThread(void* arg) {
 static intptr_t startSM(uint16_t port) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%u", port);
+
 #ifdef _WIN32
     std::string cmd = std::string("target\\bin\\service_manager.exe --port ")
                     + port_str + " --log-level 3";
@@ -286,9 +287,36 @@ static intptr_t startSM(uint16_t port) {
     CloseHandle(pi.hThread);
     return reinterpret_cast<intptr_t>(pi.hProcess);
 #else
+    // Clean up any stale SM on the same port
+    char kill_cmd[128];
+    snprintf(kill_cmd, sizeof(kill_cmd),
+             "pkill -U $(id -u) -f 'service_manager --port %u' >/dev/null 2>&1 || true", port);
+    int kill_rc = system(kill_cmd);
+    (void)kill_rc;
+    platform::sleepMs(100);
+
+    // Locate service_manager binary
+    const char* sm_binary = nullptr;
+    const char* fallbacks[] = {
+        "target/bin/service_manager",
+        "./build/target/bin/service_manager",
+        "service_manager",
+        NULL
+    };
+    for (int i = 0; fallbacks[i]; ++i) {
+        if (access(fallbacks[i], X_OK) == 0) {
+            sm_binary = fallbacks[i];
+            break;
+        }
+    }
+    if (!sm_binary) {
+        fprintf(stderr, "FATAL: Could not find service_manager binary\n");
+        return -1;
+    }
+
     pid_t pid = fork();
     if (pid == 0) {
-        execl("target/bin/service_manager", "service_manager",
+        execl(sm_binary, "service_manager",
               "--port", port_str, "--log-level", "3", (char*)NULL);
         _exit(1);
     }
@@ -305,6 +333,12 @@ static void stopSM(intptr_t pid) {
 #else
     kill(static_cast<pid_t>(pid), SIGTERM);
     int s = 0;
+    // Wait up to 2s for graceful shutdown, then force-kill
+    for (int i = 0; i < 20; ++i) {
+        if (waitpid(static_cast<pid_t>(pid), &s, WNOHANG) > 0) return;
+        platform::sleepMs(100);
+    }
+    kill(static_cast<pid_t>(pid), SIGKILL);
     waitpid(static_cast<pid_t>(pid), &s, 0);
 #endif
 }
@@ -323,7 +357,7 @@ static bool waitSM(uint16_t port, int retries) {
             omnibinder::platform::closeSocket(fd);
             if (r == 0) return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        platform::sleepMs(100);
     }
     return false;
 }

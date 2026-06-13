@@ -201,6 +201,16 @@ private:
 
         ClientConnection* conn = it->second;
 
+        // Process READ first: a normal disconnect triggers EPOLLHUP|EPOLLIN
+        // (Linux) or POLLHUP (Windows), both of which set EVENT_READ.
+        // Handle via onClientRead which detects recv==0 / recv<0 as
+        // disconnect, avoiding spurious "Client error" logs on Linux.
+        if (events & EventLoop::EVENT_READ) {
+            onClientRead(conn);
+            // onClientRead may close the client on error/disconnect
+            if (clients_.find(fd) == clients_.end()) return;
+        }
+
         if (events & EventLoop::EVENT_ERROR) {
             OMNI_LOG_WARN(TAG, "Client error: fd=%d", fd);
             closeClient(fd);
@@ -212,10 +222,6 @@ private:
                 closeClient(fd);
                 return;
             }
-        }
-
-        if (events & EventLoop::EVENT_READ) {
-            onClientRead(conn);
         }
     }
 
