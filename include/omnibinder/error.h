@@ -76,6 +76,7 @@ enum class ErrorCode : int32_t {
     ERR_INVOKE_FAILED       = -205,
     ERR_REGISTER_FAILED     = -206,
     ERR_UNREGISTER_FAILED   = -207,
+    ERR_IDL_MISMATCH        = -208,
 
     // 话题错误 (300-399)
     ERR_TOPIC_NOT_FOUND     = -300,

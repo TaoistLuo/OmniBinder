@@ -67,14 +67,15 @@ const size_t   MAX_MESSAGE_SIZE             = 16 * 1024 * 1024;  // 16MB
 // ============================================================
 struct MethodInfo {
     uint32_t    method_id;
+    uint32_t    idl_hash;      // 方法签名+参数/返回值类型递归哈希，检测 IDL 不匹配
     std::string name;
     std::string param_types;   // 参数类型（如 "ControlCommand" 或空表示无参数）
     std::string return_type;   // 返回类型（如 "StatusResponse" 或 "void"）
 
-    MethodInfo() : method_id(0) {}
-    MethodInfo(uint32_t id, const std::string& n) : method_id(id), name(n) {}
+    MethodInfo() : method_id(0), idl_hash(0) {}
+    MethodInfo(uint32_t id, const std::string& n) : method_id(id), idl_hash(0), name(n) {}
     MethodInfo(uint32_t id, const std::string& n, const std::string& p, const std::string& r)
-        : method_id(id), name(n), param_types(p), return_type(r) {}
+        : method_id(id), idl_hash(0), name(n), param_types(p), return_type(r) {}
 };
 
 // ============================================================

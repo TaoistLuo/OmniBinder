@@ -88,7 +88,7 @@ static void concurrentInvoke(OmniRuntime& runtime, int thread_id, int iterations
         Buffer request, response;
         request.writeInt32(thread_id * 1000 + i);
         ASSERT_EQ(runtime.connectService("TestService"), 0);
-        int ret = runtime.invoke("TestService", IFACE_ID, METHOD_ECHO, request, response, 5000);
+        int ret = runtime.invoke("TestService", IFACE_ID, METHOD_ECHO, 0, request, response, 5000);
         if (ret == 0) success_count++;
         else failure_count++;
         std::this_thread::sleep_for(std::chrono::microseconds(rand() % 100));

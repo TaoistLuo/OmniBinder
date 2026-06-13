@@ -13,6 +13,8 @@ class TopicRuntime {
 public:
     void rememberSubscription(const std::string& topic_name, const TopicCallback& callback);
     void forgetSubscription(const std::string& topic_name);
+    void setErrorCallback(const std::string& topic_name, const TopicErrorCallback& cb);
+    void notifyError(uint32_t topic_id, ErrorCode error);
     void rememberPublishedTopic(const std::string& topic_name, uint32_t topic_id,
                                 const std::string& owner_service);
     void forgetPublishedTopic(const std::string& topic_name);
@@ -36,6 +38,7 @@ private:
     std::map<uint32_t, std::vector<int> > tcp_subscribers_;
     std::map<uint32_t, std::vector<std::string> > shm_subscriber_services_;
     std::map<std::string, std::string> published_topic_owners_;
+    std::map<uint32_t, TopicErrorCallback> error_callbacks_;
 };
 
 } // namespace omnibinder

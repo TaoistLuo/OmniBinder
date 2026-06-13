@@ -100,7 +100,7 @@ TEST_F(RuntimeStatsTest, SuccessfulCallsUpdateStats) {
         const char* payload = "stats-ok";
         req.writeRaw(payload, strlen(payload));
         ASSERT_EQ(runtime.connectService("StatsService"), 0);
-        ASSERT_EQ(runtime.invoke("StatsService", IFACE_ID, METHOD_ECHO, req, resp, 3000), 0);
+        ASSERT_EQ(runtime.invoke("StatsService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000), 0);
     }
     RuntimeStats stats;
     ASSERT_EQ(runtime.getStats(stats), 0);
@@ -117,7 +117,7 @@ TEST_F(RuntimeStatsTest, FailedCallUpdatesStats) {
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
     Buffer req, resp;
     req.writeRaw("bad", 3);
-    int ret = runtime.invoke("MissingService", IFACE_ID, METHOD_ECHO, req, resp, 1000);
+    int ret = runtime.invoke("MissingService", IFACE_ID, METHOD_ECHO, 0, req, resp, 1000);
     EXPECT_NE(ret, 0);
 
     RuntimeStats stats;

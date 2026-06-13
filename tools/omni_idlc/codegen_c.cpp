@@ -625,6 +625,9 @@ void CCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::s
     // Topics
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         genTopic(ast.topics[i], os);
+        uint32_t topic_idl_hash = computeTopicHash(ast.topics[i], ast);
+        os << "#define " << pkg_ << "_" << ast.topics[i].name << "_TOPIC_IDL_HASH"
+           << " 0x" << std::hex << topic_idl_hash << std::dec << "u\n\n";
     }
 
     // Services
@@ -683,7 +686,7 @@ void CCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
     os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf);\n\n";
 }
 
-void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*/, std::ostream& os) {
+void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, std::ostream& os) {
     std::string prefix = pkg_ + "_" + svc.name;
     uint32_t iface_id = fnv1a_hash(pkg_ + "." + svc.name);
 
@@ -699,6 +702,17 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& /*ast*
         for (size_t j = 0; j < upper_name.size(); ++j) upper_name[j] = toupper(upper_name[j]);
         os << "#define " << prefix << "_METHOD_" << upper_name
            << " 0x" << std::hex << mid << std::dec << "u\n";
+    }
+    os << "\n";
+
+    // Method IDL hash defines (for runtime IDL compatibility verification)
+    for (size_t i = 0; i < svc.methods.size(); ++i) {
+        const MethodDef& m = svc.methods[i];
+        uint32_t idl_hash = computeMethodHash(m, ast);
+        std::string upper_name = toSnakeCase(m.name);
+        for (size_t j = 0; j < upper_name.size(); ++j) upper_name[j] = toupper(upper_name[j]);
+        os << "#define " << prefix << "_METHOD_" << upper_name << "_IDL_HASH"
+           << " 0x" << std::hex << idl_hash << std::dec << "u\n";
     }
     os << "\n";
 
@@ -1029,7 +1043,8 @@ void CCodeGen::genTopicDeserialize(const TopicDef& t, std::ostream& os) {
 }
 
 
-void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& /*ast*/, std::ostream& os) {
+void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, std::ostream& os) {
+    (void)ast;  // reserved for future IDL hash usage in C method registration
     std::string prefix = pkg_ + "_" + svc.name;
 
     // Internal struct to hold callbacks

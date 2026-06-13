@@ -600,6 +600,8 @@ private:
             sendPublishTopicReply(conn, msg.header.sequence, false);
             return;
         }
+        uint32_t idl_hash = 0;
+        payload.tryReadUint32(idl_hash);
 
         if (!registry_.ownsService(conn->fd, pub_info.name)) {
             OMNI_LOG_WARN(TAG, "Reject publish topic %s from fd=%d for non-owned service %s",
@@ -609,6 +611,9 @@ private:
         }
 
         bool success = topic_manager_.registerPublisher(topic, pub_info, conn->fd);
+        if (success) {
+            topic_manager_.setIdlHash(topic, idl_hash);
+        }
         sendPublishTopicReply(conn, msg.header.sequence, success);
 
         if (success) {
@@ -655,7 +660,9 @@ private:
         }
 
         bool added = topic_manager_.addSubscriber(topic, conn->fd);
-        sendSubscribeTopicReply(conn, msg.header.sequence, added);
+        uint32_t idl_hash = 0;
+        topic_manager_.getIdlHash(topic, idl_hash);
+        sendSubscribeTopicReply(conn, msg.header.sequence, added, idl_hash);
 
         // If there's already a publisher, notify the subscriber
         ServiceInfo pub_info;
@@ -664,9 +671,12 @@ private:
         }
     }
 
-    void sendSubscribeTopicReply(ClientConnection* conn, uint32_t seq, bool success) {
+    void sendSubscribeTopicReply(ClientConnection* conn, uint32_t seq, bool success, uint32_t idl_hash = 0) {
         Message reply(MessageType::MSG_SUBSCRIBE_TOPIC_REPLY, seq);
         reply.payload.writeBool(success);
+        if (success) {
+            reply.payload.writeUint32(idl_hash);
+        }
         sendMessage(conn, reply);
     }
 

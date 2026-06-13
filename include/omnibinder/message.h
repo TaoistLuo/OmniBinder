@@ -204,6 +204,9 @@ bool deserializeInterfaceInfo(BufT& buf, InterfaceInfo& info) {
             || !buf.tryReadString(info.methods[i].return_type)) {
             return false;
         }
+        if (!buf.tryReadUint32(info.methods[i].idl_hash)) {
+            return false;
+        }
     }
     return true;
 }

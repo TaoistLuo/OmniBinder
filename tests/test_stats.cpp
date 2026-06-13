@@ -79,7 +79,7 @@ TEST_F(StatsTest, InvokeUpdatesRpcCount) {
     for (int i = 0; i < 3; i++) {
         Buffer req, resp;
         req.writeInt32(i);
-        int ret = client_rt.invoke("TestService", 0x12345678, 0x00000001, req, resp, 5000);
+        int ret = client_rt.invoke("TestService", 0x12345678, 0x00000001, 0, req, resp, 5000);
         EXPECT_EQ(ret, 0);
     }
 
@@ -100,7 +100,7 @@ TEST_F(StatsTest, FailedInvokeUpdatesFailureCount) {
 
     Buffer req, resp;
     req.writeRaw("bad", 3);
-    int ret = runtime.invoke("MissingService", 0x12345678, 0x00000001, req, resp, 1000);
+    int ret = runtime.invoke("MissingService", 0x12345678, 0x00000001, 0, req, resp, 1000);
     EXPECT_NE(ret, 0);
 
     RuntimeStats stats;

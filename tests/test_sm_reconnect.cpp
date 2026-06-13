@@ -89,7 +89,7 @@ TEST_F(SmReconnectTest, InitialLookupAndInvoke) {
     const char* msg = "before-restart";
     req.writeRaw(msg, strlen(msg));
         ASSERT_EQ(runtime.connectService("ReconnectService"), 0);
-        ASSERT_EQ(runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, req, resp, 3000), 0);
+        ASSERT_EQ(runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000), 0);
     EXPECT_EQ(resp.size(), strlen(msg));
 
     runtime.stop();
@@ -114,7 +114,7 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
             const char* msg = "after-restart";
             req.writeRaw(msg, strlen(msg));
             ASSERT_EQ(runtime.connectService("ReconnectService"), 0);
-            if (runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, req, resp, 3000) == 0 &&
+            if (runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000) == 0 &&
                 resp.size() == strlen(msg)) {
                 recovered = true;
             }

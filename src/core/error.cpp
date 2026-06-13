@@ -30,6 +30,7 @@ const char* errorCodeToString(ErrorCode code) {
     case ErrorCode::ERR_INVOKE_FAILED:       return "Invoke failed";
     case ErrorCode::ERR_REGISTER_FAILED:     return "Register failed";
     case ErrorCode::ERR_UNREGISTER_FAILED:   return "Unregister failed";
+    case ErrorCode::ERR_IDL_MISMATCH:        return "IDL mismatch";
     case ErrorCode::ERR_TOPIC_NOT_FOUND:     return "Topic not found";
     case ErrorCode::ERR_TOPIC_EXISTS:        return "Topic already exists";
     case ErrorCode::ERR_NOT_SUBSCRIBED:      return "Not subscribed";

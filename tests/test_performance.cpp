@@ -380,7 +380,7 @@ static LatencyStats benchRpcEcho(OmniRuntime& runtime, int payload_size,
         Buffer req;
         if (payload_size > 0) req.writeRaw(payload_data.data(), payload_size);
         Buffer resp;
-        runtime.invoke("PerfService", IFACE_ID, METHOD_ECHO, req, resp, 5000);
+        runtime.invoke("PerfService", IFACE_ID, METHOD_ECHO, 0, req, resp, 5000);
     }
 
     // 正式测试
@@ -390,7 +390,7 @@ static LatencyStats benchRpcEcho(OmniRuntime& runtime, int payload_size,
         Buffer resp;
 
         int64_t t0 = nowUs();
-        int ret = runtime.invoke("PerfService", IFACE_ID, METHOD_ECHO, req, resp, 5000);
+        int ret = runtime.invoke("PerfService", IFACE_ID, METHOD_ECHO, 0, req, resp, 5000);
         int64_t t1 = nowUs();
 
         if (ret == 0) {
@@ -411,7 +411,7 @@ static LatencyStats benchRpcAdd(OmniRuntime& runtime, int warmup, int rounds) {
         req.writeInt32(i);
         req.writeInt32(i + 1);
         Buffer resp;
-        runtime.invoke("PerfService", IFACE_ID, METHOD_ADD, req, resp, 5000);
+        runtime.invoke("PerfService", IFACE_ID, METHOD_ADD, 0, req, resp, 5000);
     }
 
     // 正式测试
@@ -422,7 +422,7 @@ static LatencyStats benchRpcAdd(OmniRuntime& runtime, int warmup, int rounds) {
         Buffer resp;
 
         int64_t t0 = nowUs();
-        int ret = runtime.invoke("PerfService", IFACE_ID, METHOD_ADD, req, resp, 5000);
+        int ret = runtime.invoke("PerfService", IFACE_ID, METHOD_ADD, 0, req, resp, 5000);
         int64_t t1 = nowUs();
 
         if (ret == 0) {
@@ -542,7 +542,7 @@ static void topicSubscriberThread(void* arg) {
                 ctx->bench->recv_time_us.store(nowUs(), std::memory_order_release);
                 ctx->bench->received_seq.store(seq, std::memory_order_release);
             }
-        });
+        }, nullptr);
     if (ret != 0) {
         ctx->runtime.stop();
         return;

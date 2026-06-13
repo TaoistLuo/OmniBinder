@@ -238,7 +238,7 @@ TEST_F(IntegrationTest, InvokeAdd) {
     Buffer response;
     ASSERT_EQ(runtime.connectService("TestService"), 0);
     ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
-                        request, response, 5000), 0);
+                        0, request, response, 5000), 0);
     ASSERT_GE(response.size(), 4u);
 
     EXPECT_EQ(mustRead<int32_t>(response, &Buffer::tryReadInt32), 42);
@@ -255,7 +255,7 @@ TEST_F(IntegrationTest, InvokeEcho) {
     Buffer response;
     ASSERT_EQ(runtime.connectService("TestService"), 0);
     ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ECHO,
-                        request, response, 5000), 0);
+                        0, request, response, 5000), 0);
     EXPECT_GT(response.size(), 0u);
 
     std::string echo = mustReadString(response);
@@ -275,7 +275,7 @@ TEST_F(IntegrationTest, MultipleInvocations) {
         Buffer response;
         ASSERT_EQ(runtime.connectService("TestService"), 0);
         ASSERT_EQ(runtime.invoke("TestService", IFACE_ID, METHOD_ADD,
-                            request, response, 5000), 0);
+                            0, request, response, 5000), 0);
         EXPECT_EQ(mustRead<int32_t>(response, &Buffer::tryReadInt32), i + 100);
     }
 

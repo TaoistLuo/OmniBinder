@@ -116,7 +116,7 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
 
     Buffer req, resp;
     req.writeRaw("bad", 3);
-    int ret = runtime.invoke("MissingService", IFACE_ID, METHOD_ECHO, req, resp, 1000);
+    int ret = runtime.invoke("MissingService", IFACE_ID, METHOD_ECHO, 0, req, resp, 1000);
     EXPECT_NE(ret, 0);
 
     stopProcess(sm_pid_);
@@ -137,7 +137,7 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
         Buffer ok_req, ok_resp;
         const char* payload = "reconnect-ok";
         ok_req.writeRaw(payload, strlen(payload));
-        ret = runtime.invoke("LogService", IFACE_ID, METHOD_ECHO, ok_req, ok_resp, 3000);
+        ret = runtime.invoke("LogService", IFACE_ID, METHOD_ECHO, 0, ok_req, ok_resp, 3000);
         if (ret == 0) {
             std::string result(reinterpret_cast<const char*>(ok_resp.data()), ok_resp.size());
             if (result == payload) recovered = true;

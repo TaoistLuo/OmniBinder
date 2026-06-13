@@ -37,6 +37,7 @@
 #include "ast.h"
 #include <string>
 #include <sstream>
+#include <set>
 
 namespace omnic {
 
@@ -50,6 +51,29 @@ inline uint32_t fnv1a_hash(const std::string& str) {
     return hash;
 }
 
+// FNV-1a 组合：将 4 字节整数值混入已有哈希
+inline uint32_t fnv1a_combine(uint32_t hash, uint32_t value) {
+    hash ^= (value & 0xFFu);
+    hash *= 0x01000193u;
+    hash ^= ((value >> 8) & 0xFFu);
+    hash *= 0x01000193u;
+    hash ^= ((value >> 16) & 0xFFu);
+    hash *= 0x01000193u;
+    hash ^= ((value >> 24) & 0xFFu);
+    hash *= 0x01000193u;
+    return hash;
+}
+
+// Hash a TypeRef recursively - uses only type information, NOT field/parameter names
+uint32_t hashTypeRef(const TypeRef& t, const AstFile& ast,
+                     std::set<std::string>& visited);
+
+// Hash a single method: method_name + param_type + return_type
+uint32_t computeMethodHash(const MethodDef& m, const AstFile& ast);
+
+// Hash a topic: topic_name + all field types in declaration order
+uint32_t computeTopicHash(const TopicDef& t, const AstFile& ast);
+
 // 获取 C++ 类型名
 std::string cppTypeName(const TypeRef& type);
 
@@ -58,6 +82,82 @@ std::string cTypeName(const TypeRef& type, const std::string& pkg);
 
 // 判断类型是否需要引用传递
 bool isReferenceType(const TypeRef& type);
+
+// 获取基础类型的短名称（用于哈希计算）
+inline const char* primitiveHashName(PrimitiveType p) {
+    switch (p) {
+    case TYPE_BOOL:    return "bool";
+    case TYPE_INT8:    return "int8";
+    case TYPE_UINT8:   return "uint8";
+    case TYPE_INT16:   return "int16";
+    case TYPE_UINT16:  return "uint16";
+    case TYPE_INT32:   return "int32";
+    case TYPE_UINT32:  return "uint32";
+    case TYPE_INT64:   return "int64";
+    case TYPE_UINT64:  return "uint64";
+    case TYPE_FLOAT32: return "float";
+    case TYPE_FLOAT64: return "double";
+    case TYPE_STRING:  return "string";
+    case TYPE_BYTES:   return "bytes";
+    case TYPE_VOID:    return "void";
+    default:           return "void";
+    }
+}
+
+inline uint32_t hashTypeRef(const TypeRef& t, const AstFile& ast,
+                            std::set<std::string>& visited) {
+    switch (t.primitive) {
+    case TYPE_ARRAY:
+        if (t.element_type) {
+            return fnv1a_combine(fnv1a_hash("[]"),
+                                 hashTypeRef(*t.element_type, ast, visited));
+        }
+        return fnv1a_hash("[]");
+    case TYPE_CUSTOM: {
+        std::string fqn;
+        if (!t.package_name.empty()) {
+            fqn = t.package_name + "." + t.custom_name;
+        } else {
+            fqn = ast.package_name + "." + t.custom_name;
+        }
+        uint32_t hash = fnv1a_hash(fqn);
+        if (visited.find(fqn) == visited.end()) {
+            visited.insert(fqn);
+            for (size_t i = 0; i < ast.structs.size(); ++i) {
+                if (ast.structs[i].name == t.custom_name) {
+                    for (size_t j = 0; j < ast.structs[i].fields.size(); ++j) {
+                        hash = fnv1a_combine(hash,
+                            hashTypeRef(ast.structs[i].fields[j].type, ast, visited));
+                    }
+                    break;
+                }
+            }
+        }
+        return hash;
+    }
+    default:
+        return fnv1a_hash(primitiveHashName(t.primitive));
+    }
+}
+
+inline uint32_t computeMethodHash(const MethodDef& m, const AstFile& ast) {
+    std::set<std::string> visited;
+    uint32_t hash = fnv1a_hash(m.name);
+    if (m.has_param) {
+        hash = fnv1a_combine(hash, hashTypeRef(m.param.type, ast, visited));
+    }
+    hash = fnv1a_combine(hash, hashTypeRef(m.return_type, ast, visited));
+    return hash;
+}
+
+inline uint32_t computeTopicHash(const TopicDef& t, const AstFile& ast) {
+    std::set<std::string> visited;
+    uint32_t hash = fnv1a_hash(t.name);
+    for (size_t i = 0; i < t.fields.size(); ++i) {
+        hash = fnv1a_combine(hash, hashTypeRef(t.fields[i].type, ast, visited));
+    }
+    return hash;
+}
 
 } // namespace omnic
 

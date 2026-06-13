@@ -41,11 +41,13 @@ static void diag_serialize_event(Buffer& buf, uint8_t direction, const Message& 
 
 bool decodeInvokePayload(const Message& msg,
                          uint32_t& interface_id,
+                         uint32_t& idl_hash,
                          uint32_t& method_id,
                          Buffer& request) {
     BufferView req_buf(msg.payload.data(), msg.payload.size());
     uint32_t payload_len = 0;
     if (!req_buf.tryReadUint32(interface_id)
+        || !req_buf.tryReadUint32(idl_hash)
         || !req_buf.tryReadUint32(method_id)
         || !req_buf.tryReadUint32(payload_len)) {
         return false;
@@ -221,12 +223,14 @@ void OmniRuntime::stopHeartbeat(const std::string& name) {
 }
 
 int OmniRuntime::invoke(const std::string& name, uint32_t iface_id, uint32_t method_id,
-                          const Buffer& req, Buffer& resp, uint32_t timeout_ms) {
-    return impl_->invoke(name, iface_id, method_id, req, resp, timeout_ms);
+                          uint32_t idl_hash, const Buffer& req, Buffer& resp,
+                          uint32_t timeout_ms) {
+    return impl_->invoke(name, iface_id, method_id, idl_hash, req, resp, timeout_ms);
 }
 int OmniRuntime::invokeOneWay(const std::string& name, uint32_t iface_id,
-                                uint32_t method_id, const Buffer& req) {
-    return impl_->invokeOneWay(name, iface_id, method_id, req);
+                                uint32_t method_id, uint32_t idl_hash,
+                                const Buffer& req) {
+    return impl_->invokeOneWay(name, iface_id, method_id, idl_hash, req);
 }
 
 int OmniRuntime::subscribeServiceDeath(const std::string& name, const DeathCallback& cb) {
@@ -242,8 +246,9 @@ int OmniRuntime::publishTopic(const std::string& topic) {
 int OmniRuntime::broadcast(uint32_t topic_id, const Buffer& data) {
     return impl_->broadcast(topic_id, data);
 }
-int OmniRuntime::subscribeTopic(const std::string& topic, const TopicCallback& cb) {
-    return impl_->subscribeTopic(topic, cb);
+int OmniRuntime::subscribeTopic(const std::string& topic, const TopicCallback& on_msg,
+                                 const TopicErrorCallback& on_err) {
+    return impl_->subscribeTopic(topic, on_msg, on_err);
 }
 int OmniRuntime::unsubscribeTopic(const std::string& topic) {
     return impl_->unsubscribeTopic(topic);
@@ -1184,15 +1189,17 @@ void OmniRuntime::Impl::checkHeartbeatTimeout(const std::string& service_name) {
 // ============================================================
 
 int OmniRuntime::Impl::invoke(const std::string& service_name, uint32_t interface_id,
-                               uint32_t method_id, const Buffer& request, Buffer& response,
+                               uint32_t method_id, uint32_t idl_hash,
+                               const Buffer& request, Buffer& response,
                                uint32_t timeout_ms) {
-    return callSerialized([this, &service_name, interface_id, method_id, &request, &response, timeout_ms]() -> int {
-        return invokeInternal(service_name, interface_id, method_id, request, response, timeout_ms);
+    return callSerialized([this, &service_name, interface_id, method_id, idl_hash, &request, &response, timeout_ms]() -> int {
+        return invokeInternal(service_name, interface_id, method_id, idl_hash, request, response, timeout_ms);
     });
 }
 
 int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t interface_id,
-                                    uint32_t method_id, const Buffer& request, Buffer& response,
+                                    uint32_t method_id, uint32_t idl_hash,
+                                    const Buffer& request, Buffer& response,
                                     uint32_t timeout_ms) {
     stats_.total_rpc_calls++;
     uint32_t total_timeout_ms = effectiveTimeout(timeout_ms);
@@ -1205,7 +1212,7 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
 
     uint32_t seq = allocSequence();
     Message msg(MessageType::MSG_INVOKE, seq);
-    populateInvokeMessage(msg, interface_id, method_id, request);
+    populateInvokeMessage(msg, interface_id, method_id, idl_hash, request);
 
     uint32_t send_elapsed_ms = 0;
     if (!conn_mgr_->sendMessageWithinTimeout(service_name, msg, total_timeout_ms, &send_elapsed_ms)) {
@@ -1258,14 +1265,16 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
 }
 
 int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t interface_id,
-                                     uint32_t method_id, const Buffer& request) {
-    return callSerialized([this, &service_name, interface_id, method_id, &request]() -> int {
-        return invokeOneWayInternal(service_name, interface_id, method_id, request);
+                                     uint32_t method_id, uint32_t idl_hash,
+                                     const Buffer& request) {
+    return callSerialized([this, &service_name, interface_id, method_id, idl_hash, &request]() -> int {
+        return invokeOneWayInternal(service_name, interface_id, method_id, idl_hash, request);
     });
 }
 
 int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uint32_t interface_id,
-                                          uint32_t method_id, const Buffer& request) {
+                                           uint32_t method_id, uint32_t idl_hash,
+                                           const Buffer& request) {
     stats_.total_rpc_calls++;
 
     ServiceConnection* conn = conn_mgr_->getConnection(service_name);
@@ -1275,7 +1284,7 @@ int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uin
     }
 
     Message msg(MessageType::MSG_INVOKE_ONEWAY, allocSequence());
-    populateInvokeMessage(msg, interface_id, method_id, request);
+    populateInvokeMessage(msg, interface_id, method_id, idl_hash, request);
 
     if (!conn_mgr_->sendMessage(service_name, msg)) {
         stats_.connection_errors++;
@@ -1553,9 +1562,10 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
     result.error_code = 0;
 
     uint32_t interface_id = 0;
+    uint32_t client_idl_hash = 0;
     uint32_t method_id = 0;
     Buffer request;
-    if (!decodeInvokePayload(msg, interface_id, method_id, request)) {
+    if (!decodeInvokePayload(msg, interface_id, client_idl_hash, method_id, request)) {
         OMNI_LOG_WARN(LOG_TAG,
                       "malformed_invoke_payload service=%s transport=%s seq=%u err=%d",
                       service_name, transport_label, msg.getSequence(),
@@ -1568,6 +1578,27 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
         result.status = InvokeDispatchStatus::INTERFACE_MISMATCH;
         result.error_code = static_cast<int>(ErrorCode::ERR_INTERFACE_NOT_FOUND);
         return result;
+    }
+
+    if (client_idl_hash != 0) {
+        uint32_t server_idl_hash = 0;
+        const InterfaceInfo& iface = service->interfaceInfo();
+        for (size_t i = 0; i < iface.methods.size(); ++i) {
+            if (iface.methods[i].method_id == method_id) {
+                server_idl_hash = iface.methods[i].idl_hash;
+                break;
+            }
+        }
+        if (server_idl_hash != 0 && client_idl_hash != server_idl_hash) {
+            OMNI_LOG_WARN(LOG_TAG,
+                          "idl_mismatch service=%s transport=%s method=0x%08x "
+                          "client_hash=0x%08x server_hash=0x%08x",
+                          service_name, transport_label, method_id,
+                          client_idl_hash, server_idl_hash);
+            result.status = InvokeDispatchStatus::IDL_MISMATCH;
+            result.error_code = static_cast<int>(ErrorCode::ERR_IDL_MISMATCH);
+            return result;
+        }
     }
 
     int invoke_status = service->onInvoke(method_id, request, result.response);
@@ -1598,9 +1629,14 @@ void OmniRuntime::Impl::onTopicBroadcastMessage(const Message& msg) {
 }
 
 int OmniRuntime::Impl::subscribeTopic(const std::string& topic_name,
-                                       const TopicCallback& callback) {
-    return callSerialized([this, &topic_name, &callback]() -> int {
-        return subscribeTopicInternal(topic_name, callback);
+                                       const TopicCallback& on_message,
+                                       const TopicErrorCallback& on_error) {
+    return callSerialized([this, &topic_name, &on_message, &on_error]() -> int {
+        int ret = subscribeTopicInternal(topic_name, on_message);
+        if (ret == 0) {
+            topic_runtime_.setErrorCallback(topic_name, on_error);
+        }
+        return ret;
     });
 }
 
@@ -1613,13 +1649,17 @@ int OmniRuntime::Impl::subscribeTopicInternal(const std::string& topic_name,
     int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
 
+    Buffer reply_payload(reply.payload.data(), reply.payload.size());
     bool accepted = false;
-    if (!decodeBoolReplyPayload(reply, accepted)) {
+    if (!reply_payload.tryReadBool(accepted)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (!accepted) {
         return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
     }
+    uint32_t publisher_idl_hash = 0;
+    reply_payload.tryReadUint32(publisher_idl_hash);
+    (void)publisher_idl_hash;
 
     topic_runtime_.rememberSubscription(topic_name, callback);
     return 0;
@@ -1752,7 +1792,12 @@ void OmniRuntime::Impl::onInvokeOneWayRequest(const std::string& service_name,
         broadcastInternal(it->second->diag_topic_id, diag_buf);
     }
 
-    (void)dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
+    InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
+    if (result.status == InvokeDispatchStatus::IDL_MISMATCH) {
+        OMNI_LOG_ERROR(LOG_TAG,
+                       "oneway_idl_mismatch service=%s method=0x%08x err=%d — message discarded",
+                       service_name.c_str(), 0, result.error_code);
+    }
 }
 
 void OmniRuntime::Impl::onSubscribeBroadcast(int client_fd, const Message& msg,
@@ -2011,8 +2056,10 @@ bool OmniRuntime::Impl::sendOnFd(ITransport* transport, const Message& msg) {
 }
 
 void OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_id,
-                                              uint32_t method_id, const Buffer& request) const {
+                                              uint32_t method_id, uint32_t idl_hash,
+                                              const Buffer& request) const {
     if (!msg.payload.writeUint32(interface_id)
+        || !msg.payload.writeUint32(idl_hash)
         || !msg.payload.writeUint32(method_id)
         || !msg.payload.writeUint32(static_cast<uint32_t>(request.size()))
         || (request.size() > 0 && !msg.payload.writeRaw(request.data(), request.size()))) {
@@ -2198,7 +2245,9 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         pub_info.host_id = host_id_;
         pub_info.shm_name = sit->second->shm_name;
         pub_info.shm_config = sit->second->service->shmConfig();
-        serializeServiceInfo(pub_info, msg.payload);
+    serializeServiceInfo(pub_info, msg.payload);
+    msg.payload.writeUint32(0);  // idl_hash placeholder, generated proxy will overwrite
+    
         if (!sendToSM(msg)) {
             return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
         }
@@ -2290,7 +2339,7 @@ void OmniRuntime::Impl::closeAllConnections() {
 int OmniRuntime::Impl::enableDiagnostic(const std::string& service_name) {
     Buffer req, resp;
     req.writeUint8(1);
-    int ret = invoke(service_name, OMNI_DIAG_IFACE_ID, 1, req, resp, 3000);
+    int ret = invoke(service_name, OMNI_DIAG_IFACE_ID, 1, 0, req, resp, 3000);
     if (ret != 0) return ret;
     if (resp.size() >= 1) return resp.data()[0];
     return -1;
@@ -2299,7 +2348,7 @@ int OmniRuntime::Impl::enableDiagnostic(const std::string& service_name) {
 int OmniRuntime::Impl::disableDiagnostic(const std::string& service_name) {
     Buffer req, resp;
     req.writeUint8(0);
-    int ret = invoke(service_name, OMNI_DIAG_IFACE_ID, 1, req, resp, 3000);
+    int ret = invoke(service_name, OMNI_DIAG_IFACE_ID, 1, 0, req, resp, 3000);
     if (ret != 0) return ret;
     if (resp.size() >= 1) return resp.data()[0];
     return -1;
