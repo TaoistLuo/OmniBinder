@@ -82,8 +82,7 @@ struct InvokeDispatchResult {
 struct LocalServiceEntry {
     Service*            service;
     TcpTransportServer* server;
-    ShmTransport*       shm_server;   // 共享内存传输（服务端侧，多客户端共享）
-    std::string         shm_name;     // SHM 名称
+    ShmTransport*       shm_transport;  // server-side UDS listener + per-client context manager
     uint16_t            port;
 
     // fd -> accepted client transport (incoming invoke connections via TCP)
@@ -95,11 +94,16 @@ struct LocalServiceEntry {
     uint32_t diag_topic_id;
 
     LocalServiceEntry()
-        : service(NULL), server(NULL), shm_server(NULL), port(0)
+        : service(NULL), server(NULL), shm_transport(NULL), port(0)
         , diag_enabled(false), diag_topic_id(0)
         {}
 
     ~LocalServiceEntry() {
+        if (shm_transport) {
+            shm_transport->close();
+            delete shm_transport;
+            shm_transport = NULL;
+        }
         for (std::map<int, ITransport*>::iterator it = client_transports.begin();
              it != client_transports.end(); ++it) {
             it->second->close();
@@ -117,12 +121,6 @@ struct LocalServiceEntry {
             server->close();
             delete server;
             server = NULL;
-        }
-
-        if (shm_server) {
-            shm_server->close();
-            delete shm_server;
-            shm_server = NULL;
         }
     }
 
@@ -283,8 +281,7 @@ private:
     void initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
                               size_t req_ring_capacity, size_t resp_ring_capacity);
     int registerServiceWithManager(const std::string& name, Service* service,
-                                   LocalServiceEntry* entry, const std::string& advertise_host,
-                                   size_t req_ring_capacity, size_t resp_ring_capacity);
+                                    LocalServiceEntry* entry, const std::string& advertise_host);
     void cleanupPendingServiceRegistration(LocalServiceEntry* entry);
     void removeServiceListenerFromLoop(LocalServiceEntry* entry);
     void removeServiceShmFromLoop(LocalServiceEntry* entry);

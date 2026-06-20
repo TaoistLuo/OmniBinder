@@ -163,20 +163,13 @@ void serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
 template <typename BufT>
 bool deserializeServiceInfo(BufT& buf, ServiceInfo& info) {
     uint16_t iface_count = 0;
-    uint32_t req_ring_capacity = 0;
-    uint32_t resp_ring_capacity = 0;
     if (!buf.tryReadString(info.name)
         || !buf.tryReadString(info.host)
         || !buf.tryReadUint16(info.port)
         || !buf.tryReadString(info.host_id)
-        || !buf.tryReadString(info.shm_name)
-        || !buf.tryReadUint32(req_ring_capacity)
-        || !buf.tryReadUint32(resp_ring_capacity)
         || !buf.tryReadUint16(iface_count)) {
         return false;
     }
-    info.shm_config.req_ring_capacity = req_ring_capacity;
-    info.shm_config.resp_ring_capacity = resp_ring_capacity;
     info.interfaces.resize(iface_count);
     for (uint16_t i = 0; i < iface_count; ++i) {
         if (!deserializeInterfaceInfo(buf, info.interfaces[i])) {

@@ -94,9 +94,7 @@ public:
         const std::string& service_name,
         const std::string& host,
         uint16_t port,
-        const std::string& host_id,
-        const std::string& shm_name = "",
-        const ShmConfig& shm_config = ShmConfig());
+        const std::string& host_id);
 
     // 获取已有连接
     ServiceConnection* getConnection(const std::string& service_name);
