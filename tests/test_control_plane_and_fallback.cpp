@@ -512,8 +512,6 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     ServiceInfo info;
     ASSERT_EQ(probe.lookupService("FallbackService", info), 0);
     ASSERT_EQ(info.port, fallback_ctx.service.port());
-    ASSERT_FALSE(info.shm_name.empty());
-    omnibinder::platform::shmUnlink(info.shm_name);
 
     probe.clearServiceCache();
     probe.closeAllConnections();

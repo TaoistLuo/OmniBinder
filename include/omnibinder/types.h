@@ -113,8 +113,6 @@ struct ServiceInfo {
     std::string host;
     uint16_t    port;
     std::string host_id;
-    std::string shm_name;   // 共享内存名称（同机通信用，空表示不支持 SHM）
-    ShmConfig   shm_config; // SHM 队列容量配置（0 表示使用默认值）
     std::vector<InterfaceInfo> interfaces;
 
     ServiceInfo() : port(0) {}

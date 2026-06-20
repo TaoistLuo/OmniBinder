@@ -190,8 +190,6 @@ TEST_F(IntegrationTest, LookupService) {
     EXPECT_EQ(info.name, "TestService");
     EXPECT_EQ(info.port, server_ctx_->service.port());
     EXPECT_FALSE(info.host_id.empty());
-    EXPECT_EQ(info.shm_config.req_ring_capacity, 4u * 1024);
-    EXPECT_EQ(info.shm_config.resp_ring_capacity, 4u * 1024);
     ASSERT_EQ(info.interfaces.size(), 1u);
     EXPECT_EQ(info.interfaces[0].name, "TestService");
     EXPECT_EQ(info.interfaces[0].methods.size(), 2u);

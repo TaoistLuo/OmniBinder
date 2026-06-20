@@ -559,9 +559,8 @@ void OmniRuntime::Impl::onSMMessage(const Message& msg) {
             OMNI_LOG_ERROR(LOG_TAG, "Failed to deserialize publisher info for topic %s", topic.c_str());
             break;
         }
-        OMNI_LOG_INFO(LOG_TAG, "Topic %s publisher at %s:%u (shm=%s)",
-                        topic.c_str(), pub_info.host.c_str(), pub_info.port,
-                        pub_info.shm_name.empty() ? "none" : pub_info.shm_name.c_str());
+        OMNI_LOG_INFO(LOG_TAG, "Topic %s publisher at %s:%u",
+                        topic.c_str(), pub_info.host.c_str(), pub_info.port);
         if (!ensureTopicPublisherConnection(topic, pub_info)) {
             OMNI_LOG_WARN(LOG_TAG, "Failed to establish topic publisher path for %s", topic.c_str());
         }
@@ -622,23 +621,18 @@ int OmniRuntime::Impl::registerServiceInternal(Service* service) {
     entry->service = service;
 
     std::string advertise_host;
-    int ret = initializeServiceListener(entry, service, advertise_host);
+    int     ret = initializeServiceListener(entry, service, advertise_host);
     if (ret != 0) {
         delete entry;
         return ret;
     }
 
     ShmConfig shm_config = service->shmConfig();
-    size_t req_ring_capacity = shm_config.req_ring_capacity > 0
-        ? shm_config.req_ring_capacity
-        : SHM_DEFAULT_REQ_RING_CAPACITY;
-    size_t resp_ring_capacity = shm_config.resp_ring_capacity > 0
-        ? shm_config.resp_ring_capacity
-        : SHM_DEFAULT_RESP_RING_CAPACITY;
-    initializeServiceShm(name, entry, req_ring_capacity, resp_ring_capacity);
+    initializeServiceShm(name, entry,
+        shm_config.req_ring_capacity > 0 ? shm_config.req_ring_capacity : SHM_DEFAULT_REQ_RING_CAPACITY,
+        shm_config.resp_ring_capacity > 0 ? shm_config.resp_ring_capacity : SHM_DEFAULT_RESP_RING_CAPACITY);
 
-    ret = registerServiceWithManager(name, service, entry, advertise_host,
-                                     req_ring_capacity, resp_ring_capacity);
+    ret = registerServiceWithManager(name, service, entry, advertise_host);
     if (ret != 0) {
         cleanupPendingServiceRegistration(entry);
         delete entry;
@@ -647,9 +641,8 @@ int OmniRuntime::Impl::registerServiceInternal(Service* service) {
 
     local_services_[name] = entry;
     service->onStart();
-    OMNI_LOG_INFO(LOG_TAG, "Registered service %s on port %u (shm=%s)",
-                    name.c_str(), entry->port,
-                    entry->shm_name.empty() ? "none" : entry->shm_name.c_str());
+    OMNI_LOG_INFO(LOG_TAG, "Registered service %s on port %u",
+                    name.c_str(), entry->port);
     return 0;
 }
 
@@ -681,55 +674,44 @@ std::string OmniRuntime::Impl::resolveRegisterHost(Service* service,
 }
 
 void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
-                                             size_t req_ring_capacity, size_t resp_ring_capacity) {
-    entry->shm_name = generateShmName(name);
-    entry->shm_server = new ShmTransport(entry->shm_name, true,
-                                          req_ring_capacity, resp_ring_capacity);
-    if (entry->shm_server->state() != ConnectionState::CONNECTED) {
-        OMNI_LOG_WARN(LOG_TAG, "Failed to create SHM for service %s, SHM disabled",
-                        name.c_str());
-        delete entry->shm_server;
-        entry->shm_server = NULL;
-        entry->shm_name.clear();
+                                              size_t req_ring_capacity, size_t resp_ring_capacity) {
+    // Create server-side ShmTransport for UDS listening + per-client context management.
+    // Each connecting client creates its own SHM; the server opens it via UDS handshake.
+    entry->shm_transport = new ShmTransport(generateShmName(name), true,
+                                             req_ring_capacity, resp_ring_capacity);
+    if (entry->shm_transport->state() != ConnectionState::CONNECTED) {
+        OMNI_LOG_WARN(LOG_TAG, "Failed to create SHM UDS listener for service %s", name.c_str());
+        delete entry->shm_transport;
+        entry->shm_transport = NULL;
         return;
     }
 
-    OMNI_LOG_INFO(LOG_TAG, "Created SHM '%s' for service %s",
-                    entry->shm_name.c_str(), name.c_str());
-
-    if (entry->shm_server->eventfdEnabled() && entry->shm_server->reqEventFd() >= 0) {
-        loop_->addFd(entry->shm_server->reqEventFd(), EventLoop::EVENT_READ,
-            [this, name](int fd, uint32_t events) {
-                (void)events;
-                platform::eventFdConsume(fd);
-                std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
-                if (it == local_services_.end() || !it->second->shm_server) return;
-                LocalServiceEntry* e = it->second;
-                uint8_t buf[65536];
-                uint32_t client_id = 0;
-                while (true) {
-                    int ret = e->shm_server->serverRecv(buf, sizeof(buf), client_id);
-                    if (ret <= 0) break;
-                    onShmRequest(name, e, client_id, buf, static_cast<size_t>(ret));
+    // Register UDS listen fd with EventLoop for client handshake
+    if (entry->shm_transport->eventfdEnabled()) {
+        loop_->addFd(entry->shm_transport->reqEventFd(), EventLoop::EVENT_READ,
+            [this, entry, name](int, uint32_t) {
+                if (!entry->shm_transport) return;
+                // Server was woken — check all client rings
+                uint8_t buf[4096];
+                uint32_t from_id = 0;
+                int ret = entry->shm_transport->serverRecv(buf, sizeof(buf), from_id);
+                if (ret > 0) {
+                    onShmRequest(name, entry, from_id, buf, static_cast<size_t>(ret));
                 }
             });
     }
 
-    if (entry->shm_server->udsListenFd() >= 0) {
-        ShmTransport* shm = entry->shm_server;
-        loop_->addFd(entry->shm_server->udsListenFd(), EventLoop::EVENT_READ,
-            [shm](int fd, uint32_t events) {
-                (void)fd; (void)events;
-                shm->onUdsClientConnect();
-            });
-    }
+    loop_->addFd(entry->shm_transport->udsListenFd(), EventLoop::EVENT_READ,
+        [this, entry](int, uint32_t) {
+            if (entry->shm_transport) {
+                entry->shm_transport->onUdsClientConnect();
+            }
+        });
 }
 
 int OmniRuntime::Impl::registerServiceWithManager(const std::string& name, Service* service,
                                                   LocalServiceEntry* entry,
-                                                  const std::string& advertise_host,
-                                                  size_t req_ring_capacity,
-                                                  size_t resp_ring_capacity) {
+                                                  const std::string& advertise_host) {
     loop_->addFd(entry->server->fd(), EventLoop::EVENT_READ,
         [this, name](int fd, uint32_t events) { this->onServiceAccept(name, fd, events); });
     listen_fd_to_service_[entry->server->fd()] = name;
@@ -740,8 +722,6 @@ int OmniRuntime::Impl::registerServiceWithManager(const std::string& name, Servi
     svc_info.host = advertise_host;
     svc_info.port = entry->port;
     svc_info.host_id = host_id_;
-    svc_info.shm_name = entry->shm_name;
-    svc_info.shm_config = ShmConfig(req_ring_capacity, resp_ring_capacity);
     svc_info.interfaces.push_back(service->interfaceInfo());
     serializeServiceInfo(svc_info, msg.payload);
 
@@ -785,15 +765,15 @@ void OmniRuntime::Impl::removeServiceListenerFromLoop(LocalServiceEntry* entry) 
 }
 
 void OmniRuntime::Impl::removeServiceShmFromLoop(LocalServiceEntry* entry) {
-    if (!entry || !entry->shm_server) {
+    if (!entry || !entry->shm_transport) {
         return;
     }
 
-    if (entry->shm_server->reqEventFd() >= 0) {
-        loop_->removeFd(entry->shm_server->reqEventFd());
+    if (entry->shm_transport->reqEventFd() >= 0) {
+        loop_->removeFd(entry->shm_transport->reqEventFd());
     }
-    if (entry->shm_server->udsListenFd() >= 0) {
-        loop_->removeFd(entry->shm_server->udsListenFd());
+    if (entry->shm_transport->udsListenFd() >= 0) {
+        loop_->removeFd(entry->shm_transport->udsListenFd());
     }
 }
 
@@ -994,7 +974,7 @@ int OmniRuntime::Impl::connectServiceInternal(const std::string& service_name) {
     if (ret != 0) return ret;
 
     ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-        service_name, info.host, info.port, info.host_id, info.shm_name, info.shm_config);
+        service_name, info.host, info.port, info.host_id);
     if (!conn) {
         OMNI_LOG_ERROR(LOG_TAG, "connectService failed for %s", service_name.c_str());
         return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
@@ -1374,14 +1354,6 @@ int OmniRuntime::Impl::publishTopicInternal(const std::string& topic_name) {
         pub_info.name = local_services_.begin()->first;
         pub_info.host = normalizeAdvertiseHost(platform::getSocketAddress(entry->server->fd()));
         pub_info.port = entry->port;
-        pub_info.shm_name = entry->shm_name;
-        if (entry->service) {
-            ShmConfig cfg = entry->service->shmConfig();
-            pub_info.shm_config.req_ring_capacity = cfg.req_ring_capacity > 0
-                ? cfg.req_ring_capacity : SHM_DEFAULT_REQ_RING_CAPACITY;
-            pub_info.shm_config.resp_ring_capacity = cfg.resp_ring_capacity > 0
-                ? cfg.resp_ring_capacity : SHM_DEFAULT_RESP_RING_CAPACITY;
-        }
     } else {
         OMNI_LOG_WARN(LOG_TAG, "publishTopic requires a registered local service to advertise publisher endpoint");
         return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
@@ -1465,20 +1437,6 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
                         OMNI_LOG_WARN(LOG_TAG, "broadcast send failed to fd=%d", fds[i]);
                     }
                 }
-            }
-        }
-    }
-
-    // Also broadcast via SHM to any SHM-connected subscribers
-    std::vector<std::string>* shm_services = topic_runtime_.shmSubscriberServices(topic_id);
-    if (shm_services) {
-        OMNI_LOG_DEBUG(LOG_TAG, "Broadcast topic 0x%08x over SHM to %zu services",
-                        topic_id, shm_services->size());
-        for (size_t i = 0; i < shm_services->size(); ++i) {
-            const std::string& svc_name = (*shm_services)[i];
-            std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(svc_name);
-            if (eit != local_services_.end() && eit->second->shm_server) {
-                eit->second->shm_server->serverBroadcast(send_buf.data(), send_buf.size());
             }
         }
     }
@@ -1946,8 +1904,8 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
             && hdr.type == static_cast<uint16_t>(MessageType::MSG_HEARTBEAT)) {
             Message ack(MessageType::MSG_HEARTBEAT_ACK, hdr.sequence);
             Buffer ack_buf;
-            if (ack.serialize(ack_buf) && entry->shm_server) {
-                entry->shm_server->serverSend(client_id, ack_buf.data(), ack_buf.size());
+            if (ack.serialize(ack_buf) && entry->shm_transport) {
+                entry->shm_transport->serverSend(client_id, ack_buf.data(), ack_buf.size());
             }
             return;
         }
@@ -1985,10 +1943,12 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                                entry->service->serviceName(), cid, msg.getSequence());
                 return;
             }
-            int send_ret = entry->shm_server->serverSend(cid, send_buf.data(), send_buf.size());
-            if (send_ret <= 0) {
-                OMNI_LOG_ERROR(LOG_TAG, "shm_reply_send_failed service=%s client_id=%u seq=%u",
-                               entry->service->serviceName(), cid, msg.getSequence());
+            if (entry->shm_transport) {
+                int send_ret = entry->shm_transport->serverSend(cid, send_buf.data(), send_buf.size());
+                if (send_ret <= 0) {
+                    OMNI_LOG_ERROR(LOG_TAG, "shm_reply_send_failed service=%s client_id=%u seq=%u ret=%d",
+                                   entry->service->serviceName(), cid, msg.getSequence(), send_ret);
+                }
             }
         },
         [this, entry](const std::string& svc, const Message& msg) {
@@ -2077,8 +2037,7 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
                                                       const ServiceInfo& pub_info) {
     std::string pub_name = !pub_info.name.empty() ? pub_info.name : topicPublisherServiceName(topic_name);
     ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-        pub_name, pub_info.host, pub_info.port, pub_info.host_id,
-        pub_info.shm_name, pub_info.shm_config);
+        pub_name, pub_info.host, pub_info.port, pub_info.host_id);
     if (!conn) {
         return false;
     }
@@ -2199,10 +2158,6 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
                                             platform::getSocketAddress(entry->server->fd()));
         svc_info.port = entry->port;
         svc_info.host_id = host_id_;
-        svc_info.shm_name = entry->shm_name;
-        if (entry->service) {
-            svc_info.shm_config = entry->service->shmConfig();
-        }
         svc_info.interfaces.push_back(entry->service->interfaceInfo());
         serializeServiceInfo(svc_info, msg.payload);
         if (!sendToSM(msg)) {
@@ -2243,8 +2198,6 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         pub_info.host = normalizeAdvertiseHost(platform::getSocketAddress(sit->second->server->fd()));
         pub_info.port = sit->second->port;
         pub_info.host_id = host_id_;
-        pub_info.shm_name = sit->second->shm_name;
-        pub_info.shm_config = sit->second->service->shmConfig();
     serializeServiceInfo(pub_info, msg.payload);
     msg.payload.writeUint32(0);  // idl_hash placeholder, generated proxy will overwrite
     
