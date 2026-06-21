@@ -11,6 +11,14 @@ namespace omnibinder {
 
 namespace {
 
+// 确保 omni_allocator.o 被链接器拉入（.a 静态库场景）。
+// 该编译单元包含 operator new/delete 弱符号重载，
+// 必须有外部符号引用才会被链接器选中。
+extern "C" void omni_ensure_allocator_linked();
+struct ForceLinkAllocator {
+    ForceLinkAllocator() { omni_ensure_allocator_linked(); }
+} force_link_allocator;
+
 std::string normalizeAdvertiseHost(const std::string& host) {
     if (host.empty() || host == "0.0.0.0") {
         return "127.0.0.1";

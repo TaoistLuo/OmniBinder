@@ -7,6 +7,7 @@ set(OMNIBINDER_SOURCES
     core/message.cpp
     core/error.cpp
     core/event_loop.cpp
+    core/omni_allocator.cpp
     core/service.cpp
     core/omni_runtime.cpp
     core/sm_control_channel.cpp
