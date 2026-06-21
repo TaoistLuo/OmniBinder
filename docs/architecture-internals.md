@@ -125,7 +125,6 @@ OmniBinder 的内部实现分成两个平面：
 - `Service* service`
 - `TcpTransportServer* server`
 - `ShmTransport* shm_server`
-- `std::string shm_name`
 - `uint16_t port`
 - `std::map<int, ITransport*> client_transports`
 - `std::map<int, Buffer*> client_recv_buffers`
@@ -335,7 +334,7 @@ reply wait 期间只处理：
 
 1. 拿到目标服务 `ServiceInfo`
 2. 比较 `host_id`
-3. 同机且有 `shm_name`：优先 SHM
+3. 同机：优先 SHM（通过 UDS 握手协商 per-client SHM）
 4. SHM 建立失败：TCP fallback
 5. 跨机：TCP
 
@@ -345,55 +344,78 @@ reply wait 期间只处理：
 
 `ShmTransport` 提供同机低延迟数据面传输。
 
-### 10.2 当前内存布局
+### 10.2 架构变更：从全局 SHM 到 per-client SHM
 
-一个服务一块主 SHM：
+旧架构使用一块全局 SHM，所有客户端共用一个 request ring，服务端按 slot 写回 response。
+新架构改为 **per-client SHM**：每个客户端创建自己独立的共享内存块，各自持有独立的 request ring 和 response ring。
+
+### 10.3 Per-client SHM 内存布局
+
+每个客户端连接对应一块独立 SHM：
 
 ```text
-[ShmControlBlock]
-[Global RequestQueue]
-[ResponseArena]
+[ShmControlBlock: magic, version, req_ring_capacity, resp_ring_capacity, ready_flag]
+[Request Ring header + data]   — client 写入，server 读取
+[Response Ring header + data]  — server 写入，client 读取
 ```
 
-### 10.3 ShmControlBlock 关键字段
+### 10.4 ShmControlBlock 关键字段
 
 - `magic`
 - `version`
-- `max_clients`
-- `active_clients`
 - `req_ring_capacity`
 - `resp_ring_capacity`
-- `response_bitmap`
-- `req_lock`
-- `slots[32]`
+- `ready_flag`
 
-### 10.4 slot 关键字段
+不再包含 `max_clients`、`response_bitmap`、`req_lock`、`slots[32]` 等字段。
+每个 SHM 仅属于一个客户端，不存在跨客户端竞争，因此无需 spinlock。
 
-每个 `slot` 包含：
+### 10.5 服务端数据结构
 
-- `active`
-- `response_offset`
-- `response_capacity`
+服务端持有 `client_contexts_` 映射表，按 `client_id` 索引：
 
-### 10.5 SHM 数据流模型
+```text
+client_contexts_ : map<client_id, ClientShmContext>
+
+ClientShmContext:
+  - shm_fd
+  - mapped_address
+  - shm_size
+  - client_eventfd   — 客户端用于通知 server 的 eventfd
+  - resp_eventfd     — server 写入 response 后通知客户端
+```
+
+客户端无固定上限，仅受系统 SHM 资源限制。
+
+### 10.6 SHM 建立流程（UDS 握手）
+
+1. 客户端创建自己的 SHM，初始化 `ShmControlBlock` 和 request/response ring
+2. 客户端通过 UDS 连接服务端，发送 `shm_name`
+3. 服务端打开并映射客户端 SHM
+4. 服务端通过 UDS 回复 `[resp_eventfd, master_eventfd]`
+5. 客户端设置 `ready_flag`，握手完成
+
+### 10.7 SHM 数据流模型
 
 - request：
-  - 多客户端共享一个 request ring
-  - 服务端统一消费
+  - 客户端写入自己的 request ring
+  - 通知服务端 `master_eventfd`
+  - 服务端 `serverRecv()` 遍历所有 `client_contexts_`，依次 drain
 - response：
-  - 每个活跃 client 占一个 response block
-  - 服务端按 slot 写回
+  - 服务端 `serverSend(client_id)` 写入对应客户端的 response ring
+  - 通知 `resp_eventfd`
+  - 客户端从自己的 response ring 读取
 - 通知：
-  - `req_eventfd`
-  - `resp_eventfd`
+  - `master_eventfd`（服务端统一接收）
+  - `resp_eventfd`（每个客户端独立）
 
-### 10.6 默认配置
+### 10.8 默认配置
 
 - request ring：`4KB`
 - response ring：`4KB`
-- `max_clients = 32`
+- 无 `max_clients` 限制
 
-服务端可通过 `Service::setShmConfig()` 显式放大容量，并通过 `ServiceInfo.shm_config` 传播到客户端。
+服务端可通过 `Service::setShmConfig()` 显式放大每个客户端 ring 容量。
 
 ## 11. ServiceManager 内部角色
 
@@ -457,7 +479,7 @@ Client
   -> ServiceManager::handleLookup()
   -> ServiceRegistry::findService()
   -> 返回 ServiceInfo
-  -> OmniRuntime / ConnectionManager 使用返回的 host_id / shm_name / shm_config
+  -> OmniRuntime / ConnectionManager 使用返回的 host_id / shm_config
 ```
 
 ### 12.3 服务死亡订阅数据流
@@ -512,23 +534,25 @@ Caller
 
 ```text
 Caller
+  -> OmniRuntime::invoke()
   -> ConnectionManager 选择 SHM
-  -> 获取 slot
-  -> 请求写入 Global RequestQueue
-  -> notify req_eventfd
+  -> 创建 per-client SHM（首次连接时）
+  -> UDS 握手：发送 shm_name，接收 [resp_eventfd, master_eventfd]
+  -> 写入自己的 request ring
+  -> notify master_eventfd
 
 Service Side
-  -> EventLoop 被 req_eventfd 唤醒
-  -> ShmTransport::serverRecv()
+  -> EventLoop 被 master_eventfd 唤醒
+  -> ShmTransport::serverRecv() 遍历所有 client_contexts_，drain 每个 client 的 request ring
   -> OmniRuntime::handleShmRequest()
   -> ServiceHostRuntime::onShmRequest()
   -> OmniRuntime 执行 invoke 细节与 reply 构造
-  -> ShmTransport::serverSend(slot)
+  -> ShmTransport::serverSend(client_id) 写入对应 client 的 response ring
   -> notify resp_eventfd
 
 Caller
   -> EventLoop 被 resp_eventfd 唤醒
-  -> ShmTransport::recv()
+  -> ShmTransport::recv() 从自己的 response ring 读取
   -> RpcRuntime::waitForReply() 完成
   -> invoke() 返回 response
 ```
@@ -611,7 +635,7 @@ Publisher
   -> OmniRuntime::broadcast(topic_id, data)
   -> TopicRuntime 查询 publisher 侧 subscriber 列表
   -> 对 TCP subscriber 逐个发送 MSG_BROADCAST
-  -> 对 SHM subscriber service 逐个写入 SHM response block
+  -> 对 SHM subscriber service 逐个写入其响应 ring
 
 Subscriber
   -> 收到 MSG_BROADCAST

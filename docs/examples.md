@@ -750,16 +750,20 @@ $ ./target/example/example_cpp_sensor_client --sm-host 192.168.1.10 --sm-port 99
 [OmniRuntime] Transport: TCP (cross-machine, host_id mismatch)
 ```
 
-如果在同一台机器上运行，框架会自动打开服务已创建好的共享内存，并通过 UDS 交换 eventfd：
+如果在同一台机器上运行，每个客户端会创建自己独立的共享内存，并通过 UDS 与服务端交换 eventfd：
 
 ```
-[OmniRuntime] Connecting to SensorService via SHM '/binder_SensorService' (same machine)
-[OmniRuntime] SHM eventfd exchange via UDS: slot_id=0, req_eventfd=OK, resp_eventfd=OK
+[OmniRuntime] Connecting to SensorService via SHM '/binder_SensorService_cli_1234_0' (same machine)
+[OmniRuntime] SHM eventfd exchange via UDS: shm_name=/binder_SensorService_cli_1234_0, resp_eventfd=OK, master_eventfd=OK
 ```
 
-**注意**：同一个 SHM 可以被多个客户端共享访问。例如同时启动 3 个客户端实例，
-它们都会打开同一块 `/binder_SensorService` 共享内存，各自获取不同的 slot（0、1、2），
-互不干扰。最多支持 32 个同机客户端。
+**注意**：新的 per-client SHM 模型中，每个客户端创建独立的共享内存段，名称格式为
+`/binder_<ServiceName>_cli_<PID>_<N>`。客户端通过 UDS 将 SHM 名称发送给服务端，
+服务端回复 `resp_eventfd`（用于通知客户端响应已就绪）和 `master_eventfd`
+（用于客户端通知服务端新请求到达）。
+
+不再使用 slot 分配机制，也没有 32 客户端的硬限制。多个客户端各自拥有独立的 SHM ring，
+互不共享资源，避免了同一共享内存段上的竞争条件。
 此场景已在 `test_full_integration` 的 `three_clients_concurrent_invoke` 测试中验证通过。
 
 ## 10. 基于 OmniBinder 库构建独立项目

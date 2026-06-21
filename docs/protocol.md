@@ -505,25 +505,28 @@ enum class ErrorCode : int32_t {
 } // namespace omnibinder
 ```
 
-## 6.5 SHM eventfd 交换协议
+## 6.5 SHM 握手协议
 
-当客户端选择 SHM 通信时，需要通过 UDS 与服务端交换 eventfd 文件描述符，
-以实现事件驱动的跨进程通知。
+当客户端选择 SHM 通信时，需要通过 UDS 与服务端完成握手，交换 SHM 名称和 eventfd 文件描述符。
+协议从旧的基于 slot 的模型变更为每客户端独立 SHM 模型：
+不再有预分配的 32 个 slot，每个客户端创建自己的 SHM，服务端动态映射。
+不再发送 slot_id，客户端直接发送 SHM 名称（字符串，不附带 fd）。
 
-### 交换流程
+### 握手流程
 
 ```
 Client                                     Server (UDS listener)
    |                                             |
-   |  [本地] 打开 SHM, 获取 slot_id              |
+   |  [本地] 创建自己的 SHM, 生成唯一名            |
    |                                             |
    |-------- UDS Connect ----------------------->|
    |         /tmp/binder_<shm_name>.sock         |
    |                                             |
-   |-------- 发送 slot_id (4 bytes) ------------>|
+   |-------- 发送 SHM 名称 (变长字符串) --------->|
+   |         不附带 fd                           |
    |                                             |
    |<------- SCM_RIGHTS -------------------------|
-   |         req_eventfd + resp_eventfd          |
+   |         resp_eventfd + master_eventfd       |
    |         (2 个 fd 通过 ancillary data 传递)   |
    |                                             |
    |-------- UDS 断开 -------------------------->|
@@ -534,10 +537,10 @@ Client                                     Server (UDS listener)
 
 ### eventfd 使用约定
 
-- 服务端创建 1 个 `req_eventfd`（所有客户端共享）和 32 个 `resp_eventfd`（每 slot 一个）
-- 客户端写入 SHM RequestQueue 后，调用 `eventfd_write(req_eventfd, 1)` 唤醒服务端
-- 服务端写入 SHM ResponseSlot 后，调用 `eventfd_write(resp_eventfds[slot_id], 1)` 唤醒对应客户端
-- Topic 广播：服务端写入 SHM 后，对所有已连接客户端的 `resp_eventfd` 发送通知
+- 服务端创建 1 个 `master_eventfd`（所有客户端共享）和每客户端 1 个 `resp_eventfd`
+- 客户端写入自己的 SHM Request 后，调用 `eventfd_write(master_eventfd, 1)` 唤醒服务端
+- 服务端写入客户端 SHM Response 后，调用 `eventfd_write(resp_eventfd, 1)` 唤醒对应客户端
+- Topic 广播：服务端写入客户端 SHM 后，调用 `eventfd_write(resp_eventfd, 1)` 通知客户端
 - eventfd 使用 `EFD_NONBLOCK` 标志创建，注册到 epoll 的 `EPOLLIN` 事件
 
 ### UDS 路径命名
@@ -557,8 +560,7 @@ Client                                     Server (UDS listener)
 Service                                    ServiceManager
    |                                             |
    |  [本地] 创建 TCP 监听 (端口自动分配)           |
-   |  [本地] 创建 SHM "/binder_<name>"            |
-   |  [本地] 创建 eventfd (req + resp x 32)       |
+   |  [本地] 创建 1 个 master eventfd              |
    |  [本地] 创建 UDS 监听 "/tmp/binder_<name>.sock"|
    |                                             |
    |-------- TCP Connect -----------------------|
@@ -588,14 +590,14 @@ ServiceB                ServiceManager              ServiceA
    |     shm_name,            |                          |
    |     interfaces[]}        |                          |
    |                          |                          |
-   |  [判断] host_id 相同？                               |
-   |    是 -> 打开 SHM(shm_name), 获取 slot              |
-   |         UDS 连接 /tmp/binder_<name>.sock            |
-   |         发送 slot_id                                |
-   |         接收 req_eventfd + resp_eventfd (SCM_RIGHTS)|
-   |         UDS 断开                                    |
-   |         注册 resp_eventfd 到 EventLoop              |
-   |    否 -> TCP 连接 host:port                         |
+    |  [判断] host_id 相同？                               |
+    |    是 -> 创建自己的 SHM, 生成唯一名                  |
+    |         UDS 连接 /tmp/binder_<name>.sock            |
+    |         发送 SHM 名称 (变长字符串, 不附带 fd)        |
+    |         接收 resp_eventfd + master_eventfd (SCM_RIGHTS)|
+    |         UDS 断开                                    |
+    |         注册 resp_eventfd 到 EventLoop              |
+    |    否 -> TCP 连接 host:port                         |
    |                          |                          |
    |========= 直接建立连接 (TCP 或 SHM) ================>|
    |                          |                          |

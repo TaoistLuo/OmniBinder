@@ -144,6 +144,9 @@ bool isInProgress(int error_code);
 // 等待 socket 可写
 bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms);
 
+// 等待 fd 可读（超时毫秒），返回 true 表示可读
+bool waitFdReadable(int fd, int timeout_ms);
+
 // ============================================================
 // 事件通知（用于跨线程唤醒 EventLoop）
 // ============================================================
@@ -222,6 +225,14 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
 bool udsRecvFds(int uds_fd, int* fds, int fd_count,
                 void* buf, size_t buf_size, size_t* out_data_len);
 
+// 服务端向新连接的 SHM 客户端发送响应 fd。
+// Linux: 发送 [resp_eventfd, master_eventfd]，*out_new_fd = -1
+// Windows: 创建 per-client 通知 pipe，发送 [resp_eventfd, new_pipe]，
+//          *out_new_fd = new_pipe（调用方需注册到事件循环）
+// 返回 true 表示成功
+bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
+                           int* out_new_fd);
+
 // 关闭 UDS socket
 void udsClose(int fd);
 
@@ -258,7 +269,7 @@ void setupSignalHandlers(SignalHandler handler);
 // ============================================================
 
 // 是否支持 Unix Domain Socket（用于 SHM eventfd 交换）
-// Windows 返回 false，Linux/macOS 返回 true
+// Linux/macOS 返回 true，Windows 通过 TCP loopback 模拟 UDS 也返回 true
 bool isUdsAvailable();
 
 // ============================================================

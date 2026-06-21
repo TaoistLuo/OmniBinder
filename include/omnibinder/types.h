@@ -113,6 +113,7 @@ struct ServiceInfo {
     std::string host;
     uint16_t    port;
     std::string host_id;
+    ShmConfig    shm_config;
     std::vector<InterfaceInfo> interfaces;
 
     ServiceInfo() : port(0) {}

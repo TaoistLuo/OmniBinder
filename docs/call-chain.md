@@ -43,7 +43,7 @@
 │    │                     │     │    │ listen TCP + 创建 SHM               │
 │    ├─ lookup → SM ───────┼────►│    │ 注册到 SM                            │
 │    │  (拿到 host/port/   │     │    ▼                                      │
-│    │   host_id/shm_name) │     │  等待连接                                 │
+  │    │   host_id) │     │  等待连接                                 │
 │    │                     │     │    │                                      │
 │    ├─ 同机? SHM 直连 ────┼────►│    │◄── accept TCP / SHM eventfd         │
 │    │  跨机? TCP 直连 ────┼────►│    │                                      │
@@ -108,7 +108,7 @@ invokeInternal(service_name, iface, method, request, response, timeout)
   │     │
   │     │  查本地缓存 service_cache_
   │     │  ├── 缓存命中 → 直接返回 ServiceInfo
-  │     │  │   {host, port, host_id, shm_name, shm_config}
+  │     │  │   {host, port, host_id, shm_config}
   │     │  │
   │     │  └── 缓存未命中
   │     │       发 MSG_LOOKUP 给 ServiceManager
@@ -129,7 +129,7 @@ invokeInternal(service_name, iface, method, request, response, timeout)
   │     │    │      isSameMachine(local, remote) → 相等 → SHM
   │     │    │      isSameMachine(local, remote) → 不等 → TCP
   │     │    │
-  │     │    │    SHM 路径：new ShmTransport(shm_name) → connect()
+  │     │    │    SHM 路径：new ShmTransport(generateShmName(service_name)) → connect() → 创建独立 SHM + UDS 握手
   │     │    │      失败 → 降级 TCP
   │     │    │
   │     │    │    TCP 路径：new TcpTransport() → connect(host, port)
@@ -195,10 +195,10 @@ EventLoop epoll 触发 fd 可读
   │       ▼
   │
   └── SHM 路径
-        SHM eventfd 可读
+        per-client eventfd 可读
           │  eventFdConsume(fd)
           │  shm_server->serverRecv(buf, sizeof(buf), client_id)
-          │    从 request ring buffer 读取数据
+          │    从 client_id 对应的 per-client request ring 读取数据
           ▼
 
 handleInvokeRequest(service_name, client_fd, msg, "TCP")    // TCP
@@ -236,7 +236,7 @@ handleShmRequest(service_name, entry, client_id, data, len)  // SHM
         TCP → sendOnFd(transport, reply)
               transport->send(serialized_reply)
         SHM → shm_server->serverSend(client_id, serialized_reply)
-              写入 response ring buffer + eventfd 通知客户端
+              写入 per-client response ring + eventfd 通知客户端
 ```
 
 **涉及代码位置**：
@@ -347,7 +347,6 @@ publishTopicInternal("SensorUpdate")
   │       host     = 第一个本地注册服务的监听地址
   │       port     = 第一个本地注册服务的监听端口
   │       host_id  = 本机 machine-id
-  │       shm_name = 第一个本地注册服务的 SHM 名称
   │       shm_config = SHM ring 容量
   │
   ├── 2. sendToSM(msg) → 等待 MSG_PUBLISH_TOPIC_REPLY → accepted=true
@@ -403,7 +402,7 @@ handleSubscribeTopic(conn, msg)
   └── 如果该 topic 已有 publisher
         │  取出 publisher 的 ServiceInfo
         │  立即给这个新订阅者发 MSG_TOPIC_PUBLISHER_NOTIFY
-        ▼  （包含 publisher 的 host/port/host_id/shm_name）
+        ▼  （包含 publisher 的 host/port/host_id）
 ```
 
 ### Phase 3：订阅者收到通知并建立直连
@@ -413,12 +412,12 @@ handleSubscribeTopic(conn, msg)
   │
   ▼
 case MSG_TOPIC_PUBLISHER_NOTIFY:
-  │  反序列化 → topic_name + pub_info{host, port, host_id, shm_name}
+  │  反序列化 → topic_name + pub_info{host, port, host_id}
   │
   ▼
 ensureTopicPublisherConnection(topic, pub_info)
   │
-  ├── 1. conn_mgr_->getOrCreateConnection(pub_name, host, port, host_id, shm_name)
+  ├── 1. conn_mgr_->getOrCreateConnection(pub_name, host, port, host_id, generateShmName(pub_name))
   │     │  同机 → SHM 直连到发布者进程
   │     │  跨机 → TCP 直连到发布者进程
   │     ▼
@@ -557,8 +556,8 @@ platform::getMachineId()                              // platform.cpp:636
 ```
 ConnectionManager::getOrCreateConnection()
   │
-  │  首选 SHM 且 shm_name 非空
-  │  new ShmTransport(shm_name) → connect()
+  │  首选 SHM
+  │  new ShmTransport(generateShmName(service_name)) → connect()
   │
   ├── connect() == 0 → 使用 SHM
   └── connect() != 0 → 日志 data_connect_fallback

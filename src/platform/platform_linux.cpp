@@ -291,6 +291,18 @@ bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
     return (pfd.revents & POLLOUT) != 0;
 }
 
+bool waitFdReadable(int fd, int timeout_ms) {
+    struct pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    int ret;
+    do {
+        ret = poll(&pfd, 1, timeout_ms);
+    } while (ret < 0 && errno == EINTR);
+    return ret > 0 && (pfd.revents & POLLIN);
+}
+
 // ============================================================
 // 事件通知
 // ============================================================
@@ -622,12 +634,21 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
         return true;
     }
 
-    // 没有收到 fd
-    OMNI_LOG_WARN(LOG_TAG, "udsRecvFds: no SCM_RIGHTS in message");
+    // No SCM_RIGHTS in message — valid for data-only datagrams (e.g., SHM name exchange)
+    if (fd_count > 0) {
+        OMNI_LOG_DEBUG(LOG_TAG, "udsRecvFds: no SCM_RIGHTS in message");
+    }
     for (int i = 0; i < fd_count; ++i) {
         fds[i] = -1;
     }
     return false;
+}
+
+bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
+                           int* out_new_fd) {
+    *out_new_fd = -1;
+    int fds[2] = { resp_eventfd, master_eventfd };
+    return udsSendFds(client_fd, fds, 2, NULL, 0);
 }
 
 void udsClose(int fd) {

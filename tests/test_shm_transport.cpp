@@ -6,12 +6,6 @@
 #include <thread>
 #include <atomic>
 #include <memory>
-#ifdef _WIN32
-// SHM transport test requires UDS (Unix Domain Sockets) which
-// are not available on Windows. The test is disabled.
-int main() { return 0; }
-#else
-#include <poll.h>
 
 using namespace omnibinder;
 
@@ -27,11 +21,7 @@ public:
         thread_ = std::thread([this, &server]() {
             int listen_fd = server.udsListenFd();
             while (!stop_.load()) {
-                struct pollfd pfd;
-                pfd.fd = listen_fd;
-                pfd.events = POLLIN;
-                int ret = ::poll(&pfd, 1, 10);
-                if (ret > 0 && (pfd.revents & POLLIN)) {
+                if (platform::waitFdReadable(listen_fd, 10)) {
                     server.onUdsClientConnect();
                 }
             }
@@ -90,6 +80,11 @@ TEST_F(ShmTransportTest, ClientConnect) {
 
     ASSERT_EQ(client.connect("", 0), 0);
     EXPECT_EQ(client.state(), ConnectionState::CONNECTED);
+
+    // Wait for UdsHandlerThread to process the handshake on server side
+    for (int i = 0; i < 50 && server.clientCount() == 0; ++i) {
+        platform::sleepMs(1);
+    }
     EXPECT_EQ(server.clientCount(), 1);
 
     client.close();
@@ -110,6 +105,10 @@ TEST_F(ShmTransportTest, MultipleClientsConnect) {
     ShmTransport client2(shm_name, false);
     ASSERT_EQ(client2.connect("", 0), 0);
 
+    // Wait for UdsHandlerThread to process all handshakes
+    for (int i = 0; i < 50 && server.clientCount() < 3u; ++i) {
+        platform::sleepMs(1);
+    }
     EXPECT_EQ(server.clientCount(), 3u);
 
     client0.close();
@@ -129,10 +128,13 @@ TEST_F(ShmTransportTest, ActiveResponseArenaStats) {
 
     ShmTransport client0(shm_name, false);
     ASSERT_EQ(client0.connect("", 0), 0);
+    // Wait for UDS handshake on server side
+    for (int i = 0; i < 50 && server.clientCount() == 0; ++i) platform::sleepMs(1);
     EXPECT_EQ(server.clientCount(), 1u);
 
     ShmTransport client1(shm_name, false);
     ASSERT_EQ(client1.connect("", 0), 0);
+    for (int i = 0; i < 50 && server.clientCount() < 2u; ++i) platform::sleepMs(1);
     EXPECT_EQ(server.clientCount(), 2u);
 
     client0.close();
@@ -206,6 +208,10 @@ TEST_F(ShmTransportTest, ConcurrentMultiClientSendRecv) {
         auto c = std::unique_ptr<ShmTransport>(new ShmTransport(shm_name, false, 128 * 1024, 128 * 1024));
         ASSERT_EQ(c->connect("", 0), 0);
         clients.push_back(std::move(c));
+    }
+    // Wait for UdsHandlerThread to process all handshakes
+    for (int i = 0; i < 100 && server.clientCount() < static_cast<uint32_t>(NUM_CLIENTS); ++i) {
+        platform::sleepMs(1);
     }
     EXPECT_EQ(server.clientCount(), static_cast<uint32_t>(NUM_CLIENTS));
 
@@ -303,4 +309,3 @@ TEST_F(ShmTransportTest, ConcurrentDataIntegrity) {
     for (auto& c : clients) c->close();
     server.close();
 }
-#endif // _WIN32

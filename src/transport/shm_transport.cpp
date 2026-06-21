@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <algorithm>
 #include <unistd.h>
+#include <atomic>
 
 #define LOG_TAG "ShmTransport"
 
@@ -47,6 +48,7 @@ ShmTransport::ShmTransport(const std::string& shm_name, bool is_server,
     , ctrl_(NULL)
     , req_eventfd_(-1)
     , event_fd_(-1)
+    , peer_notify_fd_(-1)
     , uds_listen_fd_(-1)
     , eventfd_enabled_(false)
     , next_client_id_(1)
@@ -104,10 +106,15 @@ bool ShmTransport::initClient()
     // Save the server identifier (used for UDS path)
     std::string server_name = shm_name_;
 
-    // Generate unique SHM name for this client
+    // Generate unique SHM name for this client (atomic counter prevents
+    // collisions when multiple ShmTransport instances exist in same process)
     {
+        static std::atomic<uint64_t> s_instance_counter(0);
+        uint64_t unique_id = s_instance_counter.fetch_add(1, std::memory_order_relaxed);
         char buf[256];
-        snprintf(buf, sizeof(buf), "%s_cli_%d", server_name.c_str(), (int)getpid());
+        snprintf(buf, sizeof(buf), "%s_cli_%d_%lu",
+                 server_name.c_str(), static_cast<int>(getpid()),
+                 static_cast<unsigned long>(unique_id));
         shm_name_ = std::string(buf);
     }
 
@@ -148,14 +155,6 @@ bool ShmTransport::initClient()
     resp_ring->capacity = static_cast<uint32_t>(resp_cap);
     resp_ring->reserved = 0;
 
-    // Create request eventfd
-    req_eventfd_ = platform::createEventFd();
-    if (req_eventfd_ < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to create req_eventfd for client '%s'", shm_name_.c_str());
-        cleanup();
-        return false;
-    }
-
     // Set feature flag
     ctrl_->reserved[0] |= SHM_FEATURE_EVENTFD;
 
@@ -173,11 +172,12 @@ bool ShmTransport::initClient()
         return false;
     }
 
-    // Send SHM name + req_eventfd to server
+    // Step 1: Send SHM name to server (no fds — server-side master eventfd
+    //         will be sent to us in Step 2 for client→server notification)
     {
-        if (!platform::udsSendFds(uds_fd, &req_eventfd_, 1,
+        if (!platform::udsSendFds(uds_fd, NULL, 0,
                                    shm_name_.c_str(), shm_name_.size())) {
-            OMNI_LOG_WARN(LOG_TAG, "UDS send fds failed for client '%s', falling back",
+            OMNI_LOG_WARN(LOG_TAG, "UDS send name failed for client '%s', falling back",
                             shm_name_.c_str());
             platform::udsClose(uds_fd);
             cleanup();
@@ -185,10 +185,12 @@ bool ShmTransport::initClient()
         }
     }
 
-    // Receive resp_eventfd from server
+    // Step 2: Receive [resp_eventfd, master_eventfd] from server.
+    //         resp_eventfd   → client epoll wakes when server writes response
+    //         master_eventfd → client notifies this when writing request → wakes server epoll
     {
-        int recv_fds[1] = {-1};
-        if (!platform::udsRecvFds(uds_fd, recv_fds, 1, NULL, 0, NULL)) {
+        int recv_fds[2] = {-1, -1};
+        if (!platform::udsRecvFds(uds_fd, recv_fds, 2, NULL, 0, NULL)) {
             OMNI_LOG_WARN(LOG_TAG, "UDS recv fds failed for client '%s', falling back",
                             shm_name_.c_str());
             platform::udsClose(uds_fd);
@@ -196,12 +198,15 @@ bool ShmTransport::initClient()
             return false;
         }
         event_fd_ = recv_fds[0];
+        peer_notify_fd_ = recv_fds[1];
     }
 
     platform::udsClose(uds_fd);
 
-    OMNI_LOG_INFO(LOG_TAG, "Client connected: shm='%s', req_eventfd=%d, resp_eventfd=%d",
-                    shm_name_.c_str(), req_eventfd_, event_fd_);
+    eventfd_enabled_ = (event_fd_ >= 0 && peer_notify_fd_ >= 0);
+
+    OMNI_LOG_INFO(LOG_TAG, "Client connected: shm='%s', event_fd=%d, notify_fd=%d",
+                    shm_name_.c_str(), event_fd_, peer_notify_fd_);
     return true;
 }
 
@@ -370,10 +375,6 @@ void ShmTransport::cleanupClientContext(ClientShmContext& ctx)
         platform::shmDetach(ctx.shm_addr, ctx.shm_size);
         ctx.shm_addr = NULL;
     }
-    if (ctx.req_eventfd >= 0) {
-        platform::closeEventFd(ctx.req_eventfd);
-        ctx.req_eventfd = -1;
-    }
     if (ctx.resp_eventfd >= 0) {
         platform::closeEventFd(ctx.resp_eventfd);
         ctx.resp_eventfd = -1;
@@ -409,9 +410,9 @@ void ShmTransport::cleanup()
         }
     } else {
         // Client: close eventfds
-        if (req_eventfd_ >= 0) {
-            platform::closeEventFd(req_eventfd_);
-            req_eventfd_ = -1;
+        if (peer_notify_fd_ >= 0) {
+            platform::closeEventFd(peer_notify_fd_);
+            peer_notify_fd_ = -1;
         }
         if (event_fd_ >= 0) {
             platform::closeEventFd(event_fd_);
@@ -506,9 +507,9 @@ int ShmTransport::send(const uint8_t* data, size_t length)
     ringWrite(req_ring, req_data, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
     ringWrite(req_ring, req_data, data, static_cast<uint32_t>(length));
 
-    // Notify server via req_eventfd
-    if (was_empty && eventfd_enabled_ && req_eventfd_ >= 0) {
-        platform::eventFdNotify(req_eventfd_);
+    // Notify server via master eventfd (received during UDS handshake)
+    if (was_empty && eventfd_enabled_ && peer_notify_fd_ >= 0) {
+        platform::eventFdNotify(peer_notify_fd_);
     }
 
     OMNI_LOG_DEBUG(LOG_TAG, "Client sent %zu bytes on shm '%s'",
@@ -527,64 +528,76 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
         return -1;
     }
 
+    int result = 0;
+
     if (buf_size == 0) {
-        return 0;
+        goto consume_eventfd;
     }
 
-    ShmRingHeader* resp_ring = getResponseRing();
-    const uint8_t* resp_data = getResponseData();
+    {
+        ShmRingHeader* resp_ring = getResponseRing();
+        const uint8_t* resp_data = getResponseData();
 
-    if (!resp_ring || !resp_data) {
-        OMNI_LOG_ERROR(LOG_TAG, "recv() missing response ring");
-        return -1;
-    }
+        if (!resp_ring || !resp_data) {
+            OMNI_LOG_ERROR(LOG_TAG, "recv() missing response ring");
+            return -1;
+        }
 
-    uint32_t avail = ringAvailableRead(resp_ring);
-    if (avail < sizeof(uint32_t)) {
-        return 0;
-    }
+        uint32_t avail = ringAvailableRead(resp_ring);
+        if (avail < sizeof(uint32_t)) {
+            goto consume_eventfd;
+        }
 
-    // Peek at length prefix
-    uint32_t r = resp_ring->read_pos;
-    uint32_t cap = resp_ring->capacity;
-    uint32_t msg_len = 0;
-    uint8_t* len_bytes = reinterpret_cast<uint8_t*>(&msg_len);
-    for (uint32_t i = 0; i < sizeof(uint32_t); ++i) {
-        len_bytes[i] = resp_data[(r + i) % cap];
-    }
+        // Peek at length prefix
+        uint32_t r = resp_ring->read_pos;
+        uint32_t cap = resp_ring->capacity;
+        uint32_t msg_len = 0;
+        uint8_t* len_bytes = reinterpret_cast<uint8_t*>(&msg_len);
+        for (uint32_t i = 0; i < sizeof(uint32_t); ++i) {
+            len_bytes[i] = resp_data[(r + i) % cap];
+        }
 
-    if (msg_len == 0) {
-        platform::memoryBarrier();
+        if (msg_len == 0) {
+            platform::memoryBarrier();
+            resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
+            goto consume_eventfd;
+        }
+
+        uint32_t total_needed = sizeof(uint32_t) + msg_len;
+        if (avail < total_needed) {
+            goto consume_eventfd;
+        }
+
+        if (buf_size < msg_len) {
+            OMNI_LOG_WARN(LOG_TAG, "recv() buffer too small: need %u, have %zu",
+                            msg_len, buf_size);
+            return -1;
+        }
+
+        // Consume length prefix
         resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
-        return 0;
+        platform::memoryBarrier();
+
+        uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len);
+        if (read_bytes != msg_len) {
+            OMNI_LOG_ERROR(LOG_TAG, "recv() failed to read payload (%u of %u)",
+                             read_bytes, msg_len);
+            state_ = ConnectionState::ERROR;
+            return -1;
+        }
+
+        OMNI_LOG_DEBUG(LOG_TAG, "Client received %u bytes on shm '%s'",
+                         msg_len, shm_name_.c_str());
+        result = static_cast<int>(msg_len);
     }
 
-    uint32_t total_needed = sizeof(uint32_t) + msg_len;
-    if (avail < total_needed) {
-        return 0;
+consume_eventfd:
+    // Pair each notify with a consume so level-triggered epoll won't re-fire
+    // when the ring is empty (which onConnectionData would misread as disconnect)
+    if (event_fd_ >= 0) {
+        platform::eventFdConsume(event_fd_);
     }
-
-    if (buf_size < msg_len) {
-        OMNI_LOG_WARN(LOG_TAG, "recv() buffer too small: need %u, have %zu",
-                        msg_len, buf_size);
-        return -1;
-    }
-
-    // Consume length prefix
-    resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
-    platform::memoryBarrier();
-
-    uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len);
-    if (read_bytes != msg_len) {
-        OMNI_LOG_ERROR(LOG_TAG, "recv() failed to read payload (%u of %u)",
-                         read_bytes, msg_len);
-        state_ = ConnectionState::ERROR;
-        return -1;
-    }
-
-    OMNI_LOG_DEBUG(LOG_TAG, "Client received %u bytes on shm '%s'",
-                     msg_len, shm_name_.c_str());
-    return static_cast<int>(msg_len);
+    return result;
 }
 
 void ShmTransport::close()
@@ -713,8 +726,12 @@ int ShmTransport::serverSend(uint32_t client_id, const uint8_t* data, size_t len
         return 0;
     }
 
-    ClientShmContext& ctx = it->second;
+    return serverSendToContext(it->second, client_id, data, length);
+}
 
+int ShmTransport::serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
+                                       const uint8_t* data, size_t length)
+{
     if (length == 0) {
         return 0;
     }
@@ -731,7 +748,6 @@ int ShmTransport::serverSend(uint32_t client_id, const uint8_t* data, size_t len
         return -1;
     }
 
-    // Length-prefixed: [length(4B)] [payload(NB)]
     uint32_t total_needed = static_cast<uint32_t>(sizeof(uint32_t) + length);
     bool was_empty = (ringAvailableRead(resp_ring) == 0);
     uint32_t avail = ringAvailableWrite(resp_ring);
@@ -746,7 +762,6 @@ int ShmTransport::serverSend(uint32_t client_id, const uint8_t* data, size_t len
     ringWrite(resp_ring, resp_data, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
     ringWrite(resp_ring, resp_data, data, static_cast<uint32_t>(length));
 
-    // Notify client via resp_eventfd
     if (was_empty && eventfd_enabled_ && ctx.resp_eventfd >= 0) {
         platform::eventFdNotify(ctx.resp_eventfd);
     }
@@ -765,7 +780,7 @@ int ShmTransport::serverBroadcast(const uint8_t* data, size_t length)
     int count = 0;
     for (std::map<uint32_t, ClientShmContext>::iterator it = client_contexts_.begin();
          it != client_contexts_.end(); ++it) {
-        int ret = serverSend(it->first, data, length);
+        int ret = serverSendToContext(it->second, it->first, data, length);
         if (ret > 0) {
             ++count;
         }
@@ -850,53 +865,45 @@ void ShmTransport::onUdsClientConnect()
         return;
     }
 
-    // Receive shm_name + req_eventfd from the client
+    // Step 1: Receive SHM name from the client (no fds expected;
+    //         udsRecvFds returns false when no SCM_RIGHTS, but data is still received)
     int client_fds[1] = {-1};
     char name_buf[256] = {0};
     size_t data_len = 0;
 
-    if (!platform::udsRecvFds(client_fd, client_fds, 1,
-                               name_buf, sizeof(name_buf) - 1, &data_len)) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: failed to receive SHM name + eventfd from client");
-        platform::udsClose(client_fd);
-        return;
-    }
+    bool has_fd = platform::udsRecvFds(client_fd, client_fds, 1,
+                                        name_buf, sizeof(name_buf) - 1, &data_len);
 
     std::string client_shm_name(name_buf, data_len);
-    int client_req_eventfd = client_fds[0];
 
-    if (client_shm_name.empty() || client_req_eventfd < 0) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: invalid SHM name or eventfd from client");
-        if (client_req_eventfd >= 0) {
-            platform::closeEventFd(client_req_eventfd);
-        }
+    // If client sent an fd (legacy or misbehaving), close it — we don't need it
+    if (has_fd && client_fds[0] >= 0) {
+        platform::closeEventFd(client_fds[0]);
+    }
+
+    if (client_shm_name.empty()) {
+        OMNI_LOG_WARN(LOG_TAG, "UDS: empty SHM name from client");
         platform::udsClose(client_fd);
         return;
     }
 
     // Open the client's SHM
-    // We need to know the size. Try opening first with 0 size to get the size?
-    // Actually, we need to compute the expected size from the control block.
-    // First, open with a minimal size to read the control block.
     size_t try_size = sizeof(ShmControlBlock) + sizeof(ShmRingHeader) * 2
                      + SHM_DEFAULT_REQ_RING_CAPACITY + SHM_DEFAULT_RESP_RING_CAPACITY;
     void* addr = platform::shmCreate(client_shm_name, try_size, false);
     if (addr == NULL) {
         OMNI_LOG_WARN(LOG_TAG, "UDS: failed to open client SHM '%s'",
                         client_shm_name.c_str());
-        platform::closeEventFd(client_req_eventfd);
         platform::udsClose(client_fd);
         return;
     }
 
     ShmControlBlock* ctrl = reinterpret_cast<ShmControlBlock*>(addr);
 
-    // Validate magic
     if (ctrl->magic != SHM_MAGIC) {
         OMNI_LOG_WARN(LOG_TAG, "UDS: invalid SHM magic 0x%08X for '%s'",
                         ctrl->magic, client_shm_name.c_str());
         platform::shmDetach(addr, try_size);
-        platform::closeEventFd(client_req_eventfd);
         platform::udsClose(client_fd);
         return;
     }
@@ -904,39 +911,45 @@ void ShmTransport::onUdsClientConnect()
     // Calculate exact size and re-map if needed
     size_t exact_size = calculateShmSize(ctrl->req_ring_capacity, ctrl->resp_ring_capacity, 1);
     if (exact_size > try_size) {
-        // Re-open with correct size
         platform::shmDetach(addr, try_size);
         addr = platform::shmCreate(client_shm_name, exact_size, false);
         if (addr == NULL) {
             OMNI_LOG_WARN(LOG_TAG, "UDS: failed to re-open client SHM '%s' with exact size",
                             client_shm_name.c_str());
-            platform::closeEventFd(client_req_eventfd);
             platform::udsClose(client_fd);
             return;
         }
         ctrl = reinterpret_cast<ShmControlBlock*>(addr);
     }
 
-    // Create resp_eventfd for this client
+    // Step 2: Create resp_eventfd for this client
     int resp_efd = platform::createEventFd();
     if (resp_efd < 0) {
         OMNI_LOG_WARN(LOG_TAG, "UDS: failed to create resp_eventfd for client '%s'",
                         client_shm_name.c_str());
         platform::shmDetach(addr, exact_size);
-        platform::closeEventFd(client_req_eventfd);
         platform::udsClose(client_fd);
         return;
     }
 
-    // Send resp_eventfd back to client
-    if (!platform::udsSendFds(client_fd, &resp_efd, 1, NULL, 0)) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: failed to send resp_eventfd to client '%s'",
-                        client_shm_name.c_str());
-        platform::shmDetach(addr, exact_size);
-        platform::closeEventFd(client_req_eventfd);
-        platform::closeEventFd(resp_efd);
-        platform::udsClose(client_fd);
-        return;
+    // Step 3: Send eventfd(s) back to client via platform-specific mechanism.
+    //         resp_eventfd → client epoll wakes when server writes response
+    //         Linux: platform sends shared master_eventfd
+    //         Windows: platform creates per-client pipe and returns it via out_new_fd
+    {
+        int new_server_fd = -1;
+        if (!platform::udsSendServerResponse(client_fd, resp_efd, req_eventfd_,
+                                              &new_server_fd)) {
+            OMNI_LOG_WARN(LOG_TAG, "UDS: failed to send eventfds to client '%s'",
+                            client_shm_name.c_str());
+            platform::shmDetach(addr, exact_size);
+            platform::closeEventFd(resp_efd);
+            platform::udsClose(client_fd);
+            return;
+        }
+        if (new_server_fd >= 0 && on_new_client_fd_cb_) {
+            on_new_client_fd_cb_(new_server_fd);
+        }
     }
 
     platform::udsClose(client_fd);
@@ -950,18 +963,18 @@ void ShmTransport::onUdsClientConnect()
     ctx.shm_addr = addr;
     ctx.shm_size = exact_size;
     ctx.ctrl = ctrl;
-    ctx.req_eventfd = client_req_eventfd;
     ctx.resp_eventfd = resp_efd;
 
     client_contexts_[assigned_id] = ctx;
 
-    // Notify the master eventfd to wake up the caller's event loop
+    // Notify the master eventfd to wake up the event loop (data from new client
+    // may need servicing if server uses polling/scanning callback)
     if (req_eventfd_ >= 0) {
         platform::eventFdNotify(req_eventfd_);
     }
 
-    OMNI_LOG_INFO(LOG_TAG, "UDS: client[%u] connected, shm='%s', req_efd=%d, resp_efd=%d",
-                    assigned_id, client_shm_name.c_str(), client_req_eventfd, resp_efd);
+    OMNI_LOG_INFO(LOG_TAG, "UDS: client[%u] connected, shm='%s', resp_efd=%d",
+                    assigned_id, client_shm_name.c_str(), resp_efd);
 }
 
 // ============================================================

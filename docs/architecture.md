@@ -134,7 +134,7 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 
 - 维护服务连接池
 - 避免重复建立直连
-- 根据 `host_id`、`shm_name` 和本地环境选择 transport
+- 根据 `host_id` 判断同机，同机优先 SHM
 - SHM 失败后降级 TCP
 - 处理直连消息与断开回调
 
@@ -149,12 +149,9 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 当客户端通过 `ServiceManager` 拿到 `ServiceInfo` 后：
 
 1. 比较本地 `host_id` 与目标服务的 `host_id`
-2. 如果相同且服务提供了 `shm_name`
-   - 优先尝试 SHM
-3. 如果不同
-   - 直接使用 TCP
-4. 如果 SHM 建立失败
-   - 自动回退到 TCP
+2. 如果相同 → 优先尝试 SHM
+3. 如果不同 → 直接使用 TCP
+4. 如果 SHM 建立失败 → 自动回退到 TCP
 
 这一策略由 `TransportFactory` 和 `ConnectionManager` 共同执行。
 
@@ -165,61 +162,63 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 SHM 用于同机低延迟通信，设计原则是：
 
 - 低延迟
-- 多客户端共享
-- 内存占用可控
+- 每客户端独立 SHM，无共享争抢
+- 无客户端数量上限
 - 支持 eventfd 事件驱动
 
-### 5.2 当前布局
+### 5.2 Per-Client 共享内存布局
 
-每个服务创建一块主 SHM 区域，布局为：
+每个客户端创建自己的 SHM，服务端通过 UDS 握手打开客户端 SHM，实现双向通信。
+
+单客户端 SHM 内存布局：
 
 ```
 +---------------------------------------------------------------+
 | ShmControlBlock                                               |
-| - magic / version / max_clients                               |
-| - active_clients                                               |
+| - magic / version                                              |
 | - req_ring_capacity / resp_ring_capacity                       |
-| - response_bitmap                                              |
-| - req_lock                                                     |
-| - slots[0..31] => active / response_offset / response_cap      |
+| - ready_flag                                                   |
 +---------------------------------------------------------------+
-| Global RequestQueue                                            |
-| - 所有客户端共享写入                                           |
-| - 服务端读取                                                   |
+| Request Ring (header + data)                                   |
+| - 客户端写入请求，服务端读取                                    |
 +---------------------------------------------------------------+
-| ResponseArena                                                  |
-| - 每个活跃 slot 占用一个响应 block                             |
-| - 通过 bitmap 管理使用状态                                     |
+| Response Ring (header + data)                                  |
+| - 服务端写入响应，客户端读取                                    |
 +---------------------------------------------------------------+
 ```
+
+UDS 握手流程：
+
+```
+Client → Server: [shm_name]                    (纯数据，无 fd)
+Server → Client: [resp_eventfd, master_efd]     (2 个 fd via SCM_RIGHTS)
+```
+
+- `resp_eventfd`：服务端写响应后 notify，唤醒客户端 epoll
+- `master_efd`：客户端写请求后 notify，唤醒服务端 epoll
 
 ### 5.3 SHM 通信模型
 
-- 请求方向：
-  - 多客户端共享一个 `RequestQueue`
-  - 服务端统一消费
-- 响应方向：
-  - 每个活跃客户端占用一个 response block
-  - 服务端按 `slot` 写回
-- 客户端断开后：
-  - `slot` 可复用
-  - response block 重新回到空闲状态
+- 请求方向：客户端写入**自己的**请求 ring，notify 服务端 master eventfd
+- 响应方向：服务端从请求 ring 读取，处理后写入该客户端的响应 ring，notify 客户端 resp eventfd
+- 无需共享请求队列、自旋锁、固定客户端上限
+- 每个客户端独立 SHM，故障隔离，互不干扰
+- 客户端断开后其 SHM 随进程消亡，无需手动回收 slot
 
 ### 5.4 SHM 默认容量
 
-当前默认 SHM 配置：
+当前默认单客户端 SHM 配置：
 
 - `req_ring_capacity = 4KB`
 - `resp_ring_capacity = 4KB`
-- `max_clients = 32`
 
-对 payload 稍大的服务，可通过服务级配置显式放大：
+对 payload 较大的服务，可通过服务级配置显式放大：
 
 ```cpp
-setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
+setShmConfig(ShmConfig(16 * 1024, 16 * 1024));
 ```
 
-该配置会通过 `ServiceInfo.shm_config` 传播到客户端，保证 client/server 看到一致的 ring 容量。
+该配置通过 `ServiceInfo.shm_config` 传播到客户端，保证双方使用一致的 ring 容量。
 
 ### 5.5 SHM 事件驱动
 
@@ -227,10 +226,9 @@ setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
 
 - **Linux**: `eventfd + epoll`，通过 AF_UNIX (SCM_RIGHTS) 交换 fd
 - **Windows**: Named Pipe + IOCP overlapped ReadFile，通过 TCP loopback 交换 pipe 名称
-- client 写 request 后通知服务端 `req_eventfd`
-- server 写 response 后通知客户端 `resp_eventfd`
-
-因此当前 SHM 路径不是轮询模型，而是事件驱动模型。
+- Client `send()` → notify 服务端 master eventfd → 服务端 epoll 唤醒 → 排空所有客户端请求 ring
+- Server `serverSend()` → notify 客户端 resp eventfd → 客户端 epoll 唤醒 → 读取响应
+- 每对 notify/consume 严格配对，避免 level-triggered epoll 假唤醒
 
 ## 6. 服务生命周期
 
@@ -246,7 +244,6 @@ setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
     - host
     - port
     - host_id
-    - shm_name
     - shm_config
     - interface metadata
 
@@ -269,7 +266,6 @@ setShmConfig(ShmConfig(8 * 1024, 16 * 1024));
 - 服务地址
 - 端口
 - `host_id`
-- `shm_name`
 - `shm_config`
 - 接口信息
 
@@ -372,7 +368,7 @@ topic 数据不经过 `ServiceManager` 中转。
 
 - 控制面集中，数据面直连
 - 同机优先 SHM，跨机使用 TCP
-- SHM 为全局 request ring + session response block 模型
+- SHM 为 per-client 独立 ring 模型
 - 支持同步 RPC、one-way、发布订阅和服务死亡通知
 - 支持服务级 SHM 容量配置与自动传输选择
 

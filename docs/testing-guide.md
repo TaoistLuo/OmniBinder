@@ -186,7 +186,7 @@ ctest --test-dir build --output-on-failure -R test_topic_manager
 用途：
 
 - 验证 SHM 基本收发
-- 验证 slot 可复用
+- 验证客户端连接/断开管理
 - 验证 arena 使用统计
 
 推荐运行：
@@ -279,7 +279,7 @@ cd build
 - topic 发布/订阅
 - death notification
 - interface mismatch 硬拒绝
-- service 级 SHM 配置传播
+- 验证 per-client SHM ring 大小配置 (ServiceInfo.shm_config)
 
 这是当前覆盖最全的主链路测试之一。
 

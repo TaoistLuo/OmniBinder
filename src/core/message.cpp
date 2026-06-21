@@ -144,7 +144,9 @@ void serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
     if (!buf.writeString(info.name)
         || !buf.writeString(info.host)
         || !buf.writeUint16(info.port)
-        || !buf.writeString(info.host_id)) {
+        || !buf.writeString(info.host_id)
+        || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.req_ring_capacity))
+        || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.resp_ring_capacity))) {
         return;
     }
 

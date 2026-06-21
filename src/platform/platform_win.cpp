@@ -254,6 +254,17 @@ bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
     return FD_ISSET(fd, &write_fds) != 0;
 }
 
+bool waitFdReadable(int fd, int timeout_ms) {
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(fd, &read_fds);
+    struct timeval tv;
+    tv.tv_sec = static_cast<long>(timeout_ms / 1000);
+    tv.tv_usec = static_cast<long>((timeout_ms % 1000) * 1000);
+    int ret = select(fd + 1, &read_fds, NULL, NULL, &tv);
+    return ret > 0 && FD_ISSET(fd, &read_fds);
+}
+
 // ============================================================
 // Eventfd — Named Pipe implementation (replaces UDS exchange)
 // ============================================================
@@ -272,7 +283,7 @@ struct EventFdEntryV2 {
 };
 
 thread_local std::map<int, EventFdEntryV2> g_efd_map2;
-thread_local std::atomic<int>              g_efd_next_2{1};
+static std::atomic<int>                     g_efd_next_2{1};  // process-wide: prevents pipe name collision across threads
 
 static std::string makePipeName(const std::string& name) {
     std::string path = "\\\\.\\pipe\\omnibinder_evt_";
@@ -372,18 +383,10 @@ bool eventFdNotify(int efd) {
 
 bool eventFdConsume(int efd) {
     if (efd == iocpGetWakeupFd()) return true;
-    std::map<int, EventFdEntryV2>::iterator it = g_efd_map2.find(efd);
-    if (it == g_efd_map2.end()) {
-        OMNI_LOG_WARN(LOG_TAG, "eventFdConsume: fd=%d not found", efd);
-        return false;
-    }
-    DWORD avail = 0;
-    if (PeekNamedPipe(it->second.pipe, NULL, 0, NULL, &avail, NULL) && avail > 0) {
-        char buf[64];
-        DWORD nread = 0;
-        DWORD to_read = (avail < sizeof(buf)) ? avail : (DWORD)sizeof(buf);
-        ReadFile(it->second.pipe, buf, to_read, &nread, NULL);
-    }
+    // The async IOCP ReadFile posted by event_backend_win.cpp already
+    // consumed the notification byte when the completion fired.
+    // eventFdConsume is called for parity with Linux (eventfd read to
+    // clear the counter) but is a no-op on Windows.
     return true;
 }
 
@@ -634,9 +637,12 @@ bool udsPollReadable(int fd, uint32_t timeout_ms) {
 // ── fd → pipe name serialization for SendFds / RecvFds ──
 
 bool udsSendFds(int uds_fd, const int* fds, int fd_count,
-                const void* /*data*/, size_t /*data_len*/) {
-    // Wire format: [uint32_t count][uint32_t name_len][char name[]]...
-    DWORD total = 4;
+                const void* data, size_t data_len) {
+    // Wire format:
+    //   [uint32_t data_len][uint8_t data[data_len]][uint32_t fd_count]
+    //   [for each fd: uint32_t name_len][char name[name_len]]
+    uint32_t dlen = (data && data_len > 0) ? static_cast<uint32_t>(data_len) : 0;
+    DWORD total = 4 + dlen + 4;
     for (int i = 0; i < fd_count; ++i) {
         std::map<int, EventFdEntryV2>::iterator eit = g_efd_map2.find(fds[i]);
         if (eit == g_efd_map2.end()) return false;
@@ -645,7 +651,14 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
 
     std::vector<char> payload(total);
     char* p = payload.data();
-    memcpy(p, &fd_count, 4); p += 4;
+    memcpy(p, &dlen, 4); p += 4;
+    if (dlen > 0) {
+        memcpy(p, data, dlen); p += dlen;
+    }
+    {
+        uint32_t count32 = static_cast<uint32_t>(fd_count);
+        memcpy(p, &count32, 4); p += 4;
+    }
     for (int i = 0; i < fd_count; ++i) {
         std::map<int, EventFdEntryV2>::iterator eit = g_efd_map2.find(fds[i]);
         uint32_t name_len = (uint32_t)eit->second.pipe_name.size();
@@ -659,16 +672,44 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
 }
 
 bool udsRecvFds(int uds_fd, int* fds, int fd_count,
-                void* /*buf*/, size_t /*buf_size*/, size_t* out_data_len) {
+                void* buf, size_t buf_size, size_t* out_data_len) {
+    // Initialize outputs
     if (out_data_len) *out_data_len = 0;
+    for (int i = 0; i < fd_count; ++i) fds[i] = -1;
 
-    // Read header: count (4 bytes)
-    uint32_t count = 0;
-    int n = ::recv(static_cast<SocketFd>(uds_fd), reinterpret_cast<char*>(&count),
+    // Wire format:
+    //   [uint32_t data_len][uint8_t data[data_len]][uint32_t fd_count]
+    //   [for each fd: uint32_t name_len][char name[name_len]]
+
+    // Step 1: Read data length and data
+    uint32_t dlen = 0;
+    int n = ::recv(static_cast<SocketFd>(uds_fd), reinterpret_cast<char*>(&dlen),
                    4, MSG_WAITALL);
     if (n != 4) return false;
-    if (static_cast<int>(count) != fd_count) return false;
 
+    if (dlen > 0) {
+        if (buf && buf_size >= dlen) {
+            n = ::recv(static_cast<SocketFd>(uds_fd), static_cast<char*>(buf),
+                       static_cast<int>(dlen), MSG_WAITALL);
+            if (n != static_cast<int>(dlen)) return false;
+        } else {
+            // Skip data bytes that don't fit or no buffer provided
+            std::vector<char> skip(dlen);
+            n = ::recv(static_cast<SocketFd>(uds_fd), skip.data(),
+                       static_cast<int>(dlen), MSG_WAITALL);
+            if (n != static_cast<int>(dlen)) return false;
+        }
+        if (out_data_len) *out_data_len = dlen;
+    }
+
+    // Step 2: Read fd count and pipe names
+    uint32_t count = 0;
+    n = ::recv(static_cast<SocketFd>(uds_fd), reinterpret_cast<char*>(&count),
+               4, MSG_WAITALL);
+    if (n != 4) return false;
+
+    uint32_t num_to_open = (count < static_cast<uint32_t>(fd_count))
+                           ? count : static_cast<uint32_t>(fd_count);
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t name_len = 0;
         n = ::recv(static_cast<SocketFd>(uds_fd), reinterpret_cast<char*>(&name_len),
@@ -682,11 +723,32 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
         name_buf[name_len] = '\0';
         std::string pipe_name(name_buf.data(), name_len);
 
-        if (i < static_cast<uint32_t>(fd_count)) {
+        if (i < num_to_open) {
             fds[i] = openNamedEventFdByPipeName(pipe_name);
         }
     }
     return true;
+}
+
+bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
+                           int* out_new_fd) {
+    *out_new_fd = -1;
+
+    // Windows: named pipes can't be shared across clients.
+    // Create a per-client notification pipe instead of reusing master_eventfd.
+    int notify_efd = createEventFd();
+    if (notify_efd >= 0) {
+        int fds[2] = { resp_eventfd, notify_efd };
+        if (udsSendFds(client_fd, fds, 2, NULL, 0)) {
+            *out_new_fd = notify_efd;
+            return true;
+        }
+        closeEventFd(notify_efd);
+        return false;
+    }
+
+    // Fallback: send only resp_eventfd (client won't have server notification)
+    return udsSendFds(client_fd, &resp_eventfd, 1, NULL, 0);
 }
 
 void udsClose(int fd) {

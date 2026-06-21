@@ -42,6 +42,7 @@
 #include <stdint.h>
 #include <vector>
 #include <map>
+#include <functional>
 
 namespace omnibinder {
 
@@ -57,8 +58,10 @@ namespace omnibinder {
 //   [Response Ring header + data]  -- 服务端写入响应，客户端读取
 //
 // UDS 握手流程:
-//   客户端 → 服务端: [shm_name] + [req_eventfd via SCM_RIGHTS]
-//   服务端 → 客户端: [resp_eventfd via SCM_RIGHTS]
+//   客户端 → 服务端: [shm_name as data, no fd]
+//   服务端 → 客户端: [resp_eventfd, master_eventfd via SCM_RIGHTS] (2 fds)
+//   客户端 send() 时 notify master_eventfd → 唤醒服务端 epoll
+//   服务端 serverSend() 时 notify resp_eventfd → 唤醒客户端 epoll
 
 #pragma pack(push, 1)
 
@@ -96,7 +99,6 @@ struct ClientShmContext {
     void* shm_addr;           // 客户端 SHM 映射地址
     size_t shm_size;
     ShmControlBlock* ctrl;
-    int req_eventfd;          // 客户端请求通知 fd（从客户端通过 UDS 接收）
     int resp_eventfd;         // 服务端响应通知 fd（创建后通过 UDS 发送给客户端）
 };
 
@@ -109,18 +111,17 @@ struct ClientShmContext {
 //     为每个客户端打开其 SHM，从请求 ring 读取请求，向响应 ring 写入响应。
 //     内部维护 client_contexts_ 管理所有已连接客户端。
 //   - 客户端 (is_server=false): 创建自己的 SHM，通过 UDS 将 SHM 名称
-//     和 req_eventfd 发送给服务端，向自己的请求 ring 写入请求，
-//     从自己的响应 ring 读取响应。
+//     发送给服务端，向自己的请求 ring 写入请求，从自己的响应 ring 读取响应。
 //
 // ITransport 接口适配:
 //   - 客户端: send() 写请求 ring, recv() 读响应 ring
 //   - 服务端: 使用 serverRecv()/serverSend() 处理各客户端
 //
 // eventfd 事件通知:
-//   - 客户端创建 req_eventfd_，发送给服务端
-//   - 服务端创建 resp_eventfd，发送给客户端
-//   - 客户端 send() 后 notify req_eventfd_ → 唤醒服务端
-//   - 服务端 serverSend() 后 notify resp_eventfd → 唤醒客户端
+//   - 服务端创建 master eventfd（req_eventfd_），发送给客户端
+//   - 服务端为每个客户端创建 resp_eventfd，发送给客户端
+//   - 客户端 send() 后 notify 服务端 master eventfd → 唤醒服务端 epoll
+//   - 服务端 serverSend() 后 notify resp_eventfd → 唤醒客户端 epoll
 //
 class ShmTransport : public ITransport {
 public:
@@ -196,11 +197,17 @@ public:
     // 服务端: 获取 UDS 监听 fd（注册到 EventLoop 接受客户端 fd 交换）
     int udsListenFd() const { return uds_listen_fd_; }
 
-    // 服务端: 处理 UDS 客户端连接（交换 eventfd + SHM 名称）
+    // 服务端: 处理 UDS 客户端连接（接收 SHM 名称，发送 resp + master eventfd）
     void onUdsClientConnect();
 
     // 是否启用了 eventfd 通知
     bool eventfdEnabled() const { return eventfd_enabled_; }
+
+    // 服务端: 设置回调，当新客户端连接并创建通知 fd 时调用
+    // (Windows 上为 per-client pipe，需注册到 EventLoop)
+    void setOnNewClientNotifyFd(const std::function<void(int)>& cb) {
+        on_new_client_fd_cb_ = cb;
+    }
 
 private:
     ShmTransport(const ShmTransport&);
@@ -211,6 +218,10 @@ private:
 
     void cleanup();
     void cleanupClientContext(ClientShmContext& ctx);
+
+    // 服务端：直接向已查找到的上下文发送（避免 serverBroadcast 二次 find）
+    int serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
+                            const uint8_t* data, size_t length);
 
     // 环形缓冲区操作
     uint32_t ringAvailableRead(const ShmRingHeader* ring) const;
@@ -259,10 +270,10 @@ private:
     ShmControlBlock* ctrl_;
 
     // eventfd 通知
-    int req_eventfd_;    // 客户端：自己的请求通知 fd
-                          // 服务端：主控 eventfd（epoll 注册用）
+    int req_eventfd_;    // 服务端：主控 eventfd（epoll 注册用），通过 UDS 发送给客户端
     int event_fd_;       // 客户端：服务端响应通知 fd 副本（fd() 返回此 fd）
                           // 服务端：未使用
+    int peer_notify_fd_; // 客户端：服务端主控 eventfd 副本（用于 send() 时 notify 服务端 epoll）
 
     // UDS
     int uds_listen_fd_;
@@ -274,6 +285,9 @@ private:
     // 服务端：每个已连接客户端的上下文
     std::map<uint32_t, ClientShmContext> client_contexts_;
     uint32_t next_client_id_;  // 单调递增的客户端 ID 分配器
+
+    // Windows per-client notification callback
+    std::function<void(int)> on_new_client_fd_cb_;
 };
 
 // 计算单客户端共享内存总大小

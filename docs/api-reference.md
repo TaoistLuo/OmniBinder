@@ -169,7 +169,7 @@ struct ServiceInfo {
     std::string host;           // 主机地址
     uint16_t    port;           // TCP 端口
     std::string host_id;        // 主机标识
-    std::string shm_name;       // 共享内存名称（同机通信用，空表示不支持 SHM）
+    ShmConfig shm_config;  // SHM ring 容量配置（客户端据此创建独立 SHM）
     ShmConfig   shm_config;     // SHM 容量配置
     std::vector<InterfaceInfo> interfaces;  // 接口列表
 };

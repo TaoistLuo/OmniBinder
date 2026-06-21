@@ -11,7 +11,7 @@
 #include <windows.h>
 #include <cstring>
 #include <map>
-#include <vector>
+#include <set>
 
 #define LOG_TAG "EventBackend"
 
@@ -21,16 +21,23 @@ namespace platform {
 // ============================================================
 // IocpBackend — IOCP-based EventBackend for Windows
 //
-//   Socket readiness: WSAPoll (no FD_SETSIZE limit)
-//   Named pipe readiness: overlapped ReadFile on IOCP
-//   Cross-thread wakeup: PostQueuedCompletionStatus
-//   Per-thread pipe state: thread_local (supports multi-EventLoop)
+//   - Named Pipes:        overlapped ReadFile → IOCP completion
+//                          (immediate wakeup, zero polling)
+//   - TCP sockets
+//       (listen + data):  select(0) non-blocking probe, only
+//                          checked when IOCP has no completions
+//   - Cross-thread wakeup: PostQueuedCompletionStatus
+//   - Waiting:            single GetQueuedCompletionStatus
+//                          blocks until pipe event or timeout;
+//                          no fixed-interval WSAPoll loop
 // ============================================================
 
-static HANDLE       g_iocp_wakeup = NULL;  // cross-thread wakeup
-thread_local HANDLE tls_iocp      = NULL;  // per-thread pipe I/O
+static HANDLE       g_iocp_wakeup = NULL;
+thread_local HANDLE tls_iocp      = NULL;
 static const int    IOCP_WAKEUP_FD  = 0x7FFFFFFF;
 static const ULONG_PTR IOCP_WAKEUP_KEY = 0;
+
+// ── Pipe state ──────────────────────────────────────────────
 
 struct PipeEntry {
     HANDLE      pipe;
@@ -59,7 +66,7 @@ bool iocpRegisterPipeFd(int fd, HANDLE hPipe, bool is_server) {
     pe.pipe = hPipe;
     pe.read_pending = false;
     pe.is_server = is_server;
-    pe.client_connected = !is_server;  // client-side is already connected
+    pe.client_connected = !is_server;
     g_pipes[fd] = pe;
 
     if (is_server) {
@@ -106,6 +113,8 @@ static bool postPipeRead(int fd) {
     return false;
 }
 
+// ── Backend class ───────────────────────────────────────────
+
 class IocpBackend : public EventBackend {
 public:
     IocpBackend() : iocp_(NULL) {}
@@ -127,20 +136,24 @@ public:
         tls_iocp = NULL;
         g_iocp_wakeup = NULL;
         g_pipes.clear();
+        sock_fds_.clear();
         fd_events_.clear();
-        pollfds_.clear();
     }
 
     bool addFd(int fd, uint32_t events) override {
         fd_events_[fd] = events;
+
         if (g_pipes.find(fd) != g_pipes.end()) {
             PipeEntry& pe = g_pipes[fd];
             if ((events & EVENT_READ) && pe.client_connected)
                 postPipeRead(fd);
             return true;
         }
+
         if (fd == IOCP_WAKEUP_FD) return true;
-        rebuildPollFds();
+
+        // TCP socket — track in sock_fds_ for select(0) probing
+        sock_fds_.insert(fd);
         return true;
     }
 
@@ -148,102 +161,102 @@ public:
         std::map<int, uint32_t>::iterator it = fd_events_.find(fd);
         if (it == fd_events_.end()) return false;
         it->second = events;
+
         if (g_pipes.find(fd) != g_pipes.end()) {
             PipeEntry& pe = g_pipes[fd];
             if ((events & EVENT_READ) && pe.client_connected)
                 postPipeRead(fd);
             return true;
         }
-        if (fd != IOCP_WAKEUP_FD) rebuildPollFds();
         return true;
     }
 
     bool removeFd(int fd) override {
         fd_events_.erase(fd);
-        if (fd != IOCP_WAKEUP_FD && g_pipes.find(fd) == g_pipes.end())
-            rebuildPollFds();
+        sock_fds_.erase(fd);
         return true;
     }
 
     int poll(ReadyEvent* events, int max_events, int timeout_ms) override {
-        int n = checkIocpCompletions(events, max_events);
-        if (n > 0) return n;
-
-        int sock_count = 0;
-        for (std::map<int, uint32_t>::iterator it = fd_events_.begin();
-             it != fd_events_.end(); ++it) {
-            if (it->first != IOCP_WAKEUP_FD &&
-                g_pipes.find(it->first) == g_pipes.end()) ++sock_count;
-        }
-
-        if (sock_count == 0) {
-            DWORD ms = (timeout_ms < 0) ? INFINITE : (DWORD)timeout_ms;
-            DWORD bytes; ULONG_PTR key; OVERLAPPED* ov;
-            if (GetQueuedCompletionStatus(iocp_, &bytes, &key, &ov, ms)) {
-                int fd = static_cast<int>(key);
-                if (fd == IOCP_WAKEUP_KEY) {
-                    drainWakeup();
-                    events[0].fd = IOCP_WAKEUP_FD;
-                    events[0].events = EVENT_READ;
-                    return 1;
-                }
-                return handlePipeCompletion(fd, events, 0, max_events);
-            }
-            return 0;
-        }
-
-        const int CHUNK_MS = 50;
-        int64_t deadline_ms = (timeout_ms >= 0) ? currentTimeMs() + timeout_ms : INT64_MAX;
+        int64_t deadline = (timeout_ms >= 0)
+            ? currentTimeMs() + timeout_ms
+            : INT64_MAX;
 
         while (true) {
-            n = checkIocpCompletions(events, max_events);
+            // 1. Drain already-queued IOCP pipe completions (non-blocking)
+            int n = drainPipeCompletions(events, max_events);
             if (n > 0) return n;
 
-            if (timeout_ms >= 0 && currentTimeMs() >= deadline_ms) return 0;
+            // 2. Probe all TCP sockets with select(0) (non-blocking)
+            n = probeSockets(events, max_events);
+            if (n > 0) return n;
 
-            int chunk = CHUNK_MS;
+            // 3. Deadline check
+            if (timeout_ms >= 0 && currentTimeMs() >= deadline)
+                return 0;
+
+            // 4. Block on IOCP.
+            //    Pipes deliver completions through IOCP → wake immediately.
+            //    Sockets are probed above (select(0)); when sockets exist we
+            //    use a 1ms IOCP timeout so that socket events are detected
+            //    promptly (pipe completions still wake the IOCP inline).
+            DWORD wait_ms = INFINITE;
+            if (!sock_fds_.empty()) {
+                wait_ms = 1;
+            }
             if (timeout_ms >= 0) {
-                int remaining = (int)(deadline_ms - currentTimeMs());
-                if (remaining <= 0) return 0;
-                if (remaining < CHUNK_MS) chunk = remaining;
+                int64_t rem = deadline - currentTimeMs();
+                if (rem <= 0) return 0;
+                if ((DWORD)rem < wait_ms) wait_ms = (DWORD)rem;
             }
 
-            if (pollfds_.empty()) rebuildPollFds();
-            int ret = WSAPoll(pollfds_.data(), (ULONG)pollfds_.size(), chunk);
-            if (ret > 0) {
-                int count = 0;
-                for (size_t i = 0; i < pollfds_.size() && count < max_events; ++i) {
-                    uint32_t revents = 0;
-                    if (pollfds_[i].revents & (POLLIN | POLLHUP)) revents |= EVENT_READ;
-                    if (pollfds_[i].revents & POLLOUT)            revents |= EVENT_WRITE;
-                    if (pollfds_[i].revents & POLLERR)            revents |= EVENT_ERROR;
-                    if (revents != 0) {
-                        events[count].fd     = pollfds_[i].fd;
-                        events[count].events = revents;
-                        ++count;
-                    }
-                }
-                if (count > 0) return count;
+            DWORD bytes; ULONG_PTR key; OVERLAPPED* ov;
+            BOOL ok = GetQueuedCompletionStatus(iocp_, &bytes, &key, &ov, wait_ms);
+            if (!ok)
+                continue;
+
+            int fd = static_cast<int>(key);
+            if (fd == 0 && key == IOCP_WAKEUP_KEY) {
+                drainWakeup();
+                events[0].fd     = IOCP_WAKEUP_FD;
+                events[0].events = EVENT_READ;
+                return 1;
             }
-            if (ret < 0) return ret;
+
+            if (g_pipes.find(fd) != g_pipes.end())
+                return handlePipeCompletion(fd, events, 0, max_events);
+
+            // Unknown completion — ignore and loop
         }
     }
 
 private:
-    int checkIocpCompletions(ReadyEvent* events, int max_events) {
+    int64_t currentTimeMs() {
+        FILETIME ft; GetSystemTimeAsFileTime(&ft);
+        ULARGE_INTEGER uli; uli.LowPart = ft.dwLowDateTime; uli.HighPart = ft.dwHighDateTime;
+        return (int64_t)((uli.QuadPart - 116444736000000000ULL) / 10000);
+    }
+
+    // ── Pipe IOCP ─────────────────────────────────────────
+
+    int drainPipeCompletions(ReadyEvent* events, int max_events) {
         int count = 0;
         DWORD bytes; ULONG_PTR key; OVERLAPPED* ov;
         while (count < max_events) {
             if (!GetQueuedCompletionStatus(iocp_, &bytes, &key, &ov, 0)) {
                 if (GetLastError() == WAIT_TIMEOUT) break;
+                continue;
             }
-            if (key == IOCP_WAKEUP_KEY) {
+            int fd = static_cast<int>(key);
+            if (fd == 0 && key == IOCP_WAKEUP_KEY) {
                 drainWakeup();
                 events[count].fd     = IOCP_WAKEUP_FD;
                 events[count].events = EVENT_READ;
                 return count + 1;
             }
-            count += handlePipeCompletion((int)key, events, count, max_events);
+            if (g_pipes.find(fd) != g_pipes.end()) {
+                count += handlePipeCompletion(fd, events, count, max_events);
+            }
         }
         return count;
     }
@@ -276,31 +289,45 @@ private:
         }
     }
 
-    int64_t currentTimeMs() {
-        FILETIME ft; GetSystemTimeAsFileTime(&ft);
-        ULARGE_INTEGER uli; uli.LowPart = ft.dwLowDateTime; uli.HighPart = ft.dwHighDateTime;
-        return (int64_t)((uli.QuadPart - 116444736000000000ULL) / 10000);
-    }
+    // ── Socket probing (select-based, non-blocking) ───────
 
-    void rebuildPollFds() {
-        pollfds_.clear();
-        for (std::map<int, uint32_t>::iterator it = fd_events_.begin();
-             it != fd_events_.end(); ++it) {
-            if (it->first == IOCP_WAKEUP_FD) continue;
-            if (g_pipes.find(it->first) != g_pipes.end()) continue;
-            WSAPOLLFD pfd;
-            memset(&pfd, 0, sizeof(pfd));
-            pfd.fd = (SOCKET)it->first;
-            if (it->second & EVENT_READ)  pfd.events |= POLLIN;
-            if (it->second & EVENT_WRITE) pfd.events |= POLLOUT;
-            pfd.revents = 0;
-            pollfds_.push_back(pfd);
+    int probeSockets(ReadyEvent* events, int max_events) {
+        if (sock_fds_.empty() || max_events <= 0) return 0;
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        int nfds = 0;
+        for (std::set<int>::iterator it = sock_fds_.begin();
+             it != sock_fds_.end(); ++it) {
+            FD_SET((SOCKET)*it, &rfds);
+            if (*it > nfds) nfds = *it;
         }
+
+        struct timeval tv = {0, 0};
+        int ret = select(nfds + 1, &rfds, NULL, NULL, &tv);
+        if (ret <= 0) return 0;
+
+        int count = 0;
+        for (std::set<int>::iterator it = sock_fds_.begin();
+             it != sock_fds_.end() && count < max_events; ++it) {
+            if (FD_ISSET((SOCKET)*it, &rfds)) {
+                std::map<int, uint32_t>::iterator ev = fd_events_.find(*it);
+                uint32_t revents = EVENT_READ;
+                if (ev != fd_events_.end() && (ev->second & EVENT_ERROR))
+                    revents |= EVENT_ERROR;
+                events[count].fd     = *it;
+                events[count].events = revents;
+                ++count;
+            }
+        }
+        return count;
     }
 
-    HANDLE iocp_;
+    // ── members ─────────────────────────────────────────────
+
+    HANDLE              iocp_;
     std::map<int, uint32_t> fd_events_;
-    std::vector<WSAPOLLFD>  pollfds_;
+    std::set<int>       sock_fds_;    // all TCP sockets (listen + data)
 };
 
 EventBackend* createEventBackend() { return new IocpBackend(); }

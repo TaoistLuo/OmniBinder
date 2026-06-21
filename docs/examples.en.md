@@ -571,9 +571,11 @@ Machine 2 runs the client.
 
 OmniBinder will detect that the two endpoints have different `host_id` values and will use TCP automatically instead of SHM.
 
-If both run on the same machine, the runtime will open the service-created SHM region and exchange eventfds through UDS.
+If both run on the same machine, each client creates its own independent SHM region and exchanges eventfds with the server through UDS.
 
-The same SHM segment can be shared by multiple local clients. This is already covered in `test_full_integration`.
+The per-client SHM model uses a unique name format: `/binder_<ServiceName>_cli_<PID>_<N>`. The client sends its SHM name to the server via UDS, and the server replies with `resp_eventfd` (to notify the client when a response is ready) and `master_eventfd` (for the client to signal a new request to the server).
+
+There is no slot allocation or 32-client hard limit. Each client has its own independent SHM ring with no shared resources, eliminating contention on a single shared memory segment. This is already covered in `test_full_integration`.
 
 Typical commands:
 

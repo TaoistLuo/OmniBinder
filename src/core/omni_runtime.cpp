@@ -689,13 +689,14 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
     // Register UDS listen fd with EventLoop for client handshake
     if (entry->shm_transport->eventfdEnabled()) {
         loop_->addFd(entry->shm_transport->reqEventFd(), EventLoop::EVENT_READ,
-            [this, entry, name](int, uint32_t) {
+            [this, entry, name](int fd, uint32_t) {
+                platform::eventFdConsume(fd);
                 if (!entry->shm_transport) return;
-                // Server was woken — check all client rings
-                uint8_t buf[4096];
+                uint8_t buf[65536];
                 uint32_t from_id = 0;
-                int ret = entry->shm_transport->serverRecv(buf, sizeof(buf), from_id);
-                if (ret > 0) {
+                while (true) {
+                    int ret = entry->shm_transport->serverRecv(buf, sizeof(buf), from_id);
+                    if (ret <= 0) break;
                     onShmRequest(name, entry, from_id, buf, static_cast<size_t>(ret));
                 }
             });
@@ -706,6 +707,25 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
             if (entry->shm_transport) {
                 entry->shm_transport->onUdsClientConnect();
             }
+        });
+
+    // Register callback for per-client notification fds.
+    // On Linux: udsSendServerResponse never creates new fds, callback is a no-op.
+    // On Windows: each new client gets a per-client pipe, registered here.
+    entry->shm_transport->setOnNewClientNotifyFd(
+        [this, entry, name](int fd) {
+            loop_->addFd(fd, EventLoop::EVENT_READ,
+                [this, entry, name](int efd, uint32_t) {
+                    platform::eventFdConsume(efd);
+                    if (!entry->shm_transport) return;
+                    uint8_t buf[65536];
+                    uint32_t from_id = 0;
+                    while (true) {
+                        int ret = entry->shm_transport->serverRecv(buf, sizeof(buf), from_id);
+                        if (ret <= 0) break;
+                        onShmRequest(name, entry, from_id, buf, static_cast<size_t>(ret));
+                    }
+                });
         });
 }
 
@@ -722,6 +742,7 @@ int OmniRuntime::Impl::registerServiceWithManager(const std::string& name, Servi
     svc_info.host = advertise_host;
     svc_info.port = entry->port;
     svc_info.host_id = host_id_;
+    svc_info.shm_config = service->shmConfig();
     svc_info.interfaces.push_back(service->interfaceInfo());
     serializeServiceInfo(svc_info, msg.payload);
 
@@ -974,7 +995,7 @@ int OmniRuntime::Impl::connectServiceInternal(const std::string& service_name) {
     if (ret != 0) return ret;
 
     ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-        service_name, info.host, info.port, info.host_id);
+        service_name, info.host, info.port, info.host_id, info.shm_config);
     if (!conn) {
         OMNI_LOG_ERROR(LOG_TAG, "connectService failed for %s", service_name.c_str());
         return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
@@ -1354,6 +1375,9 @@ int OmniRuntime::Impl::publishTopicInternal(const std::string& topic_name) {
         pub_info.name = local_services_.begin()->first;
         pub_info.host = normalizeAdvertiseHost(platform::getSocketAddress(entry->server->fd()));
         pub_info.port = entry->port;
+        if (entry->service) {
+            pub_info.shm_config = entry->service->shmConfig();
+        }
     } else {
         OMNI_LOG_WARN(LOG_TAG, "publishTopic requires a registered local service to advertise publisher endpoint");
         return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
@@ -1436,6 +1460,20 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
                     if (!sendOnFd(tit->second, broadcast_msg)) {
                         OMNI_LOG_WARN(LOG_TAG, "broadcast send failed to fd=%d", fds[i]);
                     }
+                }
+            }
+        }
+    }
+
+    // Broadcast via SHM to all SHM-connected subscribers
+    {
+        std::vector<std::string>* shm_services = topic_runtime_.shmSubscriberServices(topic_id);
+        if (shm_services) {
+            for (size_t i = 0; i < shm_services->size(); ++i) {
+                const std::string& svc_name = (*shm_services)[i];
+                std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(svc_name);
+                if (eit != local_services_.end() && eit->second->shm_transport) {
+                    eit->second->shm_transport->serverBroadcast(send_buf.data(), send_buf.size());
                 }
             }
         }
@@ -2037,7 +2075,7 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
                                                       const ServiceInfo& pub_info) {
     std::string pub_name = !pub_info.name.empty() ? pub_info.name : topicPublisherServiceName(topic_name);
     ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-        pub_name, pub_info.host, pub_info.port, pub_info.host_id);
+        pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config);
     if (!conn) {
         return false;
     }
@@ -2198,6 +2236,7 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         pub_info.host = normalizeAdvertiseHost(platform::getSocketAddress(sit->second->server->fd()));
         pub_info.port = sit->second->port;
         pub_info.host_id = host_id_;
+        pub_info.shm_config = sit->second->service->shmConfig();
     serializeServiceInfo(pub_info, msg.payload);
     msg.payload.writeUint32(0);  // idl_hash placeholder, generated proxy will overwrite
     
