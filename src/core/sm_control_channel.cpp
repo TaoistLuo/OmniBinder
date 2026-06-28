@@ -57,8 +57,20 @@ bool SmControlChannel::tryPopMessage(Message& msg) {
         return false;
     }
     if (!Message::validateHeader(hdr)) {
-        recv_buffer.setWritePosition(0);
-        recv_buffer.trySetReadPosition(0);
+        // Corrupted header at current position. Skip one byte forward
+        // and retry, rather than discarding the entire buffer.
+        if (!recv_buffer.trySetReadPosition(pos + 1)) {
+            recv_buffer.setWritePosition(0);
+            recv_buffer.trySetReadPosition(0);
+        } else {
+            size_t remaining = recv_buffer.size() - recv_buffer.readPosition();
+            if (remaining > 0 && recv_buffer.readPosition() > 0) {
+                memmove(recv_buffer.mutableData(),
+                        recv_buffer.data() + recv_buffer.readPosition(), remaining);
+            }
+            recv_buffer.setWritePosition(remaining);
+            recv_buffer.trySetReadPosition(0);
+        }
         return false;
     }
 

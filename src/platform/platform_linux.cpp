@@ -438,16 +438,22 @@ bool semWait(SemHandle sem, uint32_t timeout_ms) {
         return sem_trywait(s) == 0;
     }
 
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_sec += timeout_ms / 1000;
-    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
-    if (ts.tv_nsec >= 1000000000L) {
-        ts.tv_sec++;
-        ts.tv_nsec -= 1000000000L;
-    }
+    struct timespec start, now, remain;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    return sem_timedwait(s, &ts) == 0;
+    while (true) {
+        if (sem_trywait(s) == 0) return true;
+        if (errno != EAGAIN) return false;
+
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        uint64_t elapsed_ms = static_cast<uint64_t>(now.tv_sec - start.tv_sec) * 1000
+                            + (now.tv_nsec - start.tv_nsec) / 1000000;
+        if (elapsed_ms >= timeout_ms) return false;
+
+        remain.tv_sec = 0;
+        remain.tv_nsec = 1000000L;
+        nanosleep(&remain, NULL);
+    }
 }
 
 bool semPost(SemHandle sem) {

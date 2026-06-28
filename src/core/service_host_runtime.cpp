@@ -129,6 +129,16 @@ void ServiceHostRuntime::processServiceClientMessages(const std::string& service
             break;
         }
         if (!Message::validateHeader(hdr)) {
+            // Corrupted header — skip one byte forward to resume on next poll,
+            // same recovery strategy as SmControlChannel::tryPopMessage.
+            recv_buf->trySetReadPosition(pos + 1);
+            size_t remaining = recv_buf->size() - recv_buf->readPosition();
+            if (remaining > 0 && recv_buf->readPosition() > 0) {
+                memmove(recv_buf->mutableData(),
+                        recv_buf->data() + recv_buf->readPosition(), remaining);
+            }
+            recv_buf->setWritePosition(remaining);
+            recv_buf->trySetReadPosition(0);
             return;
         }
 

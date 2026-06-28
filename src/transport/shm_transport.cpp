@@ -673,8 +673,11 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
         }
 
         if (msg_len > req_ring->capacity) {
-            OMNI_LOG_ERROR(LOG_TAG, "serverRecv() invalid msg_len=%u cap=%u from client[%u]",
+            OMNI_LOG_ERROR(LOG_TAG, "serverRecv() invalid msg_len=%u cap=%u from client[%u], skipping",
                              msg_len, req_ring->capacity, cid);
+            // Advance read_pos past the corrupted length prefix to avoid infinite loop
+            req_ring->read_pos = (r + sizeof(uint32_t)) % cap;
+            platform::memoryBarrier();
             continue;
         }
 
@@ -703,6 +706,11 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
         if (read_bytes != msg_len) {
             OMNI_LOG_ERROR(LOG_TAG, "serverRecv() failed to read payload (%u of %u) from client[%u]",
                              read_bytes, msg_len, cid);
+            // Roll back the length-prefix consumption so the message can be
+            // retried on the next poll cycle rather than leaving the ring in
+            // an inconsistent state.
+            req_ring->read_pos = r;
+            platform::memoryBarrier();
             continue;
         }
 
@@ -791,13 +799,16 @@ int ShmTransport::serverBroadcast(const uint8_t* data, size_t length)
 
 bool ShmTransport::waitReady(uint32_t timeout_ms)
 {
-    (void)timeout_ms;
-
     if (is_server_) {
         return state_ == ConnectionState::CONNECTED;
     }
 
-    // Client is ready after initClient completes (UDS handshake done)
+    uint32_t elapsed = 0;
+    const uint32_t interval = 1;
+    while (state_ != ConnectionState::CONNECTED && elapsed < timeout_ms) {
+        platform::sleepMs(interval);
+        elapsed += interval;
+    }
     return state_ == ConnectionState::CONNECTED;
 }
 

@@ -82,12 +82,8 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
 
         if (ret == 1) {
             TcpTransport* tcp = static_cast<TcpTransport*>(conn->transport);
-            for (int i = 0; i < 100; ++i) {
-                if (tcp->checkConnectComplete()) {
-                    break;
-                }
-                platform::sleepMs(10);
-            }
+            platform::waitSocketWritable(conn->transport->fd(), 1000);
+            tcp->checkConnectComplete();
             if (tcp->state() != ConnectionState::CONNECTED) {
                 OMNI_LOG_ERROR(LOG_TAG,
                                "data_connect_timeout service=%s transport=TCP host=%s port=%u err=%d",
@@ -177,6 +173,7 @@ bool ConnectionManager::sendRaw(ServiceConnection* conn, const uint8_t* data, si
     }
 
     size_t sent = 0;
+    int ring_full_retries = 0;
     while (sent < length) {
         int ret = conn->transport->send(data + sent, length - sent);
         if (ret < 0) {
@@ -189,9 +186,14 @@ bool ConnectionManager::sendRaw(ServiceConnection* conn, const uint8_t* data, si
             return false;
         }
         if (ret == 0) {
-            // EAGAIN - 应该等待可写事件，这里简化处理
+            if (conn->transport->type() == TransportType::SHM
+                && ++ring_full_retries < 1000) {
+                platform::sleepMs(1);
+                continue;
+            }
             break;
         }
+        ring_full_retries = 0;
         sent += static_cast<size_t>(ret);
     }
     return sent == length;

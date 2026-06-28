@@ -162,7 +162,9 @@ bool writeInvokeErrorReply(Buffer& payload, ErrorCode error) {
 
 Message makeInvokeErrorReply(uint32_t seq, ErrorCode error) {
     Message reply(MessageType::MSG_INVOKE_REPLY, seq);
-    (void)writeInvokeErrorReply(reply.payload, error);
+    if (!writeInvokeErrorReply(reply.payload, error)) {
+        OMNI_LOG_ERROR(LOG_TAG, "makeInvokeErrorReply serialization failed seq=%u", seq);
+    }
     return reply;
 }
 
@@ -379,10 +381,8 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     }
     
     if (ret == 1) {
-        for (int i = 0; i < 100 && sm_channel_.transport->state() == ConnectionState::CONNECTING; ++i) {
-            sm_channel_.transport->checkConnectComplete();
-            platform::sleepMs(10);
-        }
+        platform::waitSocketWritable(sm_channel_.transport->fd(), 1000);
+        sm_channel_.transport->checkConnectComplete();
         if (sm_channel_.transport->state() != ConnectionState::CONNECTED) {
             OMNI_LOG_ERROR(LOG_TAG, "sm_connect_timeout host=%s port=%u timeout_ms=%u err=%d",
                            sm_host.c_str(), sm_port, 1000u, static_cast<int>(ErrorCode::ERR_TIMEOUT));
@@ -2163,10 +2163,8 @@ int OmniRuntime::Impl::reconnectServiceManager() {
     }
 
     if (ret == 1) {
-        for (int i = 0; i < 100 && sm_channel_.transport->state() == ConnectionState::CONNECTING; ++i) {
-            sm_channel_.transport->checkConnectComplete();
-            platform::sleepMs(10);
-        }
+        platform::waitSocketWritable(sm_channel_.transport->fd(), 1000);
+        sm_channel_.transport->checkConnectComplete();
         if (sm_channel_.transport->state() != ConnectionState::CONNECTED) {
             sm_channel_.transport->close();
             delete sm_channel_.transport;
