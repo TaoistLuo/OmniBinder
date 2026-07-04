@@ -14,6 +14,7 @@
 #include <sys/time.h>
 #include <sys/un.h>
 #include <netdb.h>
+#include <time.h>
 
 #define LOG_TAG "Platform"
 
@@ -700,9 +701,9 @@ std::string getMachineId() {
 }
 
 int64_t currentTimeMs() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return static_cast<int64_t>(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
 }
 
 std::string getHostName() {
