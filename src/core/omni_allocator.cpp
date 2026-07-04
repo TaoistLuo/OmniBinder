@@ -60,6 +60,31 @@ extern "C" void omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn) {
 
 extern "C" void omni_ensure_allocator_linked() {}
 
+extern "C" void* omni_malloc(size_t size) {
+    if (omnibinder::g_malloc_fn) return omnibinder::g_malloc_fn(size);
+    return std::malloc(size);
+}
+
+extern "C" void omni_free(void* ptr) {
+    if (!ptr) return;
+    if (omnibinder::g_free_fn) { omnibinder::g_free_fn(ptr); return; }
+    std::free(ptr);
+}
+
+extern "C" void* omni_realloc(void* ptr, size_t new_size) {
+    if (omnibinder::g_malloc_fn) {
+        void* new_ptr = omnibinder::g_malloc_fn(new_size);
+        if (!new_ptr) return nullptr;
+        if (ptr) {
+            // caller must ensure new_size >= old_size (no old-size tracking)
+            std::memcpy(new_ptr, ptr, new_size);
+            omnibinder::g_free_fn(ptr);
+        }
+        return new_ptr;
+    }
+    return std::realloc(ptr, new_size);
+}
+
 // ============================================================
 // operator new / delete（弱符号）
 // ============================================================

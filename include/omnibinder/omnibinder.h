@@ -79,4 +79,8 @@ typedef void  (*OmniFreeFn)(void* ptr);
 ///   }
 extern "C" void omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
 
+extern "C" void* omni_malloc(size_t size);
+extern "C" void  omni_free(void* ptr);
+extern "C" void* omni_realloc(void* ptr, size_t new_size);
+
 #endif // OMNIBINDER_H
