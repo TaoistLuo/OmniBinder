@@ -2,6 +2,9 @@
 #include <cstdlib>
 #include <cstring>
 
+extern "C" void* omni_malloc(size_t size);
+extern "C" void  omni_free(void* ptr);
+
 namespace omnibinder {
 
 Buffer::Buffer() noexcept
@@ -39,7 +42,7 @@ Buffer::Buffer(const uint8_t* data, size_t length) noexcept
 
 Buffer::~Buffer() noexcept {
     if (data_) {
-        free(data_);
+        omni_free(data_);
         data_ = NULL;
     }
 }
@@ -61,7 +64,7 @@ Buffer::Buffer(Buffer&& other) noexcept
 Buffer& Buffer::operator=(Buffer&& other) noexcept {
     if (this != &other) {
         if (data_) {
-            free(data_);
+            omni_free(data_);
         }
         data_ = other.data_;
         capacity_ = other.capacity_;
@@ -91,11 +94,15 @@ void Buffer::grow(size_t min_capacity) noexcept {
     while (new_capacity < min_capacity) {
         new_capacity *= 2;
     }
-    uint8_t* new_data = static_cast<uint8_t*>(realloc(data_, new_capacity));
+    uint8_t* new_data = static_cast<uint8_t*>(omni_malloc(new_capacity));
     if (!new_data) {
         write_failed_ = true;
         return;
     }
+    if (data_ && capacity_ > 0) {
+        std::memcpy(new_data, data_, capacity_);
+    }
+    omni_free(data_);
     data_ = new_data;
     capacity_ = new_capacity;
 }
@@ -109,6 +116,7 @@ void Buffer::reserve(size_t new_capacity) noexcept {
 void Buffer::resize(size_t new_size) noexcept {
     if (new_size > capacity_) {
         reserve(new_size);
+        if (write_failed_) return;
     }
     write_pos_ = new_size;
 }

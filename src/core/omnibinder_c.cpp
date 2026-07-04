@@ -335,9 +335,12 @@ char* omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len) {
         return NULL;
     }
     uint32_t len = static_cast<uint32_t>(value.size());
-    char* result = (char*)malloc(len + 1);
+    char* result = (char*)omni_malloc(len + 1);
     if (result) {
         memcpy(result, value.c_str(), len + 1);
+    } else {
+        if (out_len) *out_len = 0;
+        return NULL;
     }
     if (out_len) *out_len = len;
     return result;
@@ -355,8 +358,12 @@ uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len) {
         return NULL;
     }
     uint32_t len = static_cast<uint32_t>(value.size());
-    uint8_t* result = (uint8_t*)malloc(len);
-    if (result && len > 0) {
+    uint8_t* result = (uint8_t*)omni_malloc(len);
+    if (!result) {
+        *out_len = 0;
+        return NULL;
+    }
+    if (len > 0) {
         memcpy(result, value.data(), len);
     }
     *out_len = len;
@@ -481,21 +488,21 @@ int omni_runtime_unregister_service(omni_runtime_t* runtime, omni_service_t* svc
 }
 
 int omni_runtime_invoke(omni_runtime_t* runtime, const char* service_name,
-    uint32_t interface_id, uint32_t method_id,
+    uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
     const omni_buffer_t* request, omni_buffer_t* response,
     uint32_t timeout_ms)
 {
     if (!runtime || !request || !response) return -1;
-    return runtime->runtime.invoke(service_name, interface_id, method_id, 0,
+    return runtime->runtime.invoke(service_name, interface_id, method_id, idl_hash,
                                  request->buf, response->buf, timeout_ms);
 }
 
 int omni_runtime_invoke_oneway(omni_runtime_t* runtime, const char* service_name,
-    uint32_t interface_id, uint32_t method_id,
+    uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
     const omni_buffer_t* request)
 {
     if (!runtime || !request) return -1;
-    return runtime->runtime.invokeOneWay(service_name, interface_id, method_id, 0, request->buf);
+    return runtime->runtime.invokeOneWay(service_name, interface_id, method_id, idl_hash, request->buf);
 }
 
 int omni_runtime_connect_service(omni_runtime_t* runtime, const char* service_name) {

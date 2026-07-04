@@ -98,6 +98,15 @@ void ServiceHostRuntime::onServiceClientData(const std::string& service_name,
     if (bit == entry->client_recv_buffers.end()) {
         return;
     }
+    static const size_t MAX_CLIENT_RECV_BUFFER = 16 * 1024 * 1024; // 16MB
+    if (bit->second->size() + static_cast<size_t>(ret) > MAX_CLIENT_RECV_BUFFER) {
+        OMNI_LOG_ERROR(LOG_TAG, "client_recv_buffer overflow for fd=%d (>%zuMB)",
+                       client_fd, MAX_CLIENT_RECV_BUFFER / (1024*1024));
+        topic_runtime.removeTcpSubscriberFd(client_fd);
+        on_client_disconnected(entry, client_fd);
+        on_disconnect(service_name, client_fd);
+        return;
+    }
     bit->second->writeRaw(buf, static_cast<size_t>(ret));
 
     processServiceClientMessages(service_name, entry, client_fd, topic_runtime,

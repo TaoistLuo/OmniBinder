@@ -4,7 +4,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <algorithm>
+#ifdef OMNIBINDER_LINUX
 #include <unistd.h>
+#endif
 #include <atomic>
 
 #define LOG_TAG "ShmTransport"

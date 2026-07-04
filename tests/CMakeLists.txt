@@ -27,7 +27,10 @@ target_include_directories(test_owner_thread_executor PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/include
 )
-target_link_libraries(test_owner_thread_executor PRIVATE omnibinder_static pthread gtest gtest_main)
+target_link_libraries(test_owner_thread_executor PRIVATE omnibinder_static gtest gtest_main)
+if(CMAKE_USE_PTHREADS_INIT)
+    target_link_libraries(test_owner_thread_executor PRIVATE Threads::Threads)
+endif()
 add_test(NAME test_owner_thread_executor COMMAND test_owner_thread_executor)
 
 add_executable(test_transport test_transport.cpp)

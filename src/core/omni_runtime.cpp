@@ -1501,11 +1501,12 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
     // Diagnostic intercept
     {
         uint32_t diag_iface_id = 0;
+        uint32_t diag_idl_hash = 0;
         uint32_t diag_method_id = 0;
         uint32_t diag_payload_len = 0;
         BufferView check_buf(msg.payload.data(), msg.payload.size());
-        if (check_buf.tryReadUint32(diag_iface_id) && check_buf.tryReadUint32(diag_method_id)
-            && check_buf.tryReadUint32(diag_payload_len)) {
+        if (check_buf.tryReadUint32(diag_iface_id) && check_buf.tryReadUint32(diag_idl_hash)
+            && check_buf.tryReadUint32(diag_method_id) && check_buf.tryReadUint32(diag_payload_len)) {
             if (diag_iface_id == OMNI_DIAG_IFACE_ID) {
                 Buffer request;
                 if (diag_payload_len > 0) {
@@ -2207,6 +2208,7 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
                                             platform::getSocketAddress(entry->server->fd()));
         svc_info.port = entry->port;
         svc_info.host_id = host_id_;
+        svc_info.shm_config = entry->service->shmConfig();
         svc_info.interfaces.push_back(entry->service->interfaceInfo());
         serializeServiceInfo(svc_info, msg.payload);
         if (!sendToSM(msg)) {
@@ -2216,6 +2218,11 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
         if (ret != 0) {
             return ret;
+        }
+        uint32_t handle = 0;
+        if (!decodeUint32ReplyPayload(reply, handle) || handle == INVALID_HANDLE) {
+            OMNI_LOG_ERROR(LOG_TAG, "restore register failed for %s", it->first.c_str());
+            return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
         }
     }
 
@@ -2230,6 +2237,10 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
         if (ret != 0) {
             return ret;
+        }
+        bool accepted = false;
+        if (!decodeBoolReplyPayload(reply, accepted) || !accepted) {
+            OMNI_LOG_WARN(LOG_TAG, "restore subscribe death failed for %s", it->first.c_str());
         }
     }
 
@@ -2259,6 +2270,10 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         if (ret != 0) {
             return ret;
         }
+        bool pub_accepted = false;
+        if (!decodeBoolReplyPayload(reply, pub_accepted) || !pub_accepted) {
+            OMNI_LOG_WARN(LOG_TAG, "restore publish topic failed for %s", it->first.c_str());
+        }
     }
 
     std::map<std::string, TopicCallback> subscriptions = topic_runtime_.subscriptions();
@@ -2273,6 +2288,10 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
         if (ret != 0) {
             return ret;
+        }
+        bool sub_accepted = false;
+        if (!decodeBoolReplyPayload(reply, sub_accepted) || !sub_accepted) {
+            OMNI_LOG_WARN(LOG_TAG, "restore subscribe topic failed for %s", it->first.c_str());
         }
     }
 

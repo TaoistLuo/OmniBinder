@@ -348,7 +348,7 @@ void CppCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
     for (size_t i = 0; i < t.fields.size(); ++i) {
         os << "    " << cppTypeName(t.fields[i].type) << " " << t.fields[i].name << ";\n";
     }
-    os << "\n    static const uint32_t TOPIC_ID = 0x" << std::hex << fnv1a_hash(pkg_ + "." + t.name) << std::dec << "u;\n";
+    os << "\n    static const uint32_t TOPIC_ID = 0x" << std::hex << fnv1a_hash(t.name) << std::dec << "u;\n";
     os << "    bool serialize(omnibinder::Buffer& buf) const;\n";
     os << "    bool deserialize(omnibinder::Buffer& buf);\n";
     os << "};\n\n";

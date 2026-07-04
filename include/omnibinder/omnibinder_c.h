@@ -196,12 +196,12 @@ int  omni_runtime_unregister_service(omni_runtime_t* client, omni_service_t* svc
 
 /* RPC 调用 */
 int  omni_runtime_invoke(omni_runtime_t* client, const char* service_name,
-         uint32_t interface_id, uint32_t method_id,
+         uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
          const omni_buffer_t* request, omni_buffer_t* response,
          uint32_t timeout_ms);
 
 int  omni_runtime_invoke_oneway(omni_runtime_t* client, const char* service_name,
-         uint32_t interface_id, uint32_t method_id,
+         uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
          const omni_buffer_t* request);
 
 /* 连接管理 */
@@ -234,6 +234,11 @@ int  omni_runtime_reset_stats(omni_runtime_t* client);
 
 /** FNV-1a 32位哈希（与 C++ 侧 omnibinder::fnv1a_32 一致） */
 uint32_t omni_fnv1a_32(const char* str);
+
+/* 自定义内存分配器包装（走 omniSetAllocator 注册的分配器，否则回退系统 malloc/free） */
+void* omni_malloc(size_t size);
+void  omni_free(void* ptr);
+void* omni_realloc(void* ptr, size_t new_size);
 
 #ifdef __cplusplus
 }

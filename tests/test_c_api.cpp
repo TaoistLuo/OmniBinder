@@ -169,7 +169,7 @@ TEST_F(CApiTest, RegisterInvokeAndStats) {
     omni_buffer_write_string(req, "rpc-through-c-api", 17);
 
     ASSERT_EQ(omni_runtime_connect_service(runtime, "CService"), 0);
-    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO, req, resp, 3000), 0);
+    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000), 0);
 
     uint32_t len = 0;
     char* echoed = omni_buffer_read_string(resp, &len);
@@ -205,7 +205,7 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     ASSERT_NE(req, nullptr);
     ASSERT_NE(resp, nullptr);
 
-    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_GET_NAME, req, resp, 3000), 0);
+    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_GET_NAME, 0, req, resp, 3000), 0);
     uint32_t name_len = 0;
     char* name = omni_buffer_read_string(resp, &name_len);
     ASSERT_NE(name, nullptr);
@@ -217,7 +217,7 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     omni_buffer_reset(resp);
     const uint8_t payload[] = {0x00, 0x11, 0x22, 0x33, 0xfe, 0xff};
     omni_buffer_write_bytes(req, payload, sizeof(payload));
-    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO_BYTES, req, resp, 3000), 0);
+    ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO_BYTES, 0, req, resp, 3000), 0);
     uint32_t out_len = 0;
     uint8_t* out = omni_buffer_read_bytes(resp, &out_len);
     EXPECT_EQ(out_len, sizeof(payload));

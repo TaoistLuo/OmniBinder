@@ -265,8 +265,15 @@ private:
             return;
         }
 
-        // Append to receive buffer
+        // Append to receive buffer (with size limit to prevent OOM)
+        static const size_t MAX_RECV_BUFFER = 16 * 1024 * 1024; // 16MB
         size_t old_size = conn->recv_buffer.size();
+        if (old_size + static_cast<size_t>(n) > MAX_RECV_BUFFER) {
+            OMNI_LOG_ERROR(TAG, "recv_buffer overflow for fd=%d (>%zuMB), disconnecting",
+                           conn->fd, MAX_RECV_BUFFER / (1024*1024));
+            closeClient(conn->fd);
+            return;
+        }
         conn->recv_buffer.resize(old_size + n);
         memcpy(conn->recv_buffer.mutableData() + old_size, temp, n);
 
@@ -836,6 +843,13 @@ private:
         }
 
         if (conn->send_offset < conn->send_buffer.size()) {
+            static const size_t MAX_SEND_BUFFER = 16 * 1024 * 1024; // 16MB
+            if (conn->send_buffer.size() + output.size() > MAX_SEND_BUFFER) {
+                OMNI_LOG_ERROR(TAG, "send_buffer overflow for fd=%d (>%zuMB), disconnecting",
+                               conn->fd, MAX_SEND_BUFFER / (1024*1024));
+                closeClient(conn->fd);
+                return;
+            }
             conn->send_buffer.writeRaw(output.data(), output.size());
             enableClientWriteEvents(conn);
             return;

@@ -170,7 +170,7 @@ static void emitValueDestroy(std::ostream& os, const TypeRef& type,
                              const std::string& expr, const std::string& pkg,
                              const std::string& indent) {
     if (type.primitive == TYPE_STRING || type.primitive == TYPE_BYTES) {
-        os << indent << "if (" << expr << ") { free(" << expr << "); }\n";
+        os << indent << "if (" << expr << ") { omni_free(" << expr << "); }\n";
     } else if (type.isCustom() || type.isArray()) {
         os << indent << cDestroyPrefix(type, pkg) << "_destroy(&" << expr << ");\n";
     }
@@ -258,21 +258,21 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
         os << "    uint32_t i = 0;\n";
         os << "    if (self->data) {\n";
         os << "        for (i = 0; i < self->count; ++i) {\n";
-        os << "            if (self->data[i]) { free(self->data[i]); }\n";
+        os << "            if (self->data[i]) { omni_free(self->data[i]); }\n";
         os << "        }\n";
-        os << "        free(self->data);\n";
+        os << "        omni_free(self->data);\n";
         os << "    }\n";
-        os << "    if (self->lens) { free(self->lens); }\n";
+        os << "    if (self->lens) { omni_free(self->lens); }\n";
     } else if (element.isCustom() || element.isArray()) {
         os << "    uint32_t i = 0;\n";
         os << "    if (self->data) {\n";
         os << "        for (i = 0; i < self->count; ++i) {\n";
         emitValueDestroy(os, element, "self->data[i]", pkg, "            ");
         os << "        }\n";
-        os << "        free(self->data);\n";
+        os << "        omni_free(self->data);\n";
         os << "    }\n";
     } else {
-        os << "    if (self->data) { free(self->data); }\n";
+        os << "    if (self->data) { omni_free(self->data); }\n";
     }
     os << "    self->data = NULL;\n";
     if (arrayElementNeedsLengths(element)) {
@@ -303,11 +303,11 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     }
     os << "        return 1;\n";
     os << "    }\n";
-    os << "    self->data = (" << element_type_name << "*)malloc(sizeof(" << element_type_name << ") * self->count);\n";
+    os << "    self->data = (" << element_type_name << "*)omni_malloc(sizeof(" << element_type_name << ") * self->count);\n";
     os << "    if (!self->data) { self->count = 0; return 0; }\n";
     if (arrayElementNeedsLengths(element)) {
-        os << "    self->lens = (uint32_t*)malloc(sizeof(uint32_t) * self->count);\n";
-        os << "    if (!self->lens) { free(self->data); self->data = NULL; self->count = 0; return 0; }\n";
+        os << "    self->lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * self->count);\n";
+        os << "    if (!self->lens) { omni_free(self->data); self->data = NULL; self->count = 0; return 0; }\n";
     }
     os << "    for (i = 0; i < self->count; ++i) {\n";
     if (element.isCustom() || element.isArray()) {
@@ -663,7 +663,7 @@ void CCodeGen::genStruct(const StructDef& s, std::ostream& os) {
 
 void CCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
     std::string tname = pkg_ + "_" + t.name;
-    uint32_t topic_id = fnv1a_hash(pkg_ + "." + t.name);
+    uint32_t topic_id = fnv1a_hash(t.name);
 
     os << "typedef struct " << tname << " {\n";
     for (size_t j = 0; j < t.fields.size(); ++j) {
@@ -824,11 +824,14 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
     os << "    uint32_t reconnect_interval_ms;\n";
     os << "    void (*death_callback)(void* user_data);\n";
     os << "    void* death_user_data;\n";
+    os << "    void* _sub_ctxs[8];\n";
+    os << "    int _sub_ctx_count;\n";
     os << "} " << prefix << "_proxy;\n\n";
 
     os << "void " << prefix << "_proxy_init(" << prefix << "_proxy* p, omni_runtime_t* runtime);\n";
     os << "int  " << prefix << "_proxy_connect(" << prefix << "_proxy* p);\n";
     os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p);\n";
+    os << "void " << prefix << "_proxy_destroy(" << prefix << "_proxy* p);\n";
     os << "int  " << prefix << "_proxy_is_connected(const " << prefix << "_proxy* p);\n";
     os << "void " << prefix << "_proxy_enable_auto_reconnect(" << prefix << "_proxy* p, int enable);\n";
     os << "void " << prefix << "_proxy_set_reconnect_interval(" << prefix << "_proxy* p, uint32_t interval_ms);\n";
@@ -918,7 +921,7 @@ void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::s
             const FieldDef& f = s.fields[j];
             if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
                 has_destroy_logic = true;
-                os << "    if (self->" << f.name << ") { free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
+                os << "    if (self->" << f.name << ") { omni_free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
             } else if (f.type.isArray()) {
                 has_destroy_logic = true;
                 os << "    " << cArrayTypeName(f.type, pkg_) << "_destroy(&self->" << f.name << ");\n";
@@ -954,7 +957,7 @@ void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::s
             const FieldDef& f = t.fields[j];
             if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
                 has_destroy_logic = true;
-                os << "    if (self->" << f.name << ") { free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
+                os << "    if (self->" << f.name << ") { omni_free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
             } else if (f.type.isArray()) {
                 has_destroy_logic = true;
                 os << "    " << cArrayTypeName(f.type, pkg_) << "_destroy(&self->" << f.name << ");\n";
@@ -1091,7 +1094,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
                 } else {
                     os << "        " << m.param.name << " = omni_buffer_read_bytes(req, &" << m.param.name << "_len);\n";
                 }
-                os << "        if (!omni_buffer_read_ok(req)) { if (" << m.param.name << ") free(" << m.param.name << "); omni_buffer_destroy(req); return -501; }\n";
+                os << "        if (!omni_buffer_read_ok(req)) { if (" << m.param.name << ") omni_free(" << m.param.name << "); omni_buffer_destroy(req); return -501; }\n";
             } else {
                 std::string ptype = cTypeName(m.param.type, pkg_);
                 os << "        " << ptype << " " << m.param.name << " = ";
@@ -1159,7 +1162,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
                 } else {
                     os << "        omni_buffer_write_bytes(response, result, result_len);\n";
                 }
-                os << "        if (result) free(result);\n";
+                os << "        if (result) omni_free(result);\n";
             } else {
                 emitPrimitiveWrite(os, m.return_type.primitive, "result", "response", "        ");
             }
@@ -1170,7 +1173,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
             std::string ppfx2 = cDestroyPrefix(m.param.type, pkg_);
             os << "        " << ppfx2 << "_destroy(&" << m.param.name << ");\n";
         } else if (m.has_param && isCStringLike(m.param.type)) {
-            os << "        if (" << m.param.name << ") free(" << m.param.name << ");\n";
+            os << "        if (" << m.param.name << ") omni_free(" << m.param.name << ");\n";
         }
     }
     if (!svc.methods.empty()) {
@@ -1181,7 +1184,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
     os << "}\n\n";
 
     os << "omni_service_t* " << prefix << "_stub_create_from_callbacks(const " << prefix << "_callbacks* cbs) {\n";
-    os << "    " << prefix << "_stub_data* data = (" << prefix << "_stub_data*)malloc(sizeof(" << prefix << "_stub_data));\n";
+    os << "    " << prefix << "_stub_data* data = (" << prefix << "_stub_data*)omni_malloc(sizeof(" << prefix << "_stub_data));\n";
     os << "    if (!data) return NULL;\n";
     os << "    data->cbs = *cbs;\n";
     os << "    omni_service_t* svc = omni_service_create(\"" << svc.name << "\",\n";
@@ -1223,7 +1226,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
 }
 
 
-void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast*/, std::ostream& os) {
+void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& ast, std::ostream& os) {
     std::string prefix = pkg_ + "_" + svc.name;
     uint32_t iface_id = fnv1a_hash(pkg_ + "." + svc.name);
 
@@ -1244,6 +1247,8 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
     os << "    p->reconnect_interval_ms = 1000;\n";
     os << "    p->death_callback = NULL;\n";
     os << "    p->death_user_data = NULL;\n";
+    os << "    memset(p->_sub_ctxs, 0, sizeof(p->_sub_ctxs));\n";
+    os << "    p->_sub_ctx_count = 0;\n";
     os << "}\n\n";
 
     // proxy_connect
@@ -1348,13 +1353,13 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
             }
         }
 
-        // Invoke
+        uint32_t idl_hash = computeMethodHash(m, ast);
         if (m.return_type.isVoid()) {
             os << "    omni_runtime_invoke_oneway(p->runtime, \"" << svc.name << "\",\n";
-            os << "        0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, req);\n";
+            os << "        0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
         } else {
             os << "    int ret = omni_runtime_invoke(p->runtime, \"" << svc.name << "\",\n";
-            os << "        0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, req, resp, 0);\n";
+            os << "        0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
         }
 
         // Deserialize result
@@ -1370,7 +1375,7 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
                 } else {
                     os << "        *result = omni_buffer_read_bytes(resp, result_len);\n";
                 }
-                os << "        if (!omni_buffer_read_ok(resp)) { if (*result) free(*result); *result = NULL; if (result_len) *result_len = 0; ret = -501; }\n";
+                os << "        if (!omni_buffer_read_ok(resp)) { if (*result) omni_free(*result); *result = NULL; if (result_len) *result_len = 0; ret = -501; }\n";
             } else {
                 emitPrimitiveRead(os, m.return_type.primitive, "*result", "resp", "        ");
                 os << "        if (!omni_buffer_read_ok(resp)) { ret = -501; }\n";
@@ -1421,13 +1426,12 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
         os << "void " << fn_name << "(" << prefix << "_proxy* p,\n";
         os << "    void (*callback)(const " << topic_type << "* msg, void* user_data), void* user_data)\n";
         os << "{\n";
-        os << "    /* Note: ctx is intentionally leaked for simplicity; in production code\n";
-        os << "       you would track and free it on unsubscribe */\n";
         os << "    " << prefix << "_" << toSnakeCase(topic) << "_sub_ctx* ctx =\n";
-        os << "        (" << prefix << "_" << toSnakeCase(topic) << "_sub_ctx*)malloc(\n";
+        os << "        (" << prefix << "_" << toSnakeCase(topic) << "_sub_ctx*)omni_malloc(\n";
         os << "            sizeof(" << prefix << "_" << toSnakeCase(topic) << "_sub_ctx));\n";
         os << "    ctx->callback = callback;\n";
         os << "    ctx->user_data = user_data;\n";
+        os << "    if (p->_sub_ctx_count < 8) p->_sub_ctxs[p->_sub_ctx_count++] = ctx;\n";
         os << "    omni_runtime_subscribe_topic(p->runtime, \"" << topic << "\",\n";
         os << "        " << prefix << "_" << toSnakeCase(topic) << "_topic_cb, ctx);\n";
         os << "}\n\n";
@@ -1438,6 +1442,13 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& /*ast
     os << "{\n";
     os << "    p->death_callback = callback;\n";
     os << "    p->death_user_data = user_data;\n";
+    os << "}\n\n";
+
+    os << "void " << prefix << "_proxy_destroy(" << prefix << "_proxy* p)\n";
+    os << "{\n";
+    os << "    for (int i = 0; i < p->_sub_ctx_count; ++i) { omni_free(p->_sub_ctxs[i]); }\n";
+    os << "    p->_sub_ctx_count = 0;\n";
+    os << "    p->runtime = NULL;\n";
     os << "}\n\n";
 }
 

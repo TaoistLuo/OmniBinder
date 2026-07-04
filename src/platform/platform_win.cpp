@@ -374,7 +374,14 @@ bool eventFdNotify(int efd) {
     }
     char c = 1;
     DWORD written = 0;
-    BOOL ok = WriteFile(it->second.pipe, &c, 1, &written, NULL);
+    OVERLAPPED ov = {};
+    ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    BOOL ok = WriteFile(it->second.pipe, &c, 1, &written, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) {
+        WaitForSingleObject(ov.hEvent, INFINITE);
+        ok = GetOverlappedResult(it->second.pipe, &ov, &written, FALSE);
+    }
+    CloseHandle(ov.hEvent);
     OMNI_LOG_DEBUG(LOG_TAG, "eventFdNotify: fd=%d pipe=%s ok=%d written=%lu err=%lu",
                    efd, it->second.pipe_name.c_str(), ok, written,
                    ok ? 0 : GetLastError());
@@ -401,6 +408,9 @@ void closeEventFd(int efd) {
 }
 
 // Windows 共享内存（使用 Named File Mapping）
+static std::map<std::string, HANDLE> g_shm_handles;
+static std::mutex g_shm_handles_mutex;
+
 void* shmCreate(const std::string& name, size_t size, bool create) {
     std::string map_name = "Local\\omnibinder_" + name;
     HANDLE hMap;
@@ -412,9 +422,18 @@ void* shmCreate(const std::string& name, size_t size, bool create) {
     }
     if (!hMap) return NULL;
 
+    {
+        std::lock_guard<std::mutex> lock(g_shm_handles_mutex);
+        g_shm_handles[name] = hMap;
+    }
+
     void* addr = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
-    // 注意：这里不关闭 hMap，因为关闭后映射仍然有效
-    // 但需要在某处保存 hMap 以便后续清理
+    if (!addr) {
+        CloseHandle(hMap);
+        std::lock_guard<std::mutex> lock(g_shm_handles_mutex);
+        g_shm_handles.erase(name);
+        return NULL;
+    }
     return addr;
 }
 
@@ -424,8 +443,13 @@ void shmDetach(void* addr, size_t /*size*/) {
     }
 }
 
-void shmUnlink(const std::string& /*name*/) {
-    // Windows 的 file mapping 在所有句柄关闭后自动删除
+void shmUnlink(const std::string& name) {
+    std::lock_guard<std::mutex> lock(g_shm_handles_mutex);
+    auto it = g_shm_handles.find(name);
+    if (it != g_shm_handles.end()) {
+        CloseHandle(it->second);
+        g_shm_handles.erase(it);
+    }
 }
 
 SemHandle semCreate(const std::string& name, unsigned int initial_value) {
@@ -812,8 +836,7 @@ bool spinLockTestAndSet(volatile uint32_t* lock) {
 }
 
 void spinLockRelease(volatile uint32_t* lock) {
-    *lock = 0;
-    MemoryBarrier();
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(lock), 0);
 }
 
 void spinWaitHint() {
