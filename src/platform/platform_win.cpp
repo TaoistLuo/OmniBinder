@@ -535,6 +535,10 @@ std::string getHostName() {
     return "unknown";
 }
 
+int getPid() {
+    return static_cast<int>(GetCurrentProcessId());
+}
+
 void sleepMs(uint32_t ms) {
     ::Sleep(ms);
 }

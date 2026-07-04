@@ -286,6 +286,7 @@ std::string getMachineId();
 int64_t currentTimeMs();
 int64_t currentTimeUs();
 std::string getHostName();
+int getPid();
 
 // 获取当前本地时间（分解为 tm + 毫秒）
 // out_tm: 输出本地时间

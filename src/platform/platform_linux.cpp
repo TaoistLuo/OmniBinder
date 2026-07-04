@@ -719,6 +719,10 @@ std::string getHostName() {
     return "unknown";
 }
 
+int getPid() {
+    return static_cast<int>(getpid());
+}
+
 void sleepMs(uint32_t ms) {
     struct timespec ts;
     ts.tv_sec = ms / 1000;

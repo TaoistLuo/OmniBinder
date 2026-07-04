@@ -1,12 +1,10 @@
 #include "transport/shm_transport.h"
 #include "omnibinder/log.h"
+#include "platform/platform.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <algorithm>
-#ifdef OMNIBINDER_LINUX
-#include <unistd.h>
-#endif
 #include <atomic>
 
 #define LOG_TAG "ShmTransport"
@@ -115,7 +113,7 @@ bool ShmTransport::initClient()
         uint64_t unique_id = s_instance_counter.fetch_add(1, std::memory_order_relaxed);
         char buf[256];
         snprintf(buf, sizeof(buf), "%s_cli_%d_%lu",
-                 server_name.c_str(), static_cast<int>(getpid()),
+                 server_name.c_str(), platform::getPid(),
                  static_cast<unsigned long>(unique_id));
         shm_name_ = std::string(buf);
     }
