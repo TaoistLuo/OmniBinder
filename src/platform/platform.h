@@ -141,6 +141,9 @@ bool isWouldBlock(int error_code);
 // 判断是否是连接中
 bool isInProgress(int error_code);
 
+// 判断是否是连接重置（ECONNRESET/EPIPE）
+bool isConnectionReset(int error_code);
+
 // 等待 socket 可写
 bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms);
 

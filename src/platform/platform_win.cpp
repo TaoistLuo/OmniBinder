@@ -231,6 +231,10 @@ bool isInProgress(int error_code) {
     return error_code == WSAEWOULDBLOCK;
 }
 
+bool isConnectionReset(int error_code) {
+    return error_code == WSAECONNRESET || error_code == WSAECONNABORTED;
+}
+
 bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
     fd_set write_fds;
     fd_set except_fds;

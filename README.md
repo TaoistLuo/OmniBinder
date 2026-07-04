@@ -236,9 +236,15 @@ TOOLCHAIN_FILE=/path/to/toolchain.cmake \
 ```bash
 cmake --install build
 
-cmake -S examples/artifact_examples -B build/example_artifacts \
+# C++ examples
+cmake -S examples/artifact_examples/cpp -B build/example_artifacts_cpp \
   -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
-cmake --build build/example_artifacts -j$(nproc)
+cmake --build build/example_artifacts_cpp -j$(nproc)
+
+# C examples
+cmake -S examples/artifact_examples/c -B build/example_artifacts_c \
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+cmake --build build/example_artifacts_c -j$(nproc)
 ```
 
 该示例同时提供 C 和 CPP 两套版本，用于演示：服务之间调用控制接口、订阅 sensor 广播、以及在 sensor 退出时接收死亡通知。

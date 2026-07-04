@@ -211,9 +211,15 @@ If you want to verify **how a downstream business project consumes OmniBinder bu
 ```bash
 cmake --install build
 
-cmake -S examples/artifact_examples -B build/example_artifacts \
+# C++ examples
+cmake -S examples/artifact_examples/cpp -B build/example_artifacts_cpp \
   -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
-cmake --build build/example_artifacts -j$(nproc)
+cmake --build build/example_artifacts_cpp -j$(nproc)
+
+# C examples
+cmake -S examples/artifact_examples/c -B build/example_artifacts_c \
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+cmake --build build/example_artifacts_c -j$(nproc)
 ```
 
 That example provides both C and CPP versions.

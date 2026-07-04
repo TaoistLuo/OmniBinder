@@ -155,8 +155,13 @@ int TcpTransport::recv(uint8_t* buf, size_t buf_size)
             return 0;
         }
         // Real error
-        OMNI_LOG_ERROR(LOG_TAG, "recv() failed on fd=%d: error=%d",
-                         static_cast<int>(fd_), err);
+        if (platform::isConnectionReset(err)) {
+            OMNI_LOG_INFO(LOG_TAG, "Peer reset connection on fd=%d",
+                          static_cast<int>(fd_));
+        } else {
+            OMNI_LOG_ERROR(LOG_TAG, "recv() failed on fd=%d: error=%d",
+                             static_cast<int>(fd_), err);
+        }
         state_ = ConnectionState::ERROR;
         return -1;
     }

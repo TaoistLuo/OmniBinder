@@ -267,6 +267,10 @@ bool isInProgress(int error_code) {
     return error_code == EINPROGRESS;
 }
 
+bool isConnectionReset(int error_code) {
+    return error_code == ECONNRESET || error_code == EPIPE;
+}
+
 bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
     struct pollfd pfd;
     memset(&pfd, 0, sizeof(pfd));
