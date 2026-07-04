@@ -11,6 +11,7 @@
 #include <map>
 #include <vector>
 #include <atomic>
+#include <mutex>
 
 
 #ifdef OMNIBINDER_WINDOWS
