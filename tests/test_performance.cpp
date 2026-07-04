@@ -276,8 +276,21 @@ static intptr_t startSM(uint16_t port) {
     snprintf(port_str, sizeof(port_str), "%u", port);
 
 #ifdef _WIN32
-    std::string cmd = std::string("target\\bin\\service_manager.exe --port ")
-                    + port_str + " --log-level 3";
+    const char* fallbacks[] = {
+        "target\\bin\\service_manager.exe",
+        "build\\target\\bin\\service_manager.exe",
+        "service_manager.exe",
+        NULL
+    };
+    std::string sm_path;
+    for (int i = 0; fallbacks[i]; ++i) {
+        if (GetFileAttributesA(fallbacks[i]) != INVALID_FILE_ATTRIBUTES) {
+            sm_path = fallbacks[i];
+            break;
+        }
+    }
+    if (sm_path.empty()) return -1;
+    std::string cmd = sm_path + " --port " + port_str + " --log-level 3";
     STARTUPINFOA si; PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
     memset(&pi, 0, sizeof(pi));
