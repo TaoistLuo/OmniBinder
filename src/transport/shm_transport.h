@@ -43,6 +43,7 @@
 #include <vector>
 #include <map>
 #include <functional>
+#include <atomic>
 
 namespace omnibinder {
 
@@ -66,8 +67,8 @@ namespace omnibinder {
 #pragma pack(push, 1)
 
 struct ShmRingHeader {
-    volatile uint32_t write_pos;
-    volatile uint32_t read_pos;
+    std::atomic<uint32_t> write_pos;
+    std::atomic<uint32_t> read_pos;
     uint32_t capacity;
     uint32_t reserved;
 };

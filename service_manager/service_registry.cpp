@@ -16,12 +16,17 @@ ServiceRegistry::~ServiceRegistry()
 
 ServiceHandle ServiceRegistry::generateHandle()
 {
-    // Handle 0 is INVALID_HANDLE, so we start from 1 and wrap around
-    ServiceHandle h = next_handle_++;
-    if (next_handle_ == INVALID_HANDLE) {
-        next_handle_ = 1;
+    // Handle 0 is INVALID_HANDLE. Skip it and any handle still in use so a
+    // wrap-around of the 32-bit counter cannot alias a live registration.
+    for (;;) {
+        ServiceHandle h = next_handle_++;
+        if (next_handle_ == INVALID_HANDLE) {
+            next_handle_ = 1;
+        }
+        if (h != INVALID_HANDLE && handle_to_name_.find(h) == handle_to_name_.end()) {
+            return h;
+        }
     }
-    return h;
 }
 
 ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_fd)

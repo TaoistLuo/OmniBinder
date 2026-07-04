@@ -16,7 +16,11 @@ RpcRuntime::RpcRuntime()
     , wait_deadline_ms_(0) {}
 
 uint32_t RpcRuntime::nextSequence() {
-    return ++sequence_counter_;
+    uint32_t seq = ++sequence_counter_;
+    if (seq == 0) {
+        seq = ++sequence_counter_;
+    }
+    return seq;
 }
 
 uint32_t RpcRuntime::effectiveTimeout(uint32_t timeout_ms) const {
@@ -50,7 +54,8 @@ bool RpcRuntime::isTimedOut() const {
 int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
                              SmControlChannel& channel,
                              const std::function<void(int)>& poll_once,
-                             Message& reply) {
+                             Message& reply,
+                             const std::function<bool()>& is_alive) {
     bool prev_in_wait = in_wait_for_reply_;
     int64_t prev_deadline = wait_deadline_ms_;
 
@@ -69,6 +74,13 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
 
         int64_t remaining = remainingWaitMs();
         poll_once(static_cast<int>(remaining));
+
+        if (channel.pendingReply(seq) == NULL && is_alive && !is_alive()) {
+            channel.eraseWait(seq);
+            in_wait_for_reply_ = prev_in_wait;
+            wait_deadline_ms_ = prev_deadline;
+            return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
+        }
     }
 
     if (!channel.takeReply(seq, reply)) {

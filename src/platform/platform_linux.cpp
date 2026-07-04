@@ -352,7 +352,7 @@ void* shmCreate(const std::string& name, size_t size, bool create) {
     }
 
     std::string shm_name = "/" + name;
-    int fd = shm_open(shm_name.c_str(), flags, 0666);
+    int fd = shm_open(shm_name.c_str(), flags, 0600);
     if (fd < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "shm_open failed for %s: %s",
                          shm_name.c_str(), strerror(errno));
@@ -410,7 +410,7 @@ void shmUnlink(const std::string& name) {
 
 SemHandle semCreate(const std::string& name, unsigned int initial_value) {
     std::string sem_name = "/" + name;
-    sem_t* sem = sem_open(sem_name.c_str(), O_CREAT, 0666, initial_value);
+    sem_t* sem = sem_open(sem_name.c_str(), O_CREAT, 0600, initial_value);
     if (sem == SEM_FAILED) {
         OMNI_LOG_ERROR(LOG_TAG, "sem_open create failed for %s: %s",
                          sem_name.c_str(), strerror(errno));

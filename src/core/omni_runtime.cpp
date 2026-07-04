@@ -588,13 +588,15 @@ uint32_t OmniRuntime::Impl::allocSequence() {
     return rpc_runtime_.nextSequence();
 }
 
-int OmniRuntime::Impl::waitForReply(uint32_t seq, uint32_t timeout_ms, Message& reply) {
+int OmniRuntime::Impl::waitForReply(uint32_t seq, uint32_t timeout_ms, Message& reply,
+                                    const std::function<bool()>& is_alive) {
     return rpc_runtime_.waitForReply(
         seq,
         timeout_ms,
         sm_channel_,
         [this](int wait_ms) { this->pollOnceWithoutFunctors(wait_ms); },
-        reply);
+        reply,
+        is_alive);
 }
 
 void OmniRuntime::Impl::storePendingReply(uint32_t seq, const Message& msg) {
@@ -1247,7 +1249,10 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
         : 0;
 
     Message reply;
-    int ret = waitForReply(seq, reply_timeout_ms, reply);
+    int ret = waitForReply(seq, reply_timeout_ms, reply,
+        [this, &service_name]() -> bool {
+            return conn_mgr_ && conn_mgr_->getConnection(service_name) != NULL;
+        });
     if (ret != 0) {
         if (ret == static_cast<int>(ErrorCode::ERR_TIMEOUT)) {
             stats_.total_rpc_timeouts++;

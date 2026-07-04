@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <string>
 #include <map>
 #include <vector>
@@ -80,12 +81,15 @@ public:
     ServiceManagerApp()
         : server_(nullptr)
         , heartbeat_timer_id_(0)
+        , shutdown_fd_(-1)
         , running_(false)
     {}
 
     ~ServiceManagerApp() {
         cleanup();
     }
+
+    int shutdownFd() const { return shutdown_fd_; }
 
     bool init(const std::string& host, uint16_t port) {
         // Initialize network
@@ -105,6 +109,16 @@ public:
         }
 
         OMNI_LOG_INFO(TAG, "Listening on %s:%d", host.c_str(), listen_port);
+
+        shutdown_fd_ = platform::createEventFd();
+        if (shutdown_fd_ >= 0) {
+            loop_.addFd(shutdown_fd_, EventLoop::EVENT_READ,
+                [this](int fd, uint32_t) {
+                    platform::eventFdConsume(fd);
+                    OMNI_LOG_INFO(TAG, "Shutdown requested, stopping...");
+                    this->stop();
+                });
+        }
 
         // Register server fd with event loop for accept events
         loop_.addFd(server_->fd(), EventLoop::EVENT_READ,
@@ -156,6 +170,12 @@ public:
             server_->close();
             delete server_;
             server_ = nullptr;
+        }
+
+        if (shutdown_fd_ >= 0) {
+            loop_.removeFd(shutdown_fd_);
+            platform::closeEventFd(shutdown_fd_);
+            shutdown_fd_ = -1;
         }
 
         platform::netCleanup();
@@ -877,18 +897,19 @@ private:
     TopicManager topic_manager_;
 
     uint32_t heartbeat_timer_id_;
+    int shutdown_fd_;
     volatile bool running_;
 };
 
 // ============================================================
-// Global app instance for signal handling
+// Global shutdown eventfd for signal handling
 // ============================================================
-static ServiceManagerApp* g_app = nullptr;
+static volatile sig_atomic_t g_shutdown_fd = -1;
 
-static void signalHandler(int sig) {
-    OMNI_LOG_INFO(TAG, "Received signal %d, shutting down...", sig);
-    if (g_app) {
-        g_app->stop();
+static void signalHandler(int) {
+    int fd = g_shutdown_fd;
+    if (fd >= 0) {
+        platform::eventFdNotify(fd);
     }
 }
 
@@ -939,20 +960,19 @@ int main(int argc, char* argv[]) {
 
     // Create and initialize the application
     omnibinder::ServiceManagerApp app;
-    omnibinder::g_app = &app;
-
-    // Set up signal handlers
-    omnibinder::platform::setupSignalHandlers(omnibinder::signalHandler);
 
     if (!app.init(host, port)) {
         OMNI_LOG_ERROR(TAG, "Failed to initialize ServiceManager");
         return 1;
     }
 
+    omnibinder::g_shutdown_fd = app.shutdownFd();
+    omnibinder::platform::setupSignalHandlers(omnibinder::signalHandler);
+
     // Run the event loop
     app.run();
 
-    omnibinder::g_app = nullptr;
+    omnibinder::g_shutdown_fd = -1;
     OMNI_LOG_INFO(TAG, "ServiceManager exited cleanly");
     return 0;
 }

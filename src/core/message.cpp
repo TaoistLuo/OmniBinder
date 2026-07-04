@@ -7,10 +7,10 @@ namespace omnibinder {
 // ============================================================
 // 序列号生成器（原子递增）
 // ============================================================
-static uint32_t s_sequence_counter = 0;
+static std::atomic<uint32_t> s_sequence_counter(0);
 
 uint32_t nextSequenceNumber() {
-    return ++s_sequence_counter;
+    return s_sequence_counter.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 // ============================================================

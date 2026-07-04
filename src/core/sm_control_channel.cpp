@@ -155,11 +155,8 @@ void SmControlChannel::eraseWait(uint32_t seq) {
 void SmControlChannel::storeReply(uint32_t seq, const Message& msg) {
     std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
     if (it == pending_replies_.end()) {
-        PendingReplySlot slot;
-        slot.message.header = msg.header;
-        slot.message.payload.assign(msg.payload.data(), msg.payload.size());
-        slot.ready = true;
-        pending_replies_.emplace(seq, std::move(slot));
+        // Drop replies nobody is waiting for; only beginWait() creates slots,
+        // so an unsolicited reply cannot grow the map without bound.
         return;
     }
     if (it->second.ready) {

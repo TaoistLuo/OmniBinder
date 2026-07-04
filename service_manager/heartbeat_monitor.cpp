@@ -69,10 +69,11 @@ std::vector<std::string> HeartbeatMonitor::checkTimeouts()
         HeartbeatEntry& entry = it->second;
         int64_t elapsed = now - entry.last_heartbeat_ms;
 
+        // Only a real heartbeat resets last_heartbeat_ms; missed_count is
+        // derived from elapsed time for deterministic detection at
+        // timeout_ms_ * max_missed_.
         if (elapsed >= static_cast<int64_t>(timeout_ms_)) {
-            // Heartbeat missed
-            entry.missed_count++;
-            entry.last_heartbeat_ms = now;  // Reset timer for next check
+            entry.missed_count = static_cast<uint32_t>(elapsed / static_cast<int64_t>(timeout_ms_));
 
             OMNI_LOG_DEBUG(TAG, "Service %s missed heartbeat (%u/%u)",
                             it->first.c_str(), entry.missed_count, max_missed_);

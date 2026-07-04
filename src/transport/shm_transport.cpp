@@ -143,15 +143,15 @@ bool ShmTransport::initClient()
 
     // Initialize request ring
     ShmRingHeader* req_ring = getRequestRing();
-    req_ring->write_pos = 0;
-    req_ring->read_pos = 0;
+    req_ring->write_pos.store(0, std::memory_order_relaxed);
+    req_ring->read_pos.store(0, std::memory_order_relaxed);
     req_ring->capacity = static_cast<uint32_t>(req_cap);
     req_ring->reserved = 0;
 
     // Initialize response ring
     ShmRingHeader* resp_ring = getResponseRing();
-    resp_ring->write_pos = 0;
-    resp_ring->read_pos = 0;
+    resp_ring->write_pos.store(0, std::memory_order_relaxed);
+    resp_ring->read_pos.store(0, std::memory_order_relaxed);
     resp_ring->capacity = static_cast<uint32_t>(resp_cap);
     resp_ring->reserved = 0;
 
@@ -301,8 +301,8 @@ size_t ShmTransport::responseBlockSize() const
 
 uint32_t ShmTransport::ringAvailableRead(const ShmRingHeader* ring) const
 {
-    uint32_t w = ring->write_pos;
-    uint32_t r = ring->read_pos;
+    uint32_t w = ring->write_pos.load(std::memory_order_acquire);
+    uint32_t r = ring->read_pos.load(std::memory_order_acquire);
     if (w >= r) {
         return w - r;
     }
@@ -324,7 +324,7 @@ uint32_t ShmTransport::ringWrite(ShmRingHeader* ring, uint8_t* ring_data,
         return 0;
     }
 
-    uint32_t w = ring->write_pos;
+    uint32_t w = ring->write_pos.load(std::memory_order_relaxed);
     uint32_t cap = ring->capacity;
 
     uint32_t first = std::min(to_write, cap - w);
@@ -334,8 +334,7 @@ uint32_t ShmTransport::ringWrite(ShmRingHeader* ring, uint8_t* ring_data,
         memcpy(ring_data, data + first, to_write - first);
     }
 
-    platform::memoryBarrier();
-    ring->write_pos = (w + to_write) % cap;
+    ring->write_pos.store((w + to_write) % cap, std::memory_order_release);
 
     return to_write;
 }
@@ -349,7 +348,7 @@ uint32_t ShmTransport::ringRead(ShmRingHeader* ring, const uint8_t* ring_data,
         return 0;
     }
 
-    uint32_t r = ring->read_pos;
+    uint32_t r = ring->read_pos.load(std::memory_order_relaxed);
     uint32_t cap = ring->capacity;
 
     uint32_t first = std::min(to_read, cap - r);
@@ -359,8 +358,7 @@ uint32_t ShmTransport::ringRead(ShmRingHeader* ring, const uint8_t* ring_data,
         memcpy(buf + first, ring_data, to_read - first);
     }
 
-    platform::memoryBarrier();
-    ring->read_pos = (r + to_read) % cap;
+    ring->read_pos.store((r + to_read) % cap, std::memory_order_release);
 
     return to_read;
 }
@@ -549,7 +547,7 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
         }
 
         // Peek at length prefix
-        uint32_t r = resp_ring->read_pos;
+        uint32_t r = resp_ring->read_pos.load(std::memory_order_relaxed);
         uint32_t cap = resp_ring->capacity;
         uint32_t msg_len = 0;
         uint8_t* len_bytes = reinterpret_cast<uint8_t*>(&msg_len);
@@ -558,8 +556,7 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
         }
 
         if (msg_len == 0) {
-            platform::memoryBarrier();
-            resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
+            resp_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
             goto consume_eventfd;
         }
 
@@ -575,8 +572,7 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
         }
 
         // Consume length prefix
-        resp_ring->read_pos = (r + sizeof(uint32_t)) % cap;
-        platform::memoryBarrier();
+        resp_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
 
         uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len);
         if (read_bytes != msg_len) {
@@ -661,7 +657,7 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
         }
 
         // Peek at length prefix
-        uint32_t r = req_ring->read_pos;
+        uint32_t r = req_ring->read_pos.load(std::memory_order_relaxed);
         uint32_t cap = req_ring->capacity;
 
         uint32_t msg_len = 0;
@@ -676,8 +672,7 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
             OMNI_LOG_ERROR(LOG_TAG, "serverRecv() invalid msg_len=%u cap=%u from client[%u], skipping",
                              msg_len, req_ring->capacity, cid);
             // Advance read_pos past the corrupted length prefix to avoid infinite loop
-            req_ring->read_pos = (r + sizeof(uint32_t)) % cap;
-            platform::memoryBarrier();
+            req_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
             continue;
         }
 
@@ -693,8 +688,7 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
         }
 
         // Consume length prefix
-        req_ring->read_pos = (r + sizeof(uint32_t)) % cap;
-        platform::memoryBarrier();
+        req_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
 
         out_client_id = cid;
 
@@ -709,8 +703,7 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
             // Roll back the length-prefix consumption so the message can be
             // retried on the next poll cycle rather than leaving the ring in
             // an inconsistent state.
-            req_ring->read_pos = r;
-            platform::memoryBarrier();
+            req_ring->read_pos.store(r, std::memory_order_release);
             continue;
         }
 

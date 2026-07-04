@@ -21,7 +21,8 @@ public:
     int waitForReply(uint32_t seq, uint32_t timeout_ms,
                      SmControlChannel& channel,
                      const std::function<void(int)>& poll_once,
-                     Message& reply);
+                     Message& reply,
+                     const std::function<bool()>& is_alive = std::function<bool()>());
 
 private:
     uint32_t default_timeout_ms_;

@@ -236,7 +236,8 @@ private:
 
     // --- 同步等待 ---
     uint32_t allocSequence();
-    int waitForReply(uint32_t seq, uint32_t timeout_ms, Message& reply);
+    int waitForReply(uint32_t seq, uint32_t timeout_ms, Message& reply,
+                     const std::function<bool()>& is_alive = std::function<bool()>());
     void storePendingReply(uint32_t seq, const Message& msg);
 
     // --- 本地服务 accept ---
