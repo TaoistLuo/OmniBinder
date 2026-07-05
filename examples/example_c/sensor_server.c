@@ -16,7 +16,7 @@ static void signal_handler(int sig) {
 
 static char* dup_cstr(const char* s, uint32_t* len_out) {
     size_t len = strlen(s);
-    char* out = (char*)malloc(len + 1);
+    char* out = (char*)omni_malloc(len + 1);
     if (!out) return NULL;
     memcpy(out, s, len + 1);
     if (len_out) *len_out = (uint32_t)len;
@@ -45,7 +45,7 @@ static void fill_config(demo_SensorConfig* cfg, uint8_t enabled, int32_t rate, c
 static void fill_sensor_data_array(demo_demo_SensorData_array* arr) {
     demo_demo_SensorData_array_init(arr);
     arr->count = 1;
-    arr->data = (struct demo_SensorData*)malloc(sizeof(struct demo_SensorData));
+    arr->data = (struct demo_SensorData*)omni_malloc(sizeof(struct demo_SensorData));
     demo_SensorData_init(&arr->data[0]);
     fill_sensor_data(&arr->data[0], 77, "bundle");
 }
@@ -54,24 +54,24 @@ static void fill_bundle(demo_SensorArrayBundle* bundle) {
     demo_SensorArrayBundle_init(bundle);
 
     bundle->ids.count = 2;
-    bundle->ids.data = (int32_t*)malloc(sizeof(int32_t) * 2);
+    bundle->ids.data = (int32_t*)omni_malloc(sizeof(int32_t) * 2);
     bundle->ids.data[0] = 1;
     bundle->ids.data[1] = 2;
 
     bundle->labels.count = 2;
-    bundle->labels.data = (char**)malloc(sizeof(char*) * 2);
-    bundle->labels.lens = (uint32_t*)malloc(sizeof(uint32_t) * 2);
+    bundle->labels.data = (char**)omni_malloc(sizeof(char*) * 2);
+    bundle->labels.lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * 2);
     bundle->labels.data[0] = dup_cstr("alpha", &bundle->labels.lens[0]);
     bundle->labels.data[1] = dup_cstr("beta", &bundle->labels.lens[1]);
 
     bundle->blobs.count = 2;
-    bundle->blobs.data = (uint8_t**)malloc(sizeof(uint8_t*) * 2);
-    bundle->blobs.lens = (uint32_t*)malloc(sizeof(uint32_t) * 2);
+    bundle->blobs.data = (uint8_t**)omni_malloc(sizeof(uint8_t*) * 2);
+    bundle->blobs.lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * 2);
     bundle->blobs.lens[0] = 3;
-    bundle->blobs.data[0] = (uint8_t*)malloc(3);
+    bundle->blobs.data[0] = (uint8_t*)omni_malloc(3);
     memset(bundle->blobs.data[0], 0xAA, 3);
     bundle->blobs.lens[1] = 2;
-    bundle->blobs.data[1] = (uint8_t*)malloc(2);
+    bundle->blobs.data[1] = (uint8_t*)omni_malloc(2);
     memset(bundle->blobs.data[1], 0xBB, 2);
 
     fill_sensor_data_array(&bundle->samples);
@@ -97,7 +97,7 @@ void demo_SensorService_impl_echo_string(const char* value, uint32_t value_len, 
     (void)user_data;
     const char* suffix = "_echo";
     uint32_t suffix_len = 5;
-    *result = (char*)malloc(value_len + suffix_len + 1);
+    *result = (char*)omni_malloc(value_len + suffix_len + 1);
     memcpy(*result, value, value_len);
     memcpy(*result + value_len, suffix, suffix_len + 1);
     *result_len = value_len + suffix_len;
@@ -105,7 +105,7 @@ void demo_SensorService_impl_echo_string(const char* value, uint32_t value_len, 
 
 void demo_SensorService_impl_echo_bytes(const uint8_t* value, uint32_t value_len, uint8_t** result, uint32_t* result_len, void* user_data) {
     (void)user_data;
-    *result = (uint8_t*)malloc(value_len + 1);
+    *result = (uint8_t*)omni_malloc(value_len + 1);
     memcpy(*result, value, value_len);
     (*result)[value_len] = (uint8_t)(value_len & 0xFF);
     *result_len = value_len + 1;
@@ -136,7 +136,7 @@ void demo_SensorService_impl_echo_id_array(const demo_int32_t_array* value, demo
     (void)user_data;
     demo_int32_t_array_init(result);
     result->count = value->count + 1;
-    result->data = (int32_t*)malloc(sizeof(int32_t) * result->count);
+    result->data = (int32_t*)omni_malloc(sizeof(int32_t) * result->count);
     memcpy(result->data, value->data, sizeof(int32_t) * value->count);
     result->data[value->count] = (int32_t)value->count;
 }
@@ -146,8 +146,8 @@ void demo_SensorService_impl_echo_label_array(const demo_string_array* value, de
     (void)user_data;
     demo_string_array_init(result);
     result->count = value->count + 1;
-    result->data = (char**)malloc(sizeof(char*) * result->count);
-    result->lens = (uint32_t*)malloc(sizeof(uint32_t) * result->count);
+    result->data = (char**)omni_malloc(sizeof(char*) * result->count);
+    result->lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * result->count);
     for (i = 0; i < value->count; ++i) {
         result->data[i] = dup_cstr(value->data[i], &result->lens[i]);
     }
@@ -159,7 +159,7 @@ void demo_SensorService_impl_echo_sensor_array(const demo_demo_SensorData_array*
     (void)user_data;
     demo_demo_SensorData_array_init(result);
     result->count = value->count;
-    result->data = (struct demo_SensorData*)malloc(sizeof(struct demo_SensorData) * result->count);
+    result->data = (struct demo_SensorData*)omni_malloc(sizeof(struct demo_SensorData) * result->count);
     for (i = 0; i < result->count; ++i) {
         demo_SensorData_init(&result->data[i]);
         fill_sensor_data(&result->data[i], value->data[i].sensor_id, "echo_location");

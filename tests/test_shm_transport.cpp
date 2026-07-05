@@ -47,10 +47,12 @@ protected:
 };
 
 TEST_F(ShmTransportTest, CalculateShmSize) {
-    EXPECT_EQ(calculateShmSize(1024, 512),
+    EXPECT_GE(calculateShmSize(1024, 512),
               sizeof(ShmControlBlock)
               + sizeof(ShmRingHeader) + 1024
               + sizeof(ShmRingHeader) + 512);
+    EXPECT_EQ(sizeof(ShmControlBlock) % alignof(ShmRingHeader), 0u);
+    EXPECT_EQ(sizeof(ShmRingHeader) % alignof(ShmRingHeader), 0u);
 }
 
 TEST_F(ShmTransportTest, GenerateShmName) {

@@ -13,7 +13,7 @@ static void signal_handler(int sig) {
 
 static char* dup_cstr(const char* s, uint32_t* len_out) {
     size_t len = strlen(s);
-    char* out = (char*)malloc(len + 1);
+    char* out = (char*)omni_malloc(len + 1);
     if (!out) return NULL;
     memcpy(out, s, len + 1);
     if (len_out) *len_out = (uint32_t)len;
@@ -47,25 +47,25 @@ static void fill_envelope(demo_SensorEnvelope* env) {
 static void fill_bundle(demo_SensorArrayBundle* bundle) {
     demo_SensorArrayBundle_init(bundle);
     bundle->ids.count = 2;
-    bundle->ids.data = (int32_t*)malloc(sizeof(int32_t) * 2);
+    bundle->ids.data = (int32_t*)omni_malloc(sizeof(int32_t) * 2);
     bundle->ids.data[0] = 1;
     bundle->ids.data[1] = 2;
 
     bundle->labels.count = 2;
-    bundle->labels.data = (char**)malloc(sizeof(char*) * 2);
-    bundle->labels.lens = (uint32_t*)malloc(sizeof(uint32_t) * 2);
+    bundle->labels.data = (char**)omni_malloc(sizeof(char*) * 2);
+    bundle->labels.lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * 2);
     bundle->labels.data[0] = dup_cstr("alpha", &bundle->labels.lens[0]);
     bundle->labels.data[1] = dup_cstr("beta", &bundle->labels.lens[1]);
 
     bundle->blobs.count = 1;
-    bundle->blobs.data = (uint8_t**)malloc(sizeof(uint8_t*));
-    bundle->blobs.lens = (uint32_t*)malloc(sizeof(uint32_t));
+    bundle->blobs.data = (uint8_t**)omni_malloc(sizeof(uint8_t*));
+    bundle->blobs.lens = (uint32_t*)omni_malloc(sizeof(uint32_t));
     bundle->blobs.lens[0] = 3;
-    bundle->blobs.data[0] = (uint8_t*)malloc(3);
+    bundle->blobs.data[0] = (uint8_t*)omni_malloc(3);
     memset(bundle->blobs.data[0], 0xAA, 3);
 
     bundle->samples.count = 1;
-    bundle->samples.data = (struct demo_SensorData*)malloc(sizeof(struct demo_SensorData));
+    bundle->samples.data = (struct demo_SensorData*)omni_malloc(sizeof(struct demo_SensorData));
     demo_SensorData_init(&bundle->samples.data[0]);
     bundle->samples.data[0].sensor_id = 77;
     bundle->samples.data[0].temperature = 20.5;
@@ -172,7 +172,7 @@ int main(int argc, char* argv[]) {
     /* 调用字符串回显 RPC，演示 char* + length 形式的字符串传输。 */
     demo_SensorService_proxy_echo_string(&proxy, "hello", 5, &out_str, &out_str_len);
     printf("EchoString => %.*s\n", out_str_len, out_str);
-    free(out_str);
+    omni_free(out_str);
 
     uint8_t in_bytes[3] = {0x11, 0x11, 0x11};
     uint8_t* out_bytes = NULL;
@@ -180,7 +180,7 @@ int main(int argc, char* argv[]) {
     /* 调用字节数组回显 RPC，演示 bytes 的传输。 */
     demo_SensorService_proxy_echo_bytes(&proxy, in_bytes, 3, &out_bytes, &out_bytes_len);
     printf("EchoBytes => size=%u\n\n", out_bytes_len);
-    free(out_bytes);
+    omni_free(out_bytes);
 
     printf("--- Custom / Nested Struct RPCs ---\n");
     common_StatusResponse status_in;
@@ -220,7 +220,7 @@ int main(int argc, char* argv[]) {
     demo_int32_t_array_init(&ids_in);
     demo_int32_t_array_init(&ids_out);
     ids_in.count = 2;
-    ids_in.data = (int32_t*)malloc(sizeof(int32_t) * 2);
+    ids_in.data = (int32_t*)omni_malloc(sizeof(int32_t) * 2);
     ids_in.data[0] = 10;
     ids_in.data[1] = 20;
     /* 调用整数数组回显 RPC，演示 array<int32> 的传输。 */
@@ -232,8 +232,8 @@ int main(int argc, char* argv[]) {
     demo_string_array_init(&labels_in);
     demo_string_array_init(&labels_out);
     labels_in.count = 2;
-    labels_in.data = (char**)malloc(sizeof(char*) * 2);
-    labels_in.lens = (uint32_t*)malloc(sizeof(uint32_t) * 2);
+    labels_in.data = (char**)omni_malloc(sizeof(char*) * 2);
+    labels_in.lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * 2);
     labels_in.data[0] = dup_cstr("l1", &labels_in.lens[0]);
     labels_in.data[1] = dup_cstr("l2", &labels_in.lens[1]);
     /* 调用字符串数组回显 RPC，演示 array<string> 的传输。 */
@@ -248,7 +248,7 @@ int main(int argc, char* argv[]) {
     demo_demo_SensorData_array_init(&sensor_arr_in);
     demo_demo_SensorData_array_init(&sensor_arr_out);
     sensor_arr_in.count = 1;
-    sensor_arr_in.data = (struct demo_SensorData*)malloc(sizeof(struct demo_SensorData));
+    sensor_arr_in.data = (struct demo_SensorData*)omni_malloc(sizeof(struct demo_SensorData));
     demo_SensorData_init(&sensor_arr_in.data[0]);
     sensor_arr_in.data[0].sensor_id = 88;
     sensor_arr_in.data[0].temperature = 21.5;

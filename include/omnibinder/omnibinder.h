@@ -81,6 +81,12 @@ extern "C" void omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
 
 extern "C" void* omni_malloc(size_t size);
 extern "C" void  omni_free(void* ptr);
+/// 安全 realloc 变体。使用自定义 allocator 时，调用方必须提供旧分配大小，
+/// 这样实现才能只复制 min(old_size, new_size) 字节，避免越界读取旧块。
+extern "C" void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size);
+/// 兼容系统 realloc 的包装。未注册自定义 allocator 时直接走 std::realloc；
+/// 注册自定义 allocator 后，无法得知旧块大小，因此仅支持 ptr == NULL 或
+/// new_size == 0。需要扩容并保留内容时请使用 omni_realloc_sized()。
 extern "C" void* omni_realloc(void* ptr, size_t new_size);
 
 #endif // OMNIBINDER_H

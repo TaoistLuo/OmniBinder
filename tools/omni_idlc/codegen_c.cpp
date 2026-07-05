@@ -1429,9 +1429,15 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& ast, 
         os << "    " << prefix << "_" << toSnakeCase(topic) << "_sub_ctx* ctx =\n";
         os << "        (" << prefix << "_" << toSnakeCase(topic) << "_sub_ctx*)omni_malloc(\n";
         os << "            sizeof(" << prefix << "_" << toSnakeCase(topic) << "_sub_ctx));\n";
+        os << "    if (!ctx) return;\n";
         os << "    ctx->callback = callback;\n";
         os << "    ctx->user_data = user_data;\n";
-        os << "    if (p->_sub_ctx_count < 8) p->_sub_ctxs[p->_sub_ctx_count++] = ctx;\n";
+        os << "    if (p->_sub_ctx_count < 8) {\n";
+        os << "        p->_sub_ctxs[p->_sub_ctx_count++] = ctx;\n";
+        os << "    } else {\n";
+        os << "        omni_free(ctx);\n";
+        os << "        return;\n";
+        os << "    }\n";
         os << "    omni_runtime_subscribe_topic(p->runtime, \"" << topic << "\",\n";
         os << "        " << prefix << "_" << toSnakeCase(topic) << "_topic_cb, ctx);\n";
         os << "}\n\n";

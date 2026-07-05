@@ -47,6 +47,9 @@ typedef struct omni_runtime_t  omni_runtime_t;
 typedef struct omni_buffer_t  omni_buffer_t;
 typedef struct omni_service_t omni_service_t;
 
+typedef void* (*OmniMallocFn)(size_t size);
+typedef void  (*OmniFreeFn)(void* ptr);
+
 typedef struct omni_runtime_stats_t {
     uint64_t total_rpc_calls;
     uint64_t total_rpc_success;
@@ -119,13 +122,13 @@ float    omni_buffer_read_float32(omni_buffer_t* buf);
 double   omni_buffer_read_float64(omni_buffer_t* buf);
 
 /**
- * 读取字符串。返回的指针指向内部静态缓冲区或堆分配内存，
- * 调用者需要用 free() 释放。out_len 可为 NULL。
+ * 读取字符串。返回的指针为堆分配内存，调用者需要用 omni_free() 释放。
+ * out_len 可为 NULL。
  */
 char*    omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len);
 
 /**
- * 读取字节数组。返回堆分配的内存，调用者需要用 free() 释放。
+ * 读取字节数组。返回堆分配的内存，调用者需要用 omni_free() 释放。
  * out_len 不可为 NULL。
  */
 uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len);
@@ -236,8 +239,10 @@ int  omni_runtime_reset_stats(omni_runtime_t* client);
 uint32_t omni_fnv1a_32(const char* str);
 
 /* 自定义内存分配器包装（走 omniSetAllocator 注册的分配器，否则回退系统 malloc/free） */
+void  omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
 void* omni_malloc(size_t size);
 void  omni_free(void* ptr);
+void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size);
 void* omni_realloc(void* ptr, size_t new_size);
 
 #ifdef __cplusplus

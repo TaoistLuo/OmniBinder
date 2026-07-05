@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
 #include <omnibinder/omnibinder_c.h>
+#include <cstdlib>
 #include <thread>
 #include <chrono>
 
@@ -11,6 +12,14 @@ static const uint32_t IFACE_ID = 0x11223344u;
 static const uint32_t METHOD_ECHO = 0x55667788u;
 static const uint32_t METHOD_GET_NAME = 0x55667789u;
 static const uint32_t METHOD_ECHO_BYTES = 0x5566778au;
+
+static void* cApiTestMalloc(size_t size) {
+    return std::malloc(size);
+}
+
+static void cApiTestFree(void* ptr) {
+    std::free(ptr);
+}
 
 static int cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
                           omni_buffer_t* response, void* user_data) {
@@ -155,6 +164,30 @@ TEST_F(CApiTest, BufferUnderflowReadsFailSafe) {
     EXPECT_EQ(omni_buffer_error(marked), 0);
     EXPECT_EQ(omni_buffer_read_ok(marked), 1);
     omni_buffer_destroy(marked);
+}
+
+TEST_F(CApiTest, CustomAllocatorReallocIsSafe) {
+    omniSetAllocator(cApiTestMalloc, cApiTestFree);
+
+    char* data = static_cast<char*>(omni_malloc(4));
+    ASSERT_NE(data, nullptr);
+    data[0] = 'o';
+    data[1] = 'm';
+    data[2] = 'n';
+    data[3] = 'i';
+
+    char* grown = static_cast<char*>(omni_realloc_sized(data, 4, 8));
+    ASSERT_NE(grown, nullptr);
+    EXPECT_EQ(grown[0], 'o');
+    EXPECT_EQ(grown[1], 'm');
+    EXPECT_EQ(grown[2], 'n');
+    EXPECT_EQ(grown[3], 'i');
+    omni_free(grown);
+
+    char* unsafe = static_cast<char*>(omni_malloc(4));
+    ASSERT_NE(unsafe, nullptr);
+    EXPECT_EQ(omni_realloc(unsafe, 8), nullptr);
+    omni_free(unsafe);
 }
 
 TEST_F(CApiTest, RegisterInvokeAndStats) {

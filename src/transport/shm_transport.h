@@ -64,14 +64,14 @@ namespace omnibinder {
 //   客户端 send() 时 notify master_eventfd → 唤醒服务端 epoll
 //   服务端 serverSend() 时 notify resp_eventfd → 唤醒客户端 epoll
 
-#pragma pack(push, 1)
-
 struct ShmRingHeader {
     std::atomic<uint32_t> write_pos;
     std::atomic<uint32_t> read_pos;
     uint32_t capacity;
     uint32_t reserved;
 };
+
+#pragma pack(push, 1)
 
 struct ShmControlBlock {
     uint32_t magic;                  // SHM_MAGIC

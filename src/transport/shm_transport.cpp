@@ -11,6 +11,35 @@
 
 namespace omnibinder {
 
+namespace {
+
+size_t alignUp(size_t value, size_t alignment)
+{
+    return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
+}
+
+size_t requestRingOffset()
+{
+    return alignUp(sizeof(ShmControlBlock), alignof(ShmRingHeader));
+}
+
+size_t requestDataOffset()
+{
+    return requestRingOffset() + sizeof(ShmRingHeader);
+}
+
+size_t responseRingOffset(size_t req_ring_capacity)
+{
+    return alignUp(requestDataOffset() + req_ring_capacity, alignof(ShmRingHeader));
+}
+
+size_t responseDataOffset(size_t req_ring_capacity)
+{
+    return responseRingOffset(req_ring_capacity) + sizeof(ShmRingHeader);
+}
+
+} // namespace
+
 // ============================================================
 // Utility functions
 // ============================================================
@@ -19,9 +48,7 @@ size_t calculateShmSize(size_t req_ring_capacity, size_t resp_ring_capacity,
                         uint32_t max_clients)
 {
     (void)max_clients;  // deprecated, kept for backward compat
-    return sizeof(ShmControlBlock)
-         + sizeof(ShmRingHeader) + req_ring_capacity
-         + sizeof(ShmRingHeader) + resp_ring_capacity;
+    return responseDataOffset(req_ring_capacity) + resp_ring_capacity;
 }
 
 std::string generateShmName(const std::string& service_name)
@@ -130,9 +157,7 @@ bool ShmTransport::initClient()
     }
 
     // Zero-init control block + both ring headers
-    memset(shm_addr_, 0, sizeof(ShmControlBlock)
-                         + sizeof(ShmRingHeader) + req_cap
-                         + sizeof(ShmRingHeader) + resp_cap);
+    memset(shm_addr_, 0, shm_size_);
 
     // Set up control block
     ctrl_ = reinterpret_cast<ShmControlBlock*>(shm_addr_);
@@ -216,24 +241,23 @@ bool ShmTransport::initClient()
 
 ShmRingHeader* ShmTransport::getRequestRingFromBase(uint8_t* base)
 {
-    return reinterpret_cast<ShmRingHeader*>(base + sizeof(ShmControlBlock));
+    return reinterpret_cast<ShmRingHeader*>(base + requestRingOffset());
 }
 
 uint8_t* ShmTransport::getRequestDataFromBase(uint8_t* base)
 {
-    return base + sizeof(ShmControlBlock) + sizeof(ShmRingHeader);
+    return base + requestDataOffset();
 }
 
 ShmRingHeader* ShmTransport::getResponseRingFromBase(uint8_t* base, ShmControlBlock* ctrl)
 {
     return reinterpret_cast<ShmRingHeader*>(
-        base + sizeof(ShmControlBlock) + sizeof(ShmRingHeader) + ctrl->req_ring_capacity);
+        base + responseRingOffset(ctrl->req_ring_capacity));
 }
 
 uint8_t* ShmTransport::getResponseDataFromBase(uint8_t* base, ShmControlBlock* ctrl)
 {
-    return base + sizeof(ShmControlBlock) + sizeof(ShmRingHeader)
-               + ctrl->req_ring_capacity + sizeof(ShmRingHeader);
+    return base + responseDataOffset(ctrl->req_ring_capacity);
 }
 
 ShmRingHeader* ShmTransport::getRequestRing() const

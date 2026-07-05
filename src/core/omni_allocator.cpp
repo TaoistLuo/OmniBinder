@@ -24,6 +24,7 @@
 
 #include "omnibinder/omnibinder.h"
 #include <cstdlib>
+#include <cstring>
 #include <new>
 #include <atomic>
 
@@ -71,16 +72,35 @@ extern "C" void omni_free(void* ptr) {
     std::free(ptr);
 }
 
+extern "C" void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size) {
+    if (new_size == 0) {
+        omni_free(ptr);
+        return nullptr;
+    }
+    if (!ptr) {
+        return omni_malloc(new_size);
+    }
+    if (!omnibinder::g_malloc_fn) {
+        return std::realloc(ptr, new_size);
+    }
+
+    void* new_ptr = omnibinder::g_malloc_fn(new_size);
+    if (!new_ptr) return nullptr;
+    std::memcpy(new_ptr, ptr, old_size < new_size ? old_size : new_size);
+    omnibinder::g_free_fn(ptr);
+    return new_ptr;
+}
+
 extern "C" void* omni_realloc(void* ptr, size_t new_size) {
+    if (new_size == 0) {
+        omni_free(ptr);
+        return nullptr;
+    }
+    if (!ptr) {
+        return omni_malloc(new_size);
+    }
     if (omnibinder::g_malloc_fn) {
-        void* new_ptr = omnibinder::g_malloc_fn(new_size);
-        if (!new_ptr) return nullptr;
-        if (ptr) {
-            // caller must ensure new_size >= old_size (no old-size tracking)
-            std::memcpy(new_ptr, ptr, new_size);
-            omnibinder::g_free_fn(ptr);
-        }
-        return new_ptr;
+        return nullptr;
     }
     return std::realloc(ptr, new_size);
 }
