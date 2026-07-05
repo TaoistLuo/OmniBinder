@@ -208,9 +208,31 @@ endif()
 
 add_executable(test_performance test_performance.cpp)
 target_link_libraries(test_performance PRIVATE omnibinder_static)
+target_include_directories(test_performance PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
 add_dependencies(test_performance service_manager)
+
+add_executable(test_performance_server
+    test_performance_server.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/perf_idl/perf_service.bidl.cpp
+)
+target_link_libraries(test_performance_server PRIVATE omnibinder_static)
+target_include_directories(test_performance_server PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
+add_dependencies(test_performance_server service_manager test_performance)
+
+if(TARGET omni-idlc)
+    omnic_generate(TARGET test_performance LANGUAGE cpp
+        FILES ${CMAKE_CURRENT_SOURCE_DIR}/perf_service.bidl
+        OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
+else()
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/perf_idl/perf_service.bidl.h
+        COMMAND ${CMAKE_BINARY_DIR}/target/bin/omni-idlc
+            ${CMAKE_CURRENT_SOURCE_DIR}/perf_service.bidl
+            --lang cpp --outdir ${CMAKE_CURRENT_BINARY_DIR}/perf_idl
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/perf_service.bidl omni-idlc)
+endif()
 add_test(NAME test_performance COMMAND test_performance
-    --report ${CMAKE_SOURCE_DIR}/docs/performance-report.md
+    -o ${CMAKE_SOURCE_DIR}/docs/performance-report.md
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(test_performance PROPERTIES TIMEOUT 120)

@@ -1,0 +1,28 @@
+package perf;
+
+struct AddParams {
+    int32 a;
+    int32 b;
+}
+
+struct PerfData {
+    int32   id;
+    float64 value;
+    string  tag;
+    bytes   blob;
+}
+
+topic PerfTopic {
+    int32  seq;
+    int64  send_time_us;
+    bytes  payload;
+}
+
+service PerfService {
+    bytes    EchoBytes(bytes data);
+    int32    EchoInt32(int32 value);
+    PerfData EchoStruct(PerfData data);
+    int32    Add(AddParams params);
+
+    publishes PerfTopic;
+}
