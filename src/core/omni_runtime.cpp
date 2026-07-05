@@ -1480,13 +1480,14 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
 
     // Broadcast via SHM to all SHM-connected subscribers
     {
-        std::vector<std::string>* shm_services = topic_runtime_.shmSubscriberServices(topic_id);
-        if (shm_services) {
-            for (size_t i = 0; i < shm_services->size(); ++i) {
-                const std::string& svc_name = (*shm_services)[i];
+        std::vector<TopicRuntime::ShmSubscriber>* shm_subscribers = topic_runtime_.shmSubscribers(topic_id);
+        if (shm_subscribers) {
+            for (size_t i = 0; i < shm_subscribers->size(); ++i) {
+                const std::string& svc_name = (*shm_subscribers)[i].service_name;
                 std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(svc_name);
                 if (eit != local_services_.end() && eit->second->shm_transport) {
-                    eit->second->shm_transport->serverBroadcast(send_buf.data(), send_buf.size());
+                    eit->second->shm_transport->serverSend((*shm_subscribers)[i].client_id,
+                                                           send_buf.data(), send_buf.size());
                 }
             }
         }
@@ -2031,7 +2032,7 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                     broadcastInternal(eit->second->diag_topic_id, diag_buf);
                 }
             }
-            topic_runtime_.addShmSubscriberService(topic_id, svc);
+            topic_runtime_.addShmSubscriberService(topic_id, svc, cid);
             OMNI_LOG_INFO(LOG_TAG, "SHM broadcast subscriber for topic %s (0x%08x) on %s",
                             topic_name.c_str(), topic_id, svc.c_str());
         });

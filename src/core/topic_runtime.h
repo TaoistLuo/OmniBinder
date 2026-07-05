@@ -11,6 +11,11 @@ namespace omnibinder {
 
 class TopicRuntime {
 public:
+    struct ShmSubscriber {
+        std::string service_name;
+        uint32_t client_id;
+    };
+
     void rememberSubscription(const std::string& topic_name, const TopicCallback& callback);
     void forgetSubscription(const std::string& topic_name);
     void setErrorCallback(const std::string& topic_name, const TopicErrorCallback& cb);
@@ -22,9 +27,10 @@ public:
     void forgetPublishedTopicsByOwner(const std::string& owner_service);
     void addTcpSubscriber(uint32_t topic_id, int client_fd);
     void removeTcpSubscriberFd(int client_fd);
-    void addShmSubscriberService(uint32_t topic_id, const std::string& service_name);
+    void addShmSubscriberService(uint32_t topic_id, const std::string& service_name,
+                                 uint32_t client_id);
     std::vector<int>* tcpSubscribers(uint32_t topic_id);
-    std::vector<std::string>* shmSubscriberServices(uint32_t topic_id);
+    std::vector<ShmSubscriber>* shmSubscribers(uint32_t topic_id);
     bool dispatch(uint32_t topic_id, const Buffer& data) const;
     std::map<std::string, TopicCallback> subscriptions() const;
     std::map<std::string, std::string> publishedTopicOwners() const;
@@ -36,7 +42,7 @@ private:
     std::map<std::string, uint32_t> topic_name_to_id_;
     std::map<uint32_t, std::vector<TopicCallback> > callbacks_by_id_;
     std::map<uint32_t, std::vector<int> > tcp_subscribers_;
-    std::map<uint32_t, std::vector<std::string> > shm_subscriber_services_;
+    std::map<uint32_t, std::vector<ShmSubscriber> > shm_subscribers_;
     std::map<std::string, std::string> published_topic_owners_;
     std::map<uint32_t, TopicErrorCallback> error_callbacks_;
 };
