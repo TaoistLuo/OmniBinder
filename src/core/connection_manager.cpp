@@ -335,6 +335,10 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                     if (disconnect_cb_) {
                         disconnect_cb_(service_name);
                     }
+                    std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
+                    if (current == connections_.end() || current->second != conn) {
+                        return;
+                    }
                 }
                 break;
             }
@@ -347,6 +351,10 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                 loop_.removeFd(conn->transport->fd());
                 if (disconnect_cb_) {
                     disconnect_cb_(service_name);
+                }
+                std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
+                if (current == connections_.end() || current->second != conn) {
+                    return;
                 }
                 break;
             }
@@ -371,6 +379,10 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         if (disconnect_cb_) {
             disconnect_cb_(service_name);
         }
+        std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
+        if (current == connections_.end() || current->second != conn) {
+            return;
+        }
         return;
     }
 
@@ -389,6 +401,10 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         if (disconnect_cb_) {
             disconnect_cb_(service_name);
         }
+        std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
+        if (current == connections_.end() || current->second != conn) {
+            return;
+        }
         return;
     }
     conn->recv_buffer.writeRaw(buf, static_cast<size_t>(ret));
@@ -398,6 +414,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
 }
 
 void ConnectionManager::processMessages(ServiceConnection* conn) {
+    const std::string service_name = conn->service_name;
     while (true) {
         // 检查是否有完整的消息头
         if (conn->recv_buffer.size() - conn->recv_buffer.readPosition() < MESSAGE_HEADER_SIZE) {
@@ -446,6 +463,10 @@ void ConnectionManager::processMessages(ServiceConnection* conn) {
         // 回调处理消息
         if (message_cb_) {
             message_cb_(conn->service_name, msg);
+            std::map<std::string, ServiceConnection*>::iterator it = connections_.find(service_name);
+            if (it == connections_.end() || it->second != conn) {
+                return;
+            }
         }
     }
 

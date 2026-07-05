@@ -37,6 +37,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "omnibinder/log.h"
 #include <string>
 #include <vector>
 #include <functional>
@@ -61,6 +62,7 @@ const size_t   DEFAULT_BUFFER_SIZE          = 4096;
 const size_t   MAX_SERVICE_NAME_LENGTH      = 256;
 const size_t   MAX_TOPIC_NAME_LENGTH        = 256;
 const size_t   MAX_MESSAGE_SIZE             = 16 * 1024 * 1024;  // 16MB
+const uint32_t RUNTIME_DIAG_CAP_WATCH       = 1u;
 
 // ============================================================
 // 方法信息
@@ -117,6 +119,21 @@ struct ServiceInfo {
     std::vector<InterfaceInfo> interfaces;
 
     ServiceInfo() : port(0) {}
+};
+
+struct RuntimeInfo {
+    uint32_t pid;
+    std::string process_name;
+    std::string role;
+    uint32_t log_level;
+    uint32_t diag_capabilities;
+    std::vector<std::string> services;
+
+    RuntimeInfo()
+        : pid(0)
+        , role("client")
+        , log_level(OMNI_LOG_INFO)
+        , diag_capabilities(0) {}
 };
 
 struct RuntimeStats {

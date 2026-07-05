@@ -58,6 +58,7 @@ class Service;
 typedef std::function<void(const std::string& service_name)> DeathCallback;
 typedef std::function<void(uint32_t topic_id, const Buffer& data)> TopicCallback;
 typedef std::function<void(uint32_t topic_id, ErrorCode error, const Buffer& raw_data)> TopicErrorCallback;
+typedef std::function<void(const Buffer& data)> DiagEventCallback;
 
 class OmniRuntime {
 public:
@@ -113,6 +114,11 @@ public:
 
     int enableDiagnostic(const std::string& service_name);
     int disableDiagnostic(const std::string& service_name);
+
+    int setLogLevelByPid(uint32_t pid, uint32_t level);
+    int listRuntimes(std::vector<RuntimeInfo>& runtimes);
+    int watchPid(uint32_t pid, const DiagEventCallback& callback);
+    int unwatchPid(uint32_t pid);
 
 private:
     OmniRuntime(const OmniRuntime&);

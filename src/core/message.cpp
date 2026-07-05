@@ -131,12 +131,35 @@ const char* messageTypeToString(MessageType type) {
     case MessageType::MSG_TOPIC_PUBLISHER_NOTIFY:  return "TOPIC_PUBLISHER_NOTIFY";
     case MessageType::MSG_UNPUBLISH_TOPIC:         return "UNPUBLISH_TOPIC";
     case MessageType::MSG_UNSUBSCRIBE_TOPIC:       return "UNSUBSCRIBE_TOPIC";
+    case MessageType::MSG_RUNTIME_HELLO:           return "RUNTIME_HELLO";
+    case MessageType::MSG_RUNTIME_HELLO_REPLY:     return "RUNTIME_HELLO_REPLY";
+    case MessageType::MSG_DIAG_SET_LOG_LEVEL:      return "DIAG_SET_LOG_LEVEL";
+    case MessageType::MSG_DIAG_SET_LOG_LEVEL_REPLY:return "DIAG_SET_LOG_LEVEL_REPLY";
+    case MessageType::MSG_DIAG_WATCH_START:        return "DIAG_WATCH_START";
+    case MessageType::MSG_DIAG_WATCH_START_REPLY:  return "DIAG_WATCH_START_REPLY";
+    case MessageType::MSG_DIAG_WATCH_STOP:         return "DIAG_WATCH_STOP";
+    case MessageType::MSG_DIAG_WATCH_STOP_REPLY:   return "DIAG_WATCH_STOP_REPLY";
+    case MessageType::MSG_RUNTIME_LIST:            return "RUNTIME_LIST";
+    case MessageType::MSG_RUNTIME_LIST_REPLY:      return "RUNTIME_LIST_REPLY";
     case MessageType::MSG_INVOKE:                  return "INVOKE";
     case MessageType::MSG_INVOKE_REPLY:            return "INVOKE_REPLY";
     case MessageType::MSG_BROADCAST:               return "BROADCAST";
     case MessageType::MSG_PING:                    return "PING";
     case MessageType::MSG_PONG:                    return "PONG";
     default:                                       return "UNKNOWN";
+    }
+}
+
+void serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf) {
+    buf.writeUint32(info.pid);
+    buf.writeString(info.process_name);
+    buf.writeString(info.role);
+    buf.writeUint32(info.log_level);
+    buf.writeUint32(info.diag_capabilities);
+    uint16_t service_count = static_cast<uint16_t>(info.services.size());
+    buf.writeUint16(service_count);
+    for (uint16_t i = 0; i < service_count; ++i) {
+        buf.writeString(info.services[i]);
     }
 }
 

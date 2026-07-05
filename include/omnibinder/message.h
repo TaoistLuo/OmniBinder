@@ -83,6 +83,18 @@ enum class MessageType : uint16_t {
     MSG_UNPUBLISH_TOPIC       = 0x0035,
     MSG_UNSUBSCRIBE_TOPIC     = 0x0036,
 
+    // 控制通道 - 运行时诊断
+    MSG_RUNTIME_HELLO         = 0x0040,
+    MSG_RUNTIME_HELLO_REPLY   = 0x0041,
+    MSG_DIAG_SET_LOG_LEVEL    = 0x0042,
+    MSG_DIAG_SET_LOG_LEVEL_REPLY = 0x0043,
+    MSG_DIAG_WATCH_START      = 0x0044,
+    MSG_DIAG_WATCH_START_REPLY = 0x0045,
+    MSG_DIAG_WATCH_STOP       = 0x0046,
+    MSG_DIAG_WATCH_STOP_REPLY = 0x0047,
+    MSG_RUNTIME_LIST          = 0x0049,
+    MSG_RUNTIME_LIST_REPLY    = 0x004A,
+
     // 数据通道 - 接口调用
     MSG_INVOKE                = 0x0100,
     MSG_INVOKE_REPLY          = 0x0101,
@@ -100,6 +112,25 @@ enum class MessageType : uint16_t {
     MSG_SHM_UPGRADE           = 0x0130,  // 客户端 -> 服务端，携带 shm_name
     MSG_SHM_UPGRADE_ACK       = 0x0131,  // 服务端 -> 客户端，确认升级成功
 };
+
+enum DiagEventDirection : uint8_t {
+    DIAG_EVENT_REQUEST = 0,
+    DIAG_EVENT_RESPONSE = 1,
+    DIAG_EVENT_ONE_WAY = 2,
+    DIAG_EVENT_SUBSCRIBE = 3,
+    DIAG_EVENT_BROADCAST = 4
+};
+
+const size_t DIAG_EVENT_DIRECTION_SIZE = 1;
+const size_t DIAG_EVENT_TIMESTAMP_SIZE = 8;
+const size_t DIAG_EVENT_TYPE_SIZE = 2;
+const size_t DIAG_EVENT_SEQUENCE_SIZE = 4;
+const size_t DIAG_EVENT_PAYLOAD_LENGTH_SIZE = 4;
+const size_t DIAG_EVENT_WIRE_HEADER_SIZE = DIAG_EVENT_DIRECTION_SIZE
+    + DIAG_EVENT_TIMESTAMP_SIZE
+    + DIAG_EVENT_TYPE_SIZE
+    + DIAG_EVENT_SEQUENCE_SIZE
+    + DIAG_EVENT_PAYLOAD_LENGTH_SIZE;
 
 // ============================================================
 // 消息头（16字节，固定大小）
@@ -159,6 +190,30 @@ uint32_t nextSequenceNumber();
 // 辅助函数：序列化/反序列化 ServiceInfo 到 Buffer
 // ============================================================
 void serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
+
+void serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf);
+
+template <typename BufT>
+bool deserializeRuntimeInfo(BufT& buf, RuntimeInfo& info) {
+    uint16_t service_count = 0;
+    if (!(buf.tryReadUint32(info.pid)
+        && buf.tryReadString(info.process_name)
+        && buf.tryReadString(info.role)
+        && buf.tryReadUint32(info.log_level)
+        && buf.tryReadUint32(info.diag_capabilities)
+        && buf.tryReadUint16(service_count))) {
+        return false;
+    }
+    info.services.clear();
+    for (uint16_t i = 0; i < service_count; ++i) {
+        std::string service;
+        if (!buf.tryReadString(service)) {
+            return false;
+        }
+        info.services.push_back(service);
+    }
+    return true;
+}
 
 template <typename BufT>
 bool deserializeServiceInfo(BufT& buf, ServiceInfo& info) {

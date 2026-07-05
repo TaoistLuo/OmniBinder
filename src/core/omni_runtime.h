@@ -220,6 +220,10 @@ public:
 
     int enableDiagnostic(const std::string& service_name);
     int disableDiagnostic(const std::string& service_name);
+    int setLogLevelByPid(uint32_t pid, uint32_t level);
+    int listRuntimes(std::vector<RuntimeInfo>& runtimes);
+    int watchPid(uint32_t pid, const DiagEventCallback& callback);
+    int unwatchPid(uint32_t pid);
 
 private:
     Impl(const Impl&);
@@ -295,6 +299,13 @@ private:
     int restoreControlPlaneState();
     int reconnectServiceManagerIfNeeded();
     void updateConnectionStats(RuntimeStats& stats) const;
+    int sendRuntimeHello();
+    std::string runtimeProcessName() const;
+    std::string diagDataServiceName(uint32_t pid) const;
+    bool initDiagDataService();
+    void destroyDiagDataService();
+    bool isDiagDataTopic(uint32_t topic_id) const;
+    void emitDiagEvent(uint8_t direction, const Message& msg);
 
     // ============================================================
     // 成员变量
@@ -361,6 +372,11 @@ private:
     RuntimeStats stats_;
     OwnerThreadExecutor owner_executor_;
     int diag_active_count_;
+    uint32_t pid_;
+    std::string process_name_;
+    bool diag_watch_active_;
+    Service* diag_data_service_;
+    uint32_t diag_watch_topic_id_;
 };
 
 template<typename F>
