@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include <limits>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -65,4 +66,11 @@ TEST(BufferTest, Assign) {
     Buffer buf;
     buf.assign(data, 4);
     EXPECT_EQ(mustRead<int32_t>(buf, &Buffer::tryReadInt32), 1);
+}
+
+TEST(BufferTest, RejectsOversizedByteLength) {
+    Buffer buf;
+    EXPECT_FALSE(buf.writeBytes(NULL,
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1u));
+    EXPECT_FALSE(buf.writeOk());
 }

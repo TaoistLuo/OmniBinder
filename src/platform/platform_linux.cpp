@@ -562,28 +562,35 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
         iov.iov_len = 1;
     }
 
-    // 构造 cmsg
-    size_t cmsg_space = CMSG_SPACE(sizeof(int) * static_cast<size_t>(fd_count));
-    // 使用栈上分配（fd_count 最多 2-3 个，cmsg_space 很小）
-    char cmsg_buf[256];
-    if (cmsg_space > sizeof(cmsg_buf)) {
-        OMNI_LOG_ERROR(LOG_TAG, "udsSendFds: too many fds (%d)", fd_count);
-        return false;
-    }
-    memset(cmsg_buf, 0, cmsg_space);
-
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
-    msg.msg_control = cmsg_buf;
-    msg.msg_controllen = cmsg_space;
 
-    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int) * static_cast<size_t>(fd_count));
-    memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * static_cast<size_t>(fd_count));
+    char cmsg_buf[256];
+    if (fd_count > 0) {
+        if (!fds) {
+            OMNI_LOG_ERROR(LOG_TAG, "udsSendFds: fd_count=%d but fds is NULL", fd_count);
+            return false;
+        }
+
+        // 构造 cmsg
+        size_t cmsg_space = CMSG_SPACE(sizeof(int) * static_cast<size_t>(fd_count));
+        // 使用栈上分配（fd_count 最多 2-3 个，cmsg_space 很小）
+        if (cmsg_space > sizeof(cmsg_buf)) {
+            OMNI_LOG_ERROR(LOG_TAG, "udsSendFds: too many fds (%d)", fd_count);
+            return false;
+        }
+        memset(cmsg_buf, 0, cmsg_space);
+        msg.msg_control = cmsg_buf;
+        msg.msg_controllen = cmsg_space;
+
+        struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int) * static_cast<size_t>(fd_count));
+        memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * static_cast<size_t>(fd_count));
+    }
 
     ssize_t ret;
     do {

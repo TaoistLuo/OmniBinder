@@ -145,7 +145,7 @@ public:
         uint32_t len = 0;
         if (!tryReadUint32(len)) return false;
         if (len == 0) { value.clear(); return true; }
-        if (read_pos_ + len > length_) return false;
+        if (len > length_ - read_pos_) return false;
         value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
         read_pos_ += len;
         return true;
@@ -155,7 +155,7 @@ public:
         uint32_t len = 0;
         if (!tryReadUint32(len)) return false;
         if (len == 0) { value.clear(); return true; }
-        if (read_pos_ + len > length_) return false;
+        if (len > length_ - read_pos_) return false;
         value.assign(data_ + read_pos_, data_ + read_pos_ + len);
         read_pos_ += len;
         return true;

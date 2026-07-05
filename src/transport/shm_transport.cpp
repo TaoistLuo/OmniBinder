@@ -6,12 +6,32 @@
 #include <stdio.h>
 #include <algorithm>
 #include <atomic>
+#include <limits>
 
 #define LOG_TAG "ShmTransport"
 
 namespace omnibinder {
 
 namespace {
+
+const size_t MIN_RING_CAPACITY = 64;
+
+bool isValidRingCapacity(size_t capacity)
+{
+    return capacity >= MIN_RING_CAPACITY
+        && capacity <= static_cast<size_t>(std::numeric_limits<uint32_t>::max());
+}
+
+size_t normalizeRingCapacity(size_t capacity)
+{
+    if (capacity == 0) {
+        return MIN_RING_CAPACITY;
+    }
+    if (capacity < MIN_RING_CAPACITY) {
+        return MIN_RING_CAPACITY;
+    }
+    return capacity;
+}
 
 size_t alignUp(size_t value, size_t alignment)
 {
@@ -48,7 +68,16 @@ size_t calculateShmSize(size_t req_ring_capacity, size_t resp_ring_capacity,
                         uint32_t max_clients)
 {
     (void)max_clients;  // deprecated, kept for backward compat
-    return responseDataOffset(req_ring_capacity) + resp_ring_capacity;
+    req_ring_capacity = normalizeRingCapacity(req_ring_capacity);
+    resp_ring_capacity = normalizeRingCapacity(resp_ring_capacity);
+    if (!isValidRingCapacity(req_ring_capacity) || !isValidRingCapacity(resp_ring_capacity)) {
+        return 0;
+    }
+    size_t offset = responseDataOffset(req_ring_capacity);
+    if (offset > std::numeric_limits<size_t>::max() - resp_ring_capacity) {
+        return 0;
+    }
+    return offset + resp_ring_capacity;
 }
 
 std::string generateShmName(const std::string& service_name)
@@ -68,8 +97,8 @@ ShmTransport::ShmTransport(const std::string& shm_name, bool is_server,
     , is_server_(is_server)
     , state_(ConnectionState::DISCONNECTED)
     , client_id_(0)
-    , requested_req_ring_capacity_(req_ring_capacity)
-    , requested_resp_ring_capacity_(resp_ring_capacity)
+    , requested_req_ring_capacity_(normalizeRingCapacity(req_ring_capacity))
+    , requested_resp_ring_capacity_(normalizeRingCapacity(resp_ring_capacity))
     , shm_addr_(NULL)
     , shm_size_(0)
     , ctrl_(NULL)
@@ -147,7 +176,15 @@ bool ShmTransport::initClient()
 
     size_t req_cap = requested_req_ring_capacity_;
     size_t resp_cap = requested_resp_ring_capacity_;
+    if (!isValidRingCapacity(req_cap) || !isValidRingCapacity(resp_cap)) {
+        OMNI_LOG_ERROR(LOG_TAG, "invalid SHM ring capacity req=%zu resp=%zu", req_cap, resp_cap);
+        return false;
+    }
     shm_size_ = calculateShmSize(req_cap, resp_cap, 1);
+    if (shm_size_ == 0) {
+        OMNI_LOG_ERROR(LOG_TAG, "invalid SHM size for req=%zu resp=%zu", req_cap, resp_cap);
+        return false;
+    }
 
     // Create the SHM region
     shm_addr_ = platform::shmCreate(shm_name_, shm_size_, true);
@@ -938,6 +975,14 @@ void ShmTransport::onUdsClientConnect()
 
     // Calculate exact size and re-map if needed
     size_t exact_size = calculateShmSize(ctrl->req_ring_capacity, ctrl->resp_ring_capacity, 1);
+    if (exact_size == 0) {
+        OMNI_LOG_WARN(LOG_TAG, "UDS: invalid SHM capacities req=%u resp=%u for '%s'",
+                      ctrl->req_ring_capacity, ctrl->resp_ring_capacity,
+                      client_shm_name.c_str());
+        platform::shmDetach(addr, try_size);
+        platform::udsClose(client_fd);
+        return;
+    }
     if (exact_size > try_size) {
         platform::shmDetach(addr, try_size);
         addr = platform::shmCreate(client_shm_name, exact_size, false);

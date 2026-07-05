@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "transport/shm_transport.h"
+#include "core/service_host_runtime.h"
 #include "platform/platform.h"
 #include <cstring>
 #include <algorithm>
@@ -53,6 +54,11 @@ TEST_F(ShmTransportTest, CalculateShmSize) {
               + sizeof(ShmRingHeader) + 512);
     EXPECT_EQ(sizeof(ShmControlBlock) % alignof(ShmRingHeader), 0u);
     EXPECT_EQ(sizeof(ShmRingHeader) % alignof(ShmRingHeader), 0u);
+}
+
+TEST_F(ShmTransportTest, CalculateShmSizeNormalizesTinyRings) {
+    EXPECT_EQ(calculateShmSize(1, 1), calculateShmSize(64, 64));
+    EXPECT_GT(calculateShmSize(1, 1), 0u);
 }
 
 TEST_F(ShmTransportTest, GenerateShmName) {
@@ -310,4 +316,39 @@ TEST_F(ShmTransportTest, ConcurrentDataIntegrity) {
 
     for (auto& c : clients) c->close();
     server.close();
+}
+
+TEST(ServiceHostRuntimeTest, IncompleteShmPayloadIsNotDispatched) {
+    ServiceHostRuntime runtime;
+    TopicRuntime topic_runtime;
+    Message msg(MessageType::MSG_INVOKE, 7);
+    ASSERT_TRUE(msg.payload.writeUint32(0x12345678));
+    Buffer serialized;
+    ASSERT_TRUE(msg.serialize(serialized));
+
+    // Corrupt the serialized header length so it declares more payload bytes
+    // than are actually present. SHM receives one framed message at a time,
+    // so the dispatcher must reject this instead of invoking with an empty or
+    // truncated payload.
+    serialized.mutableData()[12] = 0x08;
+    serialized.mutableData()[13] = 0x00;
+    serialized.mutableData()[14] = 0x00;
+    serialized.mutableData()[15] = 0x00;
+
+    bool invoked = false;
+    bool oneway = false;
+    bool subscribed = false;
+    runtime.onShmRequest(
+        "svc",
+        1,
+        serialized.data(),
+        serialized.size(),
+        topic_runtime,
+        [&invoked](const std::string&, uint32_t, const Message&) { invoked = true; },
+        [&oneway](const std::string&, const Message&) { oneway = true; },
+        [&subscribed](const std::string&, uint32_t, const Message&) { subscribed = true; });
+
+    EXPECT_FALSE(invoked);
+    EXPECT_FALSE(oneway);
+    EXPECT_FALSE(subscribed);
 }

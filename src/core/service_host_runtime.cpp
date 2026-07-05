@@ -223,7 +223,12 @@ void ServiceHostRuntime::onShmRequest(const std::string& service_name,
 
     Message msg;
     msg.header = hdr;
-    if (hdr.length > 0 && length >= MESSAGE_HEADER_SIZE + hdr.length) {
+    if (length < MESSAGE_HEADER_SIZE + hdr.length) {
+        OMNI_LOG_WARN(LOG_TAG, "incomplete SHM message for service=%s: need=%zu have=%zu",
+                      service_name.c_str(), MESSAGE_HEADER_SIZE + static_cast<size_t>(hdr.length), length);
+        return;
+    }
+    if (hdr.length > 0) {
         msg.payload.assign(data + MESSAGE_HEADER_SIZE, hdr.length);
     }
 

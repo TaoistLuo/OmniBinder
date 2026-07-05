@@ -1,6 +1,7 @@
 #include "omnibinder/message.h"
 #include <cstring>
 #include <atomic>
+#include <limits>
 
 namespace omnibinder {
 
@@ -48,6 +49,9 @@ uint32_t Message::getSequence() const {
 }
 
 bool Message::serialize(Buffer& output) const {
+    if (payload.size() > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
     // 更新 length 字段
     MessageHeader h = header;
     h.length = static_cast<uint32_t>(payload.size());

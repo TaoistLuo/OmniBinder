@@ -1,6 +1,7 @@
 #include "omnibinder/buffer.h"
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 extern "C" void* omni_malloc(size_t size);
 extern "C" void  omni_free(void* ptr);
@@ -82,6 +83,10 @@ Buffer& Buffer::operator=(Buffer&& other) noexcept {
 
 bool Buffer::ensureCapacity(size_t additional) noexcept {
     if (write_failed_) return false;
+    if (additional > std::numeric_limits<size_t>::max() - write_pos_) {
+        write_failed_ = true;
+        return false;
+    }
     size_t required = write_pos_ + additional;
     if (required > capacity_) {
         grow(required);
@@ -90,8 +95,16 @@ bool Buffer::ensureCapacity(size_t additional) noexcept {
 }
 
 void Buffer::grow(size_t min_capacity) noexcept {
+    if (capacity_ > std::numeric_limits<size_t>::max() / 2) {
+        write_failed_ = true;
+        return;
+    }
     size_t new_capacity = capacity_ == 0 ? DEFAULT_BUFFER_SIZE : capacity_ * 2;
     while (new_capacity < min_capacity) {
+        if (new_capacity > std::numeric_limits<size_t>::max() / 2) {
+            write_failed_ = true;
+            return;
+        }
         new_capacity *= 2;
     }
     uint8_t* new_data = static_cast<uint8_t*>(omni_malloc(new_capacity));
@@ -191,6 +204,10 @@ bool Buffer::writeFloat64(double value) noexcept {
 }
 
 bool Buffer::writeString(const std::string& value) noexcept {
+    if (value.size() > std::numeric_limits<uint32_t>::max() - 4u) {
+        write_failed_ = true;
+        return false;
+    }
     uint32_t len = static_cast<uint32_t>(value.size());
     // 原子性：一次性确保 length prefix + data 都有空间
     if (!ensureCapacity(4 + len)) return false;
@@ -202,6 +219,10 @@ bool Buffer::writeString(const std::string& value) noexcept {
 }
 
 bool Buffer::writeBytes(const void* data, size_t length) noexcept {
+    if (length > std::numeric_limits<uint32_t>::max() - 4u) {
+        write_failed_ = true;
+        return false;
+    }
     uint32_t len = static_cast<uint32_t>(length);
     // 原子性：一次性确保 length prefix + data 都有空间
     if (!ensureCapacity(4 + len)) return false;
@@ -339,7 +360,7 @@ bool Buffer::tryReadString(std::string& value) noexcept {
         value.clear();
         return true;
     }
-    if (read_pos_ + len > write_pos_) {
+    if (len > write_pos_ - read_pos_) {
         return false;
     }
     value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
@@ -356,7 +377,7 @@ bool Buffer::tryReadBytes(std::vector<uint8_t>& value) noexcept {
         value.clear();
         return true;
     }
-    if (read_pos_ + len > write_pos_) {
+    if (len > write_pos_ - read_pos_) {
         return false;
     }
     value.assign(data_ + read_pos_, data_ + read_pos_ + len);
