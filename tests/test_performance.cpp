@@ -31,7 +31,7 @@ TestPid startProcess(const char* binary, const char* a1 = nullptr,
                      const char* a2 = nullptr, const char* a3 = nullptr,
                      const char* a4 = nullptr) {
 #ifdef _WIN32
-    std::string cmd = std::string(binary);
+    std::string cmd = "\"" + std::string(binary) + "\"";
     if (a1) { cmd += " "; cmd += a1; }
     if (a2) { cmd += " "; cmd += a2; }
     if (a3) { cmd += " "; cmd += a3; }
@@ -100,11 +100,16 @@ bool waitPortReady(uint16_t port, int timeout_sec) {
 }
 
 const char* findBinary(const char* name) {
-    const char* paths[] = {"target/test/", "./build/target/test/", "target/bin/", "./build/target/bin/", "./", nullptr};
+    const char* paths[] = {
+        "target/test/", "./build/target/test/",
+        "target/bin/", "./build/target/bin/",
+        nullptr};
     static char full[512];
     for (int i = 0; paths[i]; ++i) {
         snprintf(full, sizeof(full), "%s%s", paths[i], name);
 #ifdef _WIN32
+        if (GetFileAttributesA(full) != INVALID_FILE_ATTRIBUTES) return full;
+        snprintf(full, sizeof(full), "%s%s.exe", paths[i], name);
         if (GetFileAttributesA(full) != INVALID_FILE_ATTRIBUTES) return full;
 #else
         if (access(full, X_OK) == 0) return full;
@@ -284,8 +289,12 @@ int main(int argc, char* argv[]) {
     omnibinder::setLogLevel(omnibinder::LOG_ERROR);
     printf("=== OmniBinder Performance Benchmark ===\n\n");
 
-    TestPid sm_pid = startProcess("./target/bin/service_manager",
-                                   "--port", "19910", "--log-level", "3");
+    const char* sm_bin = findBinary("service_manager");
+    if (!sm_bin) {
+        fprintf(stderr, "FATAL: service_manager binary not found\n");
+        return 1;
+    }
+    TestPid sm_pid = startProcess(sm_bin, "--port", "19910", "--log-level", "3");
     g_sm_pid = sm_pid;
     if (sm_pid <= 0 || !waitPortReady(SM_PORT, 15)) {
         fprintf(stderr, "FATAL: SM failed to start\n");

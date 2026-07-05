@@ -197,6 +197,23 @@ static void printHexDump(const uint8_t* data, size_t len) {
     printf("\n");
 }
 
+static uint16_t readLe16(const uint8_t* data) {
+    return static_cast<uint16_t>(data[0])
+        | (static_cast<uint16_t>(data[1]) << 8);
+}
+
+static uint32_t readLe32(const uint8_t* data) {
+    return static_cast<uint32_t>(data[0])
+        | (static_cast<uint32_t>(data[1]) << 8)
+        | (static_cast<uint32_t>(data[2]) << 16)
+        | (static_cast<uint32_t>(data[3]) << 24);
+}
+
+static bool isInvokeRequestType(uint16_t type) {
+    return type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE)
+        || type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_ONEWAY);
+}
+
 static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
                    const char* method_name, const char* params) {
     // Look up the service
@@ -397,11 +414,9 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
         for (int i = 0; i < 8; ++i) {
             ts_us = (ts_us << 8) | p[1 + i];
         }
-        uint16_t orig_type = static_cast<uint16_t>(p[9]) | (static_cast<uint16_t>(p[10]) << 8);
-        uint32_t orig_seq  = static_cast<uint32_t>(p[11]) | (static_cast<uint32_t>(p[12]) << 8)
-                           | (static_cast<uint32_t>(p[13]) << 16) | (static_cast<uint32_t>(p[14]) << 24);
-        uint32_t orig_len  = static_cast<uint32_t>(p[15]) | (static_cast<uint32_t>(p[16]) << 8)
-                           | (static_cast<uint32_t>(p[17]) << 16) | (static_cast<uint32_t>(p[18]) << 24);
+        uint16_t orig_type = readLe16(p + 9);
+        uint32_t orig_seq  = readLe32(p + 11);
+        uint32_t orig_len  = readLe32(p + 15);
 
         const char* dir_str = "?";
         switch (direction) {
@@ -430,19 +445,13 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
 
         if (g_parse_ctx && orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
             const uint8_t* payload = p + DIAG_HDR;
-            if (orig_type == 0x0100 && orig_len >= 12) {
-                uint32_t iface_id = static_cast<uint32_t>(payload[0])
-                    | (static_cast<uint32_t>(payload[1]) << 8)
-                    | (static_cast<uint32_t>(payload[2]) << 16)
-                    | (static_cast<uint32_t>(payload[3]) << 24);
-                uint32_t meth_id  = static_cast<uint32_t>(payload[4])
-                    | (static_cast<uint32_t>(payload[5]) << 8)
-                    | (static_cast<uint32_t>(payload[6]) << 16)
-                    | (static_cast<uint32_t>(payload[7]) << 24);
-                param_len = static_cast<uint32_t>(payload[8])
-                    | (static_cast<uint32_t>(payload[9]) << 8)
-                    | (static_cast<uint32_t>(payload[10]) << 16)
-                    | (static_cast<uint32_t>(payload[11]) << 24);
+            if (isInvokeRequestType(orig_type) && orig_len >= 16) {
+                uint32_t iface_id = readLe32(payload);
+                uint32_t meth_id  = readLe32(payload + 8);
+                param_len = readLe32(payload + 12);
+                if (param_len > orig_len - 16) {
+                    param_len = 0;
+                }
                 auto mit = method_map.find((static_cast<uint64_t>(iface_id) << 32) | meth_id);
                 if (mit != method_map.end()) {
                     method_name = mit->second->name;
@@ -450,11 +459,11 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
                     pending_methods[orig_seq] = mit->second;
                 }
             } else if (orig_type == 0x0101 && direction == 1 && orig_len >= 8) {
-                resp_status = static_cast<int32_t>(
-                    static_cast<uint32_t>(payload[0]) | (static_cast<uint32_t>(payload[1]) << 8)
-                    | (static_cast<uint32_t>(payload[2]) << 16) | (static_cast<uint32_t>(payload[3]) << 24));
-                resp_len = static_cast<uint32_t>(payload[4]) | (static_cast<uint32_t>(payload[5]) << 8)
-                    | (static_cast<uint32_t>(payload[6]) << 16) | (static_cast<uint32_t>(payload[7]) << 24);
+                resp_status = static_cast<int32_t>(readLe32(payload));
+                resp_len = readLe32(payload + 4);
+                if (resp_len > orig_len - 8) {
+                    resp_len = 0;
+                }
                 auto pm_it = pending_methods.find(orig_seq);
                 if (pm_it != pending_methods.end()) {
                     pm = pm_it->second;
@@ -487,14 +496,14 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
         if (g_parse_ctx && orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
             const uint8_t* payload = p + DIAG_HDR;
 
-            if (orig_type == 0x0100 && orig_len >= 12 && pm) {
+            if (isInvokeRequestType(orig_type) && orig_len >= 16 && pm) {
                 char detail[512];
                 off = snprintf(detail, sizeof(detail), "  %s.%s(", info.name.c_str(), pm->name.c_str());
                 if (!pm->param_types.empty() && param_len > 0) {
                     omnic::TypeRef paramType;
                     if (omni_cli::findTypeRef(g_parse_ctx, pm->param_types, g_idl_package, paramType)) {
                         omnibinder::Buffer param_buf;
-                        param_buf.assign(payload + 12, param_len);
+                        param_buf.assign(payload + 16, param_len);
                         type_codec::TypeCodec codec(*g_parse_ctx);
                         simple_json::Value jsonOut;
                         if (codec.decodeFromBuffer(param_buf, paramType, g_idl_package, jsonOut)) {
@@ -518,7 +527,7 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
             } else if (orig_type == 0x0101 && direction == 1 && orig_len >= 8) {
                 char detail[512];
                 off = snprintf(detail, sizeof(detail), "  -> status=%d", resp_status);
-                if (resp_len > 0 && pm && !pm->return_type.empty() && pm->return_type != "void") {
+                if (resp_len > 0 && resp_len <= orig_len - 8 && pm && !pm->return_type.empty() && pm->return_type != "void") {
                     omnic::TypeRef retType;
                     if (omni_cli::findTypeRef(g_parse_ctx, pm->return_type, g_idl_package, retType)) {
                         omnibinder::Buffer resp_buf;
@@ -539,11 +548,8 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
                 OMNI_LOG_INFO("Watch", "%s  \n%s",line, detail);
 
             } else if (orig_type == 0x0110 && orig_len >= 8) {
-                uint32_t data_len = static_cast<uint32_t>(payload[4])
-                    | (static_cast<uint32_t>(payload[5]) << 8)
-                    | (static_cast<uint32_t>(payload[6]) << 16)
-                    | (static_cast<uint32_t>(payload[7]) << 24);
-                if (data_len > 0) {
+                uint32_t data_len = readLe32(payload + 4);
+                if (data_len > 0 && data_len <= orig_len - 8) {
                     omnibinder::Buffer data_buf;
                     data_buf.assign(payload + 8, data_len);
                     bool decoded = false;
@@ -578,9 +584,9 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, const char* service_name, 
                         int hoff = 0;
                         uint32_t d = data_len > 64 ? 64 : data_len;
                         for (uint32_t i = 0; i < d; ++i) {
-                            hoff += snprintf(hex + hoff, sizeof(hex) - hoff, "%02x ", payload[i]);
+                            hoff += snprintf(hex + hoff, sizeof(hex) - hoff, "%02x ", payload[8 + i]);
                         }
-                        OMNI_LOG_INFO("Watch", "%s \n  HEX: %s", hex);
+                        OMNI_LOG_INFO("Watch", "%s \n  HEX: %s", line, hex);
                     }
                 }
             } else {

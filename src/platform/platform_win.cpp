@@ -44,6 +44,9 @@ void netCleanup() {
 }
 
 SocketFd createTcpSocket() {
+    if (!netInit()) {
+        return INVALID_SOCKET_FD;
+    }
     return socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 }
 
@@ -856,4 +859,3 @@ void spinWaitHint() {
 } // namespace omnibinder
 
 #endif // OMNIBINDER_WINDOWS
-
