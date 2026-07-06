@@ -512,6 +512,11 @@ int OmniRuntime::Impl::sendSMRequestAndWaitReply(Message& msg, Message& reply) {
 }
 
 std::string OmniRuntime::Impl::runtimeProcessName() const {
+    std::string process_name = platform::getProcessName();
+    if (!process_name.empty()) {
+        return process_name;
+    }
+
     std::ostringstream os;
     os << "pid-" << platform::getPid();
     return os.str();

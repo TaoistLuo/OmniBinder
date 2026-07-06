@@ -9,6 +9,7 @@
 #include <climits>
 #include <fstream>
 #include <sstream>
+#include <string>
 
 
 #include <sys/time.h>
@@ -20,6 +21,19 @@
 
 namespace omnibinder {
 namespace platform {
+
+namespace {
+
+std::string basenameFromPath(const char* path) {
+    if (!path || path[0] == '\0') {
+        return std::string();
+    }
+
+    const char* name = strrchr(path, '/');
+    return name ? std::string(name + 1) : std::string(path);
+}
+
+} // namespace
 
 // ============================================================
 // 网络初始化
@@ -728,6 +742,21 @@ std::string getHostName() {
 
 int getPid() {
     return static_cast<int>(getpid());
+}
+
+std::string getProcessName() {
+    const size_t PROCESS_PATH_BUFFER_SIZE = 4096;
+    char path[PROCESS_PATH_BUFFER_SIZE];
+    ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len > 0) {
+        path[len] = '\0';
+        std::string name = basenameFromPath(path);
+        if (!name.empty()) {
+            return name;
+        }
+    }
+
+    return std::string();
 }
 
 void sleepMs(uint32_t ms) {

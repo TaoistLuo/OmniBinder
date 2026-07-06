@@ -22,6 +22,21 @@
 namespace omnibinder {
 namespace platform {
 
+namespace {
+
+std::string basenameFromPath(const char* path) {
+    if (!path || path[0] == '\0') {
+        return std::string();
+    }
+
+    const char* slash = strrchr(path, '\\');
+    const char* alt_slash = strrchr(path, '/');
+    const char* name = slash && alt_slash ? (slash > alt_slash ? slash : alt_slash) : (slash ? slash : alt_slash);
+    return name ? std::string(name + 1) : std::string(path);
+}
+
+} // namespace
+
 static bool g_net_initialized = false;
 
 bool netInit() {
@@ -541,6 +556,20 @@ std::string getHostName() {
 
 int getPid() {
     return static_cast<int>(GetCurrentProcessId());
+}
+
+std::string getProcessName() {
+    const DWORD PROCESS_PATH_BUFFER_SIZE = MAX_PATH;
+    char path[PROCESS_PATH_BUFFER_SIZE];
+    DWORD len = GetModuleFileNameA(NULL, path, PROCESS_PATH_BUFFER_SIZE);
+    if (len > 0 && len < PROCESS_PATH_BUFFER_SIZE) {
+        std::string name = basenameFromPath(path);
+        if (!name.empty()) {
+            return name;
+        }
+    }
+
+    return std::string();
 }
 
 void sleepMs(uint32_t ms) {
