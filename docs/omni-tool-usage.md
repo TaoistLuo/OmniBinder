@@ -7,13 +7,16 @@
 
 ## 概述
 
-`omni-cli` 是 OmniBinder 的命令行调试工具，用于查询在线服务、查看接口定义、调用服务方法。
+`omni-cli` 是 OmniBinder 的命令行调试工具，用于查询在线服务和运行时、查看接口定义、调用服务方法、调整运行时日志级别，以及按 PID 观察业务接口输入/输出。
 
 **主要功能**：
 - 列出所有在线服务
+- 列出所有在线 runtime / PID
 - 查看服务接口和方法签名
 - 调用服务方法（支持 hex 和 JSON 格式）
 - 显示调用耗时统计
+- 按 PID 设置运行时日志级别
+- 按 PID watch IDL 业务接口输入/输出
 
 ---
 
@@ -39,8 +42,11 @@ omni-cli [options] <command> [args]
 | 命令 | 说明 |
 |------|------|
 | `list` | 列出所有在线服务 |
+| `ps` | 列出在线 runtime PID、角色、日志级别和服务 |
 | `info <service>` | 查看服务详细信息 |
 | `call <service> <method> [params]` | 调用服务方法 |
+| `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | 设置指定 runtime 日志级别 |
+| `watch --pid <pid> --idl <file.bidl> [--filter <method\|topic>]` | 观察指定 PID 的业务接口 I/O |
 
 ---
 
@@ -68,7 +74,27 @@ Total: 2 services online
 
 ---
 
-### 2. info - 查看服务信息
+### 2. ps - 列出运行时
+
+列出当前连接到 ServiceManager 的 runtime PID。隐藏诊断服务不会出现在服务列表中。
+
+**语法**：
+```bash
+omni-cli ps
+```
+
+**示例**：
+```bash
+$ omni-cli ps
+PID      ROLE     LOG   PROCESS              SERVICES
+-------- -------- ----- -------------------- ----------------
+12345    service  I     pid-12345            SensorService
+12346    client   I     pid-12346            -
+```
+
+---
+
+### 3. info - 查看服务信息
 
 查看服务的接口和方法定义。支持两种模式：
 
@@ -140,7 +166,7 @@ Service: SensorService
 
 ---
 
-### 3. call - 调用服务方法
+### 4. call - 调用服务方法
 
 调用服务的指定方法。支持两种输入格式：
 
@@ -223,6 +249,57 @@ Response (status=OK, 0 bytes, 0.58 ms):
 - JSON 输入自动检测（以 `{` 开头）
 - 即使指定了 `--idl`，仍然可以使用 hex 输入（向后兼容）
 - 响应时间以毫秒为单位显示
+
+---
+
+### 5. log set - 设置运行时日志级别
+
+按 PID 调整指定 runtime 的日志级别。PID 可通过 `omni-cli ps` 获取。
+
+**语法**：
+```bash
+omni-cli log set --pid <pid> --level <F|E|W|I|D|V|O>
+```
+
+日志级别含义：
+
+| 级别 | 含义 |
+|------|------|
+| `F` | fatal |
+| `E` | error |
+| `W` | warn |
+| `I` | info |
+| `D` | debug |
+| `V` | verbose |
+| `O` | off |
+
+**示例**：
+```bash
+omni-cli log set --pid 12345 --level D
+```
+
+---
+
+### 6. watch - 观察业务接口 I/O
+
+按 PID 观察 runtime 的 IDL 业务接口输入/输出。watch 数据面复用 OmniBinder 既有 topic 数据通道：同机自动使用 SHM，跨机自动使用 TCP；ServiceManager 只负责控制面启动/停止。
+
+**语法**：
+```bash
+omni-cli watch --pid <pid> --idl <file.bidl> [--filter <method|topic>]
+```
+
+**行为说明**：
+
+- 服务端 PID：观察 RPC 输入和 topic 发布输出。
+- 客户端 PID：观察 RPC 输出和订阅输入。
+- 不输出 ServiceManager 控制消息、lookup、heartbeat 等内部控制流。
+- `--filter` 可按解码后的 method/topic 名过滤，例如 `GetLatestData` 或 `broadcast`。
+
+**示例**：
+```bash
+omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatestData
+```
 
 ---
 

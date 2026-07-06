@@ -362,8 +362,11 @@ cmake --build . -j$(nproc)
 在 ARM 板子本机执行时：
 
 - `omni-cli list`
+- `omni-cli ps`
 - `omni-cli info`
 - `omni-cli call`
+- `omni-cli log set --pid <pid> --level <F|E|W|I|D|V|O>`
+- `omni-cli watch --pid <pid> --idl <file.bidl>`
 
 那就需要把 `omni-cli` 一并交叉编译到目标板。
 

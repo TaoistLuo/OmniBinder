@@ -68,7 +68,7 @@
 │                          │     │  broadcast()                          │   │
 │                          │     │    ├─ TCP: 遍历 fd → send ──────────►│   │
 │  ◄── MSG_BROADCAST ◄────┼─────┼────┘                                  │   │
-│  dispatch → callback()   │     │  SHM: serverBroadcast()               │   │
+│  dispatch → callback()   │     │  SHM: serverSend(client_id)           │   │
 │                          │     │                                       ▼   ▼
 └──────────────────────────┘     └───────────────────────────────────────────┘
 ```
@@ -118,16 +118,16 @@ invokeInternal(service_name, iface, method, request, response, timeout)
   │     │       返回 ServiceInfo
   │     ▼
   │
-  ├── 2. acquireInvokeConnection(service_name, info, attempt, conn)
+  ├── 2. connectServiceInternal / conn_mgr_->getOrCreateConnection(...)
   │     │
-  │     │  conn_mgr_->getOrCreateConnection(name, host, port, host_id, shm_name, shm_config)
+  │     │  conn_mgr_->getOrCreateConnection(name, host, port, host_id, shm_config)
   │     │    │
   │     │    │  已有连接且 connected → 直接复用
   │     │    │
   │     │    │  新建连接
-  │     │    │    TransportFactory::selectPreferredTransport(local_host_id, remote_host_id, shm_name)
-  │     │    │      isSameMachine(local, remote) → 相等 → SHM
-  │     │    │      isSameMachine(local, remote) → 不等 → TCP
+  │     │    │    TransportFactory::isSameMachine(local_host_id, remote_host_id)
+  │     │    │      相等 → 尝试 SHM，失败则降级 TCP
+  │     │    │      不等 → TCP
   │     │    │
   │     │    │    SHM 路径：new ShmTransport(generateShmName(service_name)) → connect() → 创建独立 SHM + UDS 握手
   │     │    │      失败 → 降级 TCP
@@ -135,13 +135,13 @@ invokeInternal(service_name, iface, method, request, response, timeout)
   │     │    │    TCP 路径：new TcpTransport() → connect(host, port)
   │     │    ▼
   │     │
-  │     │  返回 ServiceConnection{transport, connected, host_id, ...}
+  │     │  返回 ServiceConnection{transport, connected, host_id, shm_config, ...}
   │     │  注册到 event loop（fd 可读回调 → onDirectMessage）
   │     ▼
   │
   ├── 3. 构造 MSG_INVOKE 消息
   │     │  Message header: type=MSG_INVOKE, sequence=seq
-  │     │  Payload: interface_id + method_id + request_length + request_data
+  │     │  Payload: interface_id + idl_hash + method_id + request_length + request_data
   │     ▼
   │
   ├── 4. 发送请求
@@ -174,9 +174,9 @@ invokeInternal(service_name, iface, method, request, response, timeout)
 | `callSerialized()` | `omni_runtime.h:322` |
 | `invokeInternal()` | `omni_runtime.cpp:927` |
 | `lookupServiceInfo()` | `omni_runtime.cpp:771` |
-| `acquireInvokeConnection()` | `omni_runtime.cpp:1852` |
+| `ConnectionManager::getOrCreateConnection()` | `src/core/connection_manager.cpp` |
 | `populateInvokeMessage()` | `omni_runtime.cpp:1863` |
-| `sendInvokeMessageWithTimeout()` | `omni_runtime.cpp:1895` |
+| `ConnectionManager::sendMessageWithinTimeout()` | `src/core/connection_manager.cpp` |
 | `waitForReply()` | `omni_runtime.cpp:500` |
 
 ### 服务端侧：处理请求
@@ -197,15 +197,15 @@ EventLoop epoll 触发 fd 可读
   └── SHM 路径
         per-client eventfd 可读
           │  eventFdConsume(fd)
-          │  shm_server->serverRecv(buf, sizeof(buf), client_id)
+          │  shm_transport->serverRecv(buf, sizeof(buf), client_id)
           │    从 client_id 对应的 per-client request ring 读取数据
           ▼
 
-handleInvokeRequest(service_name, client_fd, msg, "TCP")    // TCP
-handleShmRequest(service_name, entry, client_id, data, len)  // SHM
+onInvokeRequest(service_name, client_fd, msg, "TCP")    // TCP
+onShmRequest(service_name, entry, client_id, data, len)  // SHM
   │
-  ├── 1. decodeInvokePayload(msg, interface_id, method_id, request)
-  │     反序列化：读 interface_id、method_id、request data
+  ├── 1. decodeInvokePayload(msg, interface_id, idl_hash, method_id, request)
+  │     反序列化：读 interface_id、idl_hash、method_id、request data
   │     失败 → 构造错误 reply 直接返回
   │
   ├── 2. 校验 interface_id 是否匹配已注册服务
@@ -235,7 +235,7 @@ handleShmRequest(service_name, entry, client_id, data, len)  // SHM
   └── 5. 发送回复
         TCP → sendOnFd(transport, reply)
               transport->send(serialized_reply)
-        SHM → shm_server->serverSend(client_id, serialized_reply)
+        SHM → shm_transport->serverSend(client_id, serialized_reply)
               写入 per-client response ring + eventfd 通知客户端
 ```
 
@@ -245,8 +245,8 @@ handleShmRequest(service_name, entry, client_id, data, len)  // SHM
 |------|------|
 | `onServiceAccept()` | `omni_runtime.cpp:1305` |
 | `onServiceClientData()` | `omni_runtime.cpp:1334` |
-| `handleInvokeRequest()` | `omni_runtime.cpp:1373` |
-| `handleShmRequest()` | `omni_runtime.cpp:1626` |
+| `onInvokeRequest()` | `src/core/omni_runtime.cpp` |
+| `onShmRequest()` | `src/core/omni_runtime.cpp` |
 | SHM eventfd 回调注册 | `omni_runtime.cpp:616` |
 
 ### 客户端侧：收到回复
@@ -298,9 +298,9 @@ invokeInternal 返回结果给调用方
 invokeOneWayInternal(service_name, iface, method, request)
   │
   ├── lookupServiceInfo(...)          // 同步 RPC 一样
-  ├── acquireInvokeConnection(...)    // 同步 RPC 一样
+  ├── conn_mgr_->getOrCreateConnection(...)    // 同步 RPC 一样
   ├── 构造 MSG_INVOKE_ONEWAY 消息
-  ├── sendInvokeMessage(...)          // 发送
+  ├── conn_mgr_->sendMessage(...)     // 发送
   │
   └── return 0                        // ★ 不等回复，直接返回
 ```
@@ -308,7 +308,7 @@ invokeOneWayInternal(service_name, iface, method, request)
 **服务端**：
 
 ```
-handleInvokeOneWayRequest(service_name, msg, "TCP")
+onInvokeOneWayRequest(service_name, msg, "TCP")
   │
   ├── decodeInvokePayload(...)
   ├── service->onInvoke(method_id, request, response)   // 执行业务逻辑
@@ -322,7 +322,7 @@ handleInvokeOneWayRequest(service_name, msg, "TCP")
 |------|------|
 | `invokeOneWay()` | `omni_runtime.cpp:1003` |
 | `invokeOneWayInternal()` | `omni_runtime.cpp:1010` |
-| `handleInvokeOneWayRequest()` | `omni_runtime.cpp:1474` |
+| `onInvokeOneWayRequest()` | `src/core/omni_runtime.cpp` |
 
 ---
 
@@ -408,7 +408,7 @@ handleSubscribeTopic(conn, msg)
 ### Phase 3：订阅者收到通知并建立直连
 
 ```
-订阅者进程 — onSMData → handleSMMessage
+订阅者进程 — onSMData → onSMMessage
   │
   ▼
 case MSG_TOPIC_PUBLISHER_NOTIFY:
@@ -417,7 +417,7 @@ case MSG_TOPIC_PUBLISHER_NOTIFY:
   ▼
 ensureTopicPublisherConnection(topic, pub_info)
   │
-  ├── 1. conn_mgr_->getOrCreateConnection(pub_name, host, port, host_id, generateShmName(pub_name))
+  ├── 1. conn_mgr_->getOrCreateConnection(pub_name, host, port, host_id, shm_config)
   │     │  同机 → SHM 直连到发布者进程
   │     │  跨机 → TCP 直连到发布者进程
   │     ▼
@@ -431,10 +431,10 @@ ensureTopicPublisherConnection(topic, pub_info)
         │    发布者进程 — 收到 MSG_SUBSCRIBE_BROADCAST
         │
         ▼
-handleSubscribeBroadcast(client_fd, msg)
+onSubscribeBroadcast(client_fd, msg)
   │
   └── topic_runtime_.addTcpSubscriber(topic_id, client_fd)
-       或 addShmSubscriber(topic_id, service_name)
+       或 addShmSubscriberService(topic_id, service_name, client_id)
        记住"这个 fd / shm 客户端需要接收该 topic 的广播"
 ```
 
@@ -465,11 +465,11 @@ broadcastInternal(topic_id, data)
   │     ▼
   │
   └── 3. SHM 订阅者
-        │  遍历 topic_runtime_.shmSubscriberServices(topic_id)
-        │  对每个 service_name：
+        │  遍历 topic_runtime_.shmSubscribers(topic_id)
+        │  对每个 service_name/client_id：
         │    找到对应 LocalServiceEntry
-        │    shm_server->serverBroadcast(send_buf.data(), send_buf.size())
-        │    写入所有客户端共享的 response ring buffer
+        │    shm_transport->serverSend(client_id, send_buf.data(), send_buf.size())
+        │    写入该订阅客户端的 per-client response ring buffer
         ▼
 ```
 
@@ -502,12 +502,12 @@ callback(data)                                       // 用户回调
 |------|------|
 | `publishTopicInternal()` | `omni_runtime.cpp:1111` |
 | `subscribeTopicInternal()` | `omni_runtime.cpp:1255` |
-| `handleSMMessage()` → `MSG_TOPIC_PUBLISHER_NOTIFY` | `omni_runtime.cpp:465` |
-| `ensureTopicPublisherConnection()` | `omni_runtime.cpp:1938` |
-| `handleSubscribeBroadcast()` | `omni_runtime.cpp:1513` |
-| `broadcastInternal()` | `omni_runtime.cpp:1178` |
-| `onDirectMessage()` → `MSG_BROADCAST` | `omni_runtime.cpp:1584` |
-| `handleTopicBroadcastMessage()` | `omni_runtime.cpp:1236` |
+| `onSMMessage()` → `MSG_TOPIC_PUBLISHER_NOTIFY` | `src/core/omni_runtime.cpp` |
+| `ensureTopicPublisherConnection()` | `src/core/omni_runtime.cpp` |
+| `onSubscribeBroadcast()` | `src/core/omni_runtime.cpp` |
+| `broadcastInternal()` | `src/core/omni_runtime.cpp` |
+| `onDirectMessage()` → `MSG_BROADCAST` | `src/core/omni_runtime.cpp` |
+| `onTopicBroadcastMessage()` | `src/core/omni_runtime.cpp` |
 | SM `handlePublishTopic()` | `service_manager/main.cpp:584` |
 | SM `handleSubscribeTopic()` | `service_manager/main.cpp:644` |
 | SM `sendTopicPublisherNotify()` | `service_manager/main.cpp:685` |
@@ -539,16 +539,13 @@ platform::getMachineId()                              // platform.cpp:636
   ConnectionManager::getOrCreateConnection(local_host_id, remote_host_id, ...)
     │
     ▼
-  TransportFactory::selectPreferredTransport(local_host_id, remote_host_id, shm_name)
-    │
-    ▼
   TransportFactory::isSameMachine(local_host_id, remote_host_id)
     return !local_host_id.empty()
         && !remote_host_id.empty()
         && local_host_id == remote_host_id            // 字符串相等 = 同机
     │
-    ├── 相等 → TransportType::SHM
-    └── 不等 → TransportType::TCP
+    ├── true  → 尝试 SHM，失败自动 fallback TCP
+    └── false → TCP
 ```
 
 ### SHM 降级 TCP

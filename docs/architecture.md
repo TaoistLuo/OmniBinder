@@ -356,9 +356,12 @@ topic 数据不经过 `ServiceManager` 中转。
 `omni-cli` 通过控制面与服务交互，支持：
 
 - 服务列表查询
+- runtime/PID 查询
 - 服务详情查询
 - 接口查询
 - 方法调用
+- 按 PID 设置 runtime 日志级别
+- 按 PID watch IDL 业务接口输入/输出
 
 在指定 `--idl` 时，可进行更友好的结构化输入输出。
 
@@ -376,6 +379,6 @@ topic 数据不经过 `ServiceManager` 中转。
 
 - 通过 `OmniRuntime` 使用统一 API 完成服务注册、发现、调用与订阅
 - 通过 IDL 与 `omni-idlc` 自动生成 Stub / Proxy，减少样板代码
-- 通过 `omni-cli` 查询服务状态、接口信息并直接发起调用
+- 通过 `omni-cli` 查询服务状态/runtime PID、接口信息、直接发起调用，并进行日志和 watch 调试
 
 如果需要查看更细的内部运行时实现、模块边界和调用路径，请参考 `docs/architecture-internals.md`。

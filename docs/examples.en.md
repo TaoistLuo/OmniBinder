@@ -752,4 +752,4 @@ Practical rule of thumb:
 - [Top-level README](../README.en.md)
 - [IDL Specification](idl-specification.en.md)
 - [omni-cli Usage Guide](omni-tool-usage.en.md)
-- [Downstream Sensor/HMI Example](../examples/artifact_sensor_hmi/README.en.md)
+- [Downstream Sensor/HMI Example](../examples/artifact_examples/README.md)

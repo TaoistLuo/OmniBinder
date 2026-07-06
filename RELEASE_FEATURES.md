@@ -146,9 +146,12 @@ OmniBinder 采用控制面与数据面分离架构：
 提供命令行调试与查询能力，支持：
 
 - 服务列表查询
+- runtime/PID 查询
 - 服务详情查询
 - 接口信息查询
 - 远程方法调用
+- 按 PID 设置 runtime 日志级别
+- 按 PID watch IDL 业务接口输入/输出
 
 适合作为联调、验证和部署阶段的辅助工具。
 
@@ -171,7 +174,7 @@ OmniBinder 采用控制面与数据面分离架构：
 
 产品提供独立下游示例：
 
-- `examples/artifact_sensor_hmi/`
+- `examples/artifact_examples/`
 
 该示例展示了如何在独立业务工程中：
 

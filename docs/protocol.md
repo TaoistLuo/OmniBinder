@@ -163,7 +163,7 @@ enum class MessageType : uint16_t {
 
 ### 4.1 服务注册（MSG_REGISTER）
 
-服务初始化时同时创建 TCP 监听和共享内存，然后将所有信息注册到 SM。
+服务初始化时创建 TCP 监听和 SHM UDS listener，然后将可发现信息注册到 SM。当前 SHM 是 per-client 独立 ring 模型，`ServiceInfo` 中不再携带固定 `shm_name`，而是携带服务级 SHM ring 容量配置。
 
 ```
 +------------------+------------------+------------------+
@@ -173,16 +173,15 @@ enum class MessageType : uint16_t {
 | host             | port             | host_id_len      |
 | (N bytes)        | (2 bytes)        | (4 bytes)        |
 +------------------+------------------+------------------+
-| host_id          | shm_name_len     | shm_name         |
-| (N bytes)        | (4 bytes)        | (N bytes)        |
+| host_id          | req_ring_cap     | resp_ring_cap    |
+| (N bytes)        | (4 bytes)        | (4 bytes)        |
 +------------------+------------------+------------------+
 | interface_count  | interfaces...    |
-| (4 bytes)        | (变长)            |
+| (2 bytes)        | (变长)            |
 +------------------+------------------+
 
-shm_name: 服务创建的共享内存名称（如 "/binder_ServiceA"）。
-          同机客户端通过此名称打开 SHM 进行通信。
-          空字符串表示该服务不支持 SHM。
+req_ring_cap / resp_ring_cap: 服务建议的每客户端 SHM request/response ring 容量。
+          客户端同机连接时会创建自己的 SHM，并通过服务端 UDS listener 交换名称和 eventfd。
 
 interfaces 数组中每个元素:
 +------------------+------------------+------------------+
@@ -190,7 +189,7 @@ interfaces 数组中每个元素:
 | (4 bytes)        | (4 bytes)        | (N bytes)        |
 +------------------+------------------+------------------+
 | method_count     | methods...       |
-| (4 bytes)        | (变长)            |
+| (2 bytes)        | (变长)            |
 +------------------+------------------+
 
 methods 数组中每个元素:
@@ -198,6 +197,12 @@ methods 数组中每个元素:
 | method_id        | name_len         | name             |
 | (4 bytes)        | (4 bytes)        | (N bytes)        |
 +------------------+------------------+------------------+
+| param_type_len   | param_type       | return_type_len  |
+| (4 bytes)        | (N bytes)        | (4 bytes)        |
++------------------+------------------+------------------+
+| return_type      | idl_hash         |
+| (N bytes)        | (4 bytes)        |
++------------------+------------------+
 ```
 
 ### 4.2 服务注册响应（MSG_REGISTER_REPLY）
@@ -216,10 +221,7 @@ service_handle:
 ### 4.3 心跳（MSG_HEARTBEAT）
 
 ```
-+------------------+------------------+
-| service_name_len | service_name     |
-| (4 bytes)        | (N bytes)        |
-+------------------+------------------+
+（无 payload）
 ```
 
 ### 4.4 心跳响应（MSG_HEARTBEAT_ACK）
@@ -242,7 +244,7 @@ service_handle:
 
 ### 4.6 服务查询响应（MSG_LOOKUP_REPLY）
 
-客户端通过此响应获取目标服务的完整信息，包括 SHM 名称，从而判断是否可以使用共享内存通信。
+客户端通过此响应获取目标服务的完整信息，包括 host_id 与 SHM ring 容量配置，从而判断是否优先尝试共享内存通信。
 
 ```
 +------------------+----------------------------------------------+
@@ -253,13 +255,14 @@ service_handle:
 found:
   1 = 找到服务，后续为完整的 ServiceInfo 序列化数据
       （格式与 MSG_REGISTER payload 相同：service_name, host,
-       port, host_id, shm_name, interfaces[]）
+       port, host_id, shm_config, interfaces[]）
   0 = 服务不存在，无后续数据
 
-shm_name: 服务的共享内存名称。客户端判断逻辑：
-  if (本机 host_id == 响应中的 host_id) && (shm_name 非空):
-      使用 SHM 连接（打开已有共享内存，获取 slot）
-      通过 UDS (/tmp/binder_<shm_name>.sock) 交换 eventfd
+客户端判断逻辑：
+  if (本机 host_id == 响应中的 host_id):
+      创建 per-client SHM
+      通过服务端 UDS (/tmp/binder_<service>.sock) 交换 SHM 名称和 eventfd
+      若 SHM 握手失败，则 fallback TCP
   else:
       使用 TCP 连接（host:port）
 ```
@@ -280,7 +283,7 @@ shm_name: 服务的共享内存名称。客户端判断逻辑：
 
 services 数组中每个元素为完整的 serialized ServiceInfo，
 格式与 MSG_REGISTER payload 相同（service_name, host, port,
-host_id, shm_name, interfaces[]）。
+host_id, shm_config, interfaces[]）。
 ```
 
 ### 4.9 订阅服务死亡通知（MSG_SUBSCRIBE_SERVICE）
@@ -567,7 +570,7 @@ Service                                    ServiceManager
    |                                             |
    |-------- MSG_REGISTER --------------------->|
    |         {name, host, port, host_id,        |
-   |          shm_name, interfaces[]}            |
+   |          shm_config, interfaces[]}          |
    |                                             |
    |<------- MSG_REGISTER_REPLY ----------------|
    |         {status=OK, handle=1}              |
@@ -587,7 +590,7 @@ ServiceB                ServiceManager              ServiceA
    |                          |                          |
    |<-- MSG_LOOKUP_REPLY -----|                          |
    |    {host, port, host_id, |                          |
-   |     shm_name,            |                          |
+   |     shm_config,          |                          |
    |     interfaces[]}        |                          |
    |                          |                          |
     |  [判断] host_id 相同？                               |
@@ -602,7 +605,7 @@ ServiceB                ServiceManager              ServiceA
    |========= 直接建立连接 (TCP 或 SHM) ================>|
    |                          |                          |
    |--- MSG_INVOKE ------------------------------------ >|
-   |    {interface_id, method_id, params}               |
+   |    {interface_id, idl_hash, method_id, params}     |
    |                          |                          |
    |<-- MSG_INVOKE_REPLY ---------------------------------|
    |    {status, result}      |                          |

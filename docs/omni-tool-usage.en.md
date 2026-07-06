@@ -10,9 +10,12 @@
 `omni-cli` is the command-line debugging tool for OmniBinder. It can be used to:
 
 - list online services
+- list online runtimes / PIDs
 - inspect service interfaces and method signatures
 - invoke service methods
 - display call latency statistics
+- set runtime log levels by PID
+- watch IDL business interface input/output by PID
 
 It supports both:
 
@@ -43,8 +46,11 @@ omni-cli [options] <command> [args]
 | Command | Description |
 |---|---|
 | `list` | List online services |
+| `ps` | List online runtime PIDs, roles, log levels, and services |
 | `info <service>` | Show service details |
 | `call <service> <method> [params]` | Invoke a service method |
+| `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | Set a runtime log level by PID |
+| `watch --pid <pid> --idl <file.bidl> [--filter <method\|topic>]` | Watch business interface I/O from a runtime PID |
 
 ---
 
@@ -72,11 +78,31 @@ Total: 2 services online
 
 ---
 
-### 2. `info`
+### 2. `ps`
+
+Lists runtime PIDs currently connected to ServiceManager. Hidden diagnostic services are not shown in the service list.
+
+```bash
+omni-cli ps
+```
+
+Example:
+
+```bash
+$ omni-cli ps
+PID      ROLE     LOG   PROCESS              SERVICES
+-------- -------- ----- -------------------- ----------------
+12345    service  I     pid-12345            SensorService
+12346    client   I     pid-12346            -
+```
+
+---
+
+### 3. `info`
 
 Shows interface and method definitions for a service.
 
-#### 2.1 Basic mode (without IDL)
+#### 3.1 Basic mode (without IDL)
 
 Displays type names only:
 
@@ -84,7 +110,7 @@ Displays type names only:
 omni-cli info <service_name>
 ```
 
-#### 2.2 IDL-aware mode
+#### 3.2 IDL-aware mode
 
 Expands full field definitions for structs:
 
@@ -99,11 +125,11 @@ Notes:
 
 ---
 
-### 3. `call`
+### 4. `call`
 
 Invokes a service method.
 
-#### 3.1 Hex mode
+#### 4.1 Hex mode
 
 Use a hex string as input and get hex output.
 
@@ -111,7 +137,7 @@ Use a hex string as input and get hex output.
 omni-cli call <service> <method> [hex_params]
 ```
 
-#### 3.2 JSON mode
+#### 4.2 JSON mode
 
 Use JSON input and get formatted JSON output.
 
@@ -135,6 +161,47 @@ Notes:
 - JSON input is auto-detected when the argument starts with `{`
 - even when `--idl` is specified, hex input is still supported for backward compatibility
 - response time is displayed in milliseconds
+
+---
+
+### 5. `log set`
+
+Sets the log level of a runtime by PID. Use `omni-cli ps` to find the PID.
+
+```bash
+omni-cli log set --pid <pid> --level <F|E|W|I|D|V|O>
+```
+
+Levels: `F` fatal, `E` error, `W` warn, `I` info, `D` debug, `V` verbose, `O` off.
+
+Example:
+
+```bash
+omni-cli log set --pid 12345 --level D
+```
+
+---
+
+### 6. `watch`
+
+Watches IDL business interface input/output from a runtime PID. The watch data path reuses OmniBinder's normal topic data channel: same-machine traffic uses SHM automatically, while cross-machine traffic uses TCP. ServiceManager is only used for start/stop control.
+
+```bash
+omni-cli watch --pid <pid> --idl <file.bidl> [--filter <method|topic>]
+```
+
+Behavior:
+
+- Service PID: observes RPC input and topic publish output.
+- Client PID: observes RPC output and subscription input.
+- ServiceManager control messages, lookup, heartbeat, and other internal control flows are not printed.
+- `--filter` matches decoded method/topic names, for example `GetLatestData` or `broadcast`.
+
+Example:
+
+```bash
+omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatestData
+```
 
 ---
 

@@ -100,31 +100,37 @@ The following data highlights typical OmniBinder latency on the **same-host SHM 
 
 - Transport: automatic TCP + SHM selection (SHM used for same-host traffic)
 - RPC warmup rounds: 50; RPC measured rounds: 1000 per case
-- Topic warmup rounds: 10; topic measured rounds: 1000 per case
+- Topic mode: server publishes rotating topics every 500us; client uses `pollOnce(0)` busy-spin receive loop
+- Test service SHM ring: 64KB / 64KB
+- Topic warmup rounds: 100; topic measured rounds: 1000 per case
 
 | Test Item | Samples | Average | 95% Case | 99% Case | Notes |
 |-----------|---------|---------|----------|----------|-------|
-| RPC Echo (0 bytes) | 1000 | 70.5 us | 93 us | 123 us | Empty payload, protocol overhead |
-| RPC Echo (64 bytes) | 1000 | 68.8 us | 92 us | 111 us | Common small payload RPC |
-| RPC Echo (256 bytes) | 1000 | 73.0 us | 97 us | 112 us | Common small payload RPC |
-| RPC Echo (1024 bytes) | 1000 | 70.2 us | 97 us | 121 us | 1KB payload |
-| RPC Echo (4096 bytes) | 1000 | 75.7 us | 101 us | 123 us | 4KB payload, enlarged SHM ring |
-| RPC Echo (8192 bytes) | 1000 | 83.5 us | 112 us | 141 us | 8KB payload, enlarged SHM ring |
-| RPC Add (2 x int32) | 1000 | 71.2 us | 91 us | 118 us | Small compute RPC |
-| Topic pub/sub (64 bytes) | 1000 | 31.2 us | 55 us | 66 us | Small broadcast data |
-| Topic pub/sub (256 bytes) | 1000 | 30.4 us | 57 us | 74 us | Common small broadcast data |
-| Topic pub/sub (1024 bytes) | 1000 | 32.1 us | 58 us | 74 us | 1KB broadcast data |
-| Topic pub/sub (8192 bytes) | 1000 | 41.0 us | 65 us | 79 us | 8KB broadcast data |
+| RPC EchoBytes (0 bytes) | 1000 | 8.5 us | 10 us | 34 us | Empty payload, protocol overhead |
+| RPC EchoBytes (64 bytes) | 1000 | 13.1 us | 39 us | 54 us | Common small payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 9.1 us | 13 us | 44 us | Common small payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 11.4 us | 33 us | 56 us | 1KB payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 36.5 us | 52 us | 65 us | 4KB payload, enlarged SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 50.7 us | 68 us | 85 us | 8KB payload, enlarged SHM ring |
+| RPC EchoInt32 | 1000 | 8.1 us | 9 us | 36 us | Small primitive RPC |
+| RPC EchoStruct | 1000 | 18.0 us | 36 us | 51 us | Struct RPC |
+| RPC Add (2 x int32) | 1000 | 9.7 us | 24 us | 44 us | Small compute RPC |
+| Topic pub/sub (0 bytes) | 1000 | 4.1 us | 9 us | 15 us | Empty broadcast payload |
+| Topic pub/sub (64 bytes) | 1000 | 5.0 us | 11 us | 20 us | Small broadcast data |
+| Topic pub/sub (256 bytes) | 1000 | 4.5 us | 10 us | 19 us | Common small broadcast data |
+| Topic pub/sub (1024 bytes) | 1000 | 5.6 us | 11 us | 18 us | 1KB broadcast data |
+| Topic pub/sub (4096 bytes) | 1000 | 10.2 us | 17 us | 23 us | 4KB broadcast data |
+| Topic pub/sub (8192 bytes) | 1000 | 17.0 us | 28 us | 43 us | 8KB broadcast data |
 
 Based on the full report:
 
-- **Common 0~1024 byte RPC** averages around **68.8~73.0 us**
-- **4096~8192 byte RPC payloads** average around **75.7~83.5 us** under enlarged SHM-ring configuration
-- **Topic pub/sub** averages around **30.4~41.0 us**
+- **Common 0~1024 byte RPC** averages around **8.5~13.1 us**
+- **4096~8192 byte RPC payloads** average around **36.5~50.7 us** under enlarged SHM-ring configuration
+- **Topic pub/sub** averages around **4.1~17.0 us**
 
 > **Performance note:** the current SHM path uses an `eventfd + EventLoop` event-driven model.
 > The latency numbers mainly reflect serialization, shared-memory copies, eventfd wakeups, epoll scheduling, and application-side handling.
-> The `4096 / 8192 bytes` cases use a service-level `16KB / 16KB` SHM ring rather than the default `4KB / 4KB` configuration.
+> The current performance report uses a service-level `64KB / 64KB` SHM ring rather than the default small SHM-ring configuration.
 
 ---
 

@@ -124,7 +124,7 @@ OmniBinder 的内部实现分成两个平面：
 
 - `Service* service`
 - `TcpTransportServer* server`
-- `ShmTransport* shm_server`
+- `ShmTransport* shm_transport`
 - `uint16_t port`
 - `std::map<int, ITransport*> client_transports`
 - `std::map<int, Buffer*> client_recv_buffers`
@@ -141,7 +141,7 @@ OmniBinder 的内部实现分成两个平面：
 
 - `TcpTransport* transport`
 - `Buffer recv_buffer`
-- `std::map<uint32_t, Message*> pending_replies_`
+- `std::map<uint32_t, PendingReplySlot> pending_replies_`
 
 ### 5.3 核心职责
 
@@ -241,7 +241,7 @@ reply wait 期间只处理：
 - `topic_name_to_id_`
 - `callbacks_by_id_`
 - `tcp_subscribers_`
-- `shm_subscriber_services_`
+- `shm_subscribers_`
 - `published_topics`
 - `published_topic_owners_`
 
@@ -502,7 +502,7 @@ ServiceManager
   -> ServiceRegistry 删除服务
   -> DeathNotifier 生成死亡通知
   -> 通过控制面 TCP 发送给订阅者
-  -> OmniRuntime::handleSMMessage()
+  -> OmniRuntime::onSMMessage()
   -> 执行本地 death callback
 ```
 
@@ -519,7 +519,7 @@ Caller
 Service Side
   -> ServiceHostRuntime::onServiceClientData()
   -> processServiceClientMessages()
-  -> OmniRuntime::handleInvokeRequest()
+  -> OmniRuntime::onInvokeRequest()
   -> Service::onInvoke()
   -> 构造 MSG_INVOKE_REPLY
   -> 返回 caller
@@ -544,7 +544,7 @@ Caller
 Service Side
   -> EventLoop 被 master_eventfd 唤醒
   -> ShmTransport::serverRecv() 遍历所有 client_contexts_，drain 每个 client 的 request ring
-  -> OmniRuntime::handleShmRequest()
+  -> OmniRuntime::onShmRequest()
   -> ServiceHostRuntime::onShmRequest()
   -> OmniRuntime 执行 invoke 细节与 reply 构造
   -> ShmTransport::serverSend(client_id) 写入对应 client 的 response ring
@@ -622,7 +622,7 @@ ServiceManager
   -> 向 subscriber 发送 MSG_TOPIC_PUBLISHER_NOTIFY
 
 Subscriber
-  -> OmniRuntime::handleSMMessage()
+  -> OmniRuntime::onSMMessage()
   -> ensureTopicPublisherConnection()
   -> ConnectionManager 建立到 publisher 的直连
   -> 发送 MSG_SUBSCRIBE_BROADCAST 给 publisher

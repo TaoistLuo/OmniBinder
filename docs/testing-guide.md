@@ -670,8 +670,16 @@ timeout 10s ./build/target/example/example_cpp_sensor_client --sm-host 127.0.0.1
 
 ```bash
 ./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 list
+./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 ps
 ./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 info SensorService
 ./build/target/bin/omni-cli --idl examples/sensor_service.bidl -h 127.0.0.1 -p 19930 call SensorService GetLatestData
+```
+
+诊断命令可按实际 PID 进一步验证：
+
+```bash
+./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 log set --pid <pid> --level D
+./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 watch --pid <pid> --idl examples/sensor_service.bidl --filter GetLatestData
 ```
 
 ### 7.3 omni-idlc
@@ -706,6 +714,7 @@ cd examples
    - `test_integration`
    - `test_full_integration`
    - `test_control_plane_and_fallback`
+   - `test_diagnostics_watch`
    - `test_threadsafe_client_and_reconnect`
    - `test_runtime_stats`
    - `test_error_logging`
@@ -725,7 +734,7 @@ cd examples
 ### 9.1 关键回归
 
 ```bash
-ctest --test-dir build --output-on-failure -R "test_transport|test_topic_manager|test_shm_transport|test_integration|test_full_integration|test_control_plane_and_fallback|test_threadsafe_client_and_reconnect|test_runtime_stats|test_error_logging"
+ctest --test-dir build --output-on-failure -R "test_transport|test_topic_manager|test_shm_transport|test_integration|test_full_integration|test_control_plane_and_fallback|test_diagnostics_watch|test_threadsafe_client_and_reconnect|test_runtime_stats|test_error_logging"
 ```
 
 ### 9.2 性能测试

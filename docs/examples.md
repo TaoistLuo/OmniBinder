@@ -679,9 +679,9 @@ ctest --output-on-failure
 
 | 测试组 | 测试内容 |
 |--------|---------|
-| 双通道初始化 | 服务同时创建 TCP + SHM，SM 返回 shm_name |
-| SHM 自动选择 | 同机客户端自动通过 SHM 调用服务 |
-| 多客户端共享 | 3 个客户端并发 + 5 个客户端顺序共享同一块 SHM |
+| 双通道初始化 | 服务同时创建 TCP listener + SHM UDS listener，SM 返回 host_id/shm_config |
+| SHM 自动选择 | 同机客户端自动创建 per-client SHM 并通过 UDS 握手 |
+| 多客户端独立 SHM | 3 个客户端并发 + 5 个客户端顺序使用各自独立 SHM ring |
 | 广播/订阅 | 发布者通过 SHM 广播数据到订阅者 |
 | 死亡通知 | 服务进程崩溃后收到死亡回调 |
 | 生命周期 | 服务注销后 SM 查询不到 |
