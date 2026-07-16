@@ -50,7 +50,7 @@ omni-cli [options] <command> [args]
 | `info <service>` | Show service details |
 | `call <service> <method> [params]` | Invoke a service method |
 | `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | Set a runtime log level by PID |
-| `watch --pid <pid> --idl <file.bidl> [--filter <method\|topic>]` | Watch business interface I/O from a runtime PID |
+| `watch --pid <pid> --idl <file.bidl> [--filter <name>]` | Watch business interface I/O from a runtime PID |
 
 ---
 
@@ -92,15 +92,25 @@ Example:
 $ omni-cli ps
 PID      ROLE     LOG   PROCESS              SERVICES
 -------- -------- ----- -------------------- ----------------
-12345    service  I     pid-12345            SensorService
-12346    client   I     pid-12346            -
+12345    service  I     example_cpp_sensor_server    SensorService
+12346    client   I     example_cpp_sensor_client    -
 ```
+
+The `PROCESS` column is the executable name reported by the runtime at startup. It has a minimum display width of 20 characters; longer names are printed in full and move the `SERVICES` column to the right. A process registered by an older runtime must be restarted before this field is refreshed to the real process name.
 
 ---
 
 ### 3. `info`
 
-Shows interface and method definitions for a service.
+Shows a service's published topics, interface, and method definitions. The Published Topics section is always printed before interfaces:
+
+```text
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
+```
+
+It shows `(none)` when the service publishes no topics. If service lookup succeeds but the dedicated topic query fails, it shows `(unavailable: <reason>)` and continues with interfaces; a missing service instead returns an error before this section.
 
 #### 3.1 Basic mode (without IDL)
 
@@ -122,6 +132,7 @@ Notes:
 
 - imported IDL dependencies are loaded recursively
 - cross-package types such as `common.StatusResponse` are expanded correctly
+- `--idl` runs the same strict semantic validation as `omni-idlc` and can fail before connecting to ServiceManager
 
 ---
 
@@ -139,7 +150,7 @@ omni-cli call <service> <method> [hex_params]
 
 #### 4.2 JSON mode
 
-Use JSON input and get formatted JSON output.
+Use IDL type information to encode input. Decodable non-`void` responses are formatted as JSON; otherwise output falls back to hex (with a warning when decoding fails).
 
 ```bash
 omni-cli --idl <file.bidl> call <service> <method> [json_params]
@@ -148,18 +159,21 @@ omni-cli --idl <file.bidl> call <service> <method> [json_params]
 Examples:
 
 ```bash
-omni-cli --idl sensor_service.bidl call SensorService GetLatestData
+omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
 
-omni-cli --idl sensor_service.bidl call SensorService SetThreshold \
+omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
   '{"command_type":1,"target":"sensor1","value":100}'
 
-omni-cli --idl sensor_service.bidl call SensorService ResetSensor 1
+omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1
 ```
 
 Notes:
 
-- JSON input is auto-detected when the argument starts with `{`
-- even when `--idl` is specified, hex input is still supported for backward compatibility
+- objects beginning with `{` and arrays beginning with `[` are parsed as JSON
+- known scalar parameters are parsed from unwrapped CLI text; strings are raw arguments (`EchoString hello`), so `EchoString '"hello"'` includes the quotes
+- non-scalar input beginning with neither `{` nor `[` is parsed as hex for backward compatibility
+- every declared struct field is required; the JSON codec does not currently support `bytes`, including nested uses
+- JSON numbers use a lightweight number representation, so `int64`/`uint64` values outside the IEEE-754 exact integer range are not guaranteed to remain exact
 - response time is displayed in milliseconds
 
 ---
@@ -187,7 +201,7 @@ omni-cli log set --pid 12345 --level D
 Watches IDL business interface input/output from a runtime PID. The watch data path reuses OmniBinder's normal topic data channel: same-machine traffic uses SHM automatically, while cross-machine traffic uses TCP. ServiceManager is only used for start/stop control.
 
 ```bash
-omni-cli watch --pid <pid> --idl <file.bidl> [--filter <method|topic>]
+omni-cli watch --pid <pid> --idl <file.bidl> [--filter <name>]
 ```
 
 Behavior:
@@ -195,7 +209,7 @@ Behavior:
 - Service PID: observes RPC input and topic publish output.
 - Client PID: observes RPC output and subscription input.
 - ServiceManager control messages, lookup, heartbeat, and other internal control flows are not printed.
-- `--filter` matches decoded method/topic names, for example `GetLatestData` or `broadcast`.
+- `--filter` matches decoded RPC method names or the generic direction names `broadcast` and `subscribe`. Filtering happens before topic payload decoding, so actual topic names such as `SensorUpdate` do not match; events still named `?` bypass this filter.
 
 Example:
 
@@ -214,7 +228,7 @@ omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatest
 | `bool` | boolean | `true`, `false` |
 | integer types | number | `42`, `-10` |
 | float types | number | `3.14`, `25.5` |
-| `string` | string | `"hello"` |
+| `string` | raw CLI string | `hello` |
 | `struct` | object | `{"field": value}` |
 | `array<T>` | array | `[1, 2, 3]` |
 
@@ -224,9 +238,7 @@ Example inputs:
 42
 ```
 
-```json
-"hello world"
-```
+For a scalar string, pass one raw shell argument such as `'hello world'`; do not preserve extra JSON quote characters.
 
 ```json
 {
@@ -293,7 +305,10 @@ Possible reasons:
 
 1. `--idl` was not provided
 2. the IDL path is wrong or cannot be resolved
-3. the response type is a cross-package type and the complete IDL chain is not available
+3. the response type cannot be resolved from the complete IDL/import chain, or decoding failed
+4. the type contains `bytes`, which the current JSON codec does not support
+
+Cross-package structs decode normally when the complete import chain is available.
 
 ### Q2: How do I know what parameters a method expects?
 

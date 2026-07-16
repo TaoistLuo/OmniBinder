@@ -131,6 +131,8 @@ const char* messageTypeToString(MessageType type) {
     case MessageType::MSG_TOPIC_PUBLISHER_NOTIFY:  return "TOPIC_PUBLISHER_NOTIFY";
     case MessageType::MSG_UNPUBLISH_TOPIC:         return "UNPUBLISH_TOPIC";
     case MessageType::MSG_UNSUBSCRIBE_TOPIC:       return "UNSUBSCRIBE_TOPIC";
+    case MessageType::MSG_QUERY_PUBLISHED_TOPICS:  return "QUERY_PUBLISHED_TOPICS";
+    case MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY: return "QUERY_PUBLISHED_TOPICS_REPLY";
     case MessageType::MSG_RUNTIME_HELLO:           return "RUNTIME_HELLO";
     case MessageType::MSG_RUNTIME_HELLO_REPLY:     return "RUNTIME_HELLO_REPLY";
     case MessageType::MSG_DIAG_SET_LOG_LEVEL:      return "DIAG_SET_LOG_LEVEL";
@@ -188,6 +190,40 @@ void serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
             return;
         }
     }
+}
+
+bool serializePublishedTopicsReply(bool found,
+                                   const std::vector<std::string>& topics,
+                                   Buffer& buf) {
+    if (topics.size() > MAX_PUBLISHED_TOPICS || (!found && !topics.empty())) {
+        return false;
+    }
+
+    size_t aggregate_bytes = 0;
+    for (size_t i = 0; i < topics.size(); ++i) {
+        if (topics[i].empty()
+            || topics[i].size() > MAX_TOPIC_NAME_LENGTH
+            || topics[i].size() > MAX_PUBLISHED_TOPICS_BYTES - aggregate_bytes) {
+            return false;
+        }
+        aggregate_bytes += topics[i].size();
+    }
+
+    Buffer encoded;
+    if (!encoded.writeBool(found)) {
+        return false;
+    }
+    if (found) {
+        if (!encoded.writeUint32(static_cast<uint32_t>(topics.size()))) {
+            return false;
+        }
+        for (size_t i = 0; i < topics.size(); ++i) {
+            if (!encoded.writeString(topics[i])) {
+                return false;
+            }
+        }
+    }
+    return buf.writeRaw(encoded.data(), encoded.size());
 }
 
 void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {

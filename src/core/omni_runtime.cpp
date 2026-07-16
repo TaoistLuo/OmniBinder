@@ -229,6 +229,15 @@ int OmniRuntime::listServices(std::vector<ServiceInfo>& services) {
 int OmniRuntime::queryInterfaces(const std::string& name, std::vector<InterfaceInfo>& ifaces) {
     return impl_->queryInterfaces(name, ifaces);
 }
+int OmniRuntime::queryPublishedTopics(const std::string& name,
+                                      std::vector<std::string>& topics) {
+    return impl_->queryPublishedTopics(name, topics);
+}
+int OmniRuntime::queryPublishedTopics(const std::string& name,
+                                      std::vector<std::string>& topics,
+                                      uint32_t timeout_ms) {
+    return impl_->queryPublishedTopics(name, topics, timeout_ms);
+}
 
 int OmniRuntime::connectService(const std::string& name) {
     return impl_->connectService(name);
@@ -501,7 +510,12 @@ bool OmniRuntime::Impl::sendToSMWithinTimeout(const Message& msg, uint32_t timeo
 }
 
 int OmniRuntime::Impl::sendSMRequestAndWaitReply(Message& msg, Message& reply) {
-    uint32_t total_timeout_ms = effectiveTimeout(0);
+    return sendSMRequestAndWaitReply(msg, reply, 0);
+}
+
+int OmniRuntime::Impl::sendSMRequestAndWaitReply(Message& msg, Message& reply,
+                                                 uint32_t timeout_ms) {
+    uint32_t total_timeout_ms = effectiveTimeout(timeout_ms);
     uint32_t send_elapsed_ms = 0;
     if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
@@ -638,6 +652,7 @@ void OmniRuntime::Impl::onSMMessage(const Message& msg) {
     if (type == MessageType::MSG_LOOKUP_REPLY
         || type == MessageType::MSG_LIST_SERVICES_REPLY
         || type == MessageType::MSG_QUERY_INTERFACES_REPLY
+        || type == MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY
         || type == MessageType::MSG_SUBSCRIBE_SERVICE_REPLY
         || type == MessageType::MSG_REGISTER_REPLY
         || type == MessageType::MSG_UNREGISTER_REPLY
@@ -706,7 +721,7 @@ void OmniRuntime::Impl::onSMMessage(const Message& msg) {
         service_cache_.erase(svc_name);
         conn_mgr_->removeConnection(svc_name);
 
-        stopHeartbeat(svc_name);
+        pauseHeartbeat(svc_name);
 
         std::map<std::string, ReconnectConfig>::iterator rc_it = reconnect_configs_.find(svc_name);
         if (rc_it != reconnect_configs_.end() && rc_it->second.enabled) {
@@ -873,11 +888,12 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
         loop_->addFd(entry->shm_transport->reqEventFd(), EventLoop::EVENT_READ,
             [this, entry, name](int fd, uint32_t) {
                 platform::eventFdConsume(fd);
-                if (!entry->shm_transport) return;
+                ShmTransport* transport = entry->shm_transport;
+                if (!transport) return;
                 uint8_t buf[65536];
                 uint32_t from_id = 0;
                 while (true) {
-                    int ret = entry->shm_transport->serverRecv(buf, sizeof(buf), from_id);
+                    int ret = transport->serverRecv(buf, sizeof(buf), from_id);
                     if (ret <= 0) break;
                     onShmRequest(name, entry, from_id, buf, static_cast<size_t>(ret));
                 }
@@ -896,14 +912,16 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
     // On Windows: each new client gets a per-client pipe, registered here.
     entry->shm_transport->setOnNewClientNotifyFd(
         [this, entry, name](int fd) {
+            entry->shm_client_notify_fds.insert(fd);
             loop_->addFd(fd, EventLoop::EVENT_READ,
                 [this, entry, name](int efd, uint32_t) {
                     platform::eventFdConsume(efd);
-                    if (!entry->shm_transport) return;
+                    ShmTransport* transport = entry->shm_transport;
+                    if (!transport) return;
                     uint8_t buf[65536];
                     uint32_t from_id = 0;
                     while (true) {
-                        int ret = entry->shm_transport->serverRecv(buf, sizeof(buf), from_id);
+                        int ret = transport->serverRecv(buf, sizeof(buf), from_id);
                         if (ret <= 0) break;
                         onShmRequest(name, entry, from_id, buf, static_cast<size_t>(ret));
                     }
@@ -972,12 +990,29 @@ void OmniRuntime::Impl::removeServiceShmFromLoop(LocalServiceEntry* entry) {
         return;
     }
 
-    if (entry->shm_transport->reqEventFd() >= 0) {
-        loop_->removeFd(entry->shm_transport->reqEventFd());
+    // Set shm_transport to NULL first so any in-flight callback on the
+    // owner thread sees the cleared pointer and returns early, avoiding
+    // use-after-free when unregisterService is called re-entrantly from
+    // a service callback.
+    ShmTransport* transport = entry->shm_transport;
+    entry->shm_transport = NULL;
+
+    if (transport->reqEventFd() >= 0) {
+        loop_->removeFd(transport->reqEventFd());
     }
-    if (entry->shm_transport->udsListenFd() >= 0) {
-        loop_->removeFd(entry->shm_transport->udsListenFd());
+    if (transport->udsListenFd() >= 0) {
+        loop_->removeFd(transport->udsListenFd());
     }
+
+    for (std::set<int>::iterator it = entry->shm_client_notify_fds.begin();
+         it != entry->shm_client_notify_fds.end(); ++it) {
+        loop_->removeFd(*it);
+    }
+    entry->shm_client_notify_fds.clear();
+
+    // Restore so the caller (which may wrap this in its own cleanup) can
+    // still close and delete the transport through the entry.
+    entry->shm_transport = transport;
 }
 
 int OmniRuntime::Impl::unregisterService(Service* service) {
@@ -1148,6 +1183,51 @@ int OmniRuntime::Impl::queryInterfacesInternal(const std::string& service_name,
     return 0;
 }
 
+int OmniRuntime::Impl::queryPublishedTopics(const std::string& service_name,
+                                            std::vector<std::string>& topics) {
+    return queryPublishedTopics(service_name, topics, 0);
+}
+
+int OmniRuntime::Impl::queryPublishedTopics(const std::string& service_name,
+                                            std::vector<std::string>& topics,
+                                            uint32_t timeout_ms) {
+    return callSerialized([this, &service_name, &topics, timeout_ms]() -> int {
+        return queryPublishedTopicsInternal(service_name, topics, timeout_ms);
+    });
+}
+
+int OmniRuntime::Impl::queryPublishedTopicsInternal(
+    const std::string& service_name, std::vector<std::string>& topics,
+    uint32_t timeout_ms) {
+    Message msg(MessageType::MSG_QUERY_PUBLISHED_TOPICS, allocSequence());
+    if (!msg.payload.writeString(service_name)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+
+    Message reply;
+    int ret = sendSMRequestAndWaitReply(msg, reply, timeout_ms);
+    if (ret != 0) {
+        return ret;
+    }
+    if (reply.getType() != MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY) {
+        return static_cast<int>(ErrorCode::ERR_PROTOCOL_ERROR);
+    }
+
+    BufferView rbuf(reply.payload.data(), reply.payload.size());
+    bool found = false;
+    std::vector<std::string> decoded_topics;
+    if (!deserializePublishedTopicsReply(rbuf, found, decoded_topics)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
+    if (!found) {
+        topics.clear();
+        return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
+    }
+
+    topics.swap(decoded_topics);
+    return 0;
+}
+
 // ============================================================
 // 连接管理
 // ============================================================
@@ -1192,7 +1272,16 @@ int OmniRuntime::Impl::disconnectServiceInternal(const std::string& service_name
         conn_mgr_->removeConnection(service_name);
     }
     service_cache_.erase(service_name);
-    reconnect_configs_.erase(service_name);
+    std::map<std::string, ReconnectConfig>::iterator reconnect_it =
+        reconnect_configs_.find(service_name);
+    if (reconnect_it != reconnect_configs_.end()) {
+        if (reconnect_it->second.timer_id > 0) {
+            loop_->cancelTimer(reconnect_it->second.timer_id);
+        }
+        reconnect_configs_.erase(reconnect_it);
+    }
+    pauseHeartbeat(service_name);
+    heartbeat_states_.erase(service_name);
     OMNI_LOG_INFO(LOG_TAG, "disconnectService for %s", service_name.c_str());
     return 0;
 }
@@ -1233,12 +1322,7 @@ void OmniRuntime::Impl::tryReconnectService(const std::string& service_name) {
         OMNI_LOG_INFO(LOG_TAG, "Successfully reconnected to %s", service_name.c_str());
         config.current_retry = 0;
         config.timer_id = 0;
-        // Reset heartbeat state so the periodic timer doesn't false-timeout
-        std::map<std::string, HeartbeatState>::iterator hb_it = heartbeat_states_.find(service_name);
-        if (hb_it != heartbeat_states_.end()) {
-            hb_it->second.last_ack_time = platform::currentTimeMs();
-            hb_it->second.pending = false;
-        }
+        resumeHeartbeat(service_name);
     } else {
         config.current_retry++;
         if (config.max_retries > 0 && config.current_retry >= config.max_retries) {
@@ -1288,17 +1372,7 @@ void OmniRuntime::Impl::startHeartbeat(const std::string& service_name, uint32_t
         HeartbeatState& state = heartbeat_states_[service_name];
         state.interval_ms = interval_ms > 0 ? interval_ms : 5000;
         state.timeout_ms = timeout_ms > 0 ? timeout_ms : 10000;
-        state.last_ack_time = platform::currentTimeMs();
-        state.pending = false;
-
-        if (state.timer_id > 0) {
-            loop_->cancelTimer(state.timer_id);
-        }
-
-        state.timer_id = loop_->addTimer(state.interval_ms, [this, service_name]() {
-            sendHeartbeatToService(service_name);
-            checkHeartbeatTimeout(service_name);
-        }, true);
+        resumeHeartbeat(service_name);
 
         OMNI_LOG_INFO(LOG_TAG, "Started heartbeat for %s (interval=%u ms, timeout=%u ms)",
                        service_name.c_str(), state.interval_ms, state.timeout_ms);
@@ -1309,13 +1383,34 @@ void OmniRuntime::Impl::stopHeartbeat(const std::string& service_name) {
     callSerialized([this, &service_name]() {
         std::map<std::string, HeartbeatState>::iterator it = heartbeat_states_.find(service_name);
         if (it != heartbeat_states_.end()) {
-            if (it->second.timer_id > 0) {
-                loop_->cancelTimer(it->second.timer_id);
-            }
+            pauseHeartbeat(service_name);
             heartbeat_states_.erase(it);
             OMNI_LOG_INFO(LOG_TAG, "Stopped heartbeat for %s", service_name.c_str());
         }
     });
+}
+
+void OmniRuntime::Impl::pauseHeartbeat(const std::string& service_name) {
+    std::map<std::string, HeartbeatState>::iterator it = heartbeat_states_.find(service_name);
+    if (it == heartbeat_states_.end()) return;
+    if (it->second.timer_id > 0) {
+        loop_->cancelTimer(it->second.timer_id);
+        it->second.timer_id = 0;
+    }
+    it->second.pending = false;
+}
+
+void OmniRuntime::Impl::resumeHeartbeat(const std::string& service_name) {
+    std::map<std::string, HeartbeatState>::iterator it = heartbeat_states_.find(service_name);
+    if (it == heartbeat_states_.end()) return;
+    HeartbeatState& state = it->second;
+    if (state.timer_id > 0) loop_->cancelTimer(state.timer_id);
+    state.last_ack_time = platform::currentTimeMs();
+    state.pending = false;
+    state.timer_id = loop_->addTimer(state.interval_ms, [this, service_name]() {
+        sendHeartbeatToService(service_name);
+        checkHeartbeatTimeout(service_name);
+    }, true);
 }
 
 void OmniRuntime::Impl::sendHeartbeatToService(const std::string& service_name) {
@@ -1358,12 +1453,16 @@ void OmniRuntime::Impl::checkHeartbeatTimeout(const std::string& service_name) {
         }
 
         std::map<std::string, ReconnectConfig>::iterator rc_it = reconnect_configs_.find(service_name);
-        if (rc_it != reconnect_configs_.end() && rc_it->second.enabled) {
+        const bool reconnect_enabled = rc_it != reconnect_configs_.end()
+            && rc_it->second.enabled;
+        if (reconnect_enabled) {
             rc_it->second.current_retry = 0;
             scheduleReconnect(service_name, rc_it->second.interval_ms);
         }
-
-        stopHeartbeat(service_name);
+        pauseHeartbeat(service_name);
+        if (!reconnect_enabled) {
+            heartbeat_states_.erase(service_name);
+        }
     }
 }
 
@@ -2098,7 +2197,7 @@ void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
     if (conn_mgr_) {
         conn_mgr_->removeConnection(service_name);
     }
-    stopHeartbeat(service_name);
+    pauseHeartbeat(service_name);
     
     // Trigger reconnect if auto-reconnect is enabled for this service
     std::map<std::string, ReconnectConfig>::iterator rc_it = reconnect_configs_.find(service_name);
@@ -2537,13 +2636,17 @@ int OmniRuntime::Impl::resetStatsInternal() {
 }
 
 void OmniRuntime::Impl::clearServiceCache() {
-    service_cache_.clear();
+    callSerialized([this]() {
+        service_cache_.clear();
+    });
 }
 
 void OmniRuntime::Impl::closeAllConnections() {
-    if (conn_mgr_) {
-        conn_mgr_->closeAll();
-    }
+    callSerialized([this]() {
+        if (conn_mgr_) {
+            conn_mgr_->closeAll();
+        }
+    });
 }
 
 int OmniRuntime::Impl::enableDiagnostic(const std::string& service_name) {

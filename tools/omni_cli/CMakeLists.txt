@@ -2,6 +2,7 @@
 
 add_executable(omni-cli
     main.cpp
+    info_formatter.cpp
     simple_json.cpp
     type_resolver.cpp
     type_codec.cpp

@@ -106,27 +106,27 @@ The following data highlights typical OmniBinder latency on the **same-host SHM 
 
 | Test Item | Samples | Average | 95% Case | 99% Case | Notes |
 |-----------|---------|---------|----------|----------|-------|
-| RPC EchoBytes (0 bytes) | 1000 | 8.5 us | 10 us | 34 us | Empty payload, protocol overhead |
-| RPC EchoBytes (64 bytes) | 1000 | 13.1 us | 39 us | 54 us | Common small payload RPC |
-| RPC EchoBytes (256 bytes) | 1000 | 9.1 us | 13 us | 44 us | Common small payload RPC |
-| RPC EchoBytes (1024 bytes) | 1000 | 11.4 us | 33 us | 56 us | 1KB payload |
-| RPC EchoBytes (4096 bytes) | 1000 | 36.5 us | 52 us | 65 us | 4KB payload, enlarged SHM ring |
-| RPC EchoBytes (8192 bytes) | 1000 | 50.7 us | 68 us | 85 us | 8KB payload, enlarged SHM ring |
-| RPC EchoInt32 | 1000 | 8.1 us | 9 us | 36 us | Small primitive RPC |
-| RPC EchoStruct | 1000 | 18.0 us | 36 us | 51 us | Struct RPC |
-| RPC Add (2 x int32) | 1000 | 9.7 us | 24 us | 44 us | Small compute RPC |
-| Topic pub/sub (0 bytes) | 1000 | 4.1 us | 9 us | 15 us | Empty broadcast payload |
-| Topic pub/sub (64 bytes) | 1000 | 5.0 us | 11 us | 20 us | Small broadcast data |
-| Topic pub/sub (256 bytes) | 1000 | 4.5 us | 10 us | 19 us | Common small broadcast data |
-| Topic pub/sub (1024 bytes) | 1000 | 5.6 us | 11 us | 18 us | 1KB broadcast data |
-| Topic pub/sub (4096 bytes) | 1000 | 10.2 us | 17 us | 23 us | 4KB broadcast data |
-| Topic pub/sub (8192 bytes) | 1000 | 17.0 us | 28 us | 43 us | 8KB broadcast data |
+| RPC EchoBytes (0 bytes) | 1000 | 9.9 us | 17 us | 54 us | Empty payload, protocol overhead |
+| RPC EchoBytes (64 bytes) | 1000 | 13.4 us | 45 us | 55 us | Common small payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 11.9 us | 45 us | 60 us | Common small payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 19.1 us | 48 us | 66 us | 1KB payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 44.9 us | 67 us | 97 us | 4KB payload, enlarged SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 61.2 us | 84 us | 119 us | 8KB payload, enlarged SHM ring |
+| RPC EchoInt32 | 1000 | 8.9 us | 9 us | 52 us | Small primitive RPC |
+| RPC EchoStruct | 1000 | 25.1 us | 58 us | 77 us | Struct RPC |
+| RPC Add (2 x int32) | 1000 | 9.6 us | 13 us | 54 us | Small compute RPC |
+| Topic pub/sub (0 bytes) | 1000 | 5.6 us | 10 us | 26 us | Empty broadcast payload |
+| Topic pub/sub (64 bytes) | 1000 | 4.9 us | 9 us | 15 us | Small broadcast data |
+| Topic pub/sub (256 bytes) | 1000 | 5.8 us | 11 us | 25 us | Common small broadcast data |
+| Topic pub/sub (1024 bytes) | 1000 | 5.5 us | 10 us | 20 us | 1KB broadcast data |
+| Topic pub/sub (4096 bytes) | 1000 | 10.8 us | 18 us | 24 us | 4KB broadcast data |
+| Topic pub/sub (8192 bytes) | 1000 | 16.0 us | 26 us | 31 us | 8KB broadcast data |
 
 Based on the full report:
 
-- **Common 0~1024 byte RPC** averages around **8.5~13.1 us**
-- **4096~8192 byte RPC payloads** average around **36.5~50.7 us** under enlarged SHM-ring configuration
-- **Topic pub/sub** averages around **4.1~17.0 us**
+- **Common 0~1024 byte RPC** averages around **9.9~19.1 us**
+- **4096~8192 byte RPC payloads** average around **44.9~61.2 us** under enlarged SHM-ring configuration
+- **Topic pub/sub** averages around **4.9~16.0 us**
 
 > **Performance note:** the current SHM path uses an `eventfd + EventLoop` event-driven model.
 > The latency numbers mainly reflect serialization, shared-memory copies, eventfd wakeups, epoll scheduling, and application-side handling.
@@ -186,7 +186,7 @@ TOOLCHAIN_FILE=/path/to/toolchain.cmake \
 ./scripts/build_dual_stage_install.sh
 ```
 
-> **Important**: the host stage must run in a clean host environment. If `CC/CXX` already point to cross compilers, the host stage will fail to produce `bin_host/omni-idlc`.
+> **Important**: pass the target compilers through `CC/CXX` when invoking the dual-stage script. The script clears them for its host stage and reuses them for the cross stage.
 >
 > For detailed toolchain configuration, environment variables, install layout, and manual build steps, see the [ARM Cross-Compilation Guide](docs/cross-compiling-arm.md).
 
@@ -270,56 +270,15 @@ See the full guide in [omni-cli Usage Guide](docs/omni-tool-usage.en.md).
 
 ### Define an interface (IDL)
 
-```bidl
-package demo;
-
-struct SensorData {
-    int32   sensor_id;
-    float64 temperature;
-    float64 humidity;
-    int64   timestamp;
-    string  location;
-}
-
-struct ControlCommand {
-    int32   command_type;
-    string  target;
-    int32   value;
-}
-
-struct AsyncRequest {
-    int32   request_id;
-    string  client_tag;
-}
-
-topic SensorUpdate {
-    SensorData data;
-    int64      publish_time;
-}
-
-topic AsyncResultReady {
-    AsyncResult result;
-    int64       publish_time;
-}
-
-service SensorService {
-    bool                  EchoBool(bool value);
-    int32                 EchoInt32(int32 value);
-    string                EchoString(string value);
-    SensorData            GetLatestData();
-    common.StatusResponse SetThreshold(ControlCommand cmd);
-    int32                 GetSensorCount();
-    common.StatusResponse RequestLatestDataAsync(AsyncRequest request);
-
-    publishes SensorUpdate;
-    publishes AsyncResultReady;
-}
-```
+The complete, self-contained generation input is [`examples/sensor_service.bidl`](examples/sensor_service.bidl), together with its imported
+[`examples/common_types.bidl`](examples/common_types.bidl). Run the command below from the repository root. Prefer these checked-in examples
+over copying an abbreviated snippet that can drift from the generated API.
 
 Generate C++ Stub/Proxy code with `omni-idlc`:
 
 ```bash
-./build/target/bin/omni-idlc sensor_service.bidl --lang cpp --outdir generated/
+mkdir -p generated/
+./build/target/bin/omni-idlc --lang=cpp --output=generated/ examples/sensor_service.bidl
 ```
 
 ### Server
@@ -353,6 +312,7 @@ public:
 
 int main() {
     omnibinder::OmniRuntime runtime;
+    runtime.setRegisterHost("192.168.1.10");
     runtime.init("127.0.0.1", 9900);
 
     MySensorService service;
@@ -382,26 +342,26 @@ int main() {
     proxy.connect();
 
     bool echo_bool = false;
-    proxy.EchoBool(false, &echo_bool);
+    proxy.EchoBool(false, echo_bool);
 
     int32_t echo_i32 = 0;
-    proxy.EchoInt32(32, &echo_i32);
+    proxy.EchoInt32(32, echo_i32);
 
     std::string echo_string;
-    proxy.EchoString("hello", &echo_string);
+    proxy.EchoString("hello", echo_string);
 
     demo::SensorData latest;
-    proxy.GetLatestData(&latest);
+    proxy.GetLatestData(latest);
 
     demo::ControlCommand cmd;
     cmd.command_type = 1;
     cmd.target = "temperature";
     cmd.value = 30;
     common::StatusResponse resp;
-    proxy.SetThreshold(cmd, &resp);
+    proxy.SetThreshold(cmd, resp);
 
     int32_t sensor_count = 0;
-    proxy.GetSensorCount(&sensor_count);
+    proxy.GetSensorCount(sensor_count);
 
     proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) {
         // regular topic broadcast
@@ -415,7 +375,7 @@ int main() {
     req.request_id = 42;
     req.client_tag = "cpp-client";
     common::StatusResponse ack;
-    proxy.RequestLatestDataAsync(req, &ack);
+    proxy.RequestLatestDataAsync(req, ack);
 
     proxy.OnServiceDied([]() {
         // service death notification
@@ -497,7 +457,7 @@ Useful log keywords include:
 | [Testing Guide](docs/testing-guide.md) | Test case descriptions, startup methods, recommended execution |
 | [Examples Guide](docs/examples.md) | Complete server/client examples, cross-board communication examples |
 | [Examples Guide (EN)](docs/examples.en.md) | English version of the examples guide |
-| [Downstream Example](examples/artifact_examples/README.md) | Building downstream projects with installed OmniBinder artifacts |
+| [Downstream Example](examples/artifact_examples/README.en.md) | Building downstream projects with installed OmniBinder artifacts |
 | [Performance Report](docs/performance-report.md) | RPC and topic latency test data (microsecond level) |
 
 The Chinese documentation remains available in the original `.md` files.
@@ -522,8 +482,8 @@ omnibinder/
 
 ## Environment requirements
 
-- **OS**: Linux (requires epoll, eventfd, POSIX SHM)
-- **Compiler**: GCC 4.8+ or Clang 3.4+ with C++11 support
+- **OS**: Linux (epoll / eventfd / POSIX SHM) or Windows (MinGW / MSVC)
+- **Compiler**: GCC 4.8+, Clang 3.4+, MinGW 7.3+, or MSVC 2017+ with C++11 support
 - **CMake**: 3.10+
 - **External dependencies**: none
 
@@ -537,7 +497,7 @@ cd build
 ctest --output-on-failure
 
 # Run the performance benchmark and regenerate the report
-./target/test/test_performance --report ../docs/performance-report.md
+./target/test/test_performance -o ../docs/performance-report.md
 ```
 
 ---

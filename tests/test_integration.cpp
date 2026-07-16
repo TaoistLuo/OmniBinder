@@ -89,6 +89,10 @@ static void serverThread(void* arg) {
         ctx->runtime.stop();
         return;
     }
+    if (ctx->runtime.publishTopic("zeta/topic") != 0
+        || ctx->runtime.publishTopic("alpha/topic") != 0) {
+        return;
+    }
 
     ctx->registered = true;
 
@@ -222,6 +226,21 @@ TEST_F(IntegrationTest, QueryInterfaces) {
     }
     EXPECT_TRUE(found_add);
     EXPECT_TRUE(found_echo);
+    runtime.stop();
+}
+
+TEST_F(IntegrationTest, QueryPublishedTopics) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    std::vector<std::string> topics(1, "stale");
+    ASSERT_EQ(runtime.queryPublishedTopics("TestService", topics), 0);
+    ASSERT_EQ(topics.size(), 2u);
+    EXPECT_EQ(topics[0], "alpha/topic");
+    EXPECT_EQ(topics[1], "zeta/topic");
+    EXPECT_EQ(runtime.queryPublishedTopics("NonExistentService", topics),
+              static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND));
+    EXPECT_TRUE(topics.empty());
     runtime.stop();
 }
 

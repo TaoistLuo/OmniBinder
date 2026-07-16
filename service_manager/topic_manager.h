@@ -44,6 +44,12 @@
 
 namespace omnibinder {
 
+const size_t MAX_TOPICS_GLOBAL = 16384u;
+const size_t MAX_TOPIC_PUBLICATIONS_PER_CONNECTION = 4096u;
+const size_t MAX_TOPIC_SUBSCRIPTIONS_PER_CONNECTION = 4096u;
+const size_t MAX_SUBSCRIBERS_PER_TOPIC = 4096u;
+const size_t MAX_TOPIC_SUBSCRIPTIONS_GLOBAL = 16384u;
+
 // ============================================================
 // TopicEntry - Internal storage for a topic's publisher info
 // ============================================================
@@ -75,7 +81,8 @@ public:
 
     // Register a publisher for a topic.
     // Returns true if successful, false if the topic already has a publisher.
-    bool registerPublisher(const std::string& topic, const ServiceInfo& publisher_info, int publisher_fd);
+    bool registerPublisher(const std::string& topic, const ServiceInfo& publisher_info,
+                           int publisher_fd, uint32_t idl_hash = 0);
 
     // Remove a publisher for a topic.
     // Returns true if the publisher was found and removed.
@@ -101,12 +108,20 @@ public:
     // Returns the list of topic names where this fd was the publisher.
     std::vector<std::string> removeByFd(int fd);
 
+    // Remove publishers owned by one service on the expected control fd.
+    // Subscriptions and sibling services sharing the fd are preserved.
+    std::vector<std::string> removePublishersByService(
+        const std::string& service_name, int publisher_fd);
+
     // Get all subscriber fds for a topic.
     std::vector<int> getSubscribers(const std::string& topic) const;
 
     // Get the publisher info for a topic.
     // Returns true if the topic has a publisher.
     bool getPublisher(const std::string& topic, ServiceInfo& publisher_info) const;
+
+    // Get currently published topics for a service in deterministic order.
+    std::vector<std::string> getPublishedTopics(const std::string& service_name) const;
 
     // Get the publisher's IDL hash for a topic.
     // Returns true if the topic has a publisher.
@@ -131,6 +146,7 @@ private:
 
     // Reverse index: fd -> set of topics where this fd is the publisher
     std::map<int, std::set<std::string>> fd_publications_;
+    size_t total_subscriptions_;
 };
 
 } // namespace omnibinder

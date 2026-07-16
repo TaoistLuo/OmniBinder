@@ -129,9 +129,20 @@ struct AstFile {
     std::string package_name;
     std::string file_path;                  // 源文件路径
     std::vector<std::string> imports;       // import 路径列表
+    std::vector<std::string> imported_packages; // resolved direct import packages
     std::vector<StructDef>  structs;
     std::vector<TopicDef>   topics;
     std::vector<ServiceDef> services;
+
+    // Set by the parser so declaration-order policy remains in semantic validation.
+    bool imports_before_declarations;
+    bool package_before_imports_and_declarations;
+    size_t package_declaration_count;
+
+    AstFile()
+        : imports_before_declarations(true)
+        , package_before_imports_and_declarations(true)
+        , package_declaration_count(0) {}
 };
 
 } // namespace omnic

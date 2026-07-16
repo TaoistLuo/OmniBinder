@@ -89,6 +89,22 @@ uint32_t findPidForService(OmniRuntime& runtime, const std::string& service_name
     return 0;
 }
 
+bool waitForRuntimePid(OmniRuntime& runtime, uint32_t pid) {
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        std::vector<RuntimeInfo> runtimes;
+        if (runtime.listRuntimes(runtimes) == 0) {
+            for (size_t i = 0; i < runtimes.size(); ++i) {
+                if (runtimes[i].pid == pid) {
+                    return true;
+                }
+            }
+        }
+        runtime.pollOnce(20);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
 void runServiceChild() {
     OmniRuntime runtime;
     if (runtime.init("127.0.0.1", SM_PORT) != 0) {
@@ -197,7 +213,8 @@ TEST_F(DiagnosticsWatchTest, ClientPidWatchRegistersAndCleansHiddenService) {
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
 
     const std::string hidden = diagName(client_pid);
-    ASSERT_TRUE(waitForService(watcher, hidden, false));
+    ASSERT_TRUE(waitForRuntimePid(watcher, static_cast<uint32_t>(client_pid)));
+    ASSERT_FALSE(listHasService(watcher, hidden));
 
     ASSERT_EQ(watcher.watchPid(static_cast<uint32_t>(client_pid), [](const Buffer&) {}), 0);
     EXPECT_TRUE(waitForService(watcher, hidden, true));

@@ -110,10 +110,9 @@ OmniBinder 的内部实现分成两个平面：
 - `SmControlChannel sm_channel_`
 - `RpcRuntime rpc_runtime_`
 - `TopicRuntime topic_runtime_`
-- `ServiceHostRuntime service_host_runtime_`
 - `ConnectionManager* conn_mgr_`
+- `std::shared_ptr<TransportFactory> transport_factory_`
 - `std::map<std::string, LocalServiceEntry*> local_services_`
-- `std::map<int, std::string> listen_fd_to_service_`
 - `std::map<int, std::string> client_fd_to_service_`
 - `std::map<std::string, ServiceInfo> service_cache_`
 - `std::map<std::string, DeathCallback> death_callbacks_`
@@ -123,10 +122,10 @@ OmniBinder 的内部实现分成两个平面：
 每个本地注册服务对应一个 `LocalServiceEntry`，包含：
 
 - `Service* service`
-- `TcpTransportServer* server`
-- `ShmTransport* shm_transport`
+- `std::unique_ptr<ITransportHost> tcp_host`
+- `std::unique_ptr<ITransportHost> shm_host`
 - `uint16_t port`
-- `std::map<int, ITransport*> client_transports`
+- `std::string advertise_host`
 - `std::map<int, Buffer*> client_recv_buffers`
 
 这个结构代表“一个本地服务完整的对外暴露状态”。
@@ -269,33 +268,33 @@ reply wait 期间只处理：
 - 不直接发控制面消息
 - 不直接选择传输通道
 
-## 8. ServiceHostRuntime
+## 8. Hosted data-plane endpoints
 
 ### 8.1 作用
 
-`ServiceHostRuntime` 负责本地服务托管侧的骨架逻辑。
+`TransportFactory` 的 host provider 创建 transport-neutral hosted endpoints。
 
 ### 8.2 当前已承接的职责
 
-- service accept
-- service client data receive
-- service client message dispatch skeleton
-- SHM request dispatch skeleton
+- TCP listener、accepted client、拆包 buffer 与 fd 生命周期
+- SHM UDS handshake、per-client context 与通知 fd 生命周期
+- 完整 Message 与 peer id 回调
+- 在具体 transport 销毁前移除 EventLoop 注册
 
 ### 8.3 已下沉的方法
 
-- `onServiceAccept(...)`
-- `onServiceClientData(...)`
-- `processServiceClientMessages(...)`
-- `onShmRequest(...)`
+- `ITransportHost::start(...)`
+- `ITransportHost::send(...)`
+- `ITransportHost::stop()`
+- `OmniRuntime::Impl::onHostedMessage(...)`
 
 ### 8.4 当前未下沉的细节
 
 为了保持当前架构清晰和稳定，以下内容仍保留在 `OmniRuntime` 中：
 
 - invoke / oneway 的具体业务执行
-- SHM invoke reply 的具体构造
-- service client 断开后的资源回收
+- invoke / oneway reply 的具体构造
+- topic 与 diagnostic 状态更新
 
 原因不是功能做不到，而是：
 
@@ -325,7 +324,8 @@ reply wait 期间只处理：
 ### 9.2 当前职责
 
 - 服务连接池
-- 同机 / 跨机 transport 选择
+- 持有内部 `TransportFactory` provider registry
+- 按 context-aware priority 执行同机 / 跨机 transport 选择
 - SHM -> TCP fallback
 - 直连消息接收
 - 直连断开通知
@@ -333,10 +333,21 @@ reply wait 期间只处理：
 ### 9.3 选择逻辑
 
 1. 拿到目标服务 `ServiceInfo`
-2. 比较 `host_id`
-3. 同机：优先 SHM（通过 UDS 握手协商 per-client SHM）
-4. SHM 建立失败：TCP fallback
-5. 跨机：TCP
+2. 构造 `TransportClientContext`，包含 service name、TCP endpoint、双方 `host_id`、`ShmConfig` 和连接 timeout
+3. 从 `TransportFactory` 获取持有 provider `shared_ptr` 的有序 snapshot；registry mutex 在调用 provider 前已释放
+4. 同机默认顺序为 SHM、TCP；跨机默认顺序为 TCP、SHM（SHM 返回 `NOT_APPLICABLE`）
+5. provider 必须在 `SUCCESS` 时返回已处于 `CONNECTED` 状态且由结果独占的 transport
+6. `NOT_APPLICABLE` / `RETRYABLE_FAILURE` 继续候选，`FATAL_FAILURE` 停止
+7. 成功 transport 移入 `ServiceConnection` 的 `unique_ptr`，由连接生命周期负责关闭和释放
+
+Registry 支持注入自定义 provider、拒绝空/重复 ID，并可 freeze；`createDefaultTransportFactory()` 返回已注册
+内置 SHM/TCP 但仍可扩展的 factory，生产 `ConnectionManager` 只 freeze 自己私有创建的默认实例。
+这是 `src/transport` 下的内部源码扩展点，不是动态插件 ABI。当前迁移范围仅为 `ConnectionManager` 出站数据面；
+服务 data-plane hosting 使用同一个 `TransportFactory` 的独立 host-provider registry：TCP
+provider 持有 listener/accepted clients，SHM provider 持有服务端握手、client-id 和通知 fd。
+host 在销毁具体 transport 前先移除全部 `EventLoop` 注册。ServiceManager 控制面仍固定使用
+TCP。release-1 曾意外导出的 factory 方法只作为 SONAME 1 兼容 shim 保留，详见
+[`transport-providers.md`](transport-providers.md)。
 
 ## 10. ShmTransport
 
@@ -390,7 +401,7 @@ ClientShmContext:
 ### 10.6 SHM 建立流程（UDS 握手）
 
 1. 客户端创建自己的 SHM，初始化 `ShmControlBlock` 和 request/response ring
-2. 客户端通过 UDS 连接服务端，发送 `shm_name`
+2. 客户端通过 UDS 连接服务端，发送自己的 `client_shm_name`
 3. 服务端打开并映射客户端 SHM
 4. 服务端通过 UDS 回复 `[resp_eventfd, master_eventfd]`
 5. 客户端设置 `ready_flag`，握手完成
@@ -512,13 +523,14 @@ ServiceManager
 
 ```text
 Caller
+  -> 之前已通过 connectService()/Proxy::connect() 建立 TCP 直连
   -> OmniRuntime::invoke()
-  -> ConnectionManager 获取或建立 TCP 直连
+  -> 使用已建立的 ConnectionManager TCP 直连
   -> 发送 MSG_INVOKE
 
 Service Side
-  -> ServiceHostRuntime::onServiceClientData()
-  -> processServiceClientMessages()
+  -> TcpTransportHost 拆 Message frame
+  -> OmniRuntime::onHostedMessage()
   -> OmniRuntime::onInvokeRequest()
   -> Service::onInvoke()
   -> 构造 MSG_INVOKE_REPLY
@@ -534,18 +546,18 @@ Caller
 
 ```text
 Caller
+  -> 之前已通过 connectService()/Proxy::connect() 建立或复用 SHM 连接
   -> OmniRuntime::invoke()
-  -> ConnectionManager 选择 SHM
-  -> 创建 per-client SHM（首次连接时）
-  -> UDS 握手：发送 shm_name，接收 [resp_eventfd, master_eventfd]
+  -> 使用已建立的 ConnectionManager SHM 直连
+  -> 首次连接时已创建 per-client SHM
+  -> UDS 握手：发送 client_shm_name，接收 [resp_eventfd, master_eventfd]
   -> 写入自己的 request ring
   -> notify master_eventfd
 
 Service Side
   -> EventLoop 被 master_eventfd 唤醒
-  -> ShmTransport::serverRecv() 遍历所有 client_contexts_，drain 每个 client 的 request ring
-  -> OmniRuntime::onShmRequest()
-  -> ServiceHostRuntime::onShmRequest()
+  -> ShmTransportHost 调用 ShmTransport::serverRecv() drain request ring
+  -> OmniRuntime::onHostedMessage()
   -> OmniRuntime 执行 invoke 细节与 reply 构造
   -> ShmTransport::serverSend(client_id) 写入对应 client 的 response ring
   -> notify resp_eventfd
@@ -609,7 +621,7 @@ Subscriber
   -> OmniRuntime::subscribeTopic()
   -> SmControlChannel::sendMessage(MSG_SUBSCRIBE_TOPIC)
   -> ServiceManager::handleSubscribeTopic()
-  -> TopicManager::registerSubscriber()
+  -> TopicManager::addSubscriber()
   -> 返回 MSG_SUBSCRIBE_TOPIC_REPLY
   -> 仅 reply 成功后，本地 TopicRuntime 记录 callback 和 topic id
 ```
@@ -825,7 +837,7 @@ public:
     // 业务方法（仅生成这些）
     int GetData(SensorData* out) {
         Buffer req, resp;
-        int ret = runtime_.invoke("SensorService", 0x..., 0x..., req, resp, 0);
+        int ret = runtime_.invoke("SensorService", 0x..., 0x..., 0x..., req, resp, 0);
         if (ret != 0) return ret;
         if (!out) return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
         // ... 反序列化 resp 到 out

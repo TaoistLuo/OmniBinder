@@ -44,6 +44,12 @@
 
 namespace omnic {
 
+static const size_t IDLC_MAX_SOURCE_BYTES_PER_FILE = 16u * 1024u * 1024u;
+static const size_t IDLC_MAX_TOTAL_SOURCE_BYTES = 64u * 1024u * 1024u;
+static const size_t IDLC_MAX_IMPORT_FILES = 256u;
+static const size_t IDLC_MAX_IMPORT_DEPTH = 64u;
+static const size_t IDLC_MAX_TYPE_NESTING = 64u;
+
 /// 跨文件共享的解析上下文
 struct ParseContext {
     /// 包名 → AST 映射（所有已加载的文件）
@@ -55,19 +61,26 @@ struct ParseContext {
     /// 正在处理中的文件集合（循环依赖检测）
     std::set<std::string> processing_files;
     
-    /// 全局类型注册表：类型名 → 包名
+    /// 全局类型注册表：限定类型名（package.Type）→ 包名
     std::map<std::string, std::string> type_registry;
     
     /// 所有加载的文件路径（按加载顺序，用于 dep-file 和代码生成）
     std::vector<std::string> all_files;
+
+    size_t total_source_bytes;
+    size_t import_file_count;
     
-    ParseContext() {}
+    ParseContext()
+        : total_source_bytes(0)
+        , import_file_count(0) {}
 };
 
 class Parser {
 public:
     /// 带上下文的构造函数（用于递归解析和外部传入上下文）
     Parser(Lexer& lexer, ParseContext& ctx, const std::string& file_path);
+    Parser(Lexer& lexer, ParseContext& ctx, const std::string& file_path,
+           size_t import_depth);
     
     /// 无上下文的构造函数（向后兼容，内部创建默认上下文）
     Parser(Lexer& lexer);
@@ -91,7 +104,7 @@ private:
     bool parseService(AstFile& ast);
     bool parseField(FieldDef& field);
     bool parseMethod(MethodDef& method);
-    bool parseType(TypeRef& type);
+    bool parseType(TypeRef& type, size_t nesting = 0);
     
     /// 将文件中的所有类型注册到全局类型表
     bool registerTypes(const AstFile& ast);
@@ -111,6 +124,9 @@ private:
     ParseContext default_ctx_;    // 默认上下文（无参构造时使用）
     std::string file_path_;      // 当前文件路径
     std::string base_dir_;       // 当前文件所在目录
+    bool saw_import_;
+    bool saw_declaration_;
+    size_t import_depth_;
 };
 
 } // namespace omnic

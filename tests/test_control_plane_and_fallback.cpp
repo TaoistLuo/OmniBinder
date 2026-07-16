@@ -191,6 +191,56 @@ static bool registerFakeService(TcpTransport& transport, uint32_t seq,
     return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
+static bool publishFakeTopic(TcpTransport& transport, uint32_t seq,
+                             const std::string& service_name,
+                             const std::string& topic) {
+    Message msg(MessageType::MSG_PUBLISH_TOPIC, seq);
+    msg.payload.writeString(topic);
+    ServiceInfo info;
+    info.name = service_name;
+    info.host = "127.0.0.1";
+    info.port = 12345;
+    info.host_id = "raw-owner";
+    serializeServiceInfo(info, msg.payload);
+    if (!sendMessage(transport, msg)) {
+        return false;
+    }
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_PUBLISH_TOPIC_REPLY) {
+        return false;
+    }
+    Buffer payload(reply.payload.data(), reply.payload.size());
+    return mustRead<bool>(payload, &Buffer::tryReadBool);
+}
+
+static bool queryRawPublishedTopics(TcpTransport& transport, uint32_t seq,
+                                    const std::string& service_name, bool& found,
+                                    std::vector<std::string>& topics) {
+    Message msg(MessageType::MSG_QUERY_PUBLISHED_TOPICS, seq);
+    msg.payload.writeString(service_name);
+    if (!sendMessage(transport, msg)) {
+        return false;
+    }
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY) {
+        return false;
+    }
+    BufferView payload(reply.payload.data(), reply.payload.size());
+    return deserializePublishedTopicsReply(payload, found, topics);
+}
+
+static bool sendHeartbeat(TcpTransport& transport, uint32_t seq,
+                          const std::string& service_name) {
+    Message heartbeat(MessageType::MSG_HEARTBEAT, seq);
+    heartbeat.payload.writeString(service_name);
+    if (!sendMessage(transport, heartbeat)) return false;
+    Message reply;
+    return recvMessage(transport, reply, 2000)
+        && reply.getType() == MessageType::MSG_HEARTBEAT_ACK;
+}
+
 static bool invokeOwnedService(OmniRuntime& runtime, int32_t a, int32_t b, int32_t& sum) {
     Buffer req;
     req.writeInt32(a);
@@ -498,6 +548,295 @@ TEST_F(ControlPlaneTest, IllegalPublishTopicRejected) {
     Buffer payload(reply.payload.data(), reply.payload.size());
     EXPECT_FALSE(mustRead<bool>(payload, &Buffer::tryReadBool));
     rogue.close();
+}
+
+TEST_F(ControlPlaneTest, InvalidTopicControlRequestsDoNotMutateState) {
+    TcpTransport owner;
+    TcpTransport query;
+    ASSERT_TRUE(connectTcp(owner, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(registerFakeService(owner, 1050, "RawValidatedService", 12340,
+                                    "raw-validated"));
+    ASSERT_TRUE(publishFakeTopic(owner, 1051, "RawValidatedService", "raw/valid"));
+
+    const std::vector<std::string> invalid_topics = {
+        std::string(), std::string(MAX_TOPIC_NAME_LENGTH + 1, 'x')
+    };
+    for (size_t i = 0; i < invalid_topics.size(); ++i) {
+        Message subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 1052 + i);
+        subscribe.payload.writeString(invalid_topics[i]);
+        ASSERT_TRUE(sendMessage(query, subscribe));
+        Message reply;
+        ASSERT_TRUE(recvMessage(query, reply, 2000));
+        Buffer payload(reply.payload.data(), reply.payload.size());
+        EXPECT_FALSE(mustRead<bool>(payload, &Buffer::tryReadBool));
+    }
+
+    Message trailing_subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 1054);
+    trailing_subscribe.payload.writeString("raw/new");
+    trailing_subscribe.payload.writeUint8(1);
+    ASSERT_TRUE(sendMessage(query, trailing_subscribe));
+    Message trailing_subscribe_reply;
+    ASSERT_TRUE(recvMessage(query, trailing_subscribe_reply, 2000));
+    Buffer trailing_subscribe_payload(trailing_subscribe_reply.payload.data(),
+                                      trailing_subscribe_reply.payload.size());
+    EXPECT_FALSE(mustRead<bool>(trailing_subscribe_payload, &Buffer::tryReadBool));
+
+    Message trailing_unpublish(MessageType::MSG_UNPUBLISH_TOPIC, 1055);
+    trailing_unpublish.payload.writeString("raw/valid");
+    trailing_unpublish.payload.writeUint8(1);
+    ASSERT_TRUE(sendMessage(owner, trailing_unpublish));
+
+    Message malformed_publish(MessageType::MSG_PUBLISH_TOPIC, 1056);
+    malformed_publish.payload.writeString("raw/new");
+    ServiceInfo pub_info;
+    pub_info.name = "RawValidatedService";
+    pub_info.host = "127.0.0.1";
+    pub_info.port = 12340;
+    serializeServiceInfo(pub_info, malformed_publish.payload);
+    malformed_publish.payload.writeUint16(7);
+    ASSERT_TRUE(sendMessage(owner, malformed_publish));
+    Message malformed_publish_reply;
+    ASSERT_TRUE(recvMessage(owner, malformed_publish_reply, 2000));
+    Buffer malformed_publish_payload(malformed_publish_reply.payload.data(),
+                                     malformed_publish_reply.payload.size());
+    EXPECT_FALSE(mustRead<bool>(malformed_publish_payload, &Buffer::tryReadBool));
+
+    bool found = false;
+    std::vector<std::string> topics;
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1057, "RawValidatedService", found, topics));
+    ASSERT_TRUE(found);
+    ASSERT_EQ(topics.size(), 1u);
+    EXPECT_EQ(topics[0], "raw/valid");
+    EXPECT_FALSE(std::find(topics.begin(), topics.end(), "raw/new") != topics.end());
+
+    query.close();
+    owner.close();
+}
+
+TEST_F(ControlPlaneTest, PublishedTopicsQueryAndServiceScopedUnregister) {
+    TcpTransport registrant;
+    TcpTransport query;
+    ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(registerFakeService(registrant, 1100, "RawServiceA", 12345, "raw-owner"));
+    ASSERT_TRUE(registerFakeService(registrant, 1101, "RawServiceB", 12346, "raw-owner"));
+    ASSERT_TRUE(publishFakeTopic(registrant, 1102, "RawServiceA", "raw/a"));
+    ASSERT_TRUE(publishFakeTopic(registrant, 1103, "RawServiceB", "raw/b"));
+
+    bool found = false;
+    std::vector<std::string> topics;
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1104, "RawServiceA", found, topics));
+    ASSERT_TRUE(found);
+    ASSERT_EQ(topics.size(), 1u);
+    EXPECT_EQ(topics[0], "raw/a");
+
+    Message unregister(MessageType::MSG_UNREGISTER, 1105);
+    unregister.payload.writeString("RawServiceA");
+    ASSERT_TRUE(sendMessage(registrant, unregister));
+    Message unregister_reply;
+    ASSERT_TRUE(recvMessage(registrant, unregister_reply, 2000));
+    ASSERT_EQ(unregister_reply.getType(), MessageType::MSG_UNREGISTER_REPLY);
+
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1106, "RawServiceA", found, topics));
+    EXPECT_FALSE(found);
+    EXPECT_TRUE(topics.empty());
+
+    const std::vector<std::string> malformed_names = {
+        std::string(), std::string(MAX_SERVICE_NAME_LENGTH + 1, 'x')
+    };
+    for (size_t i = 0; i < malformed_names.size(); ++i) {
+        Message invalid(MessageType::MSG_QUERY_PUBLISHED_TOPICS, 1113 + i);
+        invalid.payload.writeString(malformed_names[i]);
+        ASSERT_TRUE(sendMessage(query, invalid));
+        Message invalid_reply;
+        ASSERT_TRUE(recvMessage(query, invalid_reply, 2000));
+        BufferView invalid_payload(invalid_reply.payload.data(), invalid_reply.payload.size());
+        ASSERT_TRUE(deserializePublishedTopicsReply(invalid_payload, found, topics));
+        EXPECT_FALSE(found);
+    }
+    Message trailing(MessageType::MSG_QUERY_PUBLISHED_TOPICS, 1115);
+    trailing.payload.writeString("RawEmptyService");
+    trailing.payload.writeUint8(1);
+    ASSERT_TRUE(sendMessage(query, trailing));
+    Message trailing_reply;
+    ASSERT_TRUE(recvMessage(query, trailing_reply, 2000));
+    BufferView trailing_payload(trailing_reply.payload.data(), trailing_reply.payload.size());
+    ASSERT_TRUE(deserializePublishedTopicsReply(trailing_payload, found, topics));
+    EXPECT_FALSE(found);
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1107, "RawServiceB", found, topics));
+    ASSERT_TRUE(found);
+    ASSERT_EQ(topics.size(), 1u);
+    EXPECT_EQ(topics[0], "raw/b");
+
+    Message unpublish(MessageType::MSG_UNPUBLISH_TOPIC, 1108);
+    unpublish.payload.writeString("raw/b");
+    ASSERT_TRUE(sendMessage(registrant, unpublish));
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1109, "RawServiceB", found, topics));
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(topics.empty());
+
+    ASSERT_TRUE(registerFakeService(registrant, 1110, "RawEmptyService", 12347, "raw-owner"));
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1111, "RawEmptyService", found, topics));
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(topics.empty());
+
+    Message malformed(MessageType::MSG_QUERY_PUBLISHED_TOPICS, 1112);
+    malformed.payload.writeUint16(9);
+    ASSERT_TRUE(sendMessage(query, malformed));
+    Message malformed_reply;
+    ASSERT_TRUE(recvMessage(query, malformed_reply, 2000));
+    BufferView malformed_payload(malformed_reply.payload.data(), malformed_reply.payload.size());
+    ASSERT_TRUE(deserializePublishedTopicsReply(malformed_payload, found, topics));
+    EXPECT_FALSE(found);
+    EXPECT_TRUE(topics.empty());
+
+    query.close();
+    registrant.close();
+}
+
+TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
+    TcpTransport registrant;
+    TcpTransport observer;
+    TcpTransport query;
+    ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(observer, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(registerFakeService(registrant, 1200, "RawTimeoutA", 12400, "raw-heartbeat"));
+    ASSERT_TRUE(registerFakeService(registrant, 1201, "RawHealthyB", 12401, "raw-heartbeat"));
+    ASSERT_TRUE(publishFakeTopic(registrant, 1202, "RawTimeoutA", "raw/timeout-a"));
+    ASSERT_TRUE(publishFakeTopic(registrant, 1203, "RawHealthyB", "raw/healthy-b"));
+
+    Message subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 1204);
+    subscribe.payload.writeString("raw/future");
+    ASSERT_TRUE(sendMessage(registrant, subscribe));
+    Message subscribe_reply;
+    ASSERT_TRUE(recvMessage(registrant, subscribe_reply, 2000));
+    ASSERT_EQ(subscribe_reply.getType(), MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
+
+    Message post_timeout_subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 1206);
+    post_timeout_subscribe.payload.writeString("raw/post-timeout");
+    ASSERT_TRUE(sendMessage(registrant, post_timeout_subscribe));
+    Message post_timeout_subscribe_reply;
+    ASSERT_TRUE(recvMessage(registrant, post_timeout_subscribe_reply, 2000));
+    ASSERT_EQ(post_timeout_subscribe_reply.getType(), MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
+
+    Message watch(MessageType::MSG_SUBSCRIBE_SERVICE, 1205);
+    watch.payload.writeString("RawTimeoutA");
+    ASSERT_TRUE(sendMessage(observer, watch));
+    Message watch_reply;
+    ASSERT_TRUE(recvMessage(observer, watch_reply, 2000));
+
+    bool death_seen = false;
+    for (int i = 0; i < 40 && !death_seen; ++i) {
+        ASSERT_TRUE(sendHeartbeat(registrant, 1210 + i, "RawHealthyB"));
+        Message death;
+        if (recvMessage(observer, death, 200)) {
+            ASSERT_EQ(death.getType(), MessageType::MSG_DEATH_NOTIFY);
+            Buffer payload(death.payload.data(), death.payload.size());
+            EXPECT_EQ(mustReadString(payload), "RawTimeoutA");
+            death_seen = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    }
+    ASSERT_TRUE(death_seen);
+
+    bool found = false;
+    std::vector<std::string> topics;
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1260, "RawTimeoutA", found, topics));
+    EXPECT_FALSE(found);
+    ASSERT_TRUE(queryRawPublishedTopics(query, 1261, "RawHealthyB", found, topics));
+    ASSERT_TRUE(found);
+    ASSERT_EQ(topics.size(), 1u);
+    EXPECT_EQ(topics[0], "raw/healthy-b");
+    EXPECT_TRUE(sendHeartbeat(registrant, 1262, "RawHealthyB"));
+
+    Message stale_heartbeat(MessageType::MSG_HEARTBEAT, 1263);
+    stale_heartbeat.payload.writeString("RawTimeoutA");
+    ASSERT_TRUE(sendMessage(registrant, stale_heartbeat));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_TRUE(sendHeartbeat(registrant, 1264, "RawHealthyB"));
+
+    TcpTransport future_publisher;
+    ASSERT_TRUE(connectTcp(future_publisher, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(registerFakeService(future_publisher, 1265, "RawFuturePublisher",
+                                    12402, "raw-heartbeat"));
+    ASSERT_TRUE(publishFakeTopic(future_publisher, 1266, "RawFuturePublisher", "raw/future"));
+    Message notify;
+    ASSERT_TRUE(recvMessage(registrant, notify, 2000));
+    ASSERT_EQ(notify.getType(), MessageType::MSG_TOPIC_PUBLISHER_NOTIFY);
+    Buffer notify_payload(notify.payload.data(), notify.payload.size());
+    EXPECT_EQ(mustReadString(notify_payload), "raw/future");
+
+    // Let the last service on registrant time out. The fd must remain alive as
+    // a pure client because it still owns topic subscriptions.
+    bool healthy_removed = false;
+    for (int i = 0; i < 45 && !healthy_removed; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        if (queryRawPublishedTopics(query, 1270 + i, "RawHealthyB", found, topics)) {
+            healthy_removed = !found;
+        }
+    }
+    ASSERT_TRUE(healthy_removed);
+
+    TcpTransport post_timeout_publisher;
+    ASSERT_TRUE(connectTcp(post_timeout_publisher, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(registerFakeService(post_timeout_publisher, 1320,
+                                    "RawPostTimeoutPublisher", 12403,
+                                    "raw-heartbeat"));
+    ASSERT_TRUE(publishFakeTopic(post_timeout_publisher, 1321,
+                                 "RawPostTimeoutPublisher",
+                                 "raw/post-timeout"));
+    Message post_timeout_notify;
+    ASSERT_TRUE(recvMessage(registrant, post_timeout_notify, 2000));
+    ASSERT_EQ(post_timeout_notify.getType(), MessageType::MSG_TOPIC_PUBLISHER_NOTIFY);
+    Buffer post_timeout_payload(post_timeout_notify.payload.data(),
+                                post_timeout_notify.payload.size());
+    EXPECT_EQ(mustReadString(post_timeout_payload), "raw/post-timeout");
+
+    post_timeout_publisher.close();
+    future_publisher.close();
+    query.close();
+    observer.close();
+    registrant.close();
+}
+
+TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeout) {
+    const uint16_t port = 19919;
+    TcpTransportServer server;
+    ASSERT_GT(server.listen("127.0.0.1", port), 0);
+    std::thread fake_sm([&server]() {
+        TcpTransport* client = NULL;
+        for (int i = 0; i < 100 && !client; ++i) {
+            client = dynamic_cast<TcpTransport*>(server.accept());
+            if (!client) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (!client) return;
+        Message hello;
+        if (recvFullMessage(*client, hello, 2000)) {
+            Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, hello.getSequence());
+            reply.payload.writeBool(true);
+            sendFullMessage(*client, reply, 2000);
+        }
+        Message ignored;
+        recvFullMessage(*client, ignored, 2000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        delete client;
+    });
+
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", port), 0);
+    std::vector<std::string> topics;
+    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    EXPECT_EQ(runtime.queryPublishedTopics("AnyService", topics, 250),
+              static_cast<int>(ErrorCode::ERR_TIMEOUT));
+    const long long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+    EXPECT_GE(elapsed_ms, 150);
+    EXPECT_LE(elapsed_ms, 900);
+    runtime.stop();
+    fake_sm.join();
+    server.close();
 }
 
 TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {

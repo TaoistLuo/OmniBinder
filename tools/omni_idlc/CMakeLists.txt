@@ -3,6 +3,7 @@
 add_library(omni_idlc_parser STATIC
     lexer.cpp
     parser.cpp
+    semantic_validator.cpp
 )
 
 target_include_directories(omni_idlc_parser PUBLIC

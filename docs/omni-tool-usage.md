@@ -46,7 +46,7 @@ omni-cli [options] <command> [args]
 | `info <service>` | 查看服务详细信息 |
 | `call <service> <method> [params]` | 调用服务方法 |
 | `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | 设置指定 runtime 日志级别 |
-| `watch --pid <pid> --idl <file.bidl> [--filter <method\|topic>]` | 观察指定 PID 的业务接口 I/O |
+| `watch --pid <pid> --idl <file.bidl> [--filter <name>]` | 观察指定 PID 的业务接口 I/O |
 
 ---
 
@@ -88,9 +88,11 @@ omni-cli ps
 $ omni-cli ps
 PID      ROLE     LOG   PROCESS              SERVICES
 -------- -------- ----- -------------------- ----------------
-12345    service  I     pid-12345            SensorService
-12346    client   I     pid-12346            -
+12345    service  I     example_cpp_sensor_server    SensorService
+12346    client   I     example_cpp_sensor_client    -
 ```
+
+`PROCESS` 列来自 runtime 启动时上报的可执行文件名。该列的格式宽度为最小 20 字符；更长的名称会完整输出，不会截断，因此后面的 `SERVICES` 列会向右移动。如果进程是在旧版本 runtime 下注册的，需要重启该进程后才会刷新为真实进程名。
 
 ---
 
@@ -116,6 +118,10 @@ Service: SensorService
   HostID:  0cee7b0ae232461ba25df5376b29b46b
   Status:  ONLINE
 
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
+
   Interface: SensorService (id=0xa112646d)
     Methods:
       - GetLatestData() -> SensorData  (id=0x61564c6c)
@@ -134,12 +140,16 @@ omni-cli --idl <file.bidl> info <service_name>
 
 **示例**：
 ```bash
-$ omni-cli --idl sensor_service.bidl info SensorService
+$ omni-cli --idl examples/sensor_service.bidl info SensorService
 Service: SensorService
   Host:    127.0.0.1
   Port:    35451
   HostID:  0cee7b0ae232461ba25df5376b29b46b
   Status:  ONLINE
+
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
 
   Interface: SensorService (id=0xa112646d)
     Methods:
@@ -163,6 +173,8 @@ Service: SensorService
 **说明**：
 - IDL 文件中的 `import` 依赖会自动递归加载
 - 跨包类型（如 `common.StatusResponse`）也能正确展开
+- `Published Topics` 来自独立的运行时查询：没有发布话题时显示 `(none)`；服务查询成功但话题查询失败时显示 `(unavailable: <原因>)`，随后仍继续显示接口。服务本身不存在时则直接报错。
+- `--idl` 使用与 `omni-idlc` 相同的严格语义校验，校验失败时会在连接 ServiceManager 前退出。
 
 ---
 
@@ -200,7 +212,7 @@ Response (status=OK, 38 bytes, 0.75 ms):
 
 #### 3.2 JSON 模式（指定 IDL）
 
-使用 JSON 格式作为输入，输出也是格式化的 JSON。
+使用 IDL 类型信息编码参数；可解码的非 `void` 响应显示为格式化 JSON，否则回退为 hex（解码失败时同时显示警告）。
 
 **语法**：
 ```bash
@@ -209,7 +221,7 @@ omni-cli --idl <file.bidl> call <service> <method> [json_params]
 
 **示例 1：无参数方法**
 ```bash
-$ omni-cli --idl sensor_service.bidl call SensorService GetLatestData
+$ omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
 Calling SensorService.GetLatestData() ...
   interface_id = 0xa112646d
   method_id    = 0x61564c6c
@@ -225,19 +237,22 @@ Response (status=OK, 38 bytes, 0.81 ms):
 
 **示例 2：结构体参数**
 ```bash
-$ omni-cli --idl sensor_service.bidl call SensorService SetThreshold \
+$ omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
   '{"command_type":1,"target":"sensor1","value":100}'
 Calling SensorService.SetThreshold() ...
   interface_id = 0xa112646d
   method_id    = 0x2214744e
   request (19 bytes)
 Response (status=OK, 10 bytes, 0.47 ms):
-  Hex: 00 00 00 00 02 00 00 00 4f 4b
+  {
+    "code": 0,
+    "message": "OK"
+  }
 ```
 
 **示例 3：基础类型参数**
 ```bash
-$ omni-cli --idl sensor_service.bidl call SensorService ResetSensor 1
+$ omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1
 Calling SensorService.ResetSensor() ...
   interface_id = 0xa112646d
   method_id    = 0x7f2b95ee
@@ -246,8 +261,11 @@ Response (status=OK, 0 bytes, 0.58 ms):
 ```
 
 **说明**：
-- JSON 输入自动检测（以 `{` 开头）
-- 即使指定了 `--idl`，仍然可以使用 hex 输入（向后兼容）
+- `{` 开头的对象或 `[` 开头的数组按 JSON 解析；已知基础类型参数按 IDL 类型解析裸命令行文本
+- 字符串基础类型使用原始参数，例如 `EchoString hello`；`EchoString '"hello"'` 会把双引号也作为字符串内容
+- 非基础类型参数如果不以 `{` 或 `[` 开头，则按 hex 解析（向后兼容）
+- struct 输入必须提供所有声明字段；当前 JSON codec 不支持 `bytes`（包括包含 `bytes` 的数组/结构体）
+- JSON 数字经轻量 number 表示处理，超出 IEEE-754 精确整数范围的 `int64`/`uint64` 不保证精确
 - 响应时间以毫秒为单位显示
 
 ---
@@ -286,7 +304,7 @@ omni-cli log set --pid 12345 --level D
 
 **语法**：
 ```bash
-omni-cli watch --pid <pid> --idl <file.bidl> [--filter <method|topic>]
+omni-cli watch --pid <pid> --idl <file.bidl> [--filter <name>]
 ```
 
 **行为说明**：
@@ -294,7 +312,7 @@ omni-cli watch --pid <pid> --idl <file.bidl> [--filter <method|topic>]
 - 服务端 PID：观察 RPC 输入和 topic 发布输出。
 - 客户端 PID：观察 RPC 输出和订阅输入。
 - 不输出 ServiceManager 控制消息、lookup、heartbeat 等内部控制流。
-- `--filter` 可按解码后的 method/topic 名过滤，例如 `GetLatestData` 或 `broadcast`。
+- `--filter` 可匹配已解码的 RPC 方法名，也可使用通用方向名 `broadcast` 或 `subscribe`。过滤发生在话题 payload 解码之前，因此当前不能按实际话题名（例如 `SensorUpdate`）过滤；名称仍为 `?` 的事件不会被该过滤器排除。
 
 **示例**：
 ```bash
@@ -313,7 +331,7 @@ omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatest
 | `int8`, `uint8`, `int16`, `uint16` | number | `42`, `-10` |
 | `int32`, `uint32`, `int64`, `uint64` | number | `1000`, `9999999` |
 | `float32`, `float64` | number | `3.14`, `25.5` |
-| `string` | string | `"hello"`, `"Room-A"` |
+| `string` | 原始命令行字符串 | `hello`, `Room-A` |
 | `struct` | object | `{"field1": value1, "field2": value2}` |
 | `array<T>` | array | `[1, 2, 3]`, `["a", "b"]` |
 
@@ -324,10 +342,7 @@ omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatest
 42
 ```
 
-**字符串**：
-```json
-"hello world"
-```
+**字符串基础类型**：在 shell 中作为一个原始参数传递，例如 `'hello world'`，不要额外保留 JSON 双引号。
 
 **结构体**：
 ```json
@@ -399,12 +414,13 @@ echo "Result: $RESULT"
 **A**: 可能的原因：
 1. 未指定 `--idl` 参数（默认使用 hex 模式）
 2. IDL 文件路径错误或无法解析
-3. 返回类型是跨包类型（如 `common.StatusResponse`），该场景建议优先结合 IDL 完整定义进行解码验证
+3. 返回类型无法从完整 IDL/import 链解析，或响应解码失败
+4. 返回类型含当前 JSON codec 不支持的 `bytes`
 
 **解决方法**：
 - 确保使用 `--idl` 参数并指定正确的 IDL 文件路径
 - 检查 IDL 文件是否包含所需的类型定义
-- 对于跨包类型，必要时可使用 hex 模式辅助排查
+- 跨包 struct 在完整 import 链可用时可以解码；必要时可使用 hex 模式辅助排查实际类型或 payload
 
 ### Q2: 如何知道方法需要什么参数？
 

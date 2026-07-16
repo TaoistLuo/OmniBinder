@@ -132,6 +132,8 @@ Key points:
 ### 2.3 Code generation
 
 ```bash
+mkdir -p generated/
+
 # Generate C++ code
 omni-idlc --lang=cpp --output=generated/ sensor_service.bidl
 
@@ -217,22 +219,22 @@ demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
 uint8_t bool_out = 0;
-proxy.EchoBool(false, &bool_out);
+proxy.EchoBool(false, bool_out);
 
 int32_t int_out = 0;
-proxy.EchoInt32(32, &int_out);
+proxy.EchoInt32(32, int_out);
 
 StatusResponse status_out;
-proxy.EchoStatus(status, &status_out);
+proxy.EchoStatus(status, status_out);
 
 SensorEnvelope envelope_out;
-proxy.EchoEnvelope(envelope, &envelope_out);
+proxy.EchoEnvelope(envelope, envelope_out);
 
 std::vector<int32_t> ids_out;
-proxy.EchoIdArray(ids, &ids_out);
+proxy.EchoIdArray(ids, ids_out);
 
 SensorArrayBundle bundle_out;
-proxy.EchoBundle(bundle, &bundle_out);
+proxy.EchoBundle(bundle, bundle_out);
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
 proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
@@ -241,7 +243,7 @@ demo::AsyncRequest req;
 req.request_id = 42;
 req.client_tag = "cpp-client";
 common::StatusResponse ack;
-proxy.RequestLatestDataAsync(req, &ack);
+proxy.RequestLatestDataAsync(req, ack);
 ```
 
 Use `examples/example_cpp/sensor_client.cpp` as the authoritative source for the full implementation.
@@ -347,21 +349,19 @@ Current `omni-cli` rules:
 
 - with `--idl`, `call` uses **JSON input**
 - without `--idl`, parameters must be passed as raw hex payload
-- JSON I/O is currently verified to work for:
+- JSON I/O supports:
   - primitive types
   - string
   - regular structs
   - nested structs
   - no-arg methods returning structs
-- JSON I/O is **not currently verified** for:
-  - `bytes`
-  - `array<...>`
-  - complex structs containing arrays
+  - arrays and nested complex structs that do not contain `bytes`
+- the current JSON codec does not support `bytes`, including arrays/structs containing it; every declared struct field is required
 
 #### 7.3.1 Generic form
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <JSON-param>
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <param>
 ```
 
 #### 7.3.2 Methods that can be called directly with `omni-cli`
@@ -369,59 +369,55 @@ Current `omni-cli` rules:
 **No-arg RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
 ```
 
 **Primitive RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString '"hello"'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString hello
 ```
 
-> String parameters must be passed as JSON strings, so shell quoting must preserve the inner JSON quotes, for example `'
-"hello"'`.
+> String scalar parameters are passed as raw CLI text. For example, use `EchoString hello`; writing `EchoString '"hello"'` includes the quote characters in the string.
 
 **Regular struct RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
 ```
 
 **Nested struct RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
 ```
 
 **Oneway RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
 ```
 
 #### 7.3.3 Methods not currently recommended through `omni-cli`
 
-The following methods are currently **not verified** through `omni-cli` JSON I/O and may fail with JSON encoding/type resolution errors:
+The following methods contain `bytes` and are rejected by the current JSON codec. Other arrays can be supplied as JSON beginning with `[`. Affected methods:
 
 - `EchoBytes(bytes value)`
-- `EchoIdArray(array<int32> value)`
-- `EchoLabelArray(array<string> value)`
-- `EchoSensorArray(array<SensorData> value)`
 - `EchoBundle(SensorArrayBundle value)`
 
 Use `examples/example_cpp/sensor_client.cpp` or `examples/example_c/sensor_client.c` to validate those methods.
@@ -429,9 +425,9 @@ Use `examples/example_cpp/sensor_client.cpp` or `examples/example_c/sensor_clien
 #### 7.3.4 Service inspection
 
 ```bash
-./build-host/target/bin/omni-cli list
-./build-host/target/bin/omni-cli info SensorService
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl info SensorService
+./build/target/bin/omni-cli list
+./build/target/bin/omni-cli info SensorService
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl info SensorService
 ```
 
 See the full guide in [omni-cli Usage Guide](omni-tool-usage.en.md).
@@ -505,7 +501,7 @@ Example commands:
 ```bash
 ./target/bin/omni-cli list
 ./target/bin/omni-cli info SensorService
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
 ```
 
 In steady state you should see:
@@ -538,7 +534,7 @@ Integration tests automatically fork a ServiceManager child process and clean it
 
 - dual-channel initialization (TCP + SHM)
 - automatic SHM selection for same-host clients
-- multi-client SHM sharing
+- independent per-client SHM regions
 - broadcast / subscribe delivery over SHM
 - death notifications after service crash
 - service lifecycle changes after unregistering
@@ -564,7 +560,7 @@ Typical ServiceManager-side output:
 
 ## 9. Cross-board communication example
 
-When the service and client run on different machines, just point both sides to the same ServiceManager address.
+When the service and client run on different machines, point both sides to the same ServiceManager and register a host address that the client can reach.
 
 Machine 1 runs ServiceManager and the server.
 Machine 2 runs the client.
@@ -583,7 +579,7 @@ Typical commands:
 
 ```bash
 ./target/bin/service_manager --host 0.0.0.0 --port 9900
-./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900
+./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900 --register-host 192.168.1.10
 ```
 
 **Machine 2 (client)**
@@ -662,6 +658,7 @@ service MyService {
 ```
 
 ```bash
+mkdir -p generated/
 $OMNIBINDER_DIR/bin_host/omni-idlc --lang=cpp --output=generated/ my_service.bidl
 $OMNIBINDER_DIR/bin_host/omni-idlc --lang=c   --output=generated/ my_service.bidl
 ```
@@ -735,7 +732,7 @@ This is the easiest way to validate your service path early.
 | Generated header | `xxx.bidl.h` | `xxx.bidl_c.h` |
 | Service implementation | inherit `XxxStub` and override methods | implement generated `xxx_impl_*` functions and call `xxx_stub_create(user_data)` |
 | Proxy creation | `XxxProxy proxy(runtime)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
-| RPC return style | direct return values | output pointers |
+| RPC return style | output references | output pointers |
 | Topic subscription | lambdas / functors | function pointers + `user_data` |
 | Struct lifecycle | RAII | explicit `_init()` / `_destroy()` |
 
@@ -752,4 +749,4 @@ Practical rule of thumb:
 - [Top-level README](../README.en.md)
 - [IDL Specification](idl-specification.en.md)
 - [omni-cli Usage Guide](omni-tool-usage.en.md)
-- [Downstream Sensor/HMI Example](../examples/artifact_examples/README.md)
+- [Downstream Sensor/HMI Example](../examples/artifact_examples/README.en.md)

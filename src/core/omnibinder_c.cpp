@@ -137,6 +137,10 @@ size_t omni_buffer_size(const omni_buffer_t* buf) {
     return buf ? buf->buf.size() : 0;
 }
 
+size_t omni_buffer_remaining(const omni_buffer_t* buf) {
+    return buf ? buf->buf.remaining() : 0;
+}
+
 int omni_buffer_read_ok(const omni_buffer_t* buf) {
     return (buf && buf->read_ok) ? 1 : 0;
 }

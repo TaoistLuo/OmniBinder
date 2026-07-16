@@ -1,5 +1,6 @@
 #include "lexer.h"
 #include "parser.h"
+#include "semantic_validator.h"
 #include "codegen_cpp.h"
 #include "codegen_c.h"
 #include <fstream>
@@ -123,12 +124,25 @@ int main(int argc, char* argv[]) {
         printUsage(argv[0]);
         return 1;
     }
+
+    if (lang != "cpp" && lang != "c" && lang != "all") {
+        fprintf(stderr, "Error: Invalid language '%s' (expected cpp, c, or all)\n", lang.c_str());
+        return 1;
+    }
     
     std::ifstream ifs(input_file.c_str());
     if (!ifs.is_open()) {
         fprintf(stderr, "Error: Cannot open file: %s\n", input_file.c_str());
         return 1;
     }
+    ifs.seekg(0, std::ios::end);
+    const std::streamoff source_size = ifs.tellg();
+    if (source_size < 0 ||
+        static_cast<unsigned long long>(source_size) > omnic::IDLC_MAX_SOURCE_BYTES_PER_FILE) {
+        fprintf(stderr, "Error: IDL source size limit exceeded: %s\n", input_file.c_str());
+        return 1;
+    }
+    ifs.seekg(0, std::ios::beg);
     
     std::stringstream ss;
     ss << ifs.rdbuf();
@@ -143,6 +157,12 @@ int main(int argc, char* argv[]) {
     
     if (!parser.parse(ast)) {
         fprintf(stderr, "Parse error: %s\n", parser.errorMessage().c_str());
+        return 1;
+    }
+
+    std::string semantic_error;
+    if (!omnic::validateSemantics(ast, ctx, semantic_error)) {
+        fprintf(stderr, "Semantic error: %s\n", semantic_error.c_str());
         return 1;
     }
     

@@ -17,19 +17,23 @@ cmake --build build -j4
 cmake --install build
 ```
 
-然后构建下游示例：
+然后分别构建 C++ 和 C 下游示例（本目录本身没有聚合 `CMakeLists.txt`）：
 
 ```bash
-cmake -S examples/artifact_examples -B build/example_artifacts \
+cmake -S examples/artifact_examples/cpp -B build/example_artifacts_cpp \
   -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+cmake --build build/example_artifacts_cpp -j4
 
-cmake --build build/example_artifacts -j4
+cmake -S examples/artifact_examples/c -B build/example_artifacts_c \
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+cmake --build build/example_artifacts_c -j4
 ```
 
 生成的可执行文件位于：
 
 ```text
-build/example_artifacts/bin/
+build/example_artifacts_cpp/bin/
+build/example_artifacts_c/bin/
 ```
 
 包含：

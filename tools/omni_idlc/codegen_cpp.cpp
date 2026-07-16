@@ -95,6 +95,26 @@ std::string bufferMethodSuffix(const TypeRef& type) {
     }
 }
 
+static size_t minimumWireSize(const TypeRef& type) {
+    switch (type.primitive) {
+    case TYPE_BOOL:
+    case TYPE_INT8:
+    case TYPE_UINT8: return 1;
+    case TYPE_INT16:
+    case TYPE_UINT16: return 2;
+    case TYPE_INT32:
+    case TYPE_UINT32:
+    case TYPE_FLOAT32:
+    case TYPE_STRING:
+    case TYPE_BYTES:
+    case TYPE_ARRAY: return 4;
+    case TYPE_INT64:
+    case TYPE_UINT64:
+    case TYPE_FLOAT64: return 8;
+    default: return 0;
+    }
+}
+
 void emitSerializeValue(const TypeRef& type, const std::string& expr,
                         const std::string& buffer_name, const std::string& indent,
                         int depth, std::ostream& os) {
@@ -161,8 +181,19 @@ void emitDeserializeValue(const TypeRef& type, const std::string& target,
     case TYPE_ARRAY: {
         std::string count = "cnt" + std::to_string(depth);
         std::string idx = "i" + std::to_string(depth);
+        const size_t min_wire_size = minimumWireSize(*type.element_type);
         os << indent << "{ uint32_t " << count << " = 0; if (!" << buffer_name
-           << ".tryReadUint32(" << count << ")) " << fail_stmt << " " << target << ".resize(" << count << ");\n";
+           << ".tryReadUint32(" << count << ")) " << fail_stmt;
+    os << " if (" << count << " > omnibinder::MAX_ARRAY_ELEMENTS) " << fail_stmt;
+        if (min_wire_size != 0) {
+            os << " if (static_cast<size_t>(" << count << ") > " << buffer_name
+               << ".remaining() / " << min_wire_size << "u) " << fail_stmt;
+        } else {
+    os << " if (" << count << " > omnibinder::MAX_ZERO_WIRE_ARRAY_ELEMENTS) " << fail_stmt;
+        }
+    os << " if (static_cast<size_t>(" << count << ") > omnibinder::MAX_MESSAGE_SIZE / sizeof("
+           << cppTypeName(*type.element_type) << ")) " << fail_stmt;
+        os << " try { " << target << ".resize(" << count << "); } catch (...) { " << fail_stmt << " }\n";
         os << indent << "  for (uint32_t " << idx << " = 0; " << idx << " < "
            << count << "; ++" << idx << ") {\n";
         emitDeserializeValue(*type.element_type, target + "[" + idx + "]", buffer_name,
@@ -393,7 +424,7 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
-        os << "    int " << m.name << "(";
+        os << "    " << (m.return_type.isVoid() ? "void" : "int") << " " << m.name << "(";
         if (m.has_param) {
             if (isReferenceType(m.param.type)) {
                 os << "const " << cppTypeName(m.param.type) << "& " << m.param.name;
@@ -546,7 +577,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
             uint32_t idl_hash = computeMethodHash(m, ast);
-            os << "int " << svc.name << "Proxy::" << m.name << "(";
+            os << (m.return_type.isVoid() ? "void " : "int ") << svc.name << "Proxy::" << m.name << "(";
             if (m.has_param) {
                 if (isReferenceType(m.param.type)) {
                     os << "const " << cppTypeName(m.param.type) << "& " << m.param.name;
@@ -561,18 +592,34 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << cppTypeName(m.return_type) << "& out";
             }
             os << ") {\n";
-            os << "    omnibinder::Buffer req, resp;\n";
+            os << "    omnibinder::Buffer req";
+            if (!m.return_type.isVoid()) os << ", resp";
+            os << ";\n";
             if (m.has_param) {
-                emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0, os);
+                std::ostringstream serialize_os;
+                emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0, serialize_os);
+                std::string serialize_code = serialize_os.str();
+                const std::string from = "return false;";
+                const std::string to = m.return_type.isVoid()
+                    ? "return;"
+                    : "return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);";
+                size_t pos = 0;
+                while ((pos = serialize_code.find(from, pos)) != std::string::npos) {
+                    serialize_code.replace(pos, from.size(), to);
+                    pos += to.size();
+                }
+                os << serialize_code;
             }
-            os << "    int ret = runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
-            os << "    if (ret != 0) return ret;\n";
-            if (!m.return_type.isVoid()) {
+            if (m.return_type.isVoid()) {
+                os << "    runtime_.invokeOneWay(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
+            } else {
+                os << "    int ret = runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
+                os << "    if (ret != 0) return ret;\n";
                 emitDeserializeValue(m.return_type, "out", "resp", "    ", 0,
                                      "return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);",
                                      os);
+                os << "    return 0;\n";
             }
-            os << "    return 0;\n";
             os << "}\n\n";
         }
         

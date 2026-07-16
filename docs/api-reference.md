@@ -173,6 +173,15 @@ struct ServiceInfo {
     std::vector<InterfaceInfo> interfaces;  // 接口列表
 };
 
+struct RuntimeInfo {
+    uint32_t pid;                       // runtime 进程 ID
+    std::string process_name;           // 进程名
+    std::string role;                   // client / service
+    uint32_t log_level;                 // 当前日志级别
+    uint32_t diag_capabilities;         // 诊断能力位
+    std::vector<std::string> services;  // 该 runtime 注册的业务服务
+};
+
 struct RuntimeStats {
     uint64_t total_rpc_calls;
     uint64_t total_rpc_success;
@@ -196,7 +205,10 @@ struct InterfaceInfo {
 // 方法信息
 struct MethodInfo {
     uint32_t    method_id;      // 方法ID
+    uint32_t    idl_hash;       // 方法签名与参数/返回类型递归哈希
     std::string name;           // 方法名
+    std::string param_types;    // 参数类型，空表示无参数
+    std::string return_type;    // 返回类型，void 表示无返回值
 };
 
 // 死亡通知回调
@@ -204,6 +216,12 @@ typedef std::function<void(const std::string& service_name)> DeathCallback;
 
 // 话题消息回调
 typedef std::function<void(uint32_t topic_id, const Buffer& data)> TopicCallback;
+
+// 话题错误回调
+typedef std::function<void(uint32_t topic_id, ErrorCode error, const Buffer& raw_data)> TopicErrorCallback;
+
+// PID watch 诊断事件回调，data 为诊断 topic payload
+typedef std::function<void(const Buffer& data)> DiagEventCallback;
 
 class OmniRuntime {
 public:
@@ -311,6 +329,7 @@ public:
     // service_name: 目标服务名
     // interface_id: 接口ID
     // method_id: 方法ID
+    // idl_hash: 方法签名与类型哈希，用于检测客户端/服务端 IDL 不匹配
     // request: 请求数据
     // response: 响应数据
     // timeout_ms: 超时时间（毫秒），0 表示使用默认超时
@@ -320,6 +339,7 @@ public:
     int invoke(const std::string& service_name,
                uint32_t interface_id,
                uint32_t method_id,
+               uint32_t idl_hash,
                const Buffer& request,
                Buffer& response,
                uint32_t timeout_ms = 0);
@@ -329,6 +349,7 @@ public:
     int invokeOneWay(const std::string& service_name,
                      uint32_t interface_id,
                      uint32_t method_id,
+                     uint32_t idl_hash,
                      const Buffer& request);
 
     // ---- 死亡通知 ----
@@ -358,15 +379,21 @@ public:
 
     // 订阅话题
     // topic_name: 话题名
-    // callback: 收到广播时的回调函数（默认在 owner event-loop 线程执行）
+    // on_message: 收到广播时的回调函数（默认在 owner event-loop 线程执行）
+    // on_error: 订阅错误回调
     // 返回: 0 成功，负值为错误码
     int subscribeTopic(const std::string& topic_name,
-                       const TopicCallback& callback);
+                       const TopicCallback& on_message,
+                       const TopicErrorCallback& on_error);
 
     // 取消订阅话题
     int unsubscribeTopic(const std::string& topic_name);
 
     // ---- 配置 ----
+
+    // 设置/获取服务注册到 ServiceManager 的默认可达地址
+    void setRegisterHost(const std::string& host);
+    const std::string& getRegisterHost() const;
 
     // 设置心跳间隔（毫秒）
     void setHeartbeatInterval(uint32_t interval_ms);
@@ -382,6 +409,20 @@ public:
 
     // 重置运行时统计计数器
     int resetStats();
+
+    // 清理本地服务发现缓存、关闭所有数据面连接
+    void clearServiceCache();
+    void closeAllConnections();
+
+    // 兼容旧服务级诊断 API。新 CLI watch 使用 PID 级 watchPid()/unwatchPid()。
+    int enableDiagnostic(const std::string& service_name);
+    int disableDiagnostic(const std::string& service_name);
+
+    // PID 级运行时诊断控制
+    int setLogLevelByPid(uint32_t pid, uint32_t level);
+    int listRuntimes(std::vector<RuntimeInfo>& runtimes);
+    int watchPid(uint32_t pid, const DiagEventCallback& callback);
+    int unwatchPid(uint32_t pid);
 
 private:
     // 禁止拷贝
@@ -512,6 +553,11 @@ private:
 
 传输层抽象接口。SHM 通过 eventfd 事件驱动，TCP 通过 socket fd 事件驱动，均注册到 EventLoop。
 
+出站数据面由 `src/transport/transport_factory.h` 中的内部 provider registry 创建 transport。
+该头文件不安装，不属于 `OmniRuntime`、C API 或公共 `ITransport` ABI；它用于仓库内构建或源码集成时，
+按 runtime/manager 注入自定义 provider。Provider 接收完整服务 endpoint context，并在成功时返回已连接 transport。
+当前扩展边界仅覆盖 `ConnectionManager` 客户端数据面，不覆盖服务 hosting 或 ServiceManager 控制面，也不承诺动态插件 ABI。
+
 ```cpp
 namespace omnibinder {
 
@@ -582,39 +628,6 @@ public:
 
     // 获取传输类型
     virtual TransportType type() const = 0;
-};
-
-// 传输层工厂（用于自动选择传输层）
-// 注意：TransportFactory 为内部 API（位于 src/transport/transport_factory.h），
-// 不在公共头文件中暴露。以下为其接口说明，供内部开发参考。
-class TransportFactory {
-public:
-    // 获取单例
-    static TransportFactory& instance();
-
-    // 根据条件创建传输实例
-    // local_host_id: 本机标识
-    // remote_host_id: 远端标识
-    // 如果同机（host_id 相同），创建 SHM 传输
-    // 如果跨机（host_id 不同），创建 TCP 传输
-    // 返回: 合适的传输实例
-    ITransport* createTransport(const std::string& local_host_id,
-                                const std::string& remote_host_id);
-
-    // 创建服务端传输
-    // TCP: 创建 TcpTransportServer
-    // SHM: 服务端 SHM 应直接通过 ShmTransport(name, true) 创建
-    ITransportServer* createServer(TransportType type);
-
-    // 强制创建指定类型的传输
-    ITransport* createTransport(TransportType type);
-
-    // 判断是否同机
-    static bool isSameMachine(const std::string& local_host_id,
-                              const std::string& remote_host_id);
-
-private:
-    TransportFactory();
 };
 
 } // namespace omnibinder
@@ -881,12 +894,21 @@ void           omni_buffer_destroy(omni_buffer_t* buf);
 void           omni_buffer_reset(omni_buffer_t* buf);
 const uint8_t* omni_buffer_data(const omni_buffer_t* buf);
 size_t         omni_buffer_size(const omni_buffer_t* buf);
+int            omni_buffer_read_ok(const omni_buffer_t* buf);
+void           omni_buffer_clear_error(omni_buffer_t* buf);
+void           omni_buffer_mark_error(omni_buffer_t* buf, int32_t error_code);
+int32_t        omni_buffer_error(const omni_buffer_t* buf);
 
 /* 写入基础类型 */
 void omni_buffer_write_bool(omni_buffer_t* buf, uint8_t val);
+void omni_buffer_write_int8(omni_buffer_t* buf, int8_t val);
+void omni_buffer_write_uint8(omni_buffer_t* buf, uint8_t val);
+void omni_buffer_write_int16(omni_buffer_t* buf, int16_t val);
+void omni_buffer_write_uint16(omni_buffer_t* buf, uint16_t val);
 void omni_buffer_write_int32(omni_buffer_t* buf, int32_t val);
 void omni_buffer_write_uint32(omni_buffer_t* buf, uint32_t val);
 void omni_buffer_write_int64(omni_buffer_t* buf, int64_t val);
+void omni_buffer_write_uint64(omni_buffer_t* buf, uint64_t val);
 void omni_buffer_write_float32(omni_buffer_t* buf, float val);
 void omni_buffer_write_float64(omni_buffer_t* buf, double val);
 void omni_buffer_write_string(omni_buffer_t* buf, const char* val, uint32_t len);
@@ -894,9 +916,14 @@ void omni_buffer_write_bytes(omni_buffer_t* buf, const uint8_t* data, uint32_t l
 
 /* 读取基础类型 */
 uint8_t  omni_buffer_read_bool(omni_buffer_t* buf);
+int8_t   omni_buffer_read_int8(omni_buffer_t* buf);
+uint8_t  omni_buffer_read_uint8(omni_buffer_t* buf);
+int16_t  omni_buffer_read_int16(omni_buffer_t* buf);
+uint16_t omni_buffer_read_uint16(omni_buffer_t* buf);
 int32_t  omni_buffer_read_int32(omni_buffer_t* buf);
 uint32_t omni_buffer_read_uint32(omni_buffer_t* buf);
 int64_t  omni_buffer_read_int64(omni_buffer_t* buf);
+uint64_t omni_buffer_read_uint64(omni_buffer_t* buf);
 float    omni_buffer_read_float32(omni_buffer_t* buf);
 double   omni_buffer_read_float64(omni_buffer_t* buf);
 char*    omni_buffer_read_string(omni_buffer_t* buf, uint32_t* len);
@@ -910,8 +937,17 @@ uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* len);
 omni_runtime_t* omni_runtime_create(void);
 void           omni_runtime_destroy(omni_runtime_t* runtime);
 int            omni_runtime_init(omni_runtime_t* runtime, const char* sm_host, uint16_t sm_port);
+void           omni_runtime_run(omni_runtime_t* runtime);
 void           omni_runtime_poll_once(omni_runtime_t* runtime, int timeout_ms);
 void           omni_runtime_stop(omni_runtime_t* runtime);
+int            omni_runtime_is_running(const omni_runtime_t* runtime);
+
+/* Runtime 配置 */
+void        omni_runtime_set_register_host(omni_runtime_t* runtime, const char* host);
+const char* omni_runtime_get_register_host(const omni_runtime_t* runtime);
+void        omni_runtime_set_heartbeat_interval(omni_runtime_t* runtime, uint32_t interval_ms);
+void        omni_runtime_set_default_timeout(omni_runtime_t* runtime, uint32_t timeout_ms);
+const char* omni_runtime_host_id(const omni_runtime_t* runtime);
 
 /* 服务注册/注销 */
 int  omni_runtime_register_service(omni_runtime_t* runtime, omni_service_t* svc);
@@ -919,13 +955,22 @@ int  omni_runtime_unregister_service(omni_runtime_t* runtime, omni_service_t* sv
 
 /* RPC 调用 */
 int  omni_runtime_invoke(omni_runtime_t* runtime, const char* service_name,
-         uint32_t interface_id, uint32_t method_id,
+         uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
          const omni_buffer_t* request, omni_buffer_t* response,
          uint32_t timeout_ms);
 
 int  omni_runtime_invoke_oneway(omni_runtime_t* runtime, const char* service_name,
-         uint32_t interface_id, uint32_t method_id,
+         uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
          const omni_buffer_t* request);
+
+/* 连接管理 */
+int  omni_runtime_connect_service(omni_runtime_t* runtime, const char* service_name);
+int  omni_runtime_disconnect_service(omni_runtime_t* runtime, const char* service_name);
+int  omni_runtime_is_service_connected(const omni_runtime_t* runtime, const char* service_name);
+void omni_runtime_enable_auto_reconnect(omni_runtime_t* runtime, const char* service_name, int enable);
+void omni_runtime_set_reconnect_interval(omni_runtime_t* runtime, const char* service_name, uint32_t interval_ms);
+void omni_runtime_start_heartbeat(omni_runtime_t* runtime, const char* service_name, uint32_t interval_ms, uint32_t timeout_ms);
+void omni_runtime_stop_heartbeat(omni_runtime_t* runtime, const char* service_name);
 
 /* 话题 */
 int  omni_runtime_publish_topic(omni_runtime_t* runtime, const char* topic_name);
@@ -949,29 +994,41 @@ void omni_runtime_reset_stats(omni_runtime_t* runtime);
 
 ```c
 /* 服务端生命周期 */
-omni_service_t* omni_service_create(const char* service_name);
+omni_service_t* omni_service_create(const char* name,
+                                    uint32_t interface_id,
+                                    omni_invoke_callback_t callback,
+                                    void* user_data);
 void            omni_service_destroy(omni_service_t* svc);
-int             omni_service_init(omni_service_t* svc,
-                                  omni_runtime_t* runtime,
-                                  omni_invoke_callback_t callback,
-                                  void* user_data);
 
 /* 添加接口方法 */
-void omni_service_add_interface(omni_service_t* svc,
-                                 uint32_t interface_id,
-                                 const char* interface_name);
 void omni_service_add_method(omni_service_t* svc,
-                              uint32_t method_id,
-                              const char* method_name);
+                               uint32_t method_id,
+                               const char* method_name);
+void omni_service_add_method_ex(omni_service_t* svc,
+                                uint32_t method_id,
+                                const char* method_name,
+                                const char* param_types,
+                                const char* return_type);
 
-/* 话题发布 */
-int omni_service_publish_topic(omni_service_t* svc, const char* topic_name);
-int omni_service_broadcast(omni_service_t* svc,
-                            const char* topic_name,
-                            const omni_buffer_t* data);
+/* 服务配置 */
+uint16_t    omni_service_port(const omni_service_t* svc);
+void        omni_service_set_register_host(omni_service_t* svc, const char* host);
+const char* omni_service_get_register_host(const omni_service_t* svc);
 ```
 
-### 6.5 使用示例
+### 6.5 工具函数
+
+```c
+uint32_t omni_fnv1a_32(const char* str);
+
+void  omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
+void* omni_malloc(size_t size);
+void  omni_free(void* ptr);
+void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size);
+void* omni_realloc(void* ptr, size_t new_size);
+```
+
+### 6.6 使用示例
 
 完整的 C 语言示例代码位于 `examples/example_c/` 目录：
 
@@ -997,8 +1054,12 @@ void on_invoke(uint32_t method_id, const omni_buffer_t* req,
     omni_runtime_t* runtime = omni_runtime_create();
     omni_runtime_init(runtime, "127.0.0.1", 9900);
     
-    omni_service_t* svc = omni_service_create("SensorService");
-    omni_service_init(svc, runtime, on_invoke, NULL);
+    omni_service_t* svc = omni_service_create("SensorService",
+        demo_SensorService_INTERFACE_ID, on_invoke, NULL);
+    omni_service_add_method_ex(svc,
+        demo_SensorService_METHOD_GET_LATEST_DATA,
+        "GetLatestData", "", "SensorData");
+    omni_runtime_register_service(runtime, svc);
     
     while (running) {
         omni_runtime_poll_once(runtime, 100);
@@ -1006,7 +1067,7 @@ void on_invoke(uint32_t method_id, const omni_buffer_t* req,
     
     omni_service_destroy(svc);
     omni_runtime_destroy(runtime);
-    return 5;
+    return 0;
 }
 ```
 
@@ -1028,8 +1089,9 @@ int main() {
     omni_buffer_t* resp = omni_buffer_create();
     
     int ret = omni_runtime_invoke(runtime, "SensorService",
-                                  DEMO_SENSORSERVICE_INTERFACE_ID,
+                                  demo_SensorService_INTERFACE_ID,
                                   demo_SensorService_METHOD_GET_LATEST_DATA,
+                                  demo_SensorService_METHOD_GET_LATEST_DATA_IDL_HASH,
                                   req, resp, 5000);
     
     if (ret == 0) {
@@ -1046,7 +1108,7 @@ int main() {
 }
 ```
 
-### 6.6 编译和链接
+### 6.7 编译和链接
 
 ```cmake
 # CMakeLists.txt
@@ -1057,7 +1119,7 @@ add_executable(my_c_client sensor_client.c)
 target_link_libraries(my_c_client omnibinder_static)
 ```
 
-### 6.7 特性说明
+### 6.8 特性说明
 
 - ✅ **完整功能**：与 C++ API 功能对等
 - ✅ **类型安全**：使用不透明句柄避免内存泄漏
@@ -1133,11 +1195,13 @@ Total: 3 services online
 
 ```
 $ omni-cli ps
-PID      ROLE     LOG   PROCESS              SERVICES
--------- -------- ----- -------------------- ----------------
-12345    service  I     pid-12345            SensorService
-12346    client   D     pid-12346            -
+PID      ROLE     LOG   PROCESS                      SERVICES
+-------- -------- ----- ---------------------------- ----------------
+12345    service  I     example_cpp_sensor_server    SensorService
+12346    client   D     example_cpp_sensor_client    -
 ```
+
+`PROCESS` 为 runtime 启动时上报的可执行文件名；显示宽度会根据当前进程名在 28~32 字符之间调整，超过 32 字符时以 `...` 截断。旧 runtime 已注册的进程需要重启后才会刷新。
 
 ### 7.3 info 命令输出格式
 

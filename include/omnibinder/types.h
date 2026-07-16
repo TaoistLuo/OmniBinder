@@ -61,7 +61,11 @@ const uint32_t DEFAULT_INVOKE_TIMEOUT       = 5000;   // ms
 const size_t   DEFAULT_BUFFER_SIZE          = 4096;
 const size_t   MAX_SERVICE_NAME_LENGTH      = 256;
 const size_t   MAX_TOPIC_NAME_LENGTH        = 256;
-const size_t   MAX_MESSAGE_SIZE             = 16 * 1024 * 1024;  // 16MB
+const size_t   MAX_MESSAGE_SIZE             = 16u * 1024u * 1024u;
+const size_t   MAX_ARRAY_ELEMENTS           = 1024u * 1024u;
+const size_t   MAX_ZERO_WIRE_ARRAY_ELEMENTS = 4096u;
+const size_t   MAX_PUBLISHED_TOPICS         = 4096u;
+const size_t   MAX_PUBLISHED_TOPICS_BYTES   = 512u * 1024u;
 const uint32_t RUNTIME_DIAG_CAP_WATCH       = 1u;
 
 // ============================================================

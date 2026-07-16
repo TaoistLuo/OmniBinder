@@ -116,6 +116,53 @@ TEST(TopicManagerTest, RemoveByOwnerServiceFdScope) {
     EXPECT_TRUE(mgr.hasPublisher("topic/b1"));
 }
 
+TEST(TopicManagerTest, QueryPublishedTopicsUsesLivePublisherOwnerAndSorts) {
+    TopicManager mgr;
+    ServiceInfo a = makeInfo("svc.a", "127.0.0.1", 9001);
+    ServiceInfo b = makeInfo("svc.b", "127.0.0.1", 9002);
+    EXPECT_TRUE(mgr.registerPublisher("zeta", a, 11));
+    EXPECT_TRUE(mgr.registerPublisher("alpha", a, 11));
+    EXPECT_TRUE(mgr.registerPublisher("beta", b, 11));
+    EXPECT_TRUE(mgr.addSubscriber("subscriber-only", 22));
+
+    std::vector<std::string> topics = mgr.getPublishedTopics("svc.a");
+    ASSERT_EQ(topics.size(), 2u);
+    EXPECT_EQ(topics[0], "alpha");
+    EXPECT_EQ(topics[1], "zeta");
+    EXPECT_TRUE(mgr.getPublishedTopics("missing").empty());
+}
+
+TEST(TopicManagerTest, ServiceCleanupPreservesSiblingPublishersAndSubscriptions) {
+    TopicManager mgr;
+    ServiceInfo a = makeInfo("svc.a", "127.0.0.1", 9001);
+    ServiceInfo b = makeInfo("svc.b", "127.0.0.1", 9002);
+    EXPECT_TRUE(mgr.registerPublisher("topic/a", a, 11));
+    EXPECT_TRUE(mgr.setIdlHash("topic/a", 0x1234u));
+    EXPECT_TRUE(mgr.addSubscriber("topic/a", 22));
+    EXPECT_TRUE(mgr.registerPublisher("topic/b", b, 11));
+    EXPECT_TRUE(mgr.addSubscriber("other", 11));
+
+    EXPECT_TRUE(mgr.removePublishersByService("svc.a", 99).empty());
+    std::vector<std::string> removed = mgr.removePublishersByService("svc.a", 11);
+    ASSERT_EQ(removed.size(), 1u);
+    EXPECT_EQ(removed[0], "topic/a");
+    EXPECT_FALSE(mgr.hasPublisher("topic/a"));
+    EXPECT_TRUE(mgr.hasPublisher("topic/b"));
+    EXPECT_EQ(mgr.getSubscribers("topic/a").size(), 1u);
+    EXPECT_EQ(mgr.getSubscribers("other").size(), 1u);
+    uint32_t hash = 0;
+    EXPECT_FALSE(mgr.getIdlHash("topic/a", hash));
+}
+
+TEST(TopicManagerTest, PublisherHashRegistrationIsAtomic) {
+    TopicManager mgr;
+    ServiceInfo info = makeInfo("svc", "127.0.0.1", 9001);
+    ASSERT_TRUE(mgr.registerPublisher("topic/hash", info, 11, 0x12345678u));
+    uint32_t hash = 0;
+    ASSERT_TRUE(mgr.getIdlHash("topic/hash", hash));
+    EXPECT_EQ(hash, 0x12345678u);
+}
+
 TEST(TopicManagerTest, RemoveByFd) {
     TopicManager mgr;
     ServiceInfo info1 = makeInfo("pub1", "host1", 1000);
@@ -187,4 +234,68 @@ TEST(TopicManagerTest, DuplicatePublisherRejection) {
     EXPECT_EQ(out.port, 2000);
 
     EXPECT_FALSE(mgr.registerPublisher("", info1, 30));
+}
+
+TEST(TopicManagerTest, RejectsInvalidTopicNamesWithoutGrowingState) {
+    TopicManager mgr;
+    ServiceInfo info = makeInfo("pub", "host", 1000);
+    const std::string oversized(MAX_TOPIC_NAME_LENGTH + 1, 'x');
+    EXPECT_FALSE(mgr.registerPublisher("", info, 1));
+    EXPECT_FALSE(mgr.registerPublisher(oversized, info, 1));
+    EXPECT_FALSE(mgr.addSubscriber("", 2));
+    EXPECT_FALSE(mgr.addSubscriber(oversized, 2));
+    EXPECT_FALSE(mgr.removePublisher("", 1));
+    EXPECT_FALSE(mgr.removeSubscriber(oversized, 2));
+    EXPECT_TRUE(mgr.listTopics().empty());
+}
+
+TEST(TopicManagerTest, EnforcesPerConnectionPublicationLimit) {
+    TopicManager mgr;
+    ServiceInfo info = makeInfo("pub", "host", 1000);
+    for (size_t i = 0; i < MAX_TOPIC_PUBLICATIONS_PER_CONNECTION; ++i) {
+        ASSERT_TRUE(mgr.registerPublisher("pub/" + std::to_string(i), info, 7));
+    }
+    EXPECT_FALSE(mgr.registerPublisher("pub/overflow", info, 7));
+    EXPECT_EQ(mgr.getPublishedTopics("pub").size(),
+              MAX_TOPIC_PUBLICATIONS_PER_CONNECTION);
+}
+
+TEST(TopicManagerTest, EnforcesPerConnectionSubscriptionLimit) {
+    TopicManager mgr;
+    for (size_t i = 0; i < MAX_TOPIC_SUBSCRIPTIONS_PER_CONNECTION; ++i) {
+        ASSERT_TRUE(mgr.addSubscriber("sub/" + std::to_string(i), 9));
+    }
+    EXPECT_FALSE(mgr.addSubscriber("sub/overflow", 9));
+    EXPECT_EQ(mgr.listTopics().size(), MAX_TOPIC_SUBSCRIPTIONS_PER_CONNECTION);
+}
+
+TEST(TopicManagerTest, EnforcesGlobalTopicLimit) {
+    TopicManager mgr;
+    for (size_t i = 0; i < MAX_TOPICS_GLOBAL; ++i) {
+        const int fd = static_cast<int>(i / MAX_TOPIC_SUBSCRIPTIONS_PER_CONNECTION) + 1;
+        ASSERT_TRUE(mgr.addSubscriber("global/" + std::to_string(i), fd));
+    }
+    EXPECT_FALSE(mgr.addSubscriber("global/overflow", 99));
+    EXPECT_EQ(mgr.listTopics().size(), MAX_TOPICS_GLOBAL);
+}
+
+TEST(TopicManagerTest, EnforcesSubscribersPerTopicLimit) {
+    TopicManager mgr;
+    for (size_t i = 0; i < MAX_SUBSCRIBERS_PER_TOPIC; ++i) {
+        ASSERT_TRUE(mgr.addSubscriber("shared/topic", static_cast<int>(i + 1)));
+    }
+    EXPECT_FALSE(mgr.addSubscriber(
+        "shared/topic", static_cast<int>(MAX_SUBSCRIBERS_PER_TOPIC + 1)));
+    EXPECT_EQ(mgr.getSubscribers("shared/topic").size(), MAX_SUBSCRIBERS_PER_TOPIC);
+}
+
+TEST(TopicManagerTest, EnforcesGlobalSubscriptionEdgeLimitAndReleasesCapacity) {
+    TopicManager mgr;
+    for (size_t i = 0; i < MAX_TOPIC_SUBSCRIPTIONS_GLOBAL; ++i) {
+        const int fd = static_cast<int>(i / MAX_TOPIC_SUBSCRIPTIONS_PER_CONNECTION) + 1;
+        ASSERT_TRUE(mgr.addSubscriber("edge/" + std::to_string(i), fd));
+    }
+    EXPECT_FALSE(mgr.addSubscriber("edge/overflow", 99));
+    EXPECT_TRUE(mgr.removeSubscriber("edge/0", 1));
+    EXPECT_TRUE(mgr.addSubscriber("edge/reused", 99));
 }

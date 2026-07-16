@@ -90,6 +90,12 @@ struct LocalServiceEntry {
     // fd -> recv buffer for each accepted client
     std::map<int, Buffer*>      client_recv_buffers;
 
+    // Per-client notify fds created on Windows (Linux: empty).
+    // Tracked so they can be removed from the event loop and closed on
+    // unregister.  The ShmTransport owns the fd lifecycle; this set mirrors
+    // what was registered with the EventLoop.
+    std::set<int>        shm_client_notify_fds;
+
     bool     diag_enabled;
     uint32_t diag_topic_id;
 
@@ -153,9 +159,17 @@ public:
     int listServices(std::vector<ServiceInfo>& services);
     int queryInterfaces(const std::string& service_name,
                         std::vector<InterfaceInfo>& interfaces);
+    int queryPublishedTopics(const std::string& service_name,
+                             std::vector<std::string>& topics);
+    int queryPublishedTopics(const std::string& service_name,
+                             std::vector<std::string>& topics,
+                             uint32_t timeout_ms);
     int listServicesInternal(std::vector<ServiceInfo>& services);
     int queryInterfacesInternal(const std::string& service_name,
-                                std::vector<InterfaceInfo>& interfaces);
+                                 std::vector<InterfaceInfo>& interfaces);
+    int queryPublishedTopicsInternal(const std::string& service_name,
+                                     std::vector<std::string>& topics,
+                                     uint32_t timeout_ms);
 
     // --- 连接管理 ---
     int connectService(const std::string& service_name);
@@ -165,6 +179,8 @@ public:
     void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
     void startHeartbeat(const std::string& service_name, uint32_t interval_ms, uint32_t timeout_ms);
     void stopHeartbeat(const std::string& service_name);
+    void pauseHeartbeat(const std::string& service_name);
+    void resumeHeartbeat(const std::string& service_name);
     int connectServiceInternal(const std::string& service_name);
     int disconnectServiceInternal(const std::string& service_name);
     void tryReconnectService(const std::string& service_name);
@@ -234,6 +250,8 @@ private:
     bool sendToSMWithinTimeout(const Message& msg, uint32_t timeout_ms,
                                uint32_t* elapsed_ms);
     int sendSMRequestAndWaitReply(Message& msg, Message& reply);
+    int sendSMRequestAndWaitReply(Message& msg, Message& reply,
+                                  uint32_t timeout_ms);
     void onSMData(int fd, uint32_t events);
     void processSMMessages();
     void onSMMessage(const Message& msg);

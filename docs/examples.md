@@ -119,6 +119,8 @@ topic AsyncResultReady {
 ### 2.3 生成代码
 
 ```bash
+mkdir -p generated/
+
 # 生成 C++ 代码（会自动处理 import 依赖）
 omni-idlc --lang=cpp --output=generated/ sensor_service.bidl
 
@@ -147,15 +149,18 @@ omni-idlc --lang=c --output=generated/ sensor_service.bidl
 ```cmake
 # examples/example_cpp/CMakeLists.txt
 
+add_executable(example_cpp_sensor_server sensor_server.cpp)
+
 # 使用 IDL 生成代码
 omnic_generate(
     TARGET example_cpp_sensor_server
     LANGUAGE cpp
-    FILES ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+    FILES
+        ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
+        ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
-add_executable(example_cpp_sensor_server sensor_server.cpp)
 target_link_libraries(example_cpp_sensor_server omnibinder_static)
 ```
 
@@ -213,15 +218,18 @@ public:
 ```cmake
 # examples/example_cpp/CMakeLists.txt
 
+add_executable(example_cpp_sensor_client sensor_client.cpp)
+
 # 客户端使用同一份 IDL 生成的 Proxy
 omnic_generate(
     TARGET example_cpp_sensor_client
     LANGUAGE cpp
-    FILES ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+    FILES
+        ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
+        ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
-add_executable(example_cpp_sensor_client sensor_client.cpp)
 target_link_libraries(example_cpp_sensor_client omnibinder_static)
 ```
 
@@ -247,22 +255,22 @@ demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
 uint8_t bool_out = 0;
-proxy.EchoBool(false, &bool_out);
+proxy.EchoBool(false, bool_out);
 
 int32_t int_out = 0;
-proxy.EchoInt32(32, &int_out);
+proxy.EchoInt32(32, int_out);
 
 StatusResponse status_out;
-proxy.EchoStatus(status, &status_out);
+proxy.EchoStatus(status, status_out);
 
 SensorEnvelope envelope_out;
-proxy.EchoEnvelope(envelope, &envelope_out);
+proxy.EchoEnvelope(envelope, envelope_out);
 
 std::vector<int32_t> ids_out;
-proxy.EchoIdArray(ids, &ids_out);
+proxy.EchoIdArray(ids, ids_out);
 
 SensorArrayBundle bundle_out;
-proxy.EchoBundle(bundle, &bundle_out);
+proxy.EchoBundle(bundle, bundle_out);
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
 proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
@@ -271,7 +279,7 @@ demo::AsyncRequest req;
 req.request_id = 42;
 req.client_tag = "cpp-client";
 common::StatusResponse ack;
-proxy.RequestLatestDataAsync(req, &ack);
+proxy.RequestLatestDataAsync(req, ack);
 ```
 
 完整代码请直接以 `examples/example_cpp/sensor_client.cpp` 为准。
@@ -385,7 +393,7 @@ demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 
 与 C++ 版本的关键区别：
 - `SensorServiceProxy proxy(client)` → `demo_SensorService_proxy proxy; demo_SensorService_proxy_init(&proxy, runtime)`
-- `proxy.GetLatestData(&data)` 显式输出参数 → `demo_SensorService_proxy_get_latest_data(&proxy, &data)`
+- `proxy.GetLatestData(data)` 使用 C++ 输出引用 → `demo_SensorService_proxy_get_latest_data(&proxy, &data)` 使用 C 输出指针
 - `proxy.SubscribeSensorUpdate([](auto& msg){...})` → `demo_SensorService_proxy_subscribe_sensor_update(&proxy, callback, user_data)`
 - 所有结构体需要 `_init()` 初始化、`_destroy()` 释放
 
@@ -398,9 +406,7 @@ $ ./target/bin/omni-cli list
 NAME                HOST            PORT    STATUS
 ----                ----            ----    ------
 SensorService       127.0.0.1       8001    ONLINE
-SensorClient       127.0.0.1       8002    ONLINE
-
-Total: 2 services online
+Total: 1 service online
 ```
 
 ### 7.2 查询服务详细信息
@@ -414,14 +420,15 @@ Service: SensorService
   HostID:  a1b2c3d4e5f6
   Status:  ONLINE
 
-  Interface: SensorService (id=0x1a2b3c4d)
-    Methods:
-      - GetLatestData() -> SensorData  (id=0x9c0d1e2f)
-      - SetThreshold(ControlCommand) -> StatusResponse  (id=0x5e6f7a8b)
-      - ResetSensor(int32) -> void  (id=0x3a4b5c6d)
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
 
-    Published Topics:
-      - SensorUpdate  (id=0x7e8f9a0b)
+  Interface: SensorService (id=0xa112646d)
+    Methods:
+      - GetLatestData() -> SensorData  (id=0x61564c6c)
+      - SetThreshold(ControlCommand) -> common.StatusResponse  (id=0x2214744e)
+      - ResetSensor(int32) -> void  (id=0x7f2b95ee)
 ```
 
 **详细模式（展开字段定义）：**
@@ -433,9 +440,13 @@ Service: SensorService
   HostID:  a1b2c3d4e5f6
   Status:  ONLINE
 
-  Interface: SensorService (id=0x1a2b3c4d)
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
+
+  Interface: SensorService (id=0xa112646d)
     Methods:
-      - GetLatestData() -> SensorData  (id=0x9c0d1e2f)
+      - GetLatestData() -> SensorData  (id=0x61564c6c)
           return:           {
             sensor_id: int32
             temperature: float64
@@ -443,7 +454,7 @@ Service: SensorService
             timestamp: int64
             location: string
           }
-      - SetThreshold(ControlCommand) -> StatusResponse  (id=0x5e6f7a8b)
+      - SetThreshold(ControlCommand) -> common.StatusResponse  (id=0x2214744e)
           param:           {
             command_type: int32
             target: string
@@ -453,7 +464,7 @@ Service: SensorService
             code: int32
             message: string
           }
-      - ResetSensor(int32) -> void  (id=0x3a4b5c6d)
+      - ResetSensor(int32) -> void  (id=0x7f2b95ee)
 ```
 
 ### 7.3 调用服务接口
@@ -462,20 +473,18 @@ Service: SensorService
 
 - 带 `--idl` 时，`call` 的参数使用 **JSON 输入**
 - 不带 `--idl` 时，只能传原始十六进制请求体
-- 当前已经验证可正常工作的 JSON I/O 类型：
+- 当前 JSON I/O 支持：
   - 基础类型（bool/int/float/string）
   - 普通 struct
   - 嵌套 struct
   - 无参返回 struct
-- 当前**尚未验证通过**的 JSON I/O 类型：
-  - `bytes`
-  - `array<...>`
-  - 含数组的复杂 struct
+  - 不含 `bytes` 的数组及嵌套复杂 struct
+- 当前 JSON codec 不支持 `bytes`，因此也不支持包含 `bytes` 的数组或 struct；struct 输入必须包含全部声明字段
 
 #### 7.3.1 通用格式
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <JSON参数>
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <参数>
 ```
 
 #### 7.3.2 每个接口的调用方式
@@ -483,58 +492,55 @@ Service: SensorService
 **无参 RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
 ```
 
 **基础类型 RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString '"hello"'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString hello
 ```
 
-> 注意：字符串参数要按 JSON 字符串传入，因此 shell 参数中需要保留内部双引号，例如 `EchoString '"hello"'`。
+> 注意：字符串基础类型使用原始命令行参数，例如 `EchoString hello`；保留内部双引号会把引号本身作为字符串内容。
 
 **普通 struct RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
 ```
 
 **嵌套 struct RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
 ```
 
 **单向 RPC**
 
 ```bash
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
 ```
 
 **当前不建议使用 `omni-cli` 调用的接口**
 
-以下接口在当前 `omni-cli` JSON I/O 路径上未验证通过，会编码失败或找不到对应类型：
+以下接口包含 `bytes`，当前 JSON codec 会拒绝；其他不含 `bytes` 的数组可直接用 `[` 开头的 JSON 参数调用：
 
 - `EchoBytes(bytes value)`
-- `EchoIdArray(array<int32> value)`
-- `EchoLabelArray(array<string> value)`
-- `EchoSensorArray(array<SensorData> value)`
 - `EchoBundle(SensorArrayBundle value)`
 
 这些接口请使用 `examples/example_cpp/sensor_client.cpp` 或 `examples/example_c/sensor_client.c` 验证。
@@ -542,9 +548,9 @@ Service: SensorService
 #### 7.3.3 查询服务信息
 
 ```bash
-./build-host/target/bin/omni-cli list
-./build-host/target/bin/omni-cli info SensorService
-./build-host/target/bin/omni-cli --idl ./examples/sensor_service.bidl info SensorService
+./build/target/bin/omni-cli list
+./build/target/bin/omni-cli info SensorService
+./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl info SensorService
 ```
 
 详细使用说明见 [omni-cli 使用指南](omni-tool-usage.md)。
@@ -573,7 +579,7 @@ $ ./target/bin/service_manager --port 9900
 
 **终端2：启动 C++ 服务端**
 ```bash
-$ ./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900
+$ ./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900 --register-host 192.168.1.10
 === SensorService Starting ===
 ServiceManager: 127.0.0.1:9900
 Connected to ServiceManager
@@ -828,6 +834,9 @@ service MyService {
 使用 `omni-idlc` 生成代码：
 
 ```bash
+# 输出目录必须预先存在
+mkdir -p generated/
+
 # 生成 C++ 代码
 $OMNIBINDER_DIR/bin_host/omni-idlc --lang=cpp --output=generated/ my_service.bidl
 
@@ -964,7 +973,8 @@ int main() {
     myapp::Request req;
     req.id = 1;
     req.name = "hello";
-    myapp::Response resp = proxy.HandleRequest(req);
+    myapp::Response resp;
+    proxy.HandleRequest(req, resp);
     printf("Response: code=%d message=%s\n", resp.code, resp.message.c_str());
 
     // 订阅广播
@@ -994,7 +1004,8 @@ cmake .. -DCMAKE_PREFIX_PATH=$OMNIBINDER_DIR
 make -j$(nproc)
 
 # 运行（需要先启动 ServiceManager）
-$OMNIBINDER_DIR/bin/service_manager &
+# 普通主机构建安装时使用 bin_host；交叉部署到目标板时通常使用 bin_cross。
+$OMNIBINDER_DIR/bin_host/service_manager &
 ./my_server &
 ./my_client
 ```
@@ -1059,8 +1070,8 @@ omnic_generate(
 static volatile int g_running = 1;
 static void signal_handler(int sig) { (void)sig; g_running = 0; }
 
-static void on_handle_request(const myapp_Request* req,
-                              myapp_Response* result, void* user_data) {
+void myapp_MyService_impl_handle_request(const myapp_Request* req,
+                                         myapp_Response* result, void* user_data) {
     (void)user_data;
     printf("[Server] HandleRequest: id=%d name=%.*s\n",
            req->id, req->name_len, req->name);
@@ -1070,7 +1081,7 @@ static void on_handle_request(const myapp_Request* req,
     result->message_len = 2;
 }
 
-static void on_notify(int32_t event_id, void* user_data) {
+void myapp_MyService_impl_notify(int32_t event_id, void* user_data) {
     (void)user_data;
     printf("[Server] Notify: event_id=%d\n", event_id);
 }
@@ -1086,7 +1097,7 @@ int main(void) {
     }
 
     /* 直接绑定生成的 impl 接口 */
-    omni_service_t* svc = myapp_MyService_stub_create(NULL);
+    omni_service_t* svc = myapp_MyService_stub_create(runtime);
     omni_runtime_register_service(runtime, svc);
     omni_runtime_publish_topic(runtime, "StatusUpdate");
 
@@ -1180,7 +1191,7 @@ cmake .. -DCMAKE_PREFIX_PATH=$OMNIBINDER_DIR
 make -j$(nproc)
 
 # 运行
-$OMNIBINDER_DIR/bin/service_manager &
+$OMNIBINDER_DIR/bin_host/service_manager &
 ./my_server &
 ./my_client
 ```
@@ -1193,7 +1204,7 @@ $OMNIBINDER_DIR/bin/service_manager &
 
 ```bash
 # 1. 生成代码
-$OMNIBINDER_DIR/bin/omni-idlc --lang=cpp --output=. my_service.bidl
+$OMNIBINDER_DIR/bin_host/omni-idlc --lang=cpp --output=. my_service.bidl
 
 # 2. 编译服务端
 g++ -std=c++11 -I$OMNIBINDER_DIR/include \
@@ -1212,7 +1223,7 @@ g++ -std=c++11 -I$OMNIBINDER_DIR/include \
 
 ```bash
 # 1. 生成代码
-$OMNIBINDER_DIR/bin/omni-idlc --lang=c --output=. my_service.bidl
+$OMNIBINDER_DIR/bin_host/omni-idlc --lang=c --output=. my_service.bidl
 
 # 2. 编译服务端（注意：链接时需要 -lstdc++ 因为 omnibinder 库是 C++ 实现）
 gcc -std=c99 -I$OMNIBINDER_DIR/include \
@@ -1235,7 +1246,7 @@ gcc -std=c99 -I$OMNIBINDER_DIR/include \
 | 库链接 | `OmniBinder::omnibinder_static` | 同左（需声明 CXX 语言） |
 | 实现服务 | 继承 `XxxStub`，重写虚函数 | 实现生成的 `xxx_impl_*` 接口，并调用 `xxx_stub_create(user_data)` |
 | 调用服务 | `XxxProxy proxy(runtime)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
-| RPC 调用 | `proxy.Method(req, &resp)` | `xxx_proxy_method(&proxy, &req, &resp)` |
+| RPC 调用 | `proxy.Method(req, resp)` | `xxx_proxy_method(&proxy, &req, &resp)` |
 | 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(runtime, &msg)` |
 | 订阅 | `proxy.SubscribeTopic(lambda)` | `xxx_proxy_subscribe_topic(&proxy, callback, ud)` |
 | 死亡通知 | `proxy.OnServiceDied(lambda)` | `xxx_proxy_on_service_died(&proxy, callback, ud)` |

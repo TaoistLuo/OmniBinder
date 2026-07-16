@@ -2,8 +2,10 @@
 #include "simple_json.h"
 #include "type_codec.h"
 #include "type_resolver.h"
+#include "info_formatter.h"
 #include "lexer.h"
 #include "parser.h"
+#include "semantic_validator.h"
 #include "codegen.h"
 #include <cstdio>
 #include <cstring>
@@ -198,6 +200,18 @@ static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
     printf("  Port:    %u\n", info.port);
     printf("  HostID:  %s\n", info.host_id.c_str());
     printf("  Status:  ONLINE\n\n");
+
+    std::vector<std::string> published_topics;
+    const uint32_t topics_query_timeout_ms = 1000;
+    int topics_ret = runtime.queryPublishedTopics(
+        service_name, published_topics, topics_query_timeout_ms);
+    std::string topics_unavailable;
+    if (topics_ret != 0) {
+        topics_unavailable = omnibinder::errorCodeToString(
+            static_cast<omnibinder::ErrorCode>(topics_ret));
+    }
+    printf("%s", omni_cli::formatPublishedTopicsSection(
+        published_topics, topics_unavailable).c_str());
     
     for (size_t i = 0; i < info.interfaces.size(); ++i) {
         const omnibinder::InterfaceInfo& iface = info.interfaces[i];
@@ -809,6 +823,14 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Error: Cannot open IDL file: %s\n", idl_file);
             return 1;
         }
+        ifs.seekg(0, std::ios::end);
+        const std::streamoff source_size = ifs.tellg();
+        if (source_size < 0 ||
+            static_cast<unsigned long long>(source_size) > omnic::IDLC_MAX_SOURCE_BYTES_PER_FILE) {
+            fprintf(stderr, "Error: IDL source size limit exceeded: %s\n", idl_file);
+            return 1;
+        }
+        ifs.seekg(0, std::ios::beg);
         
         std::stringstream buffer;
         buffer << ifs.rdbuf();
@@ -822,6 +844,13 @@ int main(int argc, char* argv[]) {
         if (!parser.parse(ast)) {
             fprintf(stderr, "Error: IDL parse failed: %s\n", parser.errorMessage().c_str());
             delete g_parse_ctx;
+            return 1;
+        }
+        std::string semantic_error;
+        if (!omnic::validateSemantics(ast, *g_parse_ctx, semantic_error)) {
+            fprintf(stderr, "Error: IDL semantic validation failed: %s\n", semantic_error.c_str());
+            delete g_parse_ctx;
+            g_parse_ctx = NULL;
             return 1;
         }
         

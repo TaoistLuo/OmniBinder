@@ -1,4 +1,5 @@
 #include "parser.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -63,12 +64,25 @@ std::string Parser::normalizePath(const std::string& path) {
 // ---------------------------------------------------------------------------
 
 Parser::Parser(Lexer& lexer, ParseContext& ctx, const std::string& file_path)
+    : Parser(lexer, ctx, file_path, 0) {}
+
+Parser::Parser(Lexer& lexer, ParseContext& ctx, const std::string& file_path,
+               size_t import_depth)
     : lexer_(lexer)
     , has_error_(false)
     , ctx_(&ctx)
     , file_path_(file_path)
     , base_dir_(getDirectory(file_path))
+    , saw_import_(false)
+    , saw_declaration_(false)
+    , import_depth_(import_depth)
 {
+    if (lexer_.sourceSize() > IDLC_MAX_SOURCE_BYTES_PER_FILE ||
+        ctx_->total_source_bytes > IDLC_MAX_TOTAL_SOURCE_BYTES - lexer_.sourceSize()) {
+        error("IDL source size limit exceeded");
+    } else {
+        ctx_->total_source_bytes += lexer_.sourceSize();
+    }
     current_ = lexer_.nextToken();
 }
 
@@ -78,7 +92,15 @@ Parser::Parser(Lexer& lexer)
     , ctx_(&default_ctx_)
     , file_path_("")
     , base_dir_(".")
+    , saw_import_(false)
+    , saw_declaration_(false)
+    , import_depth_(0)
 {
+    if (lexer_.sourceSize() > IDLC_MAX_SOURCE_BYTES_PER_FILE) {
+        error("IDL source size limit exceeded");
+    } else {
+        ctx_->total_source_bytes += lexer_.sourceSize();
+    }
     current_ = lexer_.nextToken();
 }
 
@@ -125,35 +147,17 @@ bool Parser::registerTypes(const AstFile& ast) {
     const std::string& pkg = ast.package_name;
     
     for (size_t i = 0; i < ast.structs.size(); ++i) {
-        const std::string& name = ast.structs[i].name;
-        std::map<std::string, std::string>::iterator it = ctx_->type_registry.find(name);
-        if (it != ctx_->type_registry.end() && it->second != pkg) {
-            error("Type '" + name + "' already defined in package '" + it->second +
-                  "', cannot redefine in package '" + pkg + "'");
-            return false;
-        }
+        const std::string name = pkg + "." + ast.structs[i].name;
         ctx_->type_registry[name] = pkg;
     }
     
     for (size_t i = 0; i < ast.topics.size(); ++i) {
-        const std::string& name = ast.topics[i].name;
-        std::map<std::string, std::string>::iterator it = ctx_->type_registry.find(name);
-        if (it != ctx_->type_registry.end() && it->second != pkg) {
-            error("Type '" + name + "' already defined in package '" + it->second +
-                  "', cannot redefine in package '" + pkg + "'");
-            return false;
-        }
+        const std::string name = pkg + "." + ast.topics[i].name;
         ctx_->type_registry[name] = pkg;
     }
     
     for (size_t i = 0; i < ast.services.size(); ++i) {
-        const std::string& name = ast.services[i].name;
-        std::map<std::string, std::string>::iterator it = ctx_->type_registry.find(name);
-        if (it != ctx_->type_registry.end() && it->second != pkg) {
-            error("Type '" + name + "' already defined in package '" + it->second +
-                  "', cannot redefine in package '" + pkg + "'");
-            return false;
-        }
+        const std::string name = pkg + "." + ast.services[i].name;
         ctx_->type_registry[name] = pkg;
     }
     
@@ -178,9 +182,9 @@ bool Parser::parse(AstFile& ast) {
         switch (current_.type) {
         case TOK_PACKAGE:  parsePackage(ast); break;
         case TOK_IMPORT:   parseImport(ast); break;
-        case TOK_STRUCT:   parseStruct(ast); break;
-        case TOK_TOPIC:    parseTopic(ast); break;
-        case TOK_SERVICE:  parseService(ast); break;
+        case TOK_STRUCT:   saw_declaration_ = true; parseStruct(ast); break;
+        case TOK_TOPIC:    saw_declaration_ = true; parseTopic(ast); break;
+        case TOK_SERVICE:  saw_declaration_ = true; parseService(ast); break;
         default:
             error("Unexpected token: " + current_.value);
             return false;
@@ -220,6 +224,10 @@ bool Parser::parse(AstFile& ast) {
 // ---------------------------------------------------------------------------
 
 bool Parser::parsePackage(AstFile& ast) {
+    ++ast.package_declaration_count;
+    if (saw_import_ || saw_declaration_) {
+        ast.package_before_imports_and_declarations = false;
+    }
     expect(TOK_PACKAGE);
     Token name = expect(TOK_IDENTIFIER);
     expect(TOK_SEMICOLON);
@@ -228,6 +236,10 @@ bool Parser::parsePackage(AstFile& ast) {
 }
 
 bool Parser::parseImport(AstFile& ast) {
+    saw_import_ = true;
+    if (saw_declaration_) {
+        ast.imports_before_declarations = false;
+    }
     expect(TOK_IMPORT);
     Token path_tok = expect(TOK_STRING);
     expect(TOK_SEMICOLON);
@@ -239,15 +251,23 @@ bool Parser::parseImport(AstFile& ast) {
     // 解析路径
     std::string resolved = resolvePath(import_path);
     std::string normalized = normalizePath(resolved);
-    
     // 已加载？跳过
     if (ctx_->file_to_package.find(normalized) != ctx_->file_to_package.end()) {
+        ast.imported_packages.push_back(ctx_->file_to_package[normalized]);
         return true;
     }
     
     // 循环依赖检测
     if (ctx_->processing_files.find(normalized) != ctx_->processing_files.end()) {
         error("Circular import detected: " + import_path);
+        return false;
+    }
+    if (import_depth_ >= IDLC_MAX_IMPORT_DEPTH) {
+        error("import depth limit exceeded");
+        return false;
+    }
+    if (ctx_->import_file_count >= IDLC_MAX_IMPORT_FILES) {
+        error("import file limit exceeded");
         return false;
     }
     
@@ -257,18 +277,29 @@ bool Parser::parseImport(AstFile& ast) {
         error("Cannot open imported file: " + resolved);
         return false;
     }
+    ifs.seekg(0, std::ios::end);
+    const std::streamoff source_size = ifs.tellg();
+    if (source_size < 0 ||
+        static_cast<unsigned long long>(source_size) > IDLC_MAX_SOURCE_BYTES_PER_FILE ||
+        static_cast<unsigned long long>(source_size) >
+            IDLC_MAX_TOTAL_SOURCE_BYTES - ctx_->total_source_bytes) {
+        error("Imported IDL source size limit exceeded: " + resolved);
+        return false;
+    }
+    ifs.seekg(0, std::ios::beg);
     std::stringstream ss;
     ss << ifs.rdbuf();
     std::string source = ss.str();
     ifs.close();
     
     // 记录文件路径（用于 dep-file）
+    ++ctx_->import_file_count;
     ctx_->all_files.push_back(normalized);
     
     // 递归解析（共享同一个 ParseContext）
     // parse() 内部会自动处理 processing_files 的插入和移除
     Lexer dep_lexer(source);
-    Parser dep_parser(dep_lexer, *ctx_, resolved);
+    Parser dep_parser(dep_lexer, *ctx_, resolved, import_depth_ + 1);
     AstFile dep_ast;
     
     if (!dep_parser.parse(dep_ast)) {
@@ -279,6 +310,7 @@ bool Parser::parseImport(AstFile& ast) {
     
     // 记录文件到包名的映射
     ctx_->file_to_package[normalized] = dep_ast.package_name;
+    ast.imported_packages.push_back(dep_ast.package_name);
     
     return true;
 }
@@ -381,7 +413,11 @@ bool Parser::parseMethod(MethodDef& method) {
     return !has_error_;
 }
 
-bool Parser::parseType(TypeRef& type) {
+bool Parser::parseType(TypeRef& type, size_t nesting) {
+    if (nesting >= IDLC_MAX_TYPE_NESTING) {
+        error("type nesting limit exceeded");
+        return false;
+    }
     switch (current_.type) {
     case TOK_BOOL:    type.primitive = TYPE_BOOL; break;
     case TOK_INT8:    type.primitive = TYPE_INT8; break;
@@ -402,7 +438,7 @@ bool Parser::parseType(TypeRef& type) {
         current_ = lexer_.nextToken();
         expect(TOK_LANGLE);
         type.element_type = new TypeRef();
-        if (!parseType(*type.element_type)) return false;
+        if (!parseType(*type.element_type, nesting + 1)) return false;
         expect(TOK_RANGLE);
         return !has_error_;
     case TOK_IDENTIFIER: {

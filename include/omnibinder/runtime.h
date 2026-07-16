@@ -77,6 +77,11 @@ public:
     int lookupService(const std::string& service_name, ServiceInfo& info);
     int listServices(std::vector<ServiceInfo>& services);
     int queryInterfaces(const std::string& service_name, std::vector<InterfaceInfo>& interfaces);
+    int queryPublishedTopics(const std::string& service_name,
+                             std::vector<std::string>& topics);
+    int queryPublishedTopics(const std::string& service_name,
+                             std::vector<std::string>& topics,
+                             uint32_t timeout_ms);
 
     int connectService(const std::string& service_name);
     int disconnectService(const std::string& service_name);

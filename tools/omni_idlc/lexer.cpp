@@ -88,10 +88,20 @@ Token Lexer::readString() {
     advance(); // skip opening quote
     std::string val;
     while (!isAtEnd() && peek() != '"') {
-        if (peek() == '\\') { advance(); if (!isAtEnd()) val += advance(); }
-        else val += advance();
+        const unsigned char ch = static_cast<unsigned char>(peek());
+        if (ch == '\\' || ch < 0x20u || ch == 0x7fu) {
+            has_error_ = true;
+            error_msg_ = "Unsafe character in string literal";
+            return Token(TOK_ERROR, val, l, c);
+        }
+        val += advance();
     }
-    if (!isAtEnd()) advance(); // skip closing quote
+    if (isAtEnd()) {
+        has_error_ = true;
+        error_msg_ = "Unterminated string literal";
+        return Token(TOK_ERROR, val, l, c);
+    }
+    advance(); // skip closing quote
     return Token(TOK_STRING, val, l, c);
 }
 

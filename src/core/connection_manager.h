@@ -117,6 +117,10 @@ public:
     bool sendRawWithinTimeout(ServiceConnection* conn, const uint8_t* data, size_t length,
                               uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
 
+    // 在 deadline 时间戳前发送数据，0 表示无 deadline
+    bool sendRawWithDeadline(ServiceConnection* conn, const uint8_t* data, size_t length,
+                             uint32_t deadline_ms);
+
     // 设置消息回调
     void setMessageCallback(const MessageCallback& cb);
 

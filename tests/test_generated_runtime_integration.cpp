@@ -891,6 +891,10 @@ protected:
             "struct Item {\n"
             "    int32 id;\n"
             "}\n"
+            "struct ArrayPayload {\n"
+            "    array<int32> values;\n"
+            "    array<array<int32>> nested;\n"
+            "}\n"
             "topic ItemTopic {\n"
             "    Item item;\n"
             "}\n"
@@ -952,9 +956,13 @@ TEST_F(GeneratedRuntimeTest, RunGeneratedCppRuntimeHarness) {
 }
 
 TEST_F(GeneratedRuntimeTest, CompileGeneratedCRuntimeHarness) {
+    std::string c_object = dir_ + "/guarded_c99.o";
+    std::string compile_c = std::string("cc -std=c99 ") + getIncludeFlags() +
+        " -c " + shellQuote(dir_ + "/guarded.c") + " -o " + shellQuote(c_object);
+    ASSERT_TRUE(runCommand(compile_c));
     std::string cmd = std::string("g++ -std=c++11 ") + getIncludeFlags() +
         " " + shellQuote(c_harness_path_) +
-        " " + shellQuote(dir_ + "/guarded.c") +
+        " " + shellQuote(c_object) +
         " " + shellQuote(getLibPath()) +
         " -lpthread -lrt -o " + shellQuote(dir_ + "/generated_c_harness");
     ASSERT_TRUE(runCommand(cmd));
@@ -962,4 +970,50 @@ TEST_F(GeneratedRuntimeTest, CompileGeneratedCRuntimeHarness) {
 
 TEST_F(GeneratedRuntimeTest, RunGeneratedCRuntimeHarness) {
     ASSERT_TRUE(runCommand(shellQuote(dir_ + "/generated_c_harness")));
+}
+
+TEST_F(GeneratedRuntimeTest, GeneratedArrayDeserializersRejectHostileCounts) {
+    const std::string cpp_source =
+        "#include \"guarded.h\"\n"
+        "static int rejected(const uint8_t* data, size_t size) {\n"
+        "  omnibinder::Buffer buf(data, size); demo::ArrayPayload value;\n"
+        "  return value.deserialize(buf) ? 0 : 1;\n"
+        "}\n"
+        "int main() {\n"
+        "  const uint8_t huge[] = {0xff,0xff,0xff,0xff};\n"
+        "  const uint8_t tiny[] = {2,0,0,0,1,0,0,0};\n"
+        "  return (rejected(huge, sizeof(huge)) && rejected(tiny, sizeof(tiny))) ? 0 : 1;\n"
+        "}\n";
+    const std::string cpp_path = dir_ + "/array_guard_cpp.cpp";
+    writeFile(cpp_path, cpp_source);
+    std::string cpp_cmd = std::string("g++ -std=c++11 ") + getIncludeFlags() +
+        " " + shellQuote(cpp_path) + " " + shellQuote(dir_ + "/guarded.cpp") +
+        " " + shellQuote(getLibPath()) + " -lpthread -lrt -o " +
+        shellQuote(dir_ + "/array_guard_cpp");
+    ASSERT_TRUE(runCommand(cpp_cmd));
+    ASSERT_TRUE(runCommand(shellQuote(dir_ + "/array_guard_cpp")));
+
+    const std::string c_source =
+        "#include \"guarded_c.h\"\n"
+        "static int rejected(const uint8_t* data, size_t size) {\n"
+        "  omni_buffer_t* buf = omni_buffer_create_from(data, size);\n"
+        "  demo_ArrayPayload value; int ok; demo_ArrayPayload_init(&value);\n"
+        "  ok = demo_ArrayPayload_deserialize(&value, buf);\n"
+        "  demo_ArrayPayload_destroy(&value); omni_buffer_destroy(buf); return !ok;\n"
+        "}\n"
+        "int main(void) {\n"
+        "  const uint8_t huge[] = {0xff,0xff,0xff,0xff};\n"
+        "  const uint8_t tiny[] = {2,0,0,0,1,0,0,0};\n"
+        "  return (rejected(huge, sizeof(huge)) && rejected(tiny, sizeof(tiny))) ? 0 : 1;\n"
+        "}\n";
+    const std::string c_path = dir_ + "/array_guard_c.c";
+    writeFile(c_path, c_source);
+    std::string compile_guard_c = std::string("cc -std=c99 ") + getIncludeFlags() +
+        " -c " + shellQuote(c_path) + " -o " + shellQuote(dir_ + "/array_guard_c.o");
+    ASSERT_TRUE(runCommand(compile_guard_c));
+    std::string c_cmd = std::string("g++ ") + shellQuote(dir_ + "/array_guard_c.o") +
+        " " + shellQuote(dir_ + "/guarded_c99.o") + " " + shellQuote(getLibPath()) +
+        " -lpthread -lrt -o " + shellQuote(dir_ + "/array_guard_c");
+    ASSERT_TRUE(runCommand(c_cmd));
+    ASSERT_TRUE(runCommand(shellQuote(dir_ + "/array_guard_c")));
 }

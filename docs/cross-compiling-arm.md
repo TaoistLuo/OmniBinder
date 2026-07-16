@@ -51,10 +51,7 @@
 - `OMNIBINDER_BUILD_EXAMPLES`
 - `OMNIBINDER_BUILD_TOOLS`
 
-这意味着如果直接拿 ARM toolchain 去构建整个项目：
-
-- `omni-idlc` 也会被编译成 ARM 版本
-- 这通常对开发机上的代码生成流程没有意义
+顶层 CMake 会检测交叉编译环境；`OMNIBINDER_BUILD_HOST_IDLC` 在普通主机构建中默认开启，在交叉编译中默认关闭。因此直接使用 ARM toolchain 时通常不会生成目标板版 `omni-idlc`，主机可执行生成器需要单独构建。
 
 因此，推荐采用**两阶段构建**：
 
@@ -100,11 +97,7 @@ build-arm/
 - `aarch64-linux-gnu-`
 - `arm-none-linux-gnueabihf-`
 
-只需要修改其中的：
-
-```cmake
-set(TOOLCHAIN_PREFIX ...)
-```
+无需修改仓库文件，可使用 `-DTOOLCHAIN_PREFIX=aarch64-linux-gnu`，或通过 `CROSS_COMPILE=aarch64-linux-gnu-` 提供前缀。
 
 如果存在 sysroot，也可以在 toolchain 文件中设置：
 
@@ -114,11 +107,11 @@ set(CMAKE_SYSROOT /path/to/sysroot)
 
 ## 5.1 交叉编译环境变量
 
-cross stage 至少需要提供 `CC` 和 `CXX`。其余变量仅在工具链本身不完整时才需要补充：
+内置双阶段脚本要求提供 `CC` 和 `CXX`。手工使用仓库 toolchain 文件时则可省略，它会回退到默认前缀编译器。其余变量仅在工具链本身不完整时才需要补充：
 
 | 变量 | 何时需要 |
 |------|----------|
-| `CC`, `CXX` | **必须** — cross stage 最小约束 |
+| `CC`, `CXX` | 双阶段脚本必须；手工 toolchain 构建可使用文件中的默认值 |
 | `AR`, `RANLIB`, `STRIP`, `LD` | 仅当工具链 binutils 不完整时 |
 | `PKG_CONFIG_SYSROOT_DIR`, `PKG_CONFIG_PATH` | 仅当依赖 sysroot 下 `.pc` 文件时 |
 | `CMAKE_TOOLCHAIN_FILE` / `CMAKE_SYSROOT` | 仅当 `CC/CXX` 不能完整表达工具链信息时 |
@@ -153,19 +146,20 @@ cmake --install .
 
 ```bash
 build-host/target/bin/omni-idlc
-# 安装后位于 build-host/install/bin_host/omni-idlc
+# 安装后位于 install/bin_host/omni-idlc
 ```
 
 使用示例：
 
 ```bash
 cd examples
+mkdir -p /tmp/omni-idlc_out
 ../build-host/target/bin/omni-idlc --lang=cpp --output=/tmp/omni-idlc_out sensor_service.bidl
 ```
 
 ## 7. ARM 交叉编译运行时
 
-ARM 运行时阶段的最小有效输入是当前 shell 中正确的 `CC/CXX`。典型命令形式如下：
+使用双阶段脚本时，ARM 阶段的最小输入是正确的 `CC/CXX`；手工构建也可以直接使用 toolchain 文件的默认编译器。典型命令形式如下：
 
 ```bash
 mkdir -p build-arm
@@ -181,6 +175,8 @@ cmake .. \
 cmake --build . -j$(nproc)
 cmake --install .
 ```
+
+上面关闭 examples/tests 时没有生成代码的 target，因此 `OMNIBINDER_HOST_IDLC` 并非必需；当开启 examples 或下游 CMake 规则需要在目标构建中生成 IDL 源码时，再显式提供该主机工具。
 
 如果当前 `CC/CXX` 本身没有携带 sysroot/ABI 信息，再显式补：
 
@@ -199,7 +195,7 @@ cmake .. \
 - `build-arm/target/lib/libomnibinder.so`
 - `build-arm/target/lib/libomnibinder.a`
 - `build-arm/target/bin/service_manager`
-- `build-arm/target/example/...`
+- `build-arm/target/example/...`（仅当 `OMNIBINDER_BUILD_EXAMPLES=ON`）
 - 可选：`build-arm/target/bin/omni-cli`
 
 安装后目录建议理解为：
@@ -282,17 +278,13 @@ TOOLCHAIN_FILE=/path/to/toolchain.cmake \
 
 它不是“主机下游业务工程”的默认 `find_package()` 输入目录。
 
-注意：
-
-- host stage 必须在**干净的主机环境**里执行；
-- 如果一开始就把 `CC` / `CXX` 指到了交叉编译器，host stage 会被识别为 cross context；
-- 这种情况下不会生成 `install/bin_host/omni-idlc`，dual-stage 流程会直接失效；
-- cross stage 则直接使用当前 shell 中的 `CC/CXX`。
+脚本固定使用 `build-host/` 和 `build-cross/`（本文手工示例使用 `build-arm/`），最终安装到仓库根目录的 `install/`。调用脚本时应把 `CC/CXX` 指向目标编译器；脚本会通过 `env -u` 在 host stage 清除交叉环境，再在 cross stage 使用传入值。只有自行手工构建 host stage 时，才需要主动避免交叉环境污染。
 
 ### 步骤 1：在主机上生成 IDL 代码
 
 ```bash
 cd examples
+mkdir -p generated
 ../install/bin_host/omni-idlc --lang=cpp --output=generated sensor_service.bidl
 ```
 

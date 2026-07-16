@@ -168,12 +168,16 @@ bool ConnectionManager::sendMessageWithinTimeout(const std::string& service_name
 }
 
 bool ConnectionManager::sendRaw(ServiceConnection* conn, const uint8_t* data, size_t length) {
+    return sendRawWithDeadline(conn, data, length, 0);
+}
+
+bool ConnectionManager::sendRawWithDeadline(ServiceConnection* conn, const uint8_t* data,
+                                            size_t length, uint32_t deadline_ms) {
     if (!conn || !conn->transport || !conn->connected) {
         return false;
     }
 
     size_t sent = 0;
-    int ring_full_retries = 0;
     while (sent < length) {
         int ret = conn->transport->send(data + sent, length - sent);
         if (ret < 0) {
@@ -186,14 +190,28 @@ bool ConnectionManager::sendRaw(ServiceConnection* conn, const uint8_t* data, si
             return false;
         }
         if (ret == 0) {
-            if (conn->transport->type() == TransportType::SHM
-                && ++ring_full_retries < 1000) {
+            // SHM ring full: busy-wait with deadline to avoid starving the
+            // owner event loop indefinitely.
+            if (conn->transport->type() == TransportType::SHM && deadline_ms > 0) {
+                uint64_t now = platform::currentTimeMs();
+                if (now >= deadline_ms) {
+                    OMNI_LOG_WARN(LOG_TAG,
+                                  "data_send_shm_ring_full service=%s sent=%zu/%zu timeout",
+                                  conn->service_name.c_str(), sent, length);
+                    return false;
+                }
+                // Spin briefly (up to 1 ms) then recheck deadline to avoid
+                // blocking the event loop for too long.
                 platform::sleepMs(1);
                 continue;
+            } else if (conn->transport->type() == TransportType::SHM) {
+                // No deadline provided: fall through to break to avoid
+                // unbounded blocking.
+                break;
             }
+            // TCP EAGAIN without deadline: break
             break;
         }
-        ring_full_retries = 0;
         sent += static_cast<size_t>(ret);
     }
     return sent == length;
@@ -213,7 +231,9 @@ bool ConnectionManager::sendRawWithinTimeout(ServiceConnection* conn,
     }
 
     if (conn->transport->type() != TransportType::TCP) {
-        bool ok = sendRaw(conn, data, length);
+        uint64_t deadline_ms = platform::currentTimeMs() + timeout_ms;
+        bool ok = sendRawWithDeadline(conn, data, length,
+                                      static_cast<uint32_t>(deadline_ms));
         if (elapsed_ms) {
             *elapsed_ms = 0;
         }
@@ -343,7 +363,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                 break;
             }
 
-            static const size_t MAX_RECV_BUFFER = 16 * 1024 * 1024;
+            static const size_t MAX_RECV_BUFFER = MAX_MESSAGE_SIZE;
             if (conn->recv_buffer.size() + static_cast<size_t>(ret) > MAX_RECV_BUFFER) {
                 OMNI_LOG_ERROR(LOG_TAG, "SHM recv_buffer overflow for %s (>%zuMB)",
                                  service_name.c_str(), MAX_RECV_BUFFER / (1024*1024));
@@ -392,7 +412,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
     }
 
     // 追加到接收缓冲区 (with size limit to prevent OOM - fix #17)
-    static const size_t MAX_RECV_BUFFER = 16 * 1024 * 1024; // 16MB
+    static const size_t MAX_RECV_BUFFER = MAX_MESSAGE_SIZE;
     if (conn->recv_buffer.size() + static_cast<size_t>(ret) > MAX_RECV_BUFFER) {
         OMNI_LOG_ERROR(LOG_TAG, "recv_buffer overflow for %s (>%zuMB), disconnecting",
                          service_name.c_str(), MAX_RECV_BUFFER / (1024*1024));

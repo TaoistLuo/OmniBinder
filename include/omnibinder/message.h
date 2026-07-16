@@ -82,6 +82,8 @@ enum class MessageType : uint16_t {
     MSG_TOPIC_PUBLISHER_NOTIFY= 0x0034,
     MSG_UNPUBLISH_TOPIC       = 0x0035,
     MSG_UNSUBSCRIBE_TOPIC     = 0x0036,
+    MSG_QUERY_PUBLISHED_TOPICS= 0x0037,
+    MSG_QUERY_PUBLISHED_TOPICS_REPLY = 0x0038,
 
     // 控制通道 - 运行时诊断
     MSG_RUNTIME_HELLO         = 0x0040,
@@ -190,6 +192,49 @@ uint32_t nextSequenceNumber();
 // 辅助函数：序列化/反序列化 ServiceInfo 到 Buffer
 // ============================================================
 void serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
+
+bool serializePublishedTopicsReply(bool found,
+                                   const std::vector<std::string>& topics,
+                                   Buffer& buf);
+
+template <typename BufT>
+bool deserializePublishedTopicsReply(BufT& buf, bool& found,
+                                     std::vector<std::string>& topics) {
+    bool decoded_found = false;
+    if (!buf.tryReadBool(decoded_found)) {
+        return false;
+    }
+
+    std::vector<std::string> decoded_topics;
+    if (decoded_found) {
+        uint32_t count = 0;
+        if (!buf.tryReadUint32(count)
+            || count > MAX_PUBLISHED_TOPICS
+            || count > buf.remaining() / sizeof(uint32_t)) {
+            return false;
+        }
+        decoded_topics.reserve(count);
+        size_t aggregate_bytes = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            std::string topic;
+            if (!buf.tryReadString(topic)
+                || topic.empty()
+                || topic.size() > MAX_TOPIC_NAME_LENGTH
+                || topic.size() > MAX_PUBLISHED_TOPICS_BYTES - aggregate_bytes) {
+                return false;
+            }
+            aggregate_bytes += topic.size();
+            decoded_topics.push_back(topic);
+        }
+    }
+    if (buf.remaining() != 0) {
+        return false;
+    }
+
+    found = decoded_found;
+    topics.swap(decoded_topics);
+    return true;
+}
 
 void serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf);
 

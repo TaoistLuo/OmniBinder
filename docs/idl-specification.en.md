@@ -327,9 +327,9 @@ public:
     void disconnect();
     bool isConnected() const;
 
-    int SetThreshold(const ControlCommand& cmd, StatusResponse* out);
-    int GetLatestData(SensorData* out);
-    int ResetSensor(int32_t sensor_id);
+    int SetThreshold(const ControlCommand& cmd, StatusResponse& out);
+    int GetLatestData(SensorData& out);
+    void ResetSensor(int32_t sensor_id);
 
     void SubscribeSensorUpdate(const std::function<void(const SensorUpdate&)>& callback);
     void OnServiceDied(const std::function<void()>& callback);
@@ -358,11 +358,14 @@ int  demo_SensorService_proxy_SetThreshold(demo_SensorService_proxy* p,
 The generated Stub/Proxy code now follows an explicit-status runtime contract:
 
 - business methods still keep their IDL return type (`void`, primitive, struct, array, ...)
+- a generated C++ Proxy method for an IDL `void` method also returns `void` and calls `runtime_.invokeOneWay(...)`; it neither creates nor waits for a response, and cannot return serialization/submission errors through that method
 - the generated `onInvoke(...)` itself returns `int`
 - `0` means success
 - non-zero means an `ErrorCode` such as `ERR_DESERIALIZE` or `ERR_SERIALIZE`
 
 This lets the runtime propagate decode/encode failures explicitly instead of relying on hidden side channels.
+
+`omni-cli call` is a diagnostic path and currently uses synchronous `invoke(...)`; an empty response printed by the CLI is distinct from the generated C++ Proxy's one-way contract.
 
 The generated C runtime callback contract is also explicit-status based:
 
@@ -371,9 +374,21 @@ typedef int (*omni_invoke_callback_t)(uint32_t method_id,
     const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
 ```
 
-## 8. ID generation rules
+## 8. Strict semantic validation
 
-### 8.1 `interface_id`
+`omni-idlc` and `omni-cli --idl` run the same semantic validator after parsing. Validation errors prevent generation, and the CLI exits before connecting to ServiceManager. Current rules include:
+
+- struct, topic, and service declaration names cannot collide in one package namespace; a file has at most one `package`, before imports and declarations
+- imports require a package and must precede declarations; every custom value type must resolve to a struct, not a topic or service
+- `void` is allowed only as a method return type, never as a field, topic field, parameter, or array element
+- method names and `publishes` entries cannot repeat within a service; method overloading by parameter type is not supported
+- `publishes` must name an existing topic in the service's package, not a struct or service
+- by-value struct cycles are rejected, including qualified cross-package cycles; `array<T>` is a container edge and does not itself form a by-value cycle
+- valid forward struct dependencies are ordered before code generation
+
+## 9. ID generation rules
+
+### 9.1 `interface_id`
 
 Generated from service name using FNV-1a 32-bit hash:
 
@@ -381,7 +396,7 @@ Generated from service name using FNV-1a 32-bit hash:
 interface_id = fnv1a_32(package_name + "." + service_name)
 ```
 
-### 8.2 `method_id`
+### 9.2 `method_id`
 
 Generated from method name:
 
@@ -389,7 +404,7 @@ Generated from method name:
 method_id = fnv1a_32(method_name)
 ```
 
-### 8.3 `topic_id`
+### 9.3 `topic_id`
 
 Generated from topic name:
 
@@ -397,7 +412,7 @@ Generated from topic name:
 topic_id = fnv1a_32(package_name + "." + topic_name)
 ```
 
-### 8.4 FNV-1a example
+### 9.4 FNV-1a example
 
 ```cpp
 uint32_t fnv1a_32(const char* str) {
@@ -412,7 +427,7 @@ uint32_t fnv1a_32(const char* str) {
 
 ---
 
-## 9. Complete IDL example
+## 10. Complete IDL example
 
 Base type file:
 
@@ -475,26 +490,27 @@ service SensorService {
 
 ---
 
-## 10. Using the `omni-idlc` compiler
+## 11. Using the `omni-idlc` compiler
 
-### 10.1 Command-line usage
+### 11.1 Command-line usage
 
 ```bash
+mkdir -p ./generated
+
 omni-idlc --lang=cpp --output=./generated sensor_service.bidl
 omni-idlc --lang=c   --output=./generated sensor_service.bidl
 omni-idlc --lang=all --output=./generated sensor_service.bidl
 ```
 
-### 10.2 Parameters
+### 11.2 Parameters
 
 | Parameter | Description | Default |
 |---|---|---|
 | `--lang=<cpp\|c\|all>` | target language | `cpp` |
-| `--output=<dir>` | output directory | current directory |
+| `--output=<dir>` | output directory; it must already exist | current directory |
 | `--dep-file=<file>` | generate Makefile-style dependency file | disabled |
-| `--header-only` | generate headers only (C++) | disabled |
 
-### 10.3 Generated files
+### 11.3 Generated files
 
 ```text
 Input: sensor_service.bidl
@@ -508,10 +524,12 @@ Input: sensor_service.bidl
   sensor_service.bidl.c
 ```
 
-### 10.4 CMake integration
+### 11.4 CMake integration
 
 ```cmake
 find_package(OmniBinder REQUIRED)
+
+add_executable(my_service main.cpp)
 
 omnic_generate(
     TARGET my_service
@@ -520,7 +538,6 @@ omnic_generate(
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
-add_executable(my_service main.cpp)
 target_link_libraries(my_service omnibinder)
 ```
 

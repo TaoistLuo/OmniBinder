@@ -98,7 +98,7 @@ void ServiceHostRuntime::onServiceClientData(const std::string& service_name,
     if (bit == entry->client_recv_buffers.end()) {
         return;
     }
-    static const size_t MAX_CLIENT_RECV_BUFFER = 16 * 1024 * 1024; // 16MB
+    static const size_t MAX_CLIENT_RECV_BUFFER = MAX_MESSAGE_SIZE;
     if (bit->second->size() + static_cast<size_t>(ret) > MAX_CLIENT_RECV_BUFFER) {
         OMNI_LOG_ERROR(LOG_TAG, "client_recv_buffer overflow for fd=%d (>%zuMB)",
                        client_fd, MAX_CLIENT_RECV_BUFFER / (1024*1024));

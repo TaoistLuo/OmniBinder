@@ -70,6 +70,7 @@ add_executable(test_idl_compiler
     test_idl_compiler.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c.cpp
 )
@@ -78,7 +79,18 @@ target_include_directories(test_idl_compiler PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 target_link_libraries(test_idl_compiler PRIVATE gtest gtest_main)
+if(TARGET omni-idlc)
+    target_compile_definitions(test_idl_compiler PRIVATE
+        OMNI_IDLC_PATH="$<TARGET_FILE:omni-idlc>"
+    )
+    add_dependencies(test_idl_compiler omni-idlc)
+endif()
 add_test(NAME test_idl_compiler COMMAND test_idl_compiler)
+if(TARGET omni-idlc)
+    add_test(NAME test_omni_idlc_invalid_language
+        COMMAND $<TARGET_FILE:omni-idlc> --lang=invalid ${CMAKE_SOURCE_DIR}/tests/perf_service.bidl)
+    set_tests_properties(test_omni_idlc_invalid_language PROPERTIES WILL_FAIL TRUE)
+endif()
 
 add_executable(test_omni_cli_type_codec
     test_omni_tool_type_codec.cpp
@@ -87,6 +99,7 @@ add_executable(test_omni_cli_type_codec
     ${CMAKE_SOURCE_DIR}/tools/omni_cli/type_codec.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
 )
 target_include_directories(test_omni_cli_type_codec PRIVATE
     ${CMAKE_SOURCE_DIR}/tools/omni_cli
@@ -95,6 +108,16 @@ target_include_directories(test_omni_cli_type_codec PRIVATE
 )
 target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_omni_cli_type_codec COMMAND test_omni_cli_type_codec)
+
+add_executable(test_omni_cli_info_formatter
+    test_omni_cli_info_formatter.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_cli/info_formatter.cpp
+)
+target_include_directories(test_omni_cli_info_formatter PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/omni_cli
+)
+target_link_libraries(test_omni_cli_info_formatter PRIVATE gtest gtest_main)
+add_test(NAME test_omni_cli_info_formatter COMMAND test_omni_cli_info_formatter)
 
 # ============================================================
 # 集成测试 — pthread 已替换为 std::thread，Windows 可编译
@@ -191,6 +214,7 @@ add_executable(test_generated_runtime_integration
     test_generated_runtime_integration.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c.cpp
 )
@@ -214,46 +238,42 @@ endif()
 # 性能测试与稳定性测试
 # ============================================================
 
-add_executable(test_performance test_performance.cpp)
-target_link_libraries(test_performance PRIVATE omnibinder_static)
-target_include_directories(test_performance PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
-add_dependencies(test_performance service_manager)
+if(TARGET omni-idlc OR OMNIBINDER_HOST_IDLC)
+    add_executable(test_performance test_performance.cpp)
+    target_link_libraries(test_performance PRIVATE omnibinder_static)
+    target_include_directories(test_performance PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
+    add_dependencies(test_performance service_manager)
 
-add_executable(test_performance_server
-    test_performance_server.cpp
-    ${CMAKE_CURRENT_BINARY_DIR}/perf_idl/perf_service.bidl.cpp
-)
-target_link_libraries(test_performance_server PRIVATE omnibinder_static)
-target_include_directories(test_performance_server PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
-add_dependencies(test_performance_server service_manager test_performance)
+    add_executable(test_performance_server
+        test_performance_server.cpp
+        ${CMAKE_CURRENT_BINARY_DIR}/perf_idl/perf_service.bidl.cpp
+    )
+    target_link_libraries(test_performance_server PRIVATE omnibinder_static)
+    target_include_directories(test_performance_server PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
+    add_dependencies(test_performance_server service_manager test_performance)
 
-if(TARGET omni-idlc)
     omnic_generate(TARGET test_performance LANGUAGE cpp
         FILES ${CMAKE_CURRENT_SOURCE_DIR}/perf_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
-else()
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/perf_idl/perf_service.bidl.h
-        COMMAND ${CMAKE_BINARY_DIR}/target/bin/omni-idlc
-            ${CMAKE_CURRENT_SOURCE_DIR}/perf_service.bidl
-            --lang cpp --outdir ${CMAKE_CURRENT_BINARY_DIR}/perf_idl
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/perf_service.bidl omni-idlc)
-endif()
-add_test(NAME test_performance COMMAND test_performance
-    -o ${CMAKE_SOURCE_DIR}/docs/performance-report.md
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-set_tests_properties(test_performance PROPERTIES TIMEOUT 120)
 
-add_executable(test_soak_runner test_soak_runner.cpp)
-add_dependencies(test_soak_runner
-    test_performance
-    test_full_integration
-    test_control_plane_and_fallback
-    test_threadsafe_client_and_reconnect
-)
-add_test(NAME test_soak_runner COMMAND test_soak_runner 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-set_tests_properties(test_soak_runner PROPERTIES TIMEOUT 900)
+    add_test(NAME test_performance COMMAND test_performance
+        -o ${CMAKE_SOURCE_DIR}/docs/performance-report.md
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(test_performance PROPERTIES TIMEOUT 120)
+
+    add_executable(test_soak_runner test_soak_runner.cpp)
+    add_dependencies(test_soak_runner
+        test_performance
+        test_full_integration
+        test_control_plane_and_fallback
+        test_threadsafe_client_and_reconnect
+    )
+    add_test(NAME test_soak_runner COMMAND test_soak_runner 2 WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+    set_tests_properties(test_soak_runner PROPERTIES TIMEOUT 900)
+else()
+    message(STATUS "Skipping performance/soak tests: no runnable host omni-idlc")
+endif()
 
 add_executable(test_transient_disconnect_recovery test_transient_disconnect_recovery.cpp)
 target_link_libraries(test_transient_disconnect_recovery PRIVATE omnibinder_static)
@@ -261,12 +281,11 @@ add_dependencies(test_transient_disconnect_recovery service_manager)
 add_test(NAME test_transient_disconnect_recovery COMMAND test_transient_disconnect_recovery WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
 
-set_tests_properties(
-    test_performance
-    test_transient_disconnect_recovery
-    test_soak_runner
-    PROPERTIES RESOURCE_LOCK sm_port_lock
-)
+set_tests_properties(test_transient_disconnect_recovery PROPERTIES RESOURCE_LOCK sm_port_lock)
+if(TARGET test_performance)
+    set_tests_properties(test_performance test_soak_runner
+        PROPERTIES RESOURCE_LOCK sm_port_lock)
+endif()
 if(NOT WIN32)
 set_tests_properties(
     test_full_integration

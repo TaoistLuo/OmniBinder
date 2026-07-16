@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "lexer.h"
 #include "parser.h"
+#include "semantic_validator.h"
 #include "ast.h"
 #include "codegen_cpp.h"
 #include "codegen_c.h"
@@ -51,6 +52,17 @@ static bool parseFile(const std::string& file_path, AstFile& ast, ParseContext& 
         return false;
     }
     return true;
+}
+
+static bool parseAndValidate(const std::string& source, AstFile& ast,
+                             ParseContext& ctx, std::string& error) {
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, "test.bidl");
+    if (!parser.parse(ast)) {
+        error = parser.errorMessage();
+        return false;
+    }
+    return validateSemantics(ast, ctx, error);
 }
 
 // ============================================================
@@ -614,12 +626,12 @@ TEST(IdlCompilerTest, ParserImportStatement) {
     ASSERT_EQ(ast.structs[0].fields[1].type.package_name, "utils");
     ASSERT_EQ(ast.structs[0].fields[1].type.custom_name, "Config");
 
-    ASSERT_TRUE(ctx.type_registry.find("Point") != ctx.type_registry.end());
-    ASSERT_EQ(ctx.type_registry["Point"], "common");
-    ASSERT_TRUE(ctx.type_registry.find("Config") != ctx.type_registry.end());
-    ASSERT_EQ(ctx.type_registry["Config"], "utils");
-    ASSERT_TRUE(ctx.type_registry.find("Foo") != ctx.type_registry.end());
-    ASSERT_EQ(ctx.type_registry["Foo"], "demo");
+    ASSERT_TRUE(ctx.type_registry.find("common.Point") != ctx.type_registry.end());
+    ASSERT_EQ(ctx.type_registry["common.Point"], "common");
+    ASSERT_TRUE(ctx.type_registry.find("utils.Config") != ctx.type_registry.end());
+    ASSERT_EQ(ctx.type_registry["utils.Config"], "utils");
+    ASSERT_TRUE(ctx.type_registry.find("demo.Foo") != ctx.type_registry.end());
+    ASSERT_EQ(ctx.type_registry["demo.Foo"], "demo");
 
     ASSERT_GE(ctx.all_files.size(), 2u);
 }
@@ -766,6 +778,27 @@ TEST(IdlCompilerTest, ParserRelativePathImport) {
     ASSERT_EQ(ast.structs[0].fields[0].type.custom_name, "Config");
 }
 
+TEST(IdlCompilerTest, ParserImportAllowsSpacesInFileName) {
+    const char* dir = "/tmp/omni-idlc_test_import_spaces";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+
+    {
+        std::ofstream f(std::string(dir) + "/shared types.bidl");
+        f << "package shared; struct Config { int32 value; }";
+    }
+
+    const std::string source =
+        "package app; import \"shared types.bidl\"; "
+        "struct AppConfig { shared.Config config; }";
+    ParseContext ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, std::string(dir) + "/app.bidl");
+    AstFile ast;
+    ASSERT_TRUE(parser.parse(ast)) << parser.errorMessage();
+    std::string error;
+    ASSERT_TRUE(validateSemantics(ast, ctx, error)) << error;
+}
+
 TEST(IdlCompilerTest, ParserTransitiveImport) {
     const char* dir = "/tmp/omni-idlc_test_transitive";
     ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
@@ -797,9 +830,385 @@ TEST(IdlCompilerTest, ParserTransitiveImport) {
     ASSERT_TRUE(ctx.loaded_packages.find("bpkg") != ctx.loaded_packages.end());
     ASSERT_TRUE(ctx.loaded_packages.find("apkg") != ctx.loaded_packages.end());
 
-    ASSERT_EQ(ctx.type_registry["Base"], "cpkg");
-    ASSERT_EQ(ctx.type_registry["Mid"], "bpkg");
-    ASSERT_EQ(ctx.type_registry["Top"], "apkg");
+    ASSERT_EQ(ctx.type_registry["cpkg.Base"], "cpkg");
+    ASSERT_EQ(ctx.type_registry["bpkg.Mid"], "bpkg");
+    ASSERT_EQ(ctx.type_registry["apkg.Top"], "apkg");
+}
+
+// ============================================================
+// Semantic Validation Tests
+// ============================================================
+
+TEST(IdlCompilerTest, SemanticRejectsLateImport) {
+    const char* dir = "/tmp/omni-idlc_test_late_import";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    { std::ofstream f(std::string(dir) + "/types.bidl"); f << "package types; struct Value { int32 x; }"; }
+    const std::string source = "package demo; struct Local { int32 x; } import \"types.bidl\";";
+    ParseContext ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, std::string(dir) + "/main.bidl");
+    AstFile ast;
+    ASSERT_TRUE(parser.parse(ast));
+    std::string error;
+    ASSERT_FALSE(validateSemantics(ast, ctx, error));
+    ASSERT_NE(error.find("imports must appear before declarations"), std::string::npos);
+}
+
+TEST(IdlCompilerTest, SemanticRejectsImportBeforePackage) {
+    const char* dir = "/tmp/omni-idlc_test_import_before_package";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    { std::ofstream f(std::string(dir) + "/types.bidl"); f << "package types; struct Value { int32 x; }"; }
+    const std::string source = "import \"types.bidl\"; package demo; struct Local { int32 x; }";
+    ParseContext ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, std::string(dir) + "/main.bidl");
+    AstFile ast;
+    ASSERT_TRUE(parser.parse(ast)) << parser.errorMessage();
+    std::string error;
+    ASSERT_FALSE(validateSemantics(ast, ctx, error));
+    ASSERT_NE(error.find("package must appear before imports"), std::string::npos) << error;
+}
+
+TEST(IdlCompilerTest, SemanticRejectsDuplicateOrLatePackage) {
+    const char* cases[] = {
+        "package first; package second; struct Value { int32 x; }",
+        "struct Value { int32 x; } package demo;"
+    };
+    for (size_t i = 0; i < 2; ++i) {
+        AstFile ast;
+        ParseContext ctx;
+        std::string error;
+        ASSERT_FALSE(parseAndValidate(cases[i], ast, ctx, error));
+        ASSERT_TRUE(error.find("only once") != std::string::npos ||
+                    error.find("package must appear before") != std::string::npos) << error;
+    }
+}
+
+TEST(IdlCompilerTest, SemanticRejectsPackageLessFiles) {
+    AstFile ast;
+    ParseContext ctx;
+    std::string error;
+    ASSERT_FALSE(parseAndValidate("struct Value { int32 x; }", ast, ctx, error));
+    ASSERT_NE(error.find("package declaration is required"), std::string::npos) << error;
+
+    const char* dir = "/tmp/omni-idlc_test_packageless_import";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    { std::ofstream f(std::string(dir) + "/types.bidl"); f << "package types; struct Value { int32 x; }"; }
+    const std::string source = "import \"types.bidl\"; struct Local { int32 x; }";
+    ParseContext import_ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, import_ctx, std::string(dir) + "/main.bidl");
+    AstFile import_ast;
+    ASSERT_TRUE(parser.parse(import_ast)) << parser.errorMessage();
+    error.clear();
+    ASSERT_FALSE(validateSemantics(import_ast, import_ctx, error));
+    ASSERT_NE(error.find("package declaration is required"), std::string::npos) << error;
+}
+
+TEST(IdlCompilerTest, SemanticUsesQualifiedTypeIdentityAcrossPackages) {
+    const char* dir = "/tmp/omni-idlc_test_qualified_identity";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    {
+        std::ofstream file(std::string(dir) + "/left.bidl");
+        file << "package left; struct Value { int32 left_value; }";
+    }
+    {
+        std::ofstream file(std::string(dir) + "/right.bidl");
+        file << "package right; struct Value { string right_value; }";
+    }
+    const std::string source =
+        "package demo; import \"left.bidl\"; import \"right.bidl\"; "
+        "struct Pair { left.Value left; right.Value right; }";
+    ParseContext ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, std::string(dir) + "/main.bidl");
+    AstFile ast;
+    ASSERT_TRUE(parser.parse(ast)) << parser.errorMessage();
+    std::string error;
+    ASSERT_TRUE(validateSemantics(ast, ctx, error)) << error;
+    ASSERT_EQ(ctx.type_registry.count("left.Value"), 1u);
+    ASSERT_EQ(ctx.type_registry.count("right.Value"), 1u);
+    ASSERT_EQ(ast.structs[0].fields[0].type.package_name, "left");
+    ASSERT_EQ(ast.structs[0].fields[1].type.package_name, "right");
+}
+
+TEST(IdlCompilerTest, SemanticRejectsUnknownAndWrongKindTypes) {
+    const char* cases[] = {
+        "package demo; struct Holder { Missing value; }",
+        "package demo; topic Event { int32 value; } struct Holder { Event value; }",
+        "package demo; service Api { int32 call(); } struct Holder { Api value; }"
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        AstFile ast;
+        ParseContext ctx;
+        std::string error;
+        ASSERT_FALSE(parseAndValidate(cases[i], ast, ctx, error));
+        ASSERT_TRUE(error.find("unknown or non-imported type") != std::string::npos ||
+                    error.find("non-struct type") != std::string::npos) << error;
+    }
+}
+
+TEST(IdlCompilerTest, SemanticRejectsPublishesMissingOrWrongKind) {
+    const char* cases[] = {
+        "package demo; service Api { publishes Missing; }",
+        "package demo; struct Event { int32 value; } service Api { publishes Event; }"
+    };
+    for (size_t i = 0; i < 2; ++i) {
+        AstFile ast;
+        ParseContext ctx;
+        std::string error;
+        ASSERT_FALSE(parseAndValidate(cases[i], ast, ctx, error));
+        ASSERT_NE(error.find("publishes"), std::string::npos) << error;
+    }
+}
+
+TEST(IdlCompilerTest, SemanticRejectsDuplicatePublishes) {
+    const std::string source =
+        "package demo; topic Event { int32 value; } "
+        "service Api { publishes Event; publishes Event; }";
+    AstFile ast;
+    ParseContext ctx;
+    std::string error;
+    ASSERT_FALSE(parseAndValidate(source, ast, ctx, error));
+    ASSERT_NE(error.find("duplicate publishes entry 'Event'"), std::string::npos) << error;
+}
+
+TEST(IdlCompilerTest, SemanticRejectsDuplicateStructAndTopicFields) {
+    const char* cases[] = {
+        "package demo; struct Value { int32 item; string item; }",
+        "package demo; topic Event { int32 item; string item; }"
+    };
+    for (size_t i = 0; i < 2; ++i) {
+        AstFile ast;
+        ParseContext ctx;
+        std::string error;
+        ASSERT_FALSE(parseAndValidate(cases[i], ast, ctx, error));
+        ASSERT_NE(error.find("duplicate field 'item'"), std::string::npos) << error;
+    }
+}
+
+TEST(IdlCompilerTest, SemanticImportVisibilityRejectsRootSiblingLeakage) {
+    const char* dir = "/tmp/omni-idlc_test_sibling_visibility";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    { std::ofstream f(std::string(dir) + "/left.bidl"); f << "package left; struct UsesRight { right.Value value; }"; }
+    { std::ofstream f(std::string(dir) + "/right.bidl"); f << "package right; struct Value { int32 x; }"; }
+    const std::string source =
+        "package root; import \"left.bidl\"; import \"right.bidl\"; struct Root { int32 x; }";
+    ParseContext ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, std::string(dir) + "/root.bidl");
+    AstFile ast;
+    ASSERT_TRUE(parser.parse(ast)) << parser.errorMessage();
+    const std::vector<StructDef> original_left = ctx.loaded_packages["left"].structs;
+    std::string error;
+    ASSERT_FALSE(validateSemantics(ast, ctx, error));
+    ASSERT_NE(error.find("unknown or non-imported type 'right.Value'"), std::string::npos) << error;
+    ASSERT_EQ(ctx.loaded_packages["left"].structs[0].name, original_left[0].name);
+}
+
+TEST(IdlCompilerTest, SemanticImportVisibilityPreservesTransitiveImports) {
+    const char* dir = "/tmp/omni-idlc_test_transitive_visibility";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    { std::ofstream f(std::string(dir) + "/base.bidl"); f << "package base; struct Value { int32 x; }"; }
+    { std::ofstream f(std::string(dir) + "/middle.bidl"); f << "package middle; import \"base.bidl\"; struct Holder { base.Value value; }"; }
+    const std::string source =
+        "package root; import \"middle.bidl\"; struct Root { base.Value value; middle.Holder holder; }";
+    ParseContext ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, std::string(dir) + "/root.bidl");
+    AstFile ast;
+    ASSERT_TRUE(parser.parse(ast)) << parser.errorMessage();
+    std::string error;
+    ASSERT_TRUE(validateSemantics(ast, ctx, error)) << error;
+}
+
+TEST(IdlCompilerTest, SemanticValidationIsTransactionalOnFailure) {
+    const std::string source =
+        "package demo; struct Outer { Inner value; } struct Inner { int32 value; } "
+        "struct Bad { int32 duplicate; string duplicate; }";
+    ParseContext ctx;
+    Lexer lexer(source);
+    Parser parser(lexer, ctx, "transaction.bidl");
+    AstFile ast;
+    ASSERT_TRUE(parser.parse(ast));
+    ASSERT_EQ(ast.structs[0].name, "Outer");
+    ASSERT_EQ(ctx.loaded_packages["demo"].structs[0].name, "Outer");
+    std::string error;
+    ASSERT_FALSE(validateSemantics(ast, ctx, error));
+    ASSERT_EQ(ast.structs[0].name, "Outer");
+    ASSERT_EQ(ctx.loaded_packages["demo"].structs[0].name, "Outer");
+}
+
+TEST(IdlCompilerTest, ParserResourceBudgetsRejectBeforeGrowth) {
+    {
+        ParseContext ctx;
+        ctx.total_source_bytes = IDLC_MAX_TOTAL_SOURCE_BYTES;
+        Lexer lexer("package demo;");
+        Parser parser(lexer, ctx, "budget.bidl");
+        AstFile ast;
+        ASSERT_FALSE(parser.parse(ast));
+        ASSERT_NE(parser.errorMessage().find("source size limit"), std::string::npos);
+    }
+    {
+        std::string source = "package demo; struct Value { ";
+        for (size_t i = 0; i < IDLC_MAX_TYPE_NESTING; ++i) source += "array<";
+        source += "int32";
+        for (size_t i = 0; i < IDLC_MAX_TYPE_NESTING; ++i) source += ">";
+        source += " values; }";
+        ParseContext ctx;
+        Lexer lexer(source);
+        Parser parser(lexer, ctx, "budget.bidl");
+        AstFile ast;
+        ASSERT_FALSE(parser.parse(ast));
+        ASSERT_TRUE(parser.hasError());
+    }
+}
+
+TEST(IdlCompilerTest, ExecutableRejectsPackageLessGenerationWithoutOutput) {
+#ifndef OMNI_IDLC_PATH
+    GTEST_SKIP() << "omni-idlc executable is not built in this configuration";
+#else
+    const char* dir = "/tmp/omni-idlc_test_package_required";
+    ASSERT_EQ(system(std::string("rm -rf " + std::string(dir) + " && mkdir -p " + dir).c_str()), 0);
+    const std::string input = std::string(dir) + "/package_less.bidl";
+    { std::ofstream file(input.c_str()); file << "struct Value { int32 x; }"; }
+    const std::string command = std::string(OMNI_IDLC_PATH) + " --lang=cpp --output=" + dir + " " + input;
+    ASSERT_NE(system(command.c_str()), 0);
+    ASSERT_FALSE(std::ifstream((std::string(dir) + "/package_less.bidl.h").c_str()).good());
+    ASSERT_FALSE(std::ifstream((std::string(dir) + "/package_less.bidl.cpp").c_str()).good());
+#endif
+}
+
+TEST(IdlCompilerTest, SemanticRejectsVoidMisuse) {
+    const char* cases[] = {
+        "package demo; struct Bad { void value; }",
+        "package demo; topic Bad { void value; }",
+        "package demo; service Api { int32 call(void value); }",
+        "package demo; struct Bad { array<void> values; }"
+    };
+    for (size_t i = 0; i < 4; ++i) {
+        AstFile ast;
+        ParseContext ctx;
+        std::string error;
+        ASSERT_FALSE(parseAndValidate(cases[i], ast, ctx, error));
+        ASSERT_NE(error.find("void"), std::string::npos) << error;
+    }
+}
+
+TEST(IdlCompilerTest, SemanticRejectsByValueCyclesAndDuplicateMethods) {
+    const char* cases[] = {
+        "package demo; struct A { B b; } struct B { A a; }",
+        "package demo; struct A { A self; }",
+        "package demo; service Api { int32 call(); int32 call(int32 value); }"
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        AstFile ast;
+        ParseContext ctx;
+        std::string error;
+        ASSERT_FALSE(parseAndValidate(cases[i], ast, ctx, error));
+        ASSERT_TRUE(error.find("cycle") != std::string::npos ||
+                    error.find("duplicate method") != std::string::npos) << error;
+    }
+}
+
+TEST(IdlCompilerTest, SemanticRejectsQualifiedCrossPackageByValueCycle) {
+    AstFile left;
+    left.package_name = "left";
+    left.package_declaration_count = 1;
+    left.imported_packages.push_back("right");
+    StructDef left_value;
+    left_value.name = "Value";
+    FieldDef right_field;
+    right_field.name = "right";
+    right_field.type.primitive = TYPE_CUSTOM;
+    right_field.type.package_name = "right";
+    right_field.type.custom_name = "Value";
+    left_value.fields.push_back(right_field);
+    left.structs.push_back(left_value);
+
+    AstFile right;
+    right.package_name = "right";
+    right.package_declaration_count = 1;
+    right.imported_packages.push_back("left");
+    StructDef right_value;
+    right_value.name = "Value";
+    FieldDef left_field;
+    left_field.name = "left";
+    left_field.type.primitive = TYPE_CUSTOM;
+    left_field.type.package_name = "left";
+    left_field.type.custom_name = "Value";
+    right_value.fields.push_back(left_field);
+    right.structs.push_back(right_value);
+
+    ParseContext ctx;
+    ctx.loaded_packages["left"] = left;
+    ctx.loaded_packages["right"] = right;
+    std::string error;
+    ASSERT_FALSE(validateSemantics(left, ctx, error));
+    ASSERT_NE(error.find("by-value struct cycle"), std::string::npos) << error;
+}
+
+TEST(IdlCompilerTest, SemanticArraysDoNotCreateByValueCycleEdges) {
+    AstFile left;
+    left.package_name = "left";
+    left.package_declaration_count = 1;
+    left.imported_packages.push_back("right");
+    StructDef left_value;
+    left_value.name = "Value";
+    FieldDef right_values;
+    right_values.name = "rights";
+    right_values.type.primitive = TYPE_ARRAY;
+    right_values.type.element_type = new TypeRef();
+    right_values.type.element_type->primitive = TYPE_CUSTOM;
+    right_values.type.element_type->package_name = "right";
+    right_values.type.element_type->custom_name = "Value";
+    left_value.fields.push_back(right_values);
+    left.structs.push_back(left_value);
+
+    AstFile right;
+    right.package_name = "right";
+    right.package_declaration_count = 1;
+    right.imported_packages.push_back("left");
+    StructDef right_value;
+    right_value.name = "Value";
+    FieldDef left_field;
+    left_field.name = "left";
+    left_field.type.primitive = TYPE_CUSTOM;
+    left_field.type.package_name = "left";
+    left_field.type.custom_name = "Value";
+    right_value.fields.push_back(left_field);
+    right.structs.push_back(right_value);
+
+    ParseContext ctx;
+    ctx.loaded_packages["left"] = left;
+    ctx.loaded_packages["right"] = right;
+    std::string error;
+    ASSERT_TRUE(validateSemantics(left, ctx, error)) << error;
+}
+
+TEST(IdlCompilerTest, SemanticOrdersForwardByValueStructDependencies) {
+    const std::string source =
+        "package demo; struct Outer { Inner value; } struct Independent { int32 x; } "
+        "struct Inner { int32 value; }";
+    AstFile ast;
+    ParseContext ctx;
+    std::string error;
+    ASSERT_TRUE(parseAndValidate(source, ast, ctx, error)) << error;
+    ASSERT_EQ(ast.structs.size(), 3u);
+    ASSERT_EQ(ast.structs[0].name, "Inner");
+    ASSERT_EQ(ast.structs[1].name, "Outer");
+    ASSERT_EQ(ast.structs[2].name, "Independent");
+
+    const char* dir = "/tmp/omni-idlc_test_forward_order";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    CppCodeGen cpp_gen;
+    CCodeGen c_gen;
+    ASSERT_TRUE(cpp_gen.generate(ast, dir, "forward"));
+    ASSERT_TRUE(c_gen.generate(ast, dir, "forward"));
+    const std::string cpp_header = readFile(std::string(dir) + "/forward.h");
+    const std::string c_header = readFile(std::string(dir) + "/forward_c.h");
+    ASSERT_LT(cpp_header.find("struct Inner {"), cpp_header.find("struct Outer {"));
+    ASSERT_LT(c_header.find("typedef struct demo_Inner {"), c_header.find("typedef struct demo_Outer {"));
 }
 
 TEST(IdlCompilerTest, ParserNoImportBackwardCompat) {
@@ -891,13 +1300,14 @@ TEST(IdlCompilerTest, CodegenCppMethodArraysUseRecursiveBufferLogic) {
     std::string cpp = readFile(std::string(dir) + "/array_service.cpp");
 
     ASSERT_TRUE(cpp.find("int ArrayServiceStub::onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response)") != std::string::npos);
-    ASSERT_TRUE(cpp.find("{ uint32_t cnt0 = 0; if (!req.tryReadUint32(cnt0)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE); blobs.resize(cnt0);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (cnt0 > omnibinder::MAX_ARRAY_ELEMENTS) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("req.remaining() / 4u") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!req.tryReadBytes(blobs[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!response.writeUint32(static_cast<uint32_t>(result.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!response.writeInt32(result[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!response.writeString(result[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(blobs.size()))) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeBytes(blobs[i0])) return false;") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(blobs.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeBytes(blobs[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!resp.tryReadString(out[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
@@ -938,8 +1348,8 @@ TEST(IdlCompilerTest, CodegenCppCustomArraysUseRecursiveCustomLogic) {
     ASSERT_TRUE(cpp.find("if (!items[i0].deserialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!response.writeUint32(static_cast<uint32_t>(result.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!result[i0].serialize(response)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(items.size()))) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!items[i0].serialize(req)) return false;") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(items.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!items[i0].serialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!out[i0].deserialize(resp)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(items)") == std::string::npos);
@@ -975,15 +1385,43 @@ TEST(IdlCompilerTest, CodegenCppNestedArraysUseDistinctLoopDepths) {
     ASSERT_TRUE(cpp.find("for (size_t i0 = 0; i0 < matrix.size(); ++i0) {") != std::string::npos);
     ASSERT_TRUE(cpp.find("for (size_t i1 = 0; i1 < matrix[i0].size(); ++i1) {") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!buf.writeInt32(matrix[i0][i1])) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("{ uint32_t cnt0 = 0; if (!buf.tryReadUint32(cnt0)) return false; matrix.resize(cnt0);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("{ uint32_t cnt1 = 0; if (!buf.tryReadUint32(cnt1)) return false; matrix[i0].resize(cnt1);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (cnt0 > omnibinder::MAX_ARRAY_ELEMENTS) return false;") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (cnt1 > omnibinder::MAX_ARRAY_ELEMENTS) return false;") != std::string::npos);
+    ASSERT_TRUE(cpp.find("buf.remaining() / 4u") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!buf.tryReadInt32(matrix[i0][i1])) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(matrix.size()))) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeInt32(matrix[i0][i1])) return false;") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(matrix.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeInt32(matrix[i0][i1])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0][i1])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(matrix)") == std::string::npos);
     ASSERT_TRUE(cpp.find("resp.read()") == std::string::npos);
+}
+
+TEST(IdlCompilerTest, CodegenCppVoidProxyIsOneWay) {
+    const std::string source =
+        "package demo; struct Request { int32 value; } "
+        "service Commands { void reset(); void submit(Request request); int32 query(Request request); }";
+    AstFile ast;
+    ParseContext ctx;
+    std::string error;
+    ASSERT_TRUE(parseAndValidate(source, ast, ctx, error)) << error;
+
+    const char* dir = "/tmp/omni-idlc_test_cpp_oneway";
+    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    CppCodeGen gen;
+    ASSERT_TRUE(gen.generate(ast, dir, "commands"));
+    const std::string header = readFile(std::string(dir) + "/commands.h");
+    const std::string source_code = readFile(std::string(dir) + "/commands.cpp");
+
+    ASSERT_NE(header.find("void reset();"), std::string::npos);
+    ASSERT_NE(header.find("void submit(const Request& request);"), std::string::npos);
+    ASSERT_NE(header.find("int query(const Request& request, int32_t& out);"), std::string::npos);
+    ASSERT_NE(source_code.find("void CommandsProxy::reset()"), std::string::npos);
+    ASSERT_NE(source_code.find("void CommandsProxy::submit(const Request& request)"), std::string::npos);
+    ASSERT_NE(source_code.find("runtime_.invokeOneWay(\"Commands\""), std::string::npos);
+    ASSERT_EQ(source_code.find("void CommandsProxy::reset() {\n    omnibinder::Buffer req, resp;"), std::string::npos);
+    ASSERT_NE(source_code.find("if (!request.serialize(req)) return;"), std::string::npos);
+    ASSERT_NE(source_code.find("if (!request.serialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);"), std::string::npos);
 }
 
 TEST(IdlCompilerTest, CodegenCStringBytesSignaturesAndMetadata) {
@@ -1090,6 +1528,9 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
     std::string c_source = readFile(std::string(dir) + "/guarded.c");
 
     ASSERT_TRUE(cpp.find("if (!input.deserialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (cnt0 > omnibinder::MAX_ARRAY_ELEMENTS) return false;") != std::string::npos);
+    ASSERT_TRUE(cpp.find("buf.remaining() / 4u") != std::string::npos);
+    ASSERT_TRUE(cpp.find("omnibinder::MAX_MESSAGE_SIZE / sizeof(int32_t)") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!msg.deserialize(buf)) return;") != std::string::npos);
     ASSERT_TRUE(cpp.find("GuardedServiceProxy::echo(const AllTypes& input, AllTypes& out)") != std::string::npos);
     ASSERT_TRUE(cpp.find("int ret = runtime_.invoke(\"GuardedService\"") != std::string::npos);
@@ -1103,6 +1544,9 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
     ASSERT_TRUE(c_source.find("if (!demo_AllTypes_deserialize(result, resp)) { demo_AllTypes_destroy(result); ret = -501; }") != std::string::npos);
     ASSERT_TRUE(c_source.find("if (!demo_AllTopic_deserialize(&msg, buf)) {") != std::string::npos);
     ASSERT_TRUE(c_source.find("if (!omni_buffer_read_ok(buf)) { goto fail; }") != std::string::npos);
+    ASSERT_TRUE(c_source.find("if (self->count > OMNI_MAX_ARRAY_ELEMENTS) { omni_buffer_mark_error(buf, -501); goto fail; }") != std::string::npos);
+    ASSERT_TRUE(c_source.find("omni_buffer_remaining(buf) / 4u") != std::string::npos);
+    ASSERT_TRUE(c_source.find("OMNI_MAX_MESSAGE_SIZE / sizeof(int32_t)") != std::string::npos);
     ASSERT_TRUE(c_source.find("return 1;") != std::string::npos);
 }
 

@@ -66,6 +66,7 @@ public:
     Token nextToken();
     bool hasError() const { return has_error_; }
     const std::string& errorMessage() const { return error_msg_; }
+    size_t sourceSize() const { return source_.size(); }
     
 private:
     void skipWhitespaceAndComments();

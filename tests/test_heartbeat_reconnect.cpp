@@ -6,6 +6,7 @@
 // 3. OnServiceDiedCallbackFires    — SM death notification fires proxy callback
 // 4. DirectDisconnectTriggersReconnect — explicit disconnect/connect cycle works with heartbeat
 // 5. DisconnectCleansUpState       — disconnect() cleans up, subsequent connect() is safe
+// 6. DisconnectCancelsPendingReconnect — explicit disconnect cancels a queued reconnect timer
 
 #include <gtest/gtest.h>
 #include "test_common.h"
@@ -333,6 +334,41 @@ TEST_F(HeartbeatReconnectTest, DisconnectCleansUpState) {
         << "Heartbeat should detect death after disconnect/reconnect, "
         << "confirming no stale heartbeat state";
 
+    rt.stop();
+}
+
+TEST_F(HeartbeatReconnectTest, DisconnectCancelsPendingReconnect) {
+    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
+    ASSERT_GT(svc_pid, 0);
+
+    OmniRuntime rt;
+    ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0);
+    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
+
+    ServiceProxyBase proxy(rt, SERVICE_NAME);
+    ASSERT_EQ(proxy.connect(), 0);
+    proxy.setReconnectInterval(5000);
+
+    std::atomic<bool> death_fired(false);
+    proxy.OnServiceDied([&death_fired]() {
+        death_fired.store(true, std::memory_order_release);
+    });
+    stopProcess(svc_pid);
+    for (int i = 0; i < 150 && !death_fired.load(std::memory_order_acquire); ++i) {
+        rt.pollOnce(100);
+    }
+    ASSERT_TRUE(death_fired.load(std::memory_order_acquire));
+
+    // A reconnect is now queued for five seconds. Explicit disconnect must
+    // cancel that timer and remove reconnect/heartbeat configuration.
+    ASSERT_EQ(rt.disconnectService(SERVICE_NAME), 0);
+    svc_pid = startProcess(g_program_path, "--child-service", "19950");
+    ASSERT_GT(svc_pid, 0);
+    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME, 80));
+    for (int i = 0; i < 60; ++i) rt.pollOnce(100);
+    EXPECT_FALSE(rt.isServiceConnected(SERVICE_NAME));
+
+    stopProcess(svc_pid);
     rt.stop();
 }
 

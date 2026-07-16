@@ -92,6 +92,16 @@ static_assert(sizeof(MessageHeader) == 16, "MessageHeader size mismatch");
 | 0x0034 | MSG_TOPIC_PUBLISHER_NOTIFY | SM -> Service | 通知订阅者发布者地址 |
 | 0x0035 | MSG_UNPUBLISH_TOPIC | Service -> SM | 取消发布话题 |
 | 0x0036 | MSG_UNSUBSCRIBE_TOPIC | Service -> SM | 取消订阅话题 |
+| 0x0040 | MSG_RUNTIME_HELLO | Runtime -> SM | 上报 runtime PID / 进程名 / 诊断能力 |
+| 0x0041 | MSG_RUNTIME_HELLO_REPLY | SM -> Runtime | runtime hello 响应 |
+| 0x0042 | MSG_DIAG_SET_LOG_LEVEL | CLI/SM -> Runtime | 按 PID 设置 runtime 日志级别 |
+| 0x0043 | MSG_DIAG_SET_LOG_LEVEL_REPLY | Runtime/SM -> CLI | 设置日志级别响应 |
+| 0x0044 | MSG_DIAG_WATCH_START | CLI/SM -> Runtime | 启动指定 PID 的诊断 watch |
+| 0x0045 | MSG_DIAG_WATCH_START_REPLY | Runtime/SM -> CLI | watch start 响应 |
+| 0x0046 | MSG_DIAG_WATCH_STOP | CLI/SM -> Runtime | 停止指定 PID 的诊断 watch |
+| 0x0047 | MSG_DIAG_WATCH_STOP_REPLY | Runtime/SM -> CLI | watch stop 响应 |
+| 0x0049 | MSG_RUNTIME_LIST | CLI -> SM | 列出在线 runtime |
+| 0x004A | MSG_RUNTIME_LIST_REPLY | SM -> CLI | 在线 runtime 列表响应 |
 
 ### 3.2 数据通道消息（服务 <-> 服务）
 
@@ -141,6 +151,18 @@ enum class MessageType : uint16_t {
     MSG_TOPIC_PUBLISHER_NOTIFY= 0x0034,
     MSG_UNPUBLISH_TOPIC       = 0x0035,
     MSG_UNSUBSCRIBE_TOPIC     = 0x0036,
+
+    // 控制通道 - 运行时诊断
+    MSG_RUNTIME_HELLO         = 0x0040,
+    MSG_RUNTIME_HELLO_REPLY   = 0x0041,
+    MSG_DIAG_SET_LOG_LEVEL    = 0x0042,
+    MSG_DIAG_SET_LOG_LEVEL_REPLY = 0x0043,
+    MSG_DIAG_WATCH_START      = 0x0044,
+    MSG_DIAG_WATCH_START_REPLY = 0x0045,
+    MSG_DIAG_WATCH_STOP       = 0x0046,
+    MSG_DIAG_WATCH_STOP_REPLY = 0x0047,
+    MSG_RUNTIME_LIST          = 0x0049,
+    MSG_RUNTIME_LIST_REPLY    = 0x004A,
 
     // 数据通道 - 接口调用
     MSG_INVOKE                = 0x0100,
@@ -261,7 +283,7 @@ found:
 客户端判断逻辑：
   if (本机 host_id == 响应中的 host_id):
       创建 per-client SHM
-      通过服务端 UDS (/tmp/binder_<service>.sock) 交换 SHM 名称和 eventfd
+      通过服务端 UDS (/tmp/<server_shm_name_without_slash>.sock) 交换 SHM 名称和 eventfd
       若 SHM 握手失败，则 fallback TCP
   else:
       使用 TCP 连接（host:port）
@@ -307,10 +329,12 @@ host_id, shm_config, interfaces[]）。
 ### 4.11 声明发布话题（MSG_PUBLISH_TOPIC）
 
 ```
-+------------------+------------------+
-| topic_name_len   | topic_name       |
-| (4 bytes)        | (N bytes)        |
-+------------------+------------------+
++------------------+------------------+------------------------------+
+| topic_name_len   | topic_name       | serialized publisher ServiceInfo |
+| (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       |
++------------------+------------------+------------------------------+
+
+当前实现会在 ServiceInfo 之后兼容性尝试读取可选 idl_hash；发送端当前不写该字段。
 ```
 
 ### 4.12 订阅话题（MSG_SUBSCRIBE_TOPIC）
@@ -322,33 +346,37 @@ host_id, shm_config, interfaces[]）。
 +------------------+------------------+
 ```
 
+订阅响应（MSG_SUBSCRIBE_TOPIC_REPLY）:
+
+```
++------------------+------------------+
+| accepted          | idl_hash         |
+| (1 byte bool)     | (4 bytes, 成功时存在) |
++------------------+------------------+
+```
+
 ### 4.13 话题发布者通知（MSG_TOPIC_PUBLISHER_NOTIFY）
 
 ```
-+------------------+------------------+------------------+
-| topic_name_len   | topic_name       | host_len         |
-| (4 bytes)        | (N bytes)        | (4 bytes)        |
-+------------------+------------------+------------------+
-| host             | port             | host_id_len      |
-| (N bytes)        | (2 bytes)        | (4 bytes)        |
-+------------------+------------------+------------------+
-| host_id          |
-| (N bytes)        |
-+------------------+
++------------------+------------------+------------------------------+
+| topic_name_len   | topic_name       | serialized publisher ServiceInfo |
+| (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       |
++------------------+------------------+------------------------------+
 ```
 
 ### 4.14 接口调用（MSG_INVOKE）
 
 ```
 +------------------+------------------+------------------+
-| interface_id     | method_id        | payload_len      |
+| interface_id     | idl_hash         | method_id        |
 | (4 bytes)        | (4 bytes)        | (4 bytes)        |
 +------------------+------------------+------------------+
-| payload          |
-| (N bytes)        |
-+------------------+
+| payload_len      | payload          |
+| (4 bytes)        | (N bytes)        |
++------------------+------------------+------------------+
 
 interface_id: 接口的唯一标识（由 IDL 编译器生成的哈希值）
+idl_hash:     方法签名、参数类型和返回类型的递归哈希，用于 IDL 兼容性校验
 method_id:    方法的唯一标识（由 IDL 编译器生成的哈希值）
 payload:      方法参数的序列化数据
 ```
@@ -472,6 +500,8 @@ enum class ErrorCode : int32_t {
     ERR_OUT_OF_MEMORY       = -3,     // 内存不足
     ERR_TIMEOUT             = -4,     // 超时
     ERR_NOT_INITIALIZED     = -5,     // 未初始化
+    ERR_ALREADY_INITIALIZED = -6,     // 已初始化
+    ERR_NOT_SUPPORTED       = -7,     // 不支持
     ERR_INTERNAL            = -8,     // 内部错误
     
     // 网络错误 (-100 ~ -199)
@@ -480,6 +510,7 @@ enum class ErrorCode : int32_t {
     ERR_SEND_FAILED         = -102,   // 发送失败
     ERR_RECV_FAILED         = -103,   // 接收失败
     ERR_PROTOCOL_ERROR      = -104,   // 协议错误
+    ERR_SM_UNREACHABLE      = -105,   // ServiceManager 不可达
     ERR_BIND_FAILED         = -106,   // 绑定失败
     ERR_LISTEN_FAILED       = -107,   // 监听失败
     ERR_ACCEPT_FAILED       = -108,   // 接受连接失败
@@ -491,18 +522,28 @@ enum class ErrorCode : int32_t {
     ERR_INTERFACE_NOT_FOUND = -203,   // 接口不存在
     ERR_METHOD_NOT_FOUND    = -204,   // 方法不存在
     ERR_INVOKE_FAILED       = -205,   // 调用失败
+    ERR_REGISTER_FAILED     = -206,   // 注册失败
     ERR_UNREGISTER_FAILED   = -207,   // 注销失败
+    ERR_IDL_MISMATCH        = -208,   // IDL 不匹配
     
     // 话题错误 (-300 ~ -399)
     ERR_TOPIC_NOT_FOUND     = -300,   // 话题不存在
     ERR_TOPIC_EXISTS        = -301,   // 话题已存在
     ERR_NOT_SUBSCRIBED      = -302,   // 未订阅
+    ERR_NOT_PUBLISHER       = -303,   // 不是发布者
     
     // 传输层错误 (-400 ~ -499)
     ERR_TRANSPORT_INIT      = -400,   // 传输层初始化失败
     ERR_SHM_CREATE          = -401,   // 共享内存创建失败
     ERR_SHM_ATTACH          = -402,   // 共享内存附加失败
+    ERR_SHM_FULL            = -403,   // 共享内存 ring 满
     ERR_SHM_TIMEOUT         = -404,   // 共享内存超时
+
+    // 序列化错误 (-500 ~ -599)
+    ERR_SERIALIZE           = -500,   // 序列化失败
+    ERR_DESERIALIZE         = -501,   // 反序列化失败
+    ERR_BUFFER_OVERFLOW     = -502,   // Buffer 溢出
+    ERR_BUFFER_UNDERFLOW    = -503,   // Buffer 下溢
 };
 
 } // namespace omnibinder
@@ -523,7 +564,7 @@ Client                                     Server (UDS listener)
    |  [本地] 创建自己的 SHM, 生成唯一名            |
    |                                             |
    |-------- UDS Connect ----------------------->|
-   |         /tmp/binder_<shm_name>.sock         |
+   |         /tmp/<server_shm_name_without_slash>.sock |
    |                                             |
    |-------- 发送 SHM 名称 (变长字符串) --------->|
    |         不附带 fd                           |
@@ -549,10 +590,10 @@ Client                                     Server (UDS listener)
 ### UDS 路径命名
 
 ```
-/tmp/binder_<shm_name>.sock
+/tmp/<server_shm_name_without_slash>.sock
 
 示例: SHM 名称为 "/binder_ServiceA"
-      UDS 路径为 "/tmp/binder_binder_ServiceA.sock"
+      UDS 路径为 "/tmp/binder_ServiceA.sock"
 ```
 
 ## 7. 通信时序
@@ -564,7 +605,7 @@ Service                                    ServiceManager
    |                                             |
    |  [本地] 创建 TCP 监听 (端口自动分配)           |
    |  [本地] 创建 1 个 master eventfd              |
-   |  [本地] 创建 UDS 监听 "/tmp/binder_<name>.sock"|
+   |  [本地] 创建 UDS 监听 "/tmp/<server_shm_name_without_slash>.sock"|
    |                                             |
    |-------- TCP Connect -----------------------|
    |                                             |
@@ -595,7 +636,7 @@ ServiceB                ServiceManager              ServiceA
    |                          |                          |
     |  [判断] host_id 相同？                               |
     |    是 -> 创建自己的 SHM, 生成唯一名                  |
-    |         UDS 连接 /tmp/binder_<name>.sock            |
+   |         UDS 连接 /tmp/<server_shm_name_without_slash>.sock |
     |         发送 SHM 名称 (变长字符串, 不附带 fd)        |
     |         接收 resp_eventfd + master_eventfd (SCM_RIGHTS)|
     |         UDS 断开                                    |

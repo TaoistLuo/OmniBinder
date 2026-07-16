@@ -409,9 +409,9 @@ public:
     bool isConnected() const;
 
     // ---- 远程调用方法 ----
-    int SetThreshold(const ControlCommand& cmd, StatusResponse* out);
-    int GetLatestData(SensorData* out);
-    int ResetSensor(int32_t sensor_id);
+    int SetThreshold(const ControlCommand& cmd, StatusResponse& out);
+    int GetLatestData(SensorData& out);
+    void ResetSensor(int32_t sensor_id);
 
     // ---- 订阅广播话题 ----
     void SubscribeSensorUpdate(
@@ -434,8 +434,10 @@ private:
 补充说明：
 
 - IDL 方法返回 `void` 仍表示业务语义上的 one-way / no-return
+- 生成的 C++ Proxy 对 `void` 方法也生成 `void` 返回值，并调用 `runtime_.invokeOneWay(...)`；它不创建或等待响应，提交/序列化错误也无法通过该方法返回给调用者
 - 但生成的 Stub `onInvoke()` 本身返回 `int`，用于向 runtime 显式返回 `ERR_DESERIALIZE`、`ERR_SERIALIZE` 等错误码
 - 生成的序列化代码会检查每一步 `Buffer::writeXxx()` 的返回值，而不是假设写入永远成功
+- `omni-cli call` 是诊断工具，当前仍走同步 `invoke(...)` 路径；它显示的空响应不等同于生成 C++ Proxy 的 one-way 调用契约
 
 ### 7.6 生成的 C 代码
 
@@ -476,9 +478,21 @@ int demo_SensorService_proxy_GetLatestData(
     demo_SensorData* result);
 ```
 
-## 8. ID 生成规则
+## 8. 严格语义校验
 
-### 8.1 interface_id
+`omni-idlc` 和 `omni-cli --idl` 在解析后使用同一套语义校验。校验失败时不会生成代码；CLI 会在连接 ServiceManager 前退出。当前规则包括：
+
+- 同一包命名空间内的 struct、topic、service 声明名不能重复；每个文件最多一个 `package`，且必须位于 import 和声明之前
+- 使用 import 必须先声明 package，所有 import 必须位于类型/服务声明之前；自定义类型必须能解析且必须指向 struct，不能把 topic/service 当作值类型
+- `void` 只允许作为方法返回类型，不能用于字段、topic 字段、参数或数组元素
+- 同一 service 内方法名不能重复（不支持按参数类型重载），`publishes` 条目也不能重复
+- `publishes` 必须引用该 service 所在包中真实存在的 topic，不能引用 struct/service
+- 禁止按值 struct 环，包括跨包限定类型形成的环；`array<T>` 是容器边，不构成按值环
+- 合法的前向 struct 依赖会在生成前按依赖顺序排列
+
+## 9. ID 生成规则
+
+### 9.1 interface_id
 
 基于服务名生成，使用 FNV-1a 32位哈希：
 
@@ -486,7 +500,7 @@ int demo_SensorService_proxy_GetLatestData(
 interface_id = fnv1a_32(package_name + "." + service_name)
 ```
 
-### 8.2 method_id
+### 9.2 method_id
 
 基于方法名生成：
 
@@ -494,7 +508,7 @@ interface_id = fnv1a_32(package_name + "." + service_name)
 method_id = fnv1a_32(method_name)
 ```
 
-### 8.3 topic_id
+### 9.3 topic_id
 
 基于话题名生成：
 
@@ -502,7 +516,7 @@ method_id = fnv1a_32(method_name)
 topic_id = fnv1a_32(package_name + "." + topic_name)
 ```
 
-### 8.4 FNV-1a 哈希算法
+### 9.4 FNV-1a 哈希算法
 
 ```cpp
 uint32_t fnv1a_32(const char* str) {
@@ -515,9 +529,9 @@ uint32_t fnv1a_32(const char* str) {
 }
 ```
 
-## 9. 完整 IDL 示例
+## 10. 完整 IDL 示例
 
-### 9.1 基础类型文件
+### 10.1 基础类型文件
 
 ```
 // common_types.bidl
@@ -536,7 +550,7 @@ struct StatusResponse {
 }
 ```
 
-### 9.2 使用 import 的服务文件
+### 10.2 使用 import 的服务文件
 
 ```
 // sensor_service.bidl
@@ -604,11 +618,13 @@ service SensorService {
 }
 ```
 
-## 10. omni-idlc 编译器使用
+## 11. omni-idlc 编译器使用
 
-### 10.1 命令行用法
+### 11.1 命令行用法
 
 ```bash
+mkdir -p ./generated
+
 # 生成 C++ 代码
 omni-idlc --lang=cpp --output=./generated sensor_service.bidl
 
@@ -619,16 +635,15 @@ omni-idlc --lang=c --output=./generated sensor_service.bidl
 omni-idlc --lang=all --output=./generated sensor_service.bidl
 ```
 
-### 10.2 命令行参数
+### 11.2 命令行参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--lang=<cpp\|c\|all>` | 目标语言 | `cpp` |
-| `--output=<dir>` | 输出目录 | 当前目录 |
+| `--output=<dir>` | 输出目录（目录需已存在） | 当前目录 |
 | `--dep-file=<file>` | 生成 Makefile 格式依赖文件 | 不生成 |
-| `--header-only` | 仅生成头文件（C++） | 否 |
 
-### 10.3 生成的文件
+### 11.3 生成的文件
 
 ```bash
 # 输入: sensor_service.bidl
@@ -641,11 +656,13 @@ omni-idlc --lang=all --output=./generated sensor_service.bidl
 #   sensor_service.bidl.c
 ```
 
-### 10.4 CMake 集成
+### 11.4 CMake 集成
 
 ```cmake
 # 在 CMakeLists.txt 中使用
 find_package(OmniBinder REQUIRED)
+
+add_executable(my_service main.cpp)
 
 # 自动编译 IDL 文件并生成代码
 omnic_generate(
@@ -655,7 +672,6 @@ omnic_generate(
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
-add_executable(my_service main.cpp)
 target_link_libraries(my_service omnibinder)
 ```
 

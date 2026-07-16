@@ -36,6 +36,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Generated C deserializers use the same wire/allocation limits as C++. */
+#define OMNI_MAX_MESSAGE_SIZE (16u * 1024u * 1024u)
+#define OMNI_MAX_ARRAY_ELEMENTS (1024u * 1024u)
+#define OMNI_MAX_ZERO_WIRE_ARRAY_ELEMENTS (4096u)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -88,6 +93,7 @@ void           omni_buffer_destroy(omni_buffer_t* buf);
 void           omni_buffer_reset(omni_buffer_t* buf);
 const uint8_t* omni_buffer_data(const omni_buffer_t* buf);
 size_t         omni_buffer_size(const omni_buffer_t* buf);
+size_t         omni_buffer_remaining(const omni_buffer_t* buf);
 int            omni_buffer_read_ok(const omni_buffer_t* buf);
 void           omni_buffer_clear_error(omni_buffer_t* buf);
 void           omni_buffer_mark_error(omni_buffer_t* buf, int32_t error_code);

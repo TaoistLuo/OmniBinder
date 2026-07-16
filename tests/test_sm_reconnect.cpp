@@ -46,6 +46,8 @@ static void smReconnectServerThread(void* arg) {
     if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
     if (ret != 0) return;
+    ret = ctx->runtime.publishTopic("reconnect/topic");
+    if (ret != 0) return;
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
@@ -91,6 +93,10 @@ TEST_F(SmReconnectTest, InitialLookupAndInvoke) {
         ASSERT_EQ(runtime.connectService("ReconnectService"), 0);
         ASSERT_EQ(runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000), 0);
     EXPECT_EQ(resp.size(), strlen(msg));
+    std::vector<std::string> topics;
+    ASSERT_EQ(runtime.queryPublishedTopics("ReconnectService", topics), 0);
+    ASSERT_EQ(topics.size(), 1u);
+    EXPECT_EQ(topics[0], "reconnect/topic");
 
     runtime.stop();
 }
@@ -110,6 +116,12 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
         runtime.pollOnce(100);
         ServiceInfo info;
         if (runtime.lookupService("ReconnectService", info) == 0) {
+            std::vector<std::string> topics;
+            if (runtime.queryPublishedTopics("ReconnectService", topics) != 0
+                || topics.size() != 1 || topics[0] != "reconnect/topic") {
+                std::this_thread::sleep_for(std::chrono::microseconds(100000));
+                continue;
+            }
             Buffer req, resp;
             const char* msg = "after-restart";
             req.writeRaw(msg, strlen(msg));

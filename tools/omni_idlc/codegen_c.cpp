@@ -154,6 +154,26 @@ static bool arrayElementNeedsLengths(const TypeRef& type) {
     return type.primitive == TYPE_STRING || type.primitive == TYPE_BYTES;
 }
 
+static size_t minimumWireSize(const TypeRef& type) {
+    switch (type.primitive) {
+    case TYPE_BOOL:
+    case TYPE_INT8:
+    case TYPE_UINT8: return 1;
+    case TYPE_INT16:
+    case TYPE_UINT16: return 2;
+    case TYPE_INT32:
+    case TYPE_UINT32:
+    case TYPE_FLOAT32:
+    case TYPE_STRING:
+    case TYPE_BYTES:
+    case TYPE_ARRAY: return 4;
+    case TYPE_INT64:
+    case TYPE_UINT64:
+    case TYPE_FLOAT64: return 8;
+    default: return 0;
+    }
+}
+
 static bool isCompositePointerType(const TypeRef& type) {
     return type.isCustom() || type.isArray();
 }
@@ -248,6 +268,7 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     std::string type_name = cArrayTypeName(type, pkg);
     const TypeRef& element = *type.element_type;
     std::string element_type_name = cTypeName(element, pkg);
+    const size_t min_wire_size = minimumWireSize(element);
 
     os << "void " << type_name << "_init(" << type_name << "* self) {\n";
     os << "    memset(self, 0, sizeof(*self));\n";
@@ -293,9 +314,20 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     os << "int " << type_name << "_deserialize(" << type_name << "* self, omni_buffer_t* buf) {\n";
     os << "    uint32_t i = 0;\n";
     os << "    if (!self || !buf) { return 0; }\n";
+    os << "    " << type_name << "_destroy(self);\n";
+    os << "    " << type_name << "_init(self);\n";
     os << "    omni_buffer_clear_error(buf);\n";
     os << "    self->count = omni_buffer_read_uint32(buf);\n";
     os << "    if (!omni_buffer_read_ok(buf)) { goto fail; }\n";
+    os << "    if (self->count > OMNI_MAX_ARRAY_ELEMENTS) { omni_buffer_mark_error(buf, -501); goto fail; }\n";
+    if (min_wire_size != 0) {
+        os << "    if ((size_t)self->count > omni_buffer_remaining(buf) / " << min_wire_size
+           << "u) { omni_buffer_mark_error(buf, -501); goto fail; }\n";
+    } else {
+        os << "    if (self->count > OMNI_MAX_ZERO_WIRE_ARRAY_ELEMENTS) { omni_buffer_mark_error(buf, -501); goto fail; }\n";
+    }
+    os << "    if ((size_t)self->count > (size_t)OMNI_MAX_MESSAGE_SIZE / sizeof("
+       << element_type_name << ")) { omni_buffer_mark_error(buf, -501); goto fail; }\n";
     os << "    if (self->count == 0) {\n";
     os << "        self->data = NULL;\n";
     if (arrayElementNeedsLengths(element)) {
@@ -303,10 +335,11 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     }
     os << "        return 1;\n";
     os << "    }\n";
-    os << "    self->data = (" << element_type_name << "*)omni_malloc(sizeof(" << element_type_name << ") * self->count);\n";
+    os << "    self->data = (" << element_type_name << "*)omni_malloc(sizeof(" << element_type_name << ") * (size_t)self->count);\n";
     os << "    if (!self->data) { self->count = 0; return 0; }\n";
+    os << "    memset(self->data, 0, sizeof(" << element_type_name << ") * (size_t)self->count);\n";
     if (arrayElementNeedsLengths(element)) {
-        os << "    self->lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * self->count);\n";
+        os << "    self->lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * (size_t)self->count);\n";
         os << "    if (!self->lens) { omni_free(self->data); self->data = NULL; self->count = 0; return 0; }\n";
     }
     os << "    for (i = 0; i < self->count; ++i) {\n";
@@ -1008,6 +1041,8 @@ void CCodeGen::genStructDeserialize(const StructDef& s, std::ostream& os) {
     std::string tname = pkg_ + "_" + s.name;
     os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
     os << "    if (!self || !buf) { return 0; }\n";
+    os << "    " << tname << "_destroy(self);\n";
+    os << "    " << tname << "_init(self);\n";
     os << "    omni_buffer_clear_error(buf);\n";
     for (size_t i = 0; i < s.fields.size(); ++i) {
         genFieldDeserialize(s.fields[i], "self->", os);
@@ -1033,6 +1068,8 @@ void CCodeGen::genTopicDeserialize(const TopicDef& t, std::ostream& os) {
     std::string tname = pkg_ + "_" + t.name;
     os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
     os << "    if (!self || !buf) { return 0; }\n";
+    os << "    " << tname << "_destroy(self);\n";
+    os << "    " << tname << "_init(self);\n";
     os << "    omni_buffer_clear_error(buf);\n";
     for (size_t i = 0; i < t.fields.size(); ++i) {
         genFieldDeserialize(t.fields[i], "self->", os);

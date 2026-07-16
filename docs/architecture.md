@@ -117,16 +117,16 @@ OmniBinder 是一个运行在用户态的微服务通信框架，面向嵌入式
 
 topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 
-### 3.5 ServiceHostRuntime
+### 3.5 Transport hosts
 
-`ServiceHostRuntime` 负责本地服务托管侧的运行时：
+`TransportFactory` 的 host-provider registry 负责本地服务数据面托管：
 
-- service accept
-- client data 接收
-- service client message dispatch skeleton
-- SHM request dispatch skeleton
+- TCP host 持有 listener、accepted clients、拆包 buffer 和 EventLoop fd 注册
+- SHM host 持有服务端握手、per-client SHM context 和通知 fd 注册
+- host 将完整 `Message` 与 transport-neutral peer id 回调给 `OmniRuntime`
+- `stop()` 在销毁具体 transport 前移除所有 EventLoop 注册
 
-它负责把来自远端 client 的请求交给本地服务执行路径。
+`OmniRuntime` 保留 invoke/topic/diagnostic 的协议与业务分派。
 
 ### 3.6 ConnectionManager
 
@@ -136,6 +136,7 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 - 避免重复建立直连
 - 根据 `host_id` 判断同机，同机优先 SHM
 - SHM 失败后降级 TCP
+- 通过内部 `TransportFactory` provider registry 创建实际数据面 transport
 - 处理直连消息与断开回调
 
 ## 4. Transport 选择策略
@@ -153,7 +154,14 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 3. 如果不同 → 直接使用 TCP
 4. 如果 SHM 建立失败 → 自动回退到 TCP
 
-这一策略由 `TransportFactory` 和 `ConnectionManager` 共同执行。
+这一策略由内部 `TransportFactory` provider registry 和 `ConnectionManager` 共同执行。
+`ConnectionManager` 持有每个 runtime/manager 的 factory，并按 provider priority 顺序尝试候选项；
+`NOT_APPLICABLE` 和 `RETRYABLE_FAILURE` 允许继续尝试，`FATAL_FAILURE` 立即停止。
+默认 factory 显式注册 SHM 和 TCP provider，因此同机保持 SHM -> TCP、跨机保持 TCP 的现有行为。
+
+该 registry 位于 `src/transport`，是源码级内部扩展边界，不属于已安装公共 API，也不承诺动态插件或二进制 ABI。
+`ConnectionManager` 的出站连接与 `OmniRuntime` 的 TCP/SHM service hosting 使用同一个 factory；
+`ServiceManager` 控制面仍固定使用 TCP。
 
 ## 5. SHM 架构
 
@@ -190,7 +198,7 @@ SHM 用于同机低延迟通信，设计原则是：
 UDS 握手流程：
 
 ```
-Client → Server: [shm_name]                    (纯数据，无 fd)
+Client → Server: [client_shm_name]             (客户端 SHM 名称，纯数据，无 fd)
 Server → Client: [resp_eventfd, master_efd]     (2 个 fd via SCM_RIGHTS)
 ```
 

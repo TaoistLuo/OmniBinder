@@ -1,5 +1,6 @@
 #include "transport/shm_transport.h"
 #include "omnibinder/log.h"
+#include "omnibinder/types.h"
 #include "platform/platform.h"
 
 #include <string.h>
@@ -7,6 +8,8 @@
 #include <algorithm>
 #include <atomic>
 #include <limits>
+#include <sstream>
+#include <iomanip>
 
 #define LOG_TAG "ShmTransport"
 
@@ -82,9 +85,16 @@ size_t calculateShmSize(size_t req_ring_capacity, size_t resp_ring_capacity,
 
 std::string generateShmName(const std::string& service_name)
 {
-    char buf[256];
-    snprintf(buf, sizeof(buf), "/binder_%s", service_name.c_str());
-    return std::string(buf);
+    // Use truncated prefix + FNV-1a hash to produce a unique,
+    // bounded-length SHM name.  This prevents truncation when the
+    // service name approaches MAX_SERVICE_NAME_LENGTH (256).
+    const size_t kMaxPrefix = 48;
+    std::string prefix = service_name.substr(0, kMaxPrefix);
+    uint32_t hash = fnv1a_32(service_name);
+
+    std::ostringstream os;
+    os << "/binder_" << prefix << "_" << std::hex << hash;
+    return os.str();
 }
 
 // ============================================================
@@ -364,10 +374,14 @@ uint32_t ShmTransport::ringAvailableRead(const ShmRingHeader* ring) const
 {
     uint32_t w = ring->write_pos.load(std::memory_order_acquire);
     uint32_t r = ring->read_pos.load(std::memory_order_acquire);
+    uint32_t cap = ring->capacity;
+    if (w >= cap || r >= cap) {
+        return 0;
+    }
     if (w >= r) {
         return w - r;
     }
-    return ring->capacity - r + w;
+    return cap - r + w;
 }
 
 uint32_t ShmTransport::ringAvailableWrite(const ShmRingHeader* ring) const
@@ -973,6 +987,14 @@ void ShmTransport::onUdsClientConnect()
         return;
     }
 
+    if (ctrl->version != 1) {
+        OMNI_LOG_WARN(LOG_TAG, "UDS: unsupported SHM version %u for '%s'",
+                        ctrl->version, client_shm_name.c_str());
+        platform::shmDetach(addr, try_size);
+        platform::udsClose(client_fd);
+        return;
+    }
+
     // Calculate exact size and re-map if needed
     size_t exact_size = calculateShmSize(ctrl->req_ring_capacity, ctrl->resp_ring_capacity, 1);
     if (exact_size == 0) {
@@ -993,6 +1015,35 @@ void ShmTransport::onUdsClientConnect()
             return;
         }
         ctrl = reinterpret_cast<ShmControlBlock*>(addr);
+        if (ctrl->magic != SHM_MAGIC || ctrl->version != 1) {
+            OMNI_LOG_WARN(LOG_TAG, "UDS: SHM control block mismatch after remap for '%s'",
+                            client_shm_name.c_str());
+            platform::shmDetach(addr, exact_size);
+            platform::udsClose(client_fd);
+            return;
+        }
+    }
+
+    // Validate ring header consistency: capacities must match the control
+    // block and positions must be within bounds to prevent out-of-bounds
+    // memcpy from a malicious or corrupted peer.
+    {
+        ShmRingHeader* req_ring = getRequestRingFromBase(static_cast<uint8_t*>(addr));
+        ShmRingHeader* resp_ring = getResponseRingFromBase(
+            static_cast<uint8_t*>(addr), ctrl);
+        if (!req_ring || !resp_ring
+            || req_ring->capacity != ctrl->req_ring_capacity
+            || resp_ring->capacity != ctrl->resp_ring_capacity
+            || req_ring->read_pos.load(std::memory_order_relaxed) >= req_ring->capacity
+            || req_ring->write_pos.load(std::memory_order_relaxed) >= req_ring->capacity
+            || resp_ring->read_pos.load(std::memory_order_relaxed) >= resp_ring->capacity
+            || resp_ring->write_pos.load(std::memory_order_relaxed) >= resp_ring->capacity) {
+            OMNI_LOG_WARN(LOG_TAG, "UDS: SHM ring header mismatch for '%s'",
+                            client_shm_name.c_str());
+            platform::shmDetach(addr, exact_size);
+            platform::udsClose(client_fd);
+            return;
+        }
     }
 
     // Step 2: Create resp_eventfd for this client
@@ -1056,11 +1107,12 @@ void ShmTransport::onUdsClientConnect()
 
 std::string ShmTransport::getShmUdsPath(const std::string& shm_name)
 {
-    std::string name = shm_name;
-    if (!name.empty() && name[0] == '/') {
-        name = name.substr(1);
-    }
-    return "/tmp/" + name + ".sock";
+    // Use a hash-based path to stay safely within the Linux sun_path
+    // limit (typically 108 bytes).  The full shm_name may be too long.
+    uint32_t hash = fnv1a_32(shm_name);
+    std::ostringstream os;
+    os << "/tmp/omni_" << std::hex << hash << ".sock";
+    return os.str();
 }
 
 } // namespace omnibinder

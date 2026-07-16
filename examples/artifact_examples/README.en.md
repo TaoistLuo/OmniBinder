@@ -17,19 +17,23 @@ cmake --build build -j4
 cmake --install build
 ```
 
-Then build the downstream-style examples:
+Then configure the C++ and C downstream projects separately (this directory has no aggregate `CMakeLists.txt`):
 
 ```bash
-cmake -S examples/artifact_examples -B build/example_artifacts \
+cmake -S examples/artifact_examples/cpp -B build/example_artifacts_cpp \
   -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+cmake --build build/example_artifacts_cpp -j4
 
-cmake --build build/example_artifacts -j4
+cmake -S examples/artifact_examples/c -B build/example_artifacts_c \
+  -DCMAKE_PREFIX_PATH="$(pwd)/build/install"
+cmake --build build/example_artifacts_c -j4
 ```
 
 Generated executables will be placed under:
 
 ```text
-build/example_artifacts/bin/
+build/example_artifacts_cpp/bin/
+build/example_artifacts_c/bin/
 ```
 
 Including:

@@ -44,6 +44,19 @@ bool tryReadStringArg(const Message& msg, std::string& value) {
     return true;
 }
 
+bool tryReadExactStringArg(const Message& msg, std::string& value,
+                           size_t max_length) {
+    Buffer payload(msg.payload.data(), msg.payload.size());
+    return payload.tryReadString(value)
+        && !value.empty()
+        && value.size() <= max_length
+        && payload.remaining() == 0;
+}
+
+bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
+    return tryReadExactStringArg(msg, topic, MAX_TOPIC_NAME_LENGTH);
+}
+
 }
 
 // ============================================================
@@ -142,7 +155,6 @@ public:
             this->onHeartbeatCheck();
         }, true);
 
-        running_ = true;
         return true;
     }
 
@@ -153,7 +165,6 @@ public:
     }
 
     void stop() {
-        running_ = false;
         loop_.stop();
     }
 
@@ -275,7 +286,7 @@ private:
         }
 
         // Append to receive buffer (with size limit to prevent OOM)
-        static const size_t MAX_RECV_BUFFER = 16 * 1024 * 1024; // 16MB
+        static const size_t MAX_RECV_BUFFER = MAX_MESSAGE_SIZE;
         size_t old_size = conn->recv_buffer.size();
         if (old_size + static_cast<size_t>(n) > MAX_RECV_BUFFER) {
             OMNI_LOG_ERROR(TAG, "recv_buffer overflow for fd=%d (>%zuMB), disconnecting",
@@ -383,6 +394,9 @@ private:
                 break;
             case MessageType::MSG_QUERY_INTERFACES:
                 handleQueryInterfaces(conn, msg);
+                break;
+            case MessageType::MSG_QUERY_PUBLISHED_TOPICS:
+                handleQueryPublishedTopics(conn, msg);
                 break;
             case MessageType::MSG_SUBSCRIBE_SERVICE:
                 handleSubscribeService(conn, msg);
@@ -676,8 +690,9 @@ private:
             // Notify death subscribers
             notifyServiceDeath(name);
 
-            // Clean up topics
-            topic_manager_.removeByFd(conn->fd);
+            // Clean up only this service's publishers. Subscriptions and sibling
+            // services on the same runtime control connection remain active.
+            topic_manager_.removePublishersByService(name, conn->fd);
 
             if (conn->registered_service_name == name) {
                 conn->registered_service_name.clear();
@@ -701,16 +716,14 @@ private:
     // ============================================================
     void handleHeartbeat(ClientConnection* conn, const Message& msg) {
         std::string name;
-        if (!tryReadStringArg(msg, name)) {
+        if (!tryReadExactStringArg(msg, name, MAX_SERVICE_NAME_LENGTH)) {
             OMNI_LOG_WARN(TAG, "Reject malformed heartbeat from fd=%d", conn->fd);
-            closeClient(conn->fd);
             return;
         }
 
         if (!registry_.ownsService(conn->fd, name)) {
-            OMNI_LOG_WARN(TAG, "Reject heartbeat for %s from non-owner fd=%d",
+            OMNI_LOG_WARN(TAG, "Drop stale or non-owner heartbeat for %s from fd=%d",
                            name.c_str(), conn->fd);
-            closeClient(conn->fd);
             return;
         }
 
@@ -805,6 +818,34 @@ private:
         sendMessage(conn, reply);
     }
 
+    void handleQueryPublishedTopics(ClientConnection* conn, const Message& msg) {
+        std::string name;
+        if (!tryReadExactStringArg(msg, name, MAX_SERVICE_NAME_LENGTH)) {
+            OMNI_LOG_WARN(TAG, "Reject malformed query published topics request from fd=%d",
+                          conn->fd);
+            sendQueryPublishedTopicsReply(conn, msg.header.sequence, false,
+                                          std::vector<std::string>());
+            return;
+        }
+
+        ServiceEntry entry;
+        const bool found = registry_.findService(name, entry);
+        const std::vector<std::string> topics = found
+            ? topic_manager_.getPublishedTopics(name)
+            : std::vector<std::string>();
+        sendQueryPublishedTopicsReply(conn, msg.header.sequence, found, topics);
+    }
+
+    void sendQueryPublishedTopicsReply(ClientConnection* conn, uint32_t seq, bool found,
+                                       const std::vector<std::string>& topics) {
+        Message reply(MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY, seq);
+        if (!serializePublishedTopicsReply(found, topics, reply.payload)) {
+            OMNI_LOG_ERROR(TAG, "Failed to serialize published topics reply for seq=%u", seq);
+            return;
+        }
+        sendMessage(conn, reply);
+    }
+
     // ============================================================
     // MSG_SUBSCRIBE_SERVICE: Subscribe to death notifications
     // ============================================================
@@ -846,7 +887,8 @@ private:
     void handlePublishTopic(ClientConnection* conn, const Message& msg) {
         Buffer payload(msg.payload.data(), msg.payload.size());
         std::string topic;
-        if (!payload.tryReadString(topic)) {
+        if (!payload.tryReadString(topic)
+            || topic.empty() || topic.size() > MAX_TOPIC_NAME_LENGTH) {
             OMNI_LOG_WARN(TAG, "Reject malformed publish topic request from fd=%d", conn->fd);
             sendPublishTopicReply(conn, msg.header.sequence, false);
             return;
@@ -858,7 +900,18 @@ private:
             return;
         }
         uint32_t idl_hash = 0;
-        payload.tryReadUint32(idl_hash);
+        if (payload.remaining() != 0
+            && (!payload.tryReadUint32(idl_hash) || payload.remaining() != 0)) {
+            OMNI_LOG_WARN(TAG, "Reject publish topic request with malformed tail from fd=%d",
+                          conn->fd);
+            sendPublishTopicReply(conn, msg.header.sequence, false);
+            return;
+        }
+
+        if (pub_info.name.empty() || pub_info.name.size() > MAX_SERVICE_NAME_LENGTH) {
+            sendPublishTopicReply(conn, msg.header.sequence, false);
+            return;
+        }
 
         if (!registry_.ownsService(conn->fd, pub_info.name)) {
             OMNI_LOG_WARN(TAG, "Reject publish topic %s from fd=%d for non-owned service %s",
@@ -867,10 +920,8 @@ private:
             return;
         }
 
-        bool success = topic_manager_.registerPublisher(topic, pub_info, conn->fd);
-        if (success) {
-            topic_manager_.setIdlHash(topic, idl_hash);
-        }
+        bool success = topic_manager_.registerPublisher(topic, pub_info, conn->fd,
+                                                        idl_hash);
         sendPublishTopicReply(conn, msg.header.sequence, success);
 
         if (success) {
@@ -893,7 +944,7 @@ private:
     // ============================================================
     void handleUnpublishTopic(ClientConnection* conn, const Message& msg) {
         std::string topic;
-        if (!tryReadStringArg(msg, topic)) {
+        if (!tryReadExactTopicArg(msg, topic)) {
             OMNI_LOG_WARN(TAG, "Drop malformed unpublish topic request from fd=%d", conn->fd);
             return;
         }
@@ -910,7 +961,7 @@ private:
     // ============================================================
     void handleSubscribeTopic(ClientConnection* conn, const Message& msg) {
         std::string topic;
-        if (!tryReadStringArg(msg, topic)) {
+        if (!tryReadExactTopicArg(msg, topic)) {
             OMNI_LOG_WARN(TAG, "Reject malformed subscribe topic request from fd=%d", conn->fd);
             sendSubscribeTopicReply(conn, msg.header.sequence, false);
             return;
@@ -942,7 +993,7 @@ private:
     // ============================================================
     void handleUnsubscribeTopic(ClientConnection* conn, const Message& msg) {
         std::string topic;
-        if (!tryReadStringArg(msg, topic)) {
+        if (!tryReadExactTopicArg(msg, topic)) {
             OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe topic request from fd=%d", conn->fd);
             return;
         }
@@ -980,20 +1031,26 @@ private:
             // Get the control fd before removing
             int fd = registry_.getControlFd(name);
 
-            // Remove from registry
-            registry_.removeService(name);
-
-            // Notify death subscribers
-            notifyServiceDeath(name);
-
-            // Clean up topics for this service
-            if (fd >= 0) {
-                topic_manager_.removeByFd(fd);
+            if (!registry_.removeService(name)) {
+                continue;
             }
 
-            // Close the client connection
+            // Preserve established ordering: registry removal, death notification,
+            // then publisher cleanup for the expired service only.
+            notifyServiceDeath(name);
             if (fd >= 0) {
-                closeClient(fd);
+                topic_manager_.removePublishersByService(name, fd);
+                auto client_it = clients_.find(fd);
+                if (client_it != clients_.end()) {
+                    ClientConnection* conn = client_it->second;
+                    if (conn->registered_service_name == name) {
+                        conn->registered_service_name.clear();
+                    }
+                    conn->registered_services.erase(
+                        std::remove(conn->registered_services.begin(),
+                                    conn->registered_services.end(), name),
+                        conn->registered_services.end());
+                }
             }
         }
     }
@@ -1037,9 +1094,10 @@ private:
         if (!conn->registered_service_name.empty()) {
             std::string name = conn->registered_service_name;
 
-            registry_.removeService(name);
-            heartbeat_.stopTracking(name);
-            notifyServiceDeath(name);
+            if (registry_.removeService(name)) {
+                heartbeat_.stopTracking(name);
+                notifyServiceDeath(name);
+            }
         }
 
         // Clean up any services registered by this fd
@@ -1078,7 +1136,7 @@ private:
         }
 
         if (conn->send_offset < conn->send_buffer.size()) {
-            static const size_t MAX_SEND_BUFFER = 16 * 1024 * 1024; // 16MB
+            static const size_t MAX_SEND_BUFFER = MAX_MESSAGE_SIZE;
             if (conn->send_buffer.size() + output.size() > MAX_SEND_BUFFER) {
                 OMNI_LOG_ERROR(TAG, "send_buffer overflow for fd=%d (>%zuMB), disconnecting",
                                conn->fd, MAX_SEND_BUFFER / (1024*1024));
@@ -1150,7 +1208,6 @@ private:
 
     uint32_t heartbeat_timer_id_;
     int shutdown_fd_;
-    volatile bool running_;
 };
 
 // ============================================================

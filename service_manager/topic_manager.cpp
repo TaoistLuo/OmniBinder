@@ -6,6 +6,7 @@
 namespace omnibinder {
 
 TopicManager::TopicManager()
+    : total_subscriptions_(0)
 {
 }
 
@@ -15,7 +16,8 @@ TopicManager::~TopicManager()
 
 bool TopicManager::registerPublisher(const std::string& topic,
                                      const ServiceInfo& publisher_info,
-                                     int publisher_fd)
+                                     int publisher_fd,
+                                     uint32_t idl_hash)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -29,10 +31,37 @@ bool TopicManager::registerPublisher(const std::string& topic,
         return false;
     }
 
+    if (publisher_info.name.empty()
+        || publisher_info.name.length() > MAX_SERVICE_NAME_LENGTH) {
+        return false;
+    }
+
     auto it = topics_.find(topic);
     if (it != topics_.end() && it->second.publisher_fd >= 0) {
         OMNI_LOG_WARN(TAG, "Topic %s already has a publisher (fd=%d)",
                        topic.c_str(), it->second.publisher_fd);
+        return false;
+    }
+
+    if (it == topics_.end() && topics_.size() >= MAX_TOPICS_GLOBAL) {
+        return false;
+    }
+    auto fp_it = fd_publications_.find(publisher_fd);
+    if (fp_it != fd_publications_.end()
+        && fp_it->second.size() >= MAX_TOPIC_PUBLICATIONS_PER_CONNECTION) {
+        return false;
+    }
+    size_t service_publications = 0;
+    size_t service_topic_bytes = 0;
+    for (auto topic_it = topics_.begin(); topic_it != topics_.end(); ++topic_it) {
+        if (topic_it->second.publisher_fd >= 0
+            && topic_it->second.publisher_info.name == publisher_info.name) {
+            ++service_publications;
+            service_topic_bytes += topic_it->first.size();
+        }
+    }
+    if (service_publications >= MAX_PUBLISHED_TOPICS
+        || topic.size() > MAX_PUBLISHED_TOPICS_BYTES - service_topic_bytes) {
         return false;
     }
 
@@ -41,10 +70,12 @@ bool TopicManager::registerPublisher(const std::string& topic,
         entry.topic_name = topic;
         entry.publisher_info = publisher_info;
         entry.publisher_fd = publisher_fd;
+        entry.idl_hash = idl_hash;
         topics_[topic] = entry;
     } else {
         it->second.publisher_info = publisher_info;
         it->second.publisher_fd = publisher_fd;
+        it->second.idl_hash = idl_hash;
     }
 
     fd_publications_[publisher_fd].insert(topic);
@@ -58,6 +89,10 @@ bool TopicManager::registerPublisher(const std::string& topic,
 bool TopicManager::removePublisher(const std::string& topic)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
+        return false;
+    }
 
     auto it = topics_.find(topic);
     if (it == topics_.end()) {
@@ -85,6 +120,7 @@ bool TopicManager::removePublisher(const std::string& topic)
         // Keep the entry but clear the publisher
         it->second.publisher_fd = -1;
         it->second.publisher_info = ServiceInfo();
+        it->second.idl_hash = 0;
     }
 
     OMNI_LOG_INFO(TAG, "Publisher removed for topic: %s", topic.c_str());
@@ -94,6 +130,10 @@ bool TopicManager::removePublisher(const std::string& topic)
 bool TopicManager::removePublisher(const std::string& topic, int publisher_fd)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
+        return false;
+    }
 
     auto it = topics_.find(topic);
     if (it == topics_.end() || it->second.publisher_fd != publisher_fd) {
@@ -114,6 +154,7 @@ bool TopicManager::removePublisher(const std::string& topic, int publisher_fd)
     } else {
         it->second.publisher_fd = -1;
         it->second.publisher_info = ServiceInfo();
+        it->second.idl_hash = 0;
     }
 
     OMNI_LOG_INFO(TAG, "Publisher removed for topic: %s (fd=%d)", topic.c_str(), publisher_fd);
@@ -132,6 +173,32 @@ bool TopicManager::addSubscriber(const std::string& topic, int subscriber_fd)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
+        return false;
+    }
+
+    auto existing = topics_.find(topic);
+    if (existing != topics_.end()
+        && existing->second.subscriber_fds.find(subscriber_fd)
+            != existing->second.subscriber_fds.end()) {
+        return false;
+    }
+    if (existing == topics_.end() && topics_.size() >= MAX_TOPICS_GLOBAL) {
+        return false;
+    }
+    auto fs_existing = fd_subscriptions_.find(subscriber_fd);
+    if (fs_existing != fd_subscriptions_.end()
+        && fs_existing->second.size() >= MAX_TOPIC_SUBSCRIPTIONS_PER_CONNECTION) {
+        return false;
+    }
+    if (existing != topics_.end()
+        && existing->second.subscriber_fds.size() >= MAX_SUBSCRIBERS_PER_TOPIC) {
+        return false;
+    }
+    if (total_subscriptions_ >= MAX_TOPIC_SUBSCRIPTIONS_GLOBAL) {
+        return false;
+    }
+
     // Create topic entry if it doesn't exist
     TopicEntry& entry = topics_[topic];
     if (entry.topic_name.empty()) {
@@ -139,14 +206,9 @@ bool TopicManager::addSubscriber(const std::string& topic, int subscriber_fd)
         entry.publisher_fd = -1;
     }
 
-    if (entry.subscriber_fds.find(subscriber_fd) != entry.subscriber_fds.end()) {
-        OMNI_LOG_DEBUG(TAG, "fd=%d already subscribed to topic %s",
-                        subscriber_fd, topic.c_str());
-        return false;
-    }
-
     entry.subscriber_fds.insert(subscriber_fd);
     fd_subscriptions_[subscriber_fd].insert(topic);
+    ++total_subscriptions_;
 
     OMNI_LOG_INFO(TAG, "Subscriber fd=%d added to topic: %s", subscriber_fd, topic.c_str());
     return true;
@@ -155,6 +217,10 @@ bool TopicManager::addSubscriber(const std::string& topic, int subscriber_fd)
 bool TopicManager::removeSubscriber(const std::string& topic, int subscriber_fd)
 {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
+        return false;
+    }
 
     auto it = topics_.find(topic);
     if (it == topics_.end()) {
@@ -167,6 +233,7 @@ bool TopicManager::removeSubscriber(const std::string& topic, int subscriber_fd)
     }
 
     it->second.subscriber_fds.erase(fd_it);
+    --total_subscriptions_;
 
     // Remove from reverse index
     auto fs_it = fd_subscriptions_.find(subscriber_fd);
@@ -210,6 +277,7 @@ std::vector<std::string> TopicManager::removeByFd(int fd)
                 } else {
                     tit->second.publisher_fd = -1;
                     tit->second.publisher_info = ServiceInfo();
+                    tit->second.idl_hash = 0;
                 }
             }
 
@@ -229,6 +297,7 @@ std::vector<std::string> TopicManager::removeByFd(int fd)
             auto tit = topics_.find(topic);
             if (tit != topics_.end()) {
                 tit->second.subscriber_fds.erase(fd);
+                --total_subscriptions_;
 
                 // Clean up empty topic entries
                 if (tit->second.publisher_fd < 0 && tit->second.subscriber_fds.empty()) {
@@ -241,6 +310,42 @@ std::vector<std::string> TopicManager::removeByFd(int fd)
         }
     }
 
+    return removed_publications;
+}
+
+std::vector<std::string> TopicManager::removePublishersByService(
+    const std::string& service_name, int publisher_fd)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<std::string> removed_publications;
+    for (auto it = topics_.begin(); it != topics_.end();) {
+        TopicEntry& entry = it->second;
+        if (entry.publisher_fd != publisher_fd
+            || entry.publisher_info.name != service_name) {
+            ++it;
+            continue;
+        }
+
+        const std::string topic = it->first;
+        removed_publications.push_back(topic);
+        auto fp_it = fd_publications_.find(publisher_fd);
+        if (fp_it != fd_publications_.end()) {
+            fp_it->second.erase(topic);
+            if (fp_it->second.empty()) {
+                fd_publications_.erase(fp_it);
+            }
+        }
+
+        if (entry.subscriber_fds.empty()) {
+            it = topics_.erase(it);
+        } else {
+            entry.publisher_fd = -1;
+            entry.publisher_info = ServiceInfo();
+            entry.idl_hash = 0;
+            ++it;
+        }
+    }
     return removed_publications;
 }
 
@@ -272,6 +377,21 @@ bool TopicManager::getPublisher(const std::string& topic, ServiceInfo& publisher
 
     publisher_info = it->second.publisher_info;
     return true;
+}
+
+std::vector<std::string> TopicManager::getPublishedTopics(
+    const std::string& service_name) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::vector<std::string> result;
+    for (auto it = topics_.begin(); it != topics_.end(); ++it) {
+        if (it->second.publisher_fd >= 0
+            && it->second.publisher_info.name == service_name) {
+            result.push_back(it->first);
+        }
+    }
+    return result;
 }
 
 bool TopicManager::hasPublisher(const std::string& topic) const

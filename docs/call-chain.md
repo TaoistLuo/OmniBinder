@@ -1,642 +1,315 @@
 # 调用链路详解
 
-本文档描述 OmniBinder 两条核心数据通路的完整调用链路：**同步 RPC** 和 **发布/订阅（Topic）**。
-
-文档覆盖客户端、服务端、ServiceManager 三侧的代码级调用流程，以及传输层（SHM / TCP）的选择时机。
+本文按当前代码实现描述 OmniBinder 的主要调用链路。代码是本文档的依据；为了降低漂移风险，本文只写稳定的类名、函数名和消息类型，不再绑定源码行号。
 
 ---
 
-## 目录
+## 1. 全局职责划分
 
-- [全局概览](#全局概览)
-- [同步 RPC 调用链路](#同步-rpc-调用链路)
-  - [客户端侧：发起调用](#客户端侧发起调用)
-  - [服务端侧：处理请求](#服务端侧处理请求)
-  - [客户端侧：收到回复](#客户端侧收到回复)
-- [One-Way RPC 调用链路](#one-way-rpc-调用链路)
-- [发布/订阅调用链路](#发布订阅调用链路)
-  - [Phase 1：发布者注册 Topic](#phase-1发布者注册-topic)
-  - [Phase 2：订阅者订阅 Topic](#phase-2订阅者订阅-topic)
-  - [Phase 3：订阅者收到通知并建立直连](#phase-3订阅者收到通知并建立直连)
-  - [Phase 4：发布者广播数据](#phase-4发布者广播数据)
-  - [订阅者收到广播](#订阅者收到广播)
-- [传输层选择机制](#传输层选择机制)
-- [关键代码文件索引](#关键代码文件索引)
+OmniBinder 的运行时分成控制面和数据面：
+
+- **控制面**：`OmniRuntime::Impl` 通过 `SmControlChannel` 连接 `ServiceManager`，发送注册、查找、订阅、运行时诊断等控制消息。
+- **数据面**：客户端和服务端通过 `ConnectionManager` 建立直连，数据路径自动选择 SHM 或 TCP。
+- **服务端数据分派**：factory 创建的 TCP/SHM host 持有具体 transport 与 EventLoop 注册，向 `OmniRuntime::Impl` 回调完整消息。
+- **Topic 状态**：`TopicRuntime` 保存本地订阅回调、已发布 topic、TCP 订阅者 fd 和 SHM 订阅者 `(service_name, client_id)`。
+- **同步等待**：`RpcRuntime` 管理 sequence、默认超时和 `waitForReply()` 的等待状态；实际 reply 存储在 `SmControlChannel::pending_replies_`。
+
+ServiceManager 只负责服务注册发现、Topic 发布/订阅关系、死亡通知和诊断控制面；RPC request/response 与 topic broadcast 一旦建立数据面直连后不再经过 ServiceManager。
 
 ---
 
-## 全局概览
+## 2. 服务注册链路
 
-```
-                    ┌─────────────────────────────────────────────────────────┐
-                    │                    ServiceManager                        │
-                    │          注册/发现/心跳/死亡通知/Topic 关系管理            │
-                    └───┬──────────▲──────────────┬──────────▲────────────────┘
-                        │          │              │          │
-              TCP 控制面 │          │    TCP 控制面 │          │
-            (注册/查找)  │          │  (注册/查找)  │          │
-                        │          │              │          │
-┌───────────────────────┴──┐     ┌──┴───────────────────────┴──────────────┐
-│      客户端进程           │     │           服务端进程                      │
-│                          │     │                                          │
-│  invoke()                │     │  registerService()                       │
-│    │                     │     │    │ listen TCP + 创建 SHM               │
-│    ├─ lookup → SM ───────┼────►│    │ 注册到 SM                            │
-│    │  (拿到 host/port/   │     │    ▼                                      │
-  │    │   host_id) │     │  等待连接                                 │
-│    │                     │     │    │                                      │
-│    ├─ 同机? SHM 直连 ────┼────►│    │◄── accept TCP / SHM eventfd         │
-│    │  跨机? TCP 直连 ────┼────►│    │                                      │
-│    │                     │     │    ▼                                      │
-│    ├─ send MSG_INVOKE ───┼────►│  onServiceClientData / SHM eventfd       │
-│    │                     │     │    │                                      │
-│    ├─ waitReply ─────────┼─────┼───┤  decode → service->onInvoke()         │
-│    │                     │     │    │  encode reply → sendOnFd ─────────┐   │
-│    ◄── reply ◄───────────┼─────┼───┘                                  │   │
-│                          │     │                                       │   │
-│  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ │     │  ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─│   │
-│                          │     │                                       │   │
-│  publishTopic() ─────────┼──► SM ── 记住 publisher ──►               │   │
-│                          │     │                                       │   │
-│  subscribeTopic() ───────┼──► SM ── 记住 subscriber ──►              │   │
-│                          │     │   SM 回推 PUBLISHER_NOTIFY            │   │
-│  ◄── PUBLISHER_NOTIFY ◄─┼────┼─── 给订阅者                            │   │
-│                          │     │                                       │   │
-│  建直连到 publisher ──────┼────►│ accept                               │   │
-│  发 SUBSCRIBE_BROADCAST ─┼────►│ 记住 fd 要收哪个 topic                │   │
-│                          │     │                                       │   │
-│                          │     │  broadcast()                          │   │
-│                          │     │    ├─ TCP: 遍历 fd → send ──────────►│   │
-│  ◄── MSG_BROADCAST ◄────┼─────┼────┘                                  │   │
-│  dispatch → callback()   │     │  SHM: serverSend(client_id)           │   │
-│                          │     │                                       ▼   ▼
-└──────────────────────────┘     └───────────────────────────────────────────┘
+```text
+用户代码 registerService(service)
+  -> OmniRuntime::Impl::registerService()
+  -> registerServiceInternal()
+     - 通过同一个 TransportFactory 创建 TCP 和 SHM host
+     - host 注册 listener、client、SHM request/handshake 通知到 EventLoop
+  -> registerServiceWithManager()
+     - 构造 ServiceInfo{name, host, port, host_id, shm_config, interfaces}
+     - 发送 MSG_REGISTER 到 ServiceManager
+     - 等待 MSG_REGISTER_REPLY
+  -> ServiceManager::handleRegister()
+     - ServiceRegistry::addService()
+     - HeartbeatMonitor::startTracking()
 ```
 
-**核心设计**：ServiceManager 只负责控制面（"告诉你在哪"和"建立订阅关系"），所有实际数据流量（RPC request/response、topic broadcast）都走客户端到服务端的**数据面直连**（SHM 或 TCP）。一旦连接建立，数据流量完全不经 ServiceManager。
+当前 `ServiceInfo` 不包含固定 `shm_name`。SHM 是 per-client 模型：客户端后续直连服务端时创建自己的 SHM，再通过服务端 UDS listener 完成握手。
 
 ---
 
-## 同步 RPC 调用链路
+## 3. 客户端主动连接链路
 
-### 客户端侧：发起调用
+生成的 Proxy 通常先调用 `ServiceProxyBase::connect()`，该函数会执行：
 
-```
-用户代码
-  │
-  ▼
-proxy.GetLatestData(request, &response)             // 生成代码 Proxy 方法
-  │  序列化 request → Buffer
-  ▼
-OmniRuntime::invoke(service_name, iface, method, request, response, timeout)
-  │
-  ▼
-callSerialized(lambda)                               // 串行化入口（保证线程安全）
-  │
-  ├── 无 owner thread
-  │     lock_guard<mutex> lock(api_mutex_)
-  │     return func()                                // 直接在当前线程执行
-  │
-  └── 有 owner thread
-        │  SyncCallState<int> state                  // 跨线程结果信箱
-        │  loop_->post(lambda) ──────► owner event loop 执行
-        │  state.wait()  ←────────── 阻塞等结果（mutex + condvar）
-        ▼
-invokeInternal(service_name, iface, method, request, response, timeout)
-  │
-  ├── 1. lookupServiceInfo(service_name, info)
-  │     │
-  │     │  查本地缓存 service_cache_
-  │     │  ├── 缓存命中 → 直接返回 ServiceInfo
-  │     │  │   {host, port, host_id, shm_config}
-  │     │  │
-  │     │  └── 缓存未命中
-  │     │       发 MSG_LOOKUP 给 ServiceManager
-  │     │       等待 MSG_LOOKUP_REPLY
-  │     │       反序列化 ServiceInfo
-  │     │       写入 service_cache_
-  │     │       返回 ServiceInfo
-  │     ▼
-  │
-  ├── 2. connectServiceInternal / conn_mgr_->getOrCreateConnection(...)
-  │     │
-  │     │  conn_mgr_->getOrCreateConnection(name, host, port, host_id, shm_config)
-  │     │    │
-  │     │    │  已有连接且 connected → 直接复用
-  │     │    │
-  │     │    │  新建连接
-  │     │    │    TransportFactory::isSameMachine(local_host_id, remote_host_id)
-  │     │    │      相等 → 尝试 SHM，失败则降级 TCP
-  │     │    │      不等 → TCP
-  │     │    │
-  │     │    │    SHM 路径：new ShmTransport(generateShmName(service_name)) → connect() → 创建独立 SHM + UDS 握手
-  │     │    │      失败 → 降级 TCP
-  │     │    │
-  │     │    │    TCP 路径：new TcpTransport() → connect(host, port)
-  │     │    ▼
-  │     │
-  │     │  返回 ServiceConnection{transport, connected, host_id, shm_config, ...}
-  │     │  注册到 event loop（fd 可读回调 → onDirectMessage）
-  │     ▼
-  │
-  ├── 3. 构造 MSG_INVOKE 消息
-  │     │  Message header: type=MSG_INVOKE, sequence=seq
-  │     │  Payload: interface_id + idl_hash + method_id + request_length + request_data
-  │     ▼
-  │
-  ├── 4. 发送请求
-  │     │
-  │     │  sendInvokeMessageWithTimeout(service_name, msg, info, conn, timeout)
-  │     │    conn_mgr_->sendMessageWithinTimeout(name, msg, timeout, &elapsed)
-  │     │      transport->send(serialized_data)
-  │     │    发送失败 + attempt==0 → refreshServiceConnection → 重试一次
-  │     ▼
-  │
-  └── 5. 等待回复
-        │
-        │  waitForReply(seq, reply_timeout, reply)
-        │    rpc_runtime_.waitForReply(...)
-        │      pollOnceWithoutFunctors() 循环
-        │      期间只处理 fd 读取和 timer，不执行新的 API functor
-        │      等 MSG_INVOKE_REPLY 匹配 seq
-        │
-        ▼
-      decodeInvokeReplyPayload(reply, status, response)
-        status == 0 → 成功，response 包含返回数据
-        status != 0 → 返回错误码（ERR_DESERIALIZE / ERR_INVOKE_FAILED / ...）
+```text
+ServiceProxyBase::connect()
+  -> OmniRuntime::Impl::connectService(service_name)
+  -> connectServiceInternal()
+     - lookupServiceInfo(): 查 service_cache_；未命中则向 SM 发 MSG_LOOKUP
+     - ConnectionManager::getOrCreateConnection(service_name, host, port, host_id, shm_config)
+  -> subscribeServiceDeathInternal()
+     - 向 SM 发 MSG_SUBSCRIBE_SERVICE，注册死亡通知
 ```
 
-**涉及代码位置**：
-
-| 函数 | 文件 |
-|------|------|
-| `invoke()` | `omni_runtime.cpp:919` |
-| `callSerialized()` | `omni_runtime.h:322` |
-| `invokeInternal()` | `omni_runtime.cpp:927` |
-| `lookupServiceInfo()` | `omni_runtime.cpp:771` |
-| `ConnectionManager::getOrCreateConnection()` | `src/core/connection_manager.cpp` |
-| `populateInvokeMessage()` | `omni_runtime.cpp:1863` |
-| `ConnectionManager::sendMessageWithinTimeout()` | `src/core/connection_manager.cpp` |
-| `waitForReply()` | `omni_runtime.cpp:500` |
-
-### 服务端侧：处理请求
-
-```
-EventLoop epoll 触发 fd 可读
-  │
-  ├── TCP 路径
-  │     listen fd 可读 → onServiceAccept
-  │       │  accept() 新连接
-  │       │  注册 client fd 到 event loop
-  │       ▼
-  │     client fd 可读 → onServiceClientData
-  │       │  transport->recv() → 反序列化 → 得到 Message
-  │       │  根据 MessageType 分派
-  │       ▼
-  │
-  └── SHM 路径
-        per-client eventfd 可读
-          │  eventFdConsume(fd)
-          │  shm_transport->serverRecv(buf, sizeof(buf), client_id)
-          │    从 client_id 对应的 per-client request ring 读取数据
-          ▼
-
-onInvokeRequest(service_name, client_fd, msg, "TCP")    // TCP
-onShmRequest(service_name, entry, client_id, data, len)  // SHM
-  │
-  ├── 1. decodeInvokePayload(msg, interface_id, idl_hash, method_id, request)
-  │     反序列化：读 interface_id、idl_hash、method_id、request data
-  │     失败 → 构造错误 reply 直接返回
-  │
-  ├── 2. 校验 interface_id 是否匹配已注册服务
-  │     不匹配 → 返回 ERR_INTERFACE_NOT_FOUND
-  │
-  ├── 3. service->onInvoke(method_id, request, response)     // ★ 核心调用
-  │     │  进入用户 Service 子类（如 MySensorService）
-  │     │  生成代码 Stub 内部：
-  │     │    switch(method_id)
-  │     │      case METHOD_GET_LATEST_DATA:
-  │     │        反序列化 request 参数
-  │     │        调用业务方法 GetLatestData(sensor_id)
-  │     │        序列化返回值到 response
-  │     │        return 0  (成功)
-  │     │      default:
-  │     │        return ERR_METHOD_NOT_FOUND
-  │     ▼
-  │
-  ├── 4. 构造回复
-  │     invoke_status == 0 (成功):
-  │       MSG_INVOKE_REPLY(seq, status=0, response_length, response_data)
-  │     invoke_status != 0 (失败):
-  │       MSG_INVOKE_REPLY(seq, status=invoke_status)
-  │     失败:
-  │       MSG_INVOKE_REPLY(seq, status=ERR_INVOKE_FAILED)
-  │
-  └── 5. 发送回复
-        TCP → sendOnFd(transport, reply)
-              transport->send(serialized_reply)
-        SHM → shm_transport->serverSend(client_id, serialized_reply)
-              写入 per-client response ring + eventfd 通知客户端
-```
-
-**涉及代码位置**：
-
-| 函数 | 文件 |
-|------|------|
-| `onServiceAccept()` | `omni_runtime.cpp:1305` |
-| `onServiceClientData()` | `omni_runtime.cpp:1334` |
-| `onInvokeRequest()` | `src/core/omni_runtime.cpp` |
-| `onShmRequest()` | `src/core/omni_runtime.cpp` |
-| SHM eventfd 回调注册 | `omni_runtime.cpp:616` |
-
-### 客户端侧：收到回复
-
-```
-EventLoop epoll 触发 fd 可读
-  │
-  ├── TCP 路径
-  │     ConnectionManager 的 fd 回调
-  │       │  transport->recv() → 反序列化 → 得到 Message
-  │       ▼
-  │     onDirectMessage(service_name, msg)
-  │       │  type == MSG_INVOKE_REPLY
-  │       │  storePendingReply(seq, msg)
-  │       │    写入 sm_channel_ 的 pending_replies_
-  │       │    唤醒 waitForReply 中阻塞的线程
-  │       ▼
-  │
-  └── SHM 路径
-        ShmTransport 的 eventfd 回调
-          │  clientRecv() 读 response ring buffer
-          │  反序列化 → 得到 Message
-          │  走同样的 reply 匹配逻辑
-          ▼
-
-waitForReply 返回 → decodeInvokeReplyPayload
-  │  解析 status 和 response data
-  ▼
-invokeInternal 返回结果给调用方
-```
-
-**涉及代码位置**：
-
-| 函数 | 文件 |
-|------|------|
-| `onDirectMessage()` | `omni_runtime.cpp:1567` |
-| `storePendingReply()` | `omni_runtime.cpp:509` |
-| `waitForReply()` | `omni_runtime.cpp:500` |
+`invokeInternal()` 本身要求连接已经存在：它只调用 `conn_mgr_->getConnection(service_name)`，连接不存在时返回 `ERR_CONNECT_FAILED`，不会在 invoke 内隐式 lookup/connect。
 
 ---
 
-## One-Way RPC 调用链路
+## 4. 传输层选择链路
 
-与同步 RPC 几乎完全一致，区别仅在于：
-
-**客户端**：
-
-```
-invokeOneWayInternal(service_name, iface, method, request)
-  │
-  ├── lookupServiceInfo(...)          // 同步 RPC 一样
-  ├── conn_mgr_->getOrCreateConnection(...)    // 同步 RPC 一样
-  ├── 构造 MSG_INVOKE_ONEWAY 消息
-  ├── conn_mgr_->sendMessage(...)     // 发送
-  │
-  └── return 0                        // ★ 不等回复，直接返回
-```
-
-**服务端**：
-
-```
-onInvokeOneWayRequest(service_name, msg, "TCP")
-  │
-  ├── decodeInvokePayload(...)
-  ├── service->onInvoke(method_id, request, response)   // 执行业务逻辑
-  │
-  └── return                                            // ★ 不构造回复，不发回任何东西
-```
-
-**涉及代码位置**：
-
-| 函数 | 文件 |
-|------|------|
-| `invokeOneWay()` | `omni_runtime.cpp:1003` |
-| `invokeOneWayInternal()` | `omni_runtime.cpp:1010` |
-| `onInvokeOneWayRequest()` | `src/core/omni_runtime.cpp` |
-
----
-
-## 发布/订阅调用链路
-
-发布/订阅的完整流程分四个阶段，涉及 ServiceManager 的控制面协调和客户端到发布者的数据面直连。
-
-### Phase 1：发布者注册 Topic
-
-```
-发布者进程
-  │
-  ▼
-runtime.publishTopic("SensorUpdate")
-  │
-  ▼
-publishTopicInternal("SensorUpdate")
-  │
-  ├── 1. 构造 MSG_PUBLISH_TOPIC 消息
-  │     payload = topic_name + ServiceInfo
-  │     ServiceInfo 包含：
-  │       host     = 第一个本地注册服务的监听地址
-  │       port     = 第一个本地注册服务的监听端口
-  │       host_id  = 本机 machine-id
-  │       shm_config = SHM ring 容量
-  │
-  ├── 2. sendToSM(msg) → 等待 MSG_PUBLISH_TOPIC_REPLY → accepted=true
-  │
-  └── 3. topic_runtime_.rememberPublishedTopic(topic, topic_id, service_name)
-         本地记录 topic_id 与服务的映射关系
-
-        │
-        │    ServiceManager 侧
-        │
-        ▼
-handlePublishTopic(conn, msg)
-  │
-  ├── registry_.registerPublisher(topic, pub_info, conn->fd)
-  │     记录 topic → publisher 的 ServiceInfo
-  │
-  ├── 回复 MSG_PUBLISH_TOPIC_REPLY(accepted=true) 给发布者
-  │
-  └── 遍历该 topic 的已有订阅者
-        给每个订阅者发送 MSG_TOPIC_PUBLISHER_NOTIFY
-        包含：topic_name + publisher 的 ServiceInfo
-```
-
-### Phase 2：订阅者订阅 Topic
-
-```
-订阅者进程
-  │
-  ▼
-runtime.subscribeTopic("SensorUpdate", callback)
-  │
-  ▼
-subscribeTopicInternal("SensorUpdate", callback)
-  │
-  ├── 1. 发 MSG_SUBSCRIBE_TOPIC 给 ServiceManager
-  │
-  ├── 2. 等待 MSG_SUBSCRIBE_TOPIC_REPLY → accepted=true
-  │
-  └── 3. topic_runtime_.rememberSubscription(topic, callback)
-         本地注册用户的回调函数
-
-        │
-        │    ServiceManager 侧
-        │
-        ▼
-handleSubscribeTopic(conn, msg)
-  │
-  ├── topic_manager_.addSubscriber(topic, conn->fd)
-  │     记录订阅关系
-  │
-  ├── 回复 MSG_SUBSCRIBE_TOPIC_REPLY(accepted=true) 给订阅者
-  │
-  └── 如果该 topic 已有 publisher
-        │  取出 publisher 的 ServiceInfo
-        │  立即给这个新订阅者发 MSG_TOPIC_PUBLISHER_NOTIFY
-        ▼  （包含 publisher 的 host/port/host_id）
-```
-
-### Phase 3：订阅者收到通知并建立直连
-
-```
-订阅者进程 — onSMData → onSMMessage
-  │
-  ▼
-case MSG_TOPIC_PUBLISHER_NOTIFY:
-  │  反序列化 → topic_name + pub_info{host, port, host_id}
-  │
-  ▼
-ensureTopicPublisherConnection(topic, pub_info)
-  │
-  ├── 1. conn_mgr_->getOrCreateConnection(pub_name, host, port, host_id, shm_config)
-  │     │  同机 → SHM 直连到发布者进程
-  │     │  跨机 → TCP 直连到发布者进程
-  │     ▼
-  │
-  └── 2. conn_mgr_->sendMessage(pub_name, MSG_SUBSCRIBE_BROADCAST{topic_id, topic_name})
-        │  告诉发布者："我要订阅这个 topic"
-        │  这条消息走数据面直连，不经 ServiceManager
-        ▼
-
-        │
-        │    发布者进程 — 收到 MSG_SUBSCRIBE_BROADCAST
-        │
-        ▼
-onSubscribeBroadcast(client_fd, msg)
-  │
-  └── topic_runtime_.addTcpSubscriber(topic_id, client_fd)
-       或 addShmSubscriberService(topic_id, service_name, client_id)
-       记住"这个 fd / shm 客户端需要接收该 topic 的广播"
-```
-
-### Phase 4：发布者广播数据
-
-```
-发布者进程
-  │
-  ▼
-service.BroadcastSensorUpdate(data)                  // 生成代码
-  │  序列化 data → Buffer
-  ▼
-runtime.broadcast(topic_id, data)
-  │
-  ▼
-broadcastInternal(topic_id, data)
-  │
-  ├── 1. 构造 MSG_BROADCAST 消息
-  │     payload = topic_id + data_length + data
-  │     msg.serialize(send_buf)
-  │
-  ├── 2. TCP 订阅者
-  │     │  遍历 topic_runtime_.tcpSubscribers(topic_id)
-  │     │  对每个 fd：
-  │     │    通过 client_fd_to_service_ 找到对应 service
-  │     │    通过 service 的 client_transports 找到 transport
-  │     │    sendOnFd(transport, broadcast_msg)
-  │     ▼
-  │
-  └── 3. SHM 订阅者
-        │  遍历 topic_runtime_.shmSubscribers(topic_id)
-        │  对每个 service_name/client_id：
-        │    找到对应 LocalServiceEntry
-        │    shm_transport->serverSend(client_id, send_buf.data(), send_buf.size())
-        │    写入该订阅客户端的 per-client response ring buffer
-        ▼
-```
-
-### 订阅者收到广播
-
-```
-EventLoop epoll 触发 fd 可读
-  │
-  ├── TCP 路径
-  │     ConnectionManager → onDirectMessage
-  │       │  type == MSG_BROADCAST
-  │       │  decodeBroadcastPayload → topic_id + data
-  │       ▼
-  │
-  └── SHM 路径
-        ShmTransport client eventfd 可读
-          │  clientRecv() → 反序列化 → Message
-          ▼
-
-topic_runtime_.dispatch(topic_id, data)
-  │  找到 topic_name 对应的用户回调
-  ▼
-callback(data)                                       // 用户回调
-  反序列化 data → 业务结构体 → 处理
-```
-
-**涉及代码位置**：
-
-| 函数 | 文件 |
-|------|------|
-| `publishTopicInternal()` | `omni_runtime.cpp:1111` |
-| `subscribeTopicInternal()` | `omni_runtime.cpp:1255` |
-| `onSMMessage()` → `MSG_TOPIC_PUBLISHER_NOTIFY` | `src/core/omni_runtime.cpp` |
-| `ensureTopicPublisherConnection()` | `src/core/omni_runtime.cpp` |
-| `onSubscribeBroadcast()` | `src/core/omni_runtime.cpp` |
-| `broadcastInternal()` | `src/core/omni_runtime.cpp` |
-| `onDirectMessage()` → `MSG_BROADCAST` | `src/core/omni_runtime.cpp` |
-| `onTopicBroadcastMessage()` | `src/core/omni_runtime.cpp` |
-| SM `handlePublishTopic()` | `service_manager/main.cpp:584` |
-| SM `handleSubscribeTopic()` | `service_manager/main.cpp:644` |
-| SM `sendTopicPublisherNotify()` | `service_manager/main.cpp:685` |
-
----
-
-## 传输层选择机制
-
-### host_id 的来源
-
-```
-platform::getMachineId()                              // platform.cpp:636
-  │
-  ├── 1. 读 /etc/machine-id                           // Linux 系统唯一标识
-  ├── 2. 读 /var/lib/dbus/machine-id                  // 备选
-  └── 3. hostname 的 FNV1a 哈希                       // 兜底
-```
-
-### 同机/跨机判断
-
-```
-服务端注册时：
-  svc_info.host_id = host_id_                         // 塞入 ServiceInfo 发给 SM
-
-客户端查找时：
-  lookupServiceInfo → 从 SM 拿到 ServiceInfo（含 remote host_id）
-
-客户端建连接时：
-  ConnectionManager::getOrCreateConnection(local_host_id, remote_host_id, ...)
-    │
-    ▼
-  TransportFactory::isSameMachine(local_host_id, remote_host_id)
-    return !local_host_id.empty()
-        && !remote_host_id.empty()
-        && local_host_id == remote_host_id            // 字符串相等 = 同机
-    │
-    ├── true  → 尝试 SHM，失败自动 fallback TCP
-    └── false → TCP
-```
-
-### SHM 降级 TCP
-
-```
+```text
 ConnectionManager::getOrCreateConnection()
-  │
-  │  首选 SHM
-  │  new ShmTransport(generateShmName(service_name)) → connect()
-  │
-  ├── connect() == 0 → 使用 SHM
-  └── connect() != 0 → 日志 data_connect_fallback
-                        delete shm
-                        new TcpTransport() → connect(host, port)   // 降级 TCP
+  -> 构造 TransportClientContext
+     - service_name / host / port
+     - local_host_id / remote_host_id
+     - ShmConfig / timeout
+  -> TransportFactory::candidates(context)
+     - snapshot 持有 provider shared_ptr
+     - priority 降序，priority 相同保持注册顺序
+  -> 依次调用 ITransportProvider::createClient(context)
+     - SUCCESS：必须返回已 CONNECTED transport，所有权移入 ServiceConnection
+     - NOT_APPLICABLE / RETRYABLE_FAILURE：尝试下一个 provider
+     - FATAL_FAILURE：立即停止
+  -> 默认同机：SHM provider -> TCP provider
+  -> 默认跨机：TCP provider；SHM provider 返回 NOT_APPLICABLE
 ```
+
+SHM ring 容量来自服务注册时上报的 `ServiceInfo.shm_config`；未配置时使用 `SHM_DEFAULT_REQ_RING_CAPACITY` / `SHM_DEFAULT_RESP_RING_CAPACITY`。
+TCP provider 内部完成非阻塞 connect 的 writable 等待与 `checkConnectComplete()`，因此 `ConnectionManager` 不再依赖具体 TCP 类型。
+该 factory 是内部源码扩展边界，不是公共动态插件 ABI；service hosting 已使用 host provider，ServiceManager 控制面仍固定使用 TCP。
 
 ---
 
-## 关键代码文件索引
+## 5. 同步 RPC 调用链路
 
-| 文件 | 职责 |
-|------|------|
-| `src/core/omni_runtime.h` | OmniRuntime::Impl 定义，`callSerialized` 模板实现 |
-| `src/core/omni_runtime.cpp` | 核心运行时：init、invoke、topic、服务端请求处理 |
-| `src/core/connection_manager.cpp` | 连接管理：创建/复用/删除连接，传输层选择 |
-| `src/core/owner_thread_executor.h` | 跨线程调度：`SyncCallState`、`invokeOnOwner*` |
-| `src/core/service_host_runtime.cpp` | 服务端骨架：accept、消息分派 |
-| `src/transport/transport_factory.cpp` | 传输层工厂：同机/跨机判断 |
-| `src/transport/shm_transport.h/cpp` | SHM 传输实现：ring buffer、eventfd |
-| `src/transport/tcp_transport.h/cpp` | TCP 传输实现 |
-| `src/platform/platform.cpp` | 平台层：`getMachineId()`、`getHostName()` |
-| `service_manager/main.cpp` | ServiceManager：服务注册、查找、topic 关系管理 |
-| `src/core/message.cpp` | Message 序列化/反序列化 |
-| `include/omnibinder/types.h` | `ServiceInfo` 定义（含 host_id） |
-| `include/omnibinder/proxy_base.h` | ServiceProxyBase 基类 |
-| `src/core/service_host_runtime.cpp` | 服务端消息分发，含心跳自动响应 |
+### 5.1 客户端发送
+
+```text
+生成 Proxy 方法
+  -> 序列化参数到 Buffer
+  -> OmniRuntime::Impl::invoke(...)
+  -> callSerialized(...)
+  -> invokeInternal(...)
+     - conn_mgr_->getConnection(service_name)
+     - allocSequence()
+     - populateInvokeMessage(): interface_id + idl_hash + method_id + request_length + request_data
+     - emitDiagEvent(DIAG_EVENT_REQUEST, MSG_INVOKE)
+     - ConnectionManager::sendMessageWithinTimeout()
+     - waitForReply(seq, remaining_timeout, is_alive)
+```
+
+`waitForReply()` 委托给 `RpcRuntime::waitForReply()`：
+
+- `SmControlChannel::beginWait(seq)` 创建等待槽。
+- 循环调用 `pollOnceWithoutFunctors(wait_ms)`，只处理 fd/timer，不执行新的 pending API functor。
+- `onDirectMessage()` 收到匹配 `MSG_INVOKE_REPLY` 后调用 `storePendingReply()`。
+- `SmControlChannel::takeReply(seq)` 取走 reply。
+
+### 5.2 服务端处理 TCP 请求
+
+```text
+TCP host listener/client fd 可读
+  -> TcpTransportHost accept / recv / 拆 Message frame
+  -> OmniRuntime::Impl::onHostedMessage()
+     - 拆 Message frame
+     - MSG_INVOKE         -> OmniRuntime::Impl::onInvokeRequest()
+     - MSG_INVOKE_ONEWAY  -> OmniRuntime::Impl::onInvokeOneWayRequest()
+     - MSG_HEARTBEAT      -> 自动发送 MSG_HEARTBEAT_ACK
+     - MSG_SUBSCRIBE_BROADCAST -> OmniRuntime::Impl::onSubscribeBroadcast()
+     - MSG_BROADCAST      -> TopicRuntime::dispatch()
+```
+
+`onInvokeRequest()` 调用 `dispatchLocalInvoke()`：
+
+1. 解码 invoke payload。
+2. 校验 `interface_id`。
+3. 如果请求带 `idl_hash`，校验客户端/服务端方法 hash。
+4. 调用用户服务的 `Service::onInvoke(method_id, request, response)`。
+5. 成功时构造 `MSG_INVOKE_REPLY(status=0)`；失败时构造错误 reply。
+6. TCP 路径通过 `ITransportHost::send(peer_id, reply)` 发送 reply。
+
+### 5.3 服务端处理 SHM 请求
+
+```text
+SHM host request notify fd 可读
+  -> eventFdConsume()
+  -> ShmTransport::serverRecv(buf, ..., client_id)
+  -> ShmTransportHost 校验并构造完整 Message
+  -> OmniRuntime::Impl::onHostedMessage(service_name, SHM, client_id, msg)
+```
+
+`OmniRuntime::Impl::onHostedMessage()` 对 SHM 单帧消息分派：
+
+- `MSG_INVOKE`：回到 `dispatchLocalInvoke()`，再把 reply 序列化后 `ShmTransport::serverSend(client_id, ...)`。
+- `MSG_INVOKE_ONEWAY`：只执行本地调用，不发 reply。
+- `MSG_SUBSCRIBE_BROADCAST`：记录 SHM topic 订阅者。
+- `MSG_BROADCAST`：本地 dispatch 给订阅回调。
+
+### 5.4 客户端接收 reply
+
+```text
+ConnectionManager fd 回调
+  -> ConnectionManager::onConnectionData()
+  -> message_cb_(service_name, msg)
+  -> OmniRuntime::Impl::onDirectMessage()
+     - MSG_INVOKE_REPLY：storePendingReply(seq, msg)
+     - MSG_BROADCAST：decodeBroadcastPayload() -> TopicRuntime::dispatch()
+     - MSG_HEARTBEAT_ACK：刷新 heartbeat state
+```
+
+对于 SHM 客户端，`ShmTransport::recv()` 从 response ring 读取消息并触发同一条 `onDirectMessage()` 路径。
 
 ---
 
-## 连接管理调用链路
+## 6. One-Way RPC 调用链路
 
-### 主动连接（Proxy::connect）
-
-```
-Proxy::connect()
-    │
-    └── ServiceProxyBase::connect()
-        │
-        ├── runtime_.connectService(service_name)
-        │       │
-        │       ├── lookupServiceInfo()     // 查询 SM 获取 ServiceInfo
-        │       │       ├── 检查 service_cache_
-        │       │       └── 未命中则查询 SM
-        │       │
-        │       └── conn_mgr_->getOrCreateConnection()  // 建立 SHM/TCP 连接
-        │
-        └── runtime_.subscribeServiceDeath()  // 注册死亡通知
+```text
+Proxy oneway 方法
+  -> OmniRuntime::Impl::invokeOneWay()
+  -> invokeOneWayInternal()
+     - conn_mgr_->getConnection(service_name)
+     - populateInvokeMessage(MSG_INVOKE_ONEWAY)
+     - emitDiagEvent(DIAG_EVENT_ONE_WAY, msg)
+     - ConnectionManager::sendMessage()
+     - 不创建 wait slot，不等待 reply
 ```
 
-### 自动重连
+服务端收到 `MSG_INVOKE_ONEWAY` 后仍走 `dispatchLocalInvoke()` 执行业务逻辑，但不构造 `MSG_INVOKE_REPLY`。如果发生 IDL hash mismatch，会记录错误并丢弃该 oneway 消息。
 
-```
-服务死亡 / 心跳超时
-    │
-    ├── service_cache_.erase(service_name)
-    ├── conn_mgr_->removeConnection(service_name)
-    │
-    └── scheduleReconnect(interval_ms)
-        │
-        └── 定时器触发
-            │
-            └── tryReconnectService(service_name)
-                │
-                └── connectServiceInternal()
-                    ├── lookupServiceInfo()   // 查询 SM 获取最新信息
-                    └── getOrCreateConnection()  // 建立新连接
+---
+
+## 7. Topic 发布/订阅链路
+
+### 7.1 发布者注册 Topic
+
+```text
+runtime.publishTopic(topic_name)
+  -> publishTopicInternal(topic_name)
+     - 要求当前 runtime 至少已注册一个本地服务
+     - 使用第一个本地服务的 listen host/port/shm_config 构造 publisher ServiceInfo
+     - 向 SM 发送 MSG_PUBLISH_TOPIC(topic_name, ServiceInfo)
+     - SM handlePublishTopic(): TopicManager::registerPublisher()
+     - SM 回复 MSG_PUBLISH_TOPIC_REPLY
+     - 本地 TopicRuntime::rememberPublishedTopic(topic_name, topic_id, owner_service)
 ```
 
-### 心跳流程
+当前实现不再为普通 topic 单独创建隐藏 publisher listener；它复用本地已注册服务的数据面入口。
 
+### 7.2 订阅者订阅 Topic
+
+```text
+runtime.subscribeTopic(topic_name, callback)
+  -> subscribeTopicInternal(topic_name, callback)
+     - 向 SM 发送 MSG_SUBSCRIBE_TOPIC(topic_name)
+     - SM handleSubscribeTopic(): TopicManager::addSubscriber()
+     - 如果 publisher 已存在，SM 发送 MSG_TOPIC_PUBLISHER_NOTIFY 给订阅者
+     - runtime 收到 MSG_SUBSCRIBE_TOPIC_REPLY 后 TopicRuntime::rememberSubscription()
 ```
-startHeartbeat(interval, timeout)
-    │
-    └── 启动定时器
-        │
-        ├── sendHeartbeatToService()
-        │       └── MSG_HEARTBEAT → 服务端
-        │               │
-        │               └── ServiceHostRuntime 自动响应 MSG_HEARTBEAT_ACK
-        │
-        └── checkHeartbeatTimeout()
-            ├── 更新 last_ack_time
-            └── 超时: 清除缓存 + 移除连接 + 触发重连
+
+`MSG_SUBSCRIBE_TOPIC_REPLY` 中可能附带 publisher idl hash；当前 runtime 读取后不使用该值。
+
+### 7.3 订阅者连接发布者
+
+```text
+SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo)
+  -> OmniRuntime::Impl::onSMMessage()
+  -> ensureTopicPublisherConnection(topic_name, pub_info)
+     - conn_mgr_->getOrCreateConnection("topic_pub_" + topic_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config)
+     - 构造 MSG_SUBSCRIBE_BROADCAST(topic_id, topic_name)
+     - conn_mgr_->sendMessage("topic_pub_" + topic_name, sub_msg)
 ```
+
+发布者收到 `MSG_SUBSCRIBE_BROADCAST` 后：
+
+- TCP 路径：`onSubscribeBroadcast(client_fd, msg, "TCP")` -> `TopicRuntime::addTcpSubscriber(topic_id, client_fd)`。
+- SHM 路径：`onShmRequest()` 中的 subscribe 回调 -> `TopicRuntime::addShmSubscriberService(topic_id, service_name, client_id)`。
+
+### 7.4 发布者广播数据
+
+```text
+生成 Stub 的 BroadcastXxx(data)
+  -> runtime.broadcast(topic_id, payload)
+  -> broadcastInternal(topic_id, payload)
+     - 构造 MSG_BROADCAST(topic_id, data_length, data)
+     - TCP 订阅者：按 fd 找到 ITransport，sendOnFd()
+     - SHM 订阅者：按 service_name/client_id 找到 LocalServiceEntry，ShmTransport::serverSend(client_id, ...)
+```
+
+订阅者收到 `MSG_BROADCAST` 后，TCP 和 SHM 最终都调用 `TopicRuntime::dispatch(topic_id, data)`，再进入用户注册的 `TopicCallback`。
+
+---
+
+## 8. 死亡通知、心跳和自动重连
+
+### 8.1 ServiceManager 侧死亡通知
+
+客户端通过 `MSG_SUBSCRIBE_SERVICE` 注册死亡通知。服务 unregister、连接断开或 ServiceManager 判定服务死亡时，SM 调用 `notifyServiceDeath()` 向订阅者发送 `MSG_DEATH_NOTIFY`。
+
+runtime 在 `onSMMessage()` 中处理 `MSG_DEATH_NOTIFY`：
+
+- 删除 `service_cache_`。
+- 调用 `conn_mgr_->removeConnection(service_name)`。
+- 停止 heartbeat。
+- 触发用户 `DeathCallback`。
+- 如果启用了自动重连，调度 `tryReconnectService()`。
+
+### 8.2 数据面 heartbeat
+
+`startHeartbeat(service_name, interval, timeout)` 启动客户端到服务端的数据面 heartbeat：
+
+```text
+timer
+  -> sendHeartbeatToService()
+     - conn_mgr_->sendMessage(MSG_HEARTBEAT)
+  -> checkHeartbeatTimeout()
+```
+
+TCP 服务端路径由 `ServiceHostRuntime::processServiceClientMessages()` 自动返回 `MSG_HEARTBEAT_ACK`；SHM 服务端路径由 `OmniRuntime::Impl::onShmRequest()` 特判 heartbeat 后用 `ShmTransport::serverSend()` 返回 ACK。客户端在 `onDirectMessage(MSG_HEARTBEAT_ACK)` 中清除 pending 并刷新时间戳。
+
+---
+
+## 9. 诊断 watch 链路
+
+`omni-cli watch --pid <pid> --idl <file.bidl>` 观察的是 IDL 业务接口 I/O，不是 core 控制消息抓包。
+
+控制面：
+
+```text
+watcher runtime
+  -> OmniRuntime::watchPid(pid, callback)
+  -> 向 SM 发送 MSG_DIAG_WATCH_START(pid)
+  -> SM handleDiagWatchStart()
+     - 按 pid_to_fds_ 找到目标 runtime 控制连接
+     - 转发 MSG_DIAG_WATCH_START 给目标 runtime
+     - 记录 watcher_to_pid_ / pid_watchers_
+```
+
+目标 runtime 收到 watch start 后启用 lazy 诊断数据面：
+
+- 诊断 topic 名为 `__diag_pid_<pid>`。
+- 如果目标 runtime 没有本地业务 service，临时注册隐藏 `RuntimeDiagService` 作为数据面入口。
+- 如果已有业务 service，则复用现有 service 数据面入口，只发布诊断 topic。
+- watch stop 或最后一个 watcher 断开时，SM 转发 `MSG_DIAG_WATCH_STOP`，目标 runtime 清理诊断 topic/隐藏 service。
+
+数据面：目标 runtime 在 RPC request/response、oneway、topic broadcast 等业务 I/O 点调用 `emitDiagEvent()`，再通过 `broadcastInternal(__diag_pid_<pid>, payload)` 发送诊断 payload。该数据面复用现有 topic 直连路径：同机自动 SHM，跨机自动 TCP，不经过 ServiceManager。
+
+---
+
+## 10. 关键代码文件索引
+
+| 文件 | 当前职责 |
+|------|----------|
+| `src/core/omni_runtime.cpp` | Runtime 编排：SM 控制面、服务注册、连接管理入口、RPC、topic、诊断、心跳、重连 |
+| `src/core/omni_runtime.h` | `OmniRuntime::Impl` 状态与内部 API；`callSerialized()` 串行化入口 |
+| `src/core/rpc_runtime.cpp` | sequence、默认超时、`waitForReply()` 等 RPC 等待状态 |
+| `src/core/sm_control_channel.cpp` | SM 控制连接收发缓冲与 pending reply slots |
+| `src/core/connection_manager.cpp` | 数据面连接创建/复用/删除，SHM/TCP 选择和发送 |
+| `src/core/service_host_runtime.cpp` | 服务端 TCP/SHM 消息拆包和分派 |
+| `src/core/topic_runtime.cpp` | 本地 topic 回调、publisher、TCP/SHM subscriber 状态 |
+| `src/transport/shm_transport.cpp` | per-client SHM、UDS 握手、request/response ring、eventfd |
+| `src/transport/tcp_transport.cpp` | TCP connect/listen/accept/send/recv |
+| `service_manager/main.cpp` | 服务注册发现、Topic 关系、死亡通知、runtime PID/log/watch 控制面 |
+| `include/omnibinder/message.h` | 消息类型、消息名、ServiceInfo/RuntimeInfo 序列化接口 |
+| `include/omnibinder/types.h` | `ServiceInfo`、`RuntimeInfo`、`ShmConfig` 等公共类型 |
