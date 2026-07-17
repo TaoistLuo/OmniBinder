@@ -42,18 +42,18 @@ void TopicRuntime::notifyError(uint32_t topic_id, ErrorCode error) {
 
 void TopicRuntime::rememberPublishedTopic(const std::string& topic_name, uint32_t topic_id,
                                           const std::string& owner_service) {
-    published_topics[topic_name] = topic_id;
+    published_topics_[topic_name] = topic_id;
     published_topic_owners_[topic_name] = owner_service;
 }
 
 void TopicRuntime::forgetPublishedTopic(const std::string& topic_name) {
-    std::map<std::string, uint32_t>::iterator it = published_topics.find(topic_name);
-    if (it == published_topics.end()) {
+    std::map<std::string, uint32_t>::iterator it = published_topics_.find(topic_name);
+    if (it == published_topics_.end()) {
         return;
     }
     tcp_subscribers_.erase(it->second);
     shm_subscribers_.erase(it->second);
-    published_topics.erase(it);
+    published_topics_.erase(it);
     published_topic_owners_.erase(topic_name);
 }
 
@@ -62,11 +62,11 @@ void TopicRuntime::forgetPublishedTopicsByIds(const std::vector<uint32_t>& topic
         uint32_t topic_id = topic_ids[i];
         tcp_subscribers_.erase(topic_id);
         shm_subscribers_.erase(topic_id);
-        for (std::map<std::string, uint32_t>::iterator it = published_topics.begin();
-             it != published_topics.end();) {
+        for (std::map<std::string, uint32_t>::iterator it = published_topics_.begin();
+             it != published_topics_.end();) {
             if (it->second == topic_id) {
                 published_topic_owners_.erase(it->first);
-                it = published_topics.erase(it);
+                it = published_topics_.erase(it);
             } else {
                 ++it;
             }
@@ -116,14 +116,37 @@ void TopicRuntime::addShmSubscriberService(uint32_t topic_id, const std::string&
     subscribers.push_back(subscriber);
 }
 
-std::vector<int>* TopicRuntime::tcpSubscribers(uint32_t topic_id) {
-    std::map<uint32_t, std::vector<int> >::iterator it = tcp_subscribers_.find(topic_id);
-    return it == tcp_subscribers_.end() ? NULL : &it->second;
+const std::vector<int>& TopicRuntime::tcpSubscribers(uint32_t topic_id) const {
+    static const std::vector<int> empty;
+    std::map<uint32_t, std::vector<int> >::const_iterator it = tcp_subscribers_.find(topic_id);
+    return it == tcp_subscribers_.end() ? empty : it->second;
 }
 
-std::vector<TopicRuntime::ShmSubscriber>* TopicRuntime::shmSubscribers(uint32_t topic_id) {
-    std::map<uint32_t, std::vector<ShmSubscriber> >::iterator it = shm_subscribers_.find(topic_id);
-    return it == shm_subscribers_.end() ? NULL : &it->second;
+const std::vector<TopicRuntime::ShmSubscriber>& TopicRuntime::shmSubscribers(uint32_t topic_id) const {
+    static const std::vector<ShmSubscriber> empty;
+    std::map<uint32_t, std::vector<ShmSubscriber> >::const_iterator it = shm_subscribers_.find(topic_id);
+    return it == shm_subscribers_.end() ? empty : it->second;
+}
+
+void TopicRuntime::removeTcpSubscriber(uint32_t topic_id, int client_fd) {
+    std::map<uint32_t, std::vector<int> >::iterator it = tcp_subscribers_.find(topic_id);
+    if (it == tcp_subscribers_.end()) return;
+    std::vector<int>& fds = it->second;
+    for (std::vector<int>::iterator fd_it = fds.begin(); fd_it != fds.end(); ++fd_it) {
+        if (*fd_it == client_fd) {
+            fds.erase(fd_it);
+            return;
+        }
+    }
+}
+
+bool TopicRuntime::isTopicPublished(const std::string& name) const {
+    return published_topics_.find(name) != published_topics_.end();
+}
+
+uint32_t TopicRuntime::getTopicId(const std::string& name) const {
+    std::map<std::string, uint32_t>::const_iterator it = published_topics_.find(name);
+    return it == published_topics_.end() ? 0 : it->second;
 }
 
 bool TopicRuntime::dispatch(uint32_t topic_id, const Buffer& data) const {

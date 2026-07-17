@@ -277,9 +277,6 @@ bool isWouldBlock(int error_code) {
     return error_code == EAGAIN || error_code == EWOULDBLOCK;
 }
 
-bool isInProgress(int error_code) {
-    return error_code == EINPROGRESS;
-}
 
 bool isConnectionReset(int error_code) {
     return error_code == ECONNRESET || error_code == EPIPE;
@@ -423,85 +420,11 @@ void shmUnlink(const std::string& name) {
     shm_unlink(shm_name.c_str());
 }
 
-// ============================================================
-// 命名信号量
-// ============================================================
-
-SemHandle semCreate(const std::string& name, unsigned int initial_value) {
-    std::string sem_name = "/" + name;
-    sem_t* sem = sem_open(sem_name.c_str(), O_CREAT, 0600, initial_value);
-    if (sem == SEM_FAILED) {
-        OMNI_LOG_ERROR(LOG_TAG, "sem_open create failed for %s: %s",
-                         sem_name.c_str(), strerror(errno));
-        return INVALID_SEM;
-    }
-    return static_cast<SemHandle>(sem);
-}
-
-SemHandle semOpen(const std::string& name) {
-    std::string sem_name = "/" + name;
-    sem_t* sem = sem_open(sem_name.c_str(), 0);
-    if (sem == SEM_FAILED) {
-        OMNI_LOG_ERROR(LOG_TAG, "sem_open failed for %s: %s",
-                         sem_name.c_str(), strerror(errno));
-        return INVALID_SEM;
-    }
-    return static_cast<SemHandle>(sem);
-}
-
-bool semWait(SemHandle sem, uint32_t timeout_ms) {
-    if (!sem) return false;
-    sem_t* s = static_cast<sem_t*>(sem);
-
-    if (timeout_ms == 0) {
-        return sem_trywait(s) == 0;
-    }
-
-    struct timespec start, now, remain;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-    while (true) {
-        if (sem_trywait(s) == 0) return true;
-        if (errno != EAGAIN) return false;
-
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        uint64_t elapsed_ms = static_cast<uint64_t>(now.tv_sec - start.tv_sec) * 1000
-                            + (now.tv_nsec - start.tv_nsec) / 1000000;
-        if (elapsed_ms >= timeout_ms) return false;
-
-        remain.tv_sec = 0;
-        remain.tv_nsec = 1000000L;
-        nanosleep(&remain, NULL);
-    }
-}
-
-bool semPost(SemHandle sem) {
-    if (!sem) return false;
-    return sem_post(static_cast<sem_t*>(sem)) == 0;
-}
-
-void semClose(SemHandle sem) {
-    if (sem) {
-        sem_close(static_cast<sem_t*>(sem));
-    }
-}
-
-void semUnlink(const std::string& name) {
-    std::string sem_name = "/" + name;
-    sem_unlink(sem_name.c_str());
-}
 
 // ============================================================
 // Unix Domain Socket（用于 SHM eventfd 交换）
 // ============================================================
 
-int udsCreate() {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS socket: %s", strerror(errno));
-    }
-    return fd;
-}
 
 int udsBindListen(const std::string& path, int backlog) {
     // 清理残留
@@ -766,25 +689,8 @@ void sleepMs(uint32_t ms) {
     nanosleep(&ts, NULL);
 }
 
-int udsSend(int fd, const void* data, size_t len) {
-    ssize_t n = ::send(fd, data, len, 0);
-    return static_cast<int>(n);
-}
 
-int udsRecv(int fd, void* buf, size_t len, bool wait_all) {
-    int flags = wait_all ? MSG_WAITALL : 0;
-    ssize_t n = ::recv(fd, buf, len, flags);
-    return static_cast<int>(n);
-}
 
-bool udsPollReadable(int fd, uint32_t timeout_ms) {
-    struct pollfd pfd;
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    int ret = ::poll(&pfd, 1, static_cast<int>(timeout_ms));
-    return ret > 0 && (pfd.revents & POLLIN);
-}
 
 bool checkSocketConnected(SocketFd fd, int* out_error) {
     int so_error = 0;
@@ -809,9 +715,6 @@ void getLocalTime(struct tm* out_tm, int* out_ms) {
     if (out_ms) *out_ms = static_cast<int>(tv.tv_usec / 1000);
 }
 
-uint32_t popcount32(uint32_t value) {
-    return static_cast<uint32_t>(__builtin_popcount(value));
-}
 
 void setupSignalHandlers(SignalHandler handler) {
     signal(SIGINT, handler);
@@ -827,36 +730,6 @@ bool isUdsAvailable() {
 
 void memoryBarrier() {
     __sync_synchronize();
-}
-
-bool atomicCompareSwap(volatile uint32_t* ptr, uint32_t expected, uint32_t desired) {
-    return __sync_bool_compare_and_swap(ptr, expected, desired);
-}
-
-uint32_t atomicFetchAdd(volatile uint32_t* ptr, uint32_t value) {
-    return __sync_fetch_and_add(ptr, value);
-}
-
-uint32_t atomicFetchSub(volatile uint32_t* ptr, uint32_t value) {
-    return __sync_fetch_and_sub(ptr, value);
-}
-
-uint32_t atomicFetchAnd(volatile uint32_t* ptr, uint32_t value) {
-    return __sync_fetch_and_and(ptr, value);
-}
-
-bool spinLockTestAndSet(volatile uint32_t* lock) {
-    return __sync_lock_test_and_set(lock, 1) != 0;
-}
-
-void spinLockRelease(volatile uint32_t* lock) {
-    __sync_lock_release(lock);
-}
-
-void spinWaitHint() {
-#if defined(__x86_64__) || defined(__i386__)
-    __asm__ __volatile__("pause");
-#endif
 }
 
 } // namespace platform

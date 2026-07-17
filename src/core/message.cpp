@@ -146,8 +146,6 @@ const char* messageTypeToString(MessageType type) {
     case MessageType::MSG_INVOKE:                  return "INVOKE";
     case MessageType::MSG_INVOKE_REPLY:            return "INVOKE_REPLY";
     case MessageType::MSG_BROADCAST:               return "BROADCAST";
-    case MessageType::MSG_PING:                    return "PING";
-    case MessageType::MSG_PONG:                    return "PONG";
     default:                                       return "UNKNOWN";
     }
 }

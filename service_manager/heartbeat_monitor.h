@@ -79,26 +79,14 @@ public:
     // Returns the list of service names that have timed out.
     std::vector<std::string> checkTimeouts();
 
-    // Check if a specific service has timed out.
-    bool isTimedOut(const std::string& service_name) const;
-
     // Get the number of tracked services.
     size_t trackedCount() const;
-
-    // Set timeout parameters
-    void setTimeout(uint32_t timeout_ms);
-    void setMaxMissed(uint32_t max_missed);
-
-    // Get timeout parameters
-    uint32_t getTimeout() const { return timeout_ms_; }
-    uint32_t getMaxMissed() const { return max_missed_; }
 
 private:
     struct HeartbeatEntry {
         int64_t last_heartbeat_ms;  // Timestamp of last heartbeat
-        uint32_t missed_count;      // Number of consecutive missed heartbeats
 
-        HeartbeatEntry() : last_heartbeat_ms(0), missed_count(0) {}
+        HeartbeatEntry() : last_heartbeat_ms(0) {}
     };
 
     mutable std::mutex mutex_;

@@ -246,9 +246,6 @@ bool isWouldBlock(int error_code) {
     return error_code == WSAEWOULDBLOCK;
 }
 
-bool isInProgress(int error_code) {
-    return error_code == WSAEWOULDBLOCK;
-}
 
 bool isConnectionReset(int error_code) {
     return error_code == WSAECONNRESET || error_code == WSAECONNABORTED;
@@ -475,38 +472,6 @@ void shmUnlink(const std::string& name) {
     }
 }
 
-SemHandle semCreate(const std::string& name, unsigned int initial_value) {
-    std::string sem_name = "Local\\omnibinder_sem_" + name;
-    HANDLE sem = CreateSemaphoreA(NULL, initial_value, 0x7FFFFFFF, sem_name.c_str());
-    return static_cast<SemHandle>(sem);
-}
-
-SemHandle semOpen(const std::string& name) {
-    std::string sem_name = "Local\\omnibinder_sem_" + name;
-    HANDLE sem = OpenSemaphoreA(SEMAPHORE_ALL_ACCESS, FALSE, sem_name.c_str());
-    return static_cast<SemHandle>(sem);
-}
-
-bool semWait(SemHandle sem, uint32_t timeout_ms) {
-    if (!sem) return false;
-    DWORD t = (timeout_ms == 0) ? 0 : timeout_ms;
-    return WaitForSingleObject(static_cast<HANDLE>(sem), t) == WAIT_OBJECT_0;
-}
-
-bool semPost(SemHandle sem) {
-    if (!sem) return false;
-    return ReleaseSemaphore(static_cast<HANDLE>(sem), 1, NULL) != 0;
-}
-
-void semClose(SemHandle sem) {
-    if (sem) {
-        CloseHandle(static_cast<HANDLE>(sem));
-    }
-}
-
-void semUnlink(const std::string& /*name*/) {
-    // Windows 信号量在所有句柄关闭后自动删除
-}
 
 std::string getMachineId() {
     // 读取 Windows MachineGuid
@@ -606,11 +571,6 @@ static uint16_t udsPathToPort(const std::string& path) {
     return static_cast<uint16_t>(50000 + (h % 10000));
 }
 
-int udsCreate() {
-    SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd == INVALID_SOCKET) return -1;
-    return static_cast<int>(fd);
-}
 
 int udsBindListen(const std::string& path, int backlog) {
     uint16_t port = udsPathToPort(path);
@@ -677,27 +637,8 @@ int udsConnect(const std::string& path) {
     return static_cast<int>(fd);
 }
 
-int udsSend(int fd, const void* data, size_t len) {
-    return ::send(static_cast<SocketFd>(fd), static_cast<const char*>(data),
-                  static_cast<int>(len), 0);
-}
 
-int udsRecv(int fd, void* buf, size_t len, bool wait_all) {
-    int flags = wait_all ? MSG_WAITALL : 0;
-    return ::recv(static_cast<SocketFd>(fd), static_cast<char*>(buf),
-                  static_cast<int>(len), flags);
-}
 
-bool udsPollReadable(int fd, uint32_t timeout_ms) {
-    struct timeval tv;
-    tv.tv_sec  = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(static_cast<SocketFd>(fd), &rfds);
-    int ret = ::select(0, &rfds, NULL, NULL, &tv);
-    return ret > 0 && FD_ISSET(static_cast<SocketFd>(fd), &rfds);
-}
 
 // ── fd → pipe name serialization for SendFds / RecvFds ──
 
@@ -836,11 +777,6 @@ bool checkSocketConnected(SocketFd fd, int* out_error) {
     return so_error == 0;
 }
 
-uint32_t popcount32(uint32_t value) {
-    value = value - ((value >> 1) & 0x55555555);
-    value = (value & 0x33333333) + ((value >> 2) & 0x33333333);
-    return (((value + (value >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
-}
 
 void setupSignalHandlers(SignalHandler handler) {
     signal(SIGINT, handler);
@@ -853,35 +789,6 @@ bool isUdsAvailable() {
 
 void memoryBarrier() {
     MemoryBarrier();
-}
-
-bool atomicCompareSwap(volatile uint32_t* ptr, uint32_t expected, uint32_t desired) {
-    return InterlockedCompareExchange(ptr, desired, expected) == expected;
-}
-
-uint32_t atomicFetchAdd(volatile uint32_t* ptr, uint32_t value) {
-    return InterlockedExchangeAdd(ptr, value);
-}
-
-uint32_t atomicFetchSub(volatile uint32_t* ptr, uint32_t value) {
-    return InterlockedExchangeAdd(ptr, -static_cast<LONG>(value));
-}
-
-uint32_t atomicFetchAnd(volatile uint32_t* ptr, uint32_t value) {
-    return static_cast<uint32_t>(InterlockedAnd(
-        reinterpret_cast<volatile LONG*>(ptr), static_cast<LONG>(value)));
-}
-
-bool spinLockTestAndSet(volatile uint32_t* lock) {
-    return InterlockedExchange(lock, 1) != 0;
-}
-
-void spinLockRelease(volatile uint32_t* lock) {
-    InterlockedExchange(reinterpret_cast<volatile LONG*>(lock), 0);
-}
-
-void spinWaitHint() {
-    YieldProcessor();
 }
 
 } // namespace platform

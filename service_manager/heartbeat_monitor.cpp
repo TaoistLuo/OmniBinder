@@ -22,15 +22,12 @@ void HeartbeatMonitor::updateHeartbeat(const std::string& service_name)
 
     auto it = entries_.find(service_name);
     if (it == entries_.end()) {
-        // Not tracked yet, start tracking
         HeartbeatEntry entry;
         entry.last_heartbeat_ms = platform::currentTimeMs();
-        entry.missed_count = 0;
         entries_[service_name] = entry;
         OMNI_LOG_DEBUG(TAG, "Started tracking heartbeat for: %s", service_name.c_str());
     } else {
         it->second.last_heartbeat_ms = platform::currentTimeMs();
-        it->second.missed_count = 0;
         OMNI_LOG_DEBUG(TAG, "Heartbeat received from: %s", service_name.c_str());
     }
 }
@@ -41,7 +38,6 @@ void HeartbeatMonitor::startTracking(const std::string& service_name)
 
     HeartbeatEntry entry;
     entry.last_heartbeat_ms = platform::currentTimeMs();
-    entry.missed_count = 0;
     entries_[service_name] = entry;
 
     OMNI_LOG_DEBUG(TAG, "Started tracking heartbeat for: %s", service_name.c_str());
@@ -69,24 +65,20 @@ std::vector<std::string> HeartbeatMonitor::checkTimeouts()
         HeartbeatEntry& entry = it->second;
         int64_t elapsed = now - entry.last_heartbeat_ms;
 
-        // Only a real heartbeat resets last_heartbeat_ms; missed_count is
-        // derived from elapsed time for deterministic detection at
-        // timeout_ms_ * max_missed_.
         if (elapsed >= static_cast<int64_t>(timeout_ms_)) {
-            entry.missed_count = static_cast<uint32_t>(elapsed / static_cast<int64_t>(timeout_ms_));
+            uint32_t missed = static_cast<uint32_t>(elapsed / static_cast<int64_t>(timeout_ms_));
 
             OMNI_LOG_DEBUG(TAG, "Service %s missed heartbeat (%u/%u)",
-                            it->first.c_str(), entry.missed_count, max_missed_);
+                            it->first.c_str(), missed, max_missed_);
 
-            if (entry.missed_count >= max_missed_) {
+            if (missed >= max_missed_) {
                 timed_out.push_back(it->first);
                 OMNI_LOG_WARN(TAG, "Service %s timed out (missed %u heartbeats)",
-                               it->first.c_str(), entry.missed_count);
+                               it->first.c_str(), missed);
             }
         }
     }
 
-    // Remove timed out entries
     for (size_t i = 0; i < timed_out.size(); ++i) {
         entries_.erase(timed_out[i]);
     }
@@ -94,41 +86,10 @@ std::vector<std::string> HeartbeatMonitor::checkTimeouts()
     return timed_out;
 }
 
-bool HeartbeatMonitor::isTimedOut(const std::string& service_name) const
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    auto it = entries_.find(service_name);
-    if (it == entries_.end()) {
-        // Not tracked, consider it timed out
-        return true;
-    }
-
-    int64_t now = platform::currentTimeMs();
-    int64_t elapsed = now - it->second.last_heartbeat_ms;
-
-    // Calculate total timeout threshold
-    int64_t total_timeout = static_cast<int64_t>(timeout_ms_) * max_missed_;
-
-    return elapsed >= total_timeout;
-}
-
 size_t HeartbeatMonitor::trackedCount() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
     return entries_.size();
-}
-
-void HeartbeatMonitor::setTimeout(uint32_t timeout_ms)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    timeout_ms_ = timeout_ms;
-}
-
-void HeartbeatMonitor::setMaxMissed(uint32_t max_missed)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    max_missed_ = max_missed;
 }
 
 } // namespace omnibinder

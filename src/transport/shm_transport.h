@@ -162,12 +162,6 @@ public:
     // 返回值: >0 = 写入的字节数, 0 = ring 满, <0 = 错误
     int serverSend(uint32_t client_id, const uint8_t* data, size_t length);
 
-    // 服务端：广播数据到所有活跃客户端的响应 ring
-    // data: 广播数据
-    // length: 数据长度
-    // 返回: 成功发送的客户端数
-    int serverBroadcast(const uint8_t* data, size_t length);
-
     // 等待 SHM 就绪（客户端调用，UDS 握手完成后即就绪）
     bool waitReady(uint32_t timeout_ms);
 
@@ -176,18 +170,6 @@ public:
 
     // 获取当前活跃客户端 ID 列表（调试/测试用）
     std::vector<uint32_t> activeClientIds() const;
-
-    // 获取响应区已占用块数（等于活跃客户端数）
-    uint32_t responseSlotsInUse() const;
-
-    // 获取响应区总容量（字节，按当前客户端数计算）
-    size_t totalResponseArenaSize() const;
-
-    // 获取当前活跃响应区容量（字节）
-    size_t activeResponseArenaSize() const;
-
-    // 获取最大客户端数（无上限，返回当前连接数）
-    uint32_t maxClients() const;
 
     // 是否是服务端
     bool isServer() const { return is_server_; }
@@ -220,7 +202,7 @@ private:
     void cleanup();
     void cleanupClientContext(ClientShmContext& ctx);
 
-    // 服务端：直接向已查找到的上下文发送（避免 serverBroadcast 二次 find）
+    // 服务端：直接向已查找到的上下文发送
     int serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
                             const uint8_t* data, size_t length);
 
@@ -250,8 +232,6 @@ private:
     ShmRingHeader* getResponseRing(const ClientShmContext& ctx) const;
     uint8_t*       getResponseData(const ClientShmContext& ctx) const;
 
-    size_t responseBlockSize(const ShmControlBlock* ctrl) const;
-    size_t responseBlockSize() const;
 
     // 根据服务名生成确定性 UDS 路径
     static std::string getShmUdsPath(const std::string& shm_name);

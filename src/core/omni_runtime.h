@@ -44,7 +44,6 @@
 #include "core/sm_control_channel.h"
 #include "core/rpc_runtime.h"
 #include "core/topic_runtime.h"
-#include "core/service_host_runtime.h"
 #include "transport/tcp_transport.h"
 #include "transport/shm_transport.h"
 #include "platform/platform.h"
@@ -332,7 +331,6 @@ private:
     EventLoop*          loop_;
     SmControlChannel    sm_channel_;
     RpcRuntime          rpc_runtime_;
-    ServiceHostRuntime  service_host_runtime_;
     ConnectionManager*  conn_mgr_;
 
     // 本地注册的服务: service_name -> LocalServiceEntry*

@@ -105,14 +105,6 @@ enum class MessageType : uint16_t {
     // 数据通道 - 广播
     MSG_BROADCAST             = 0x0110,
     MSG_SUBSCRIBE_BROADCAST   = 0x0111,  // 订阅者直连发布者后发送，携带 topic_id
-
-    // 数据通道 - 保活
-    MSG_PING                  = 0x0120,
-    MSG_PONG                  = 0x0121,
-
-    // 数据通道 - SHM 升级（同机 TCP 连接升级为 SHM）
-    MSG_SHM_UPGRADE           = 0x0130,  // 客户端 -> 服务端，携带 shm_name
-    MSG_SHM_UPGRADE_ACK       = 0x0131,  // 服务端 -> 客户端，确认升级成功
 };
 
 enum DiagEventDirection : uint8_t {

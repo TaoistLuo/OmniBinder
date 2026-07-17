@@ -10,10 +10,16 @@ set(OMNIBINDER_SOURCES
     core/omni_allocator.cpp
     core/service.cpp
     core/omni_runtime.cpp
+    core/omni_sm.cpp
+    core/omni_service.cpp
+    core/omni_connection.cpp
+    core/omni_rpc.cpp
+    core/omni_topic.cpp
+    core/omni_dispatch.cpp
+    core/omni_diag.cpp
     core/sm_control_channel.cpp
     core/rpc_runtime.cpp
     core/topic_runtime.cpp
-    core/service_host_runtime.cpp
     core/connection_manager.cpp
     core/omnibinder_c.cpp
 

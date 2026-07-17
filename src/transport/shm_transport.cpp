@@ -355,17 +355,6 @@ uint8_t* ShmTransport::getResponseData(const ClientShmContext& ctx) const
     return getResponseDataFromBase(static_cast<uint8_t*>(ctx.shm_addr), ctx.ctrl);
 }
 
-size_t ShmTransport::responseBlockSize(const ShmControlBlock* ctrl) const
-{
-    return sizeof(ShmRingHeader) + ctrl->resp_ring_capacity;
-}
-
-size_t ShmTransport::responseBlockSize() const
-{
-    if (!ctrl_) return 0;
-    return responseBlockSize(ctrl_);
-}
-
 // ============================================================
 // Ring buffer operations
 // ============================================================
@@ -847,24 +836,6 @@ int ShmTransport::serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
     return static_cast<int>(length);
 }
 
-int ShmTransport::serverBroadcast(const uint8_t* data, size_t length)
-{
-    if (!is_server_ || state_ != ConnectionState::CONNECTED) {
-        return -1;
-    }
-
-    int count = 0;
-    for (std::map<uint32_t, ClientShmContext>::iterator it = client_contexts_.begin();
-         it != client_contexts_.end(); ++it) {
-        int ret = serverSendToContext(it->second, it->first, data, length);
-        if (ret > 0) {
-            ++count;
-        }
-    }
-
-    return count;
-}
-
 bool ShmTransport::waitReady(uint32_t timeout_ms)
 {
     if (is_server_) {
@@ -900,37 +871,6 @@ std::vector<uint32_t> ShmTransport::activeClientIds() const
         ids.push_back(it->first);
     }
     return ids;
-}
-
-uint32_t ShmTransport::responseSlotsInUse() const
-{
-    return clientCount();
-}
-
-size_t ShmTransport::totalResponseArenaSize() const
-{
-    if (!is_server_) {
-        return 0;
-    }
-
-    size_t total = 0;
-    for (std::map<uint32_t, ClientShmContext>::const_iterator it = client_contexts_.begin();
-         it != client_contexts_.end(); ++it) {
-        if (it->second.ctrl) {
-            total += responseBlockSize(it->second.ctrl);
-        }
-    }
-    return total;
-}
-
-size_t ShmTransport::activeResponseArenaSize() const
-{
-    return totalResponseArenaSize();
-}
-
-uint32_t ShmTransport::maxClients() const
-{
-    return clientCount();
 }
 
 // ============================================================

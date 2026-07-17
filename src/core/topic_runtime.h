@@ -29,13 +29,17 @@ public:
     void removeTcpSubscriberFd(int client_fd);
     void addShmSubscriberService(uint32_t topic_id, const std::string& service_name,
                                  uint32_t client_id);
-    std::vector<int>* tcpSubscribers(uint32_t topic_id);
-    std::vector<ShmSubscriber>* shmSubscribers(uint32_t topic_id);
+
+    const std::vector<int>& tcpSubscribers(uint32_t topic_id) const;
+    const std::vector<ShmSubscriber>& shmSubscribers(uint32_t topic_id) const;
+    void removeTcpSubscriber(uint32_t topic_id, int client_fd);
+
     bool dispatch(uint32_t topic_id, const Buffer& data) const;
     std::map<std::string, TopicCallback> subscriptions() const;
     std::map<std::string, std::string> publishedTopicOwners() const;
 
-    std::map<std::string, uint32_t> published_topics;
+    bool isTopicPublished(const std::string& name) const;
+    uint32_t getTopicId(const std::string& name) const;
 
 private:
     std::map<std::string, TopicCallback> callbacks_;
@@ -45,6 +49,7 @@ private:
     std::map<uint32_t, std::vector<ShmSubscriber> > shm_subscribers_;
     std::map<std::string, std::string> published_topic_owners_;
     std::map<uint32_t, TopicErrorCallback> error_callbacks_;
+    std::map<std::string, uint32_t> published_topics_;
 };
 
 } // namespace omnibinder
