@@ -24,10 +24,9 @@ set(OMNIBINDER_SOURCES
     core/omnibinder_c.cpp
 
     # transport
-    transport/transport.cpp
     transport/tcp_transport.cpp
     transport/shm_transport.cpp
-    transport/transport_factory.cpp
+    transport/transport_selector.cpp
 
     # platform
     platform/platform_linux.cpp

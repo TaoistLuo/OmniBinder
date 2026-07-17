@@ -5,7 +5,6 @@
 #include "core/omni_runtime.h"
 #include "omnibinder/log.h"
 #include "omnibinder/buffer_view.h"
-#include "transport/transport_factory.h"
 #include <cstring>
 #include <algorithm>
 #include <sstream>

@@ -553,7 +553,7 @@ private:
 
 传输层抽象接口。SHM 通过 eventfd 事件驱动，TCP 通过 socket fd 事件驱动，均注册到 EventLoop。
 
-出站数据面由 `src/transport/transport_factory.h` 中的内部 provider registry 创建 transport。
+出站数据面由 `src/transport/transport_selector.cpp` 中的 `selectTransport()` 自由函数创建 transport。
 该头文件不安装，不属于 `OmniRuntime`、C API 或公共 `ITransport` ABI；它用于仓库内构建或源码集成时，
 按 runtime/manager 注入自定义 provider。Provider 接收完整服务 endpoint context，并在成功时返回已连接 transport。
 当前扩展边界仅覆盖 `ConnectionManager` 客户端数据面，不覆盖服务 hosting 或 ServiceManager 控制面，也不承诺动态插件 ABI。

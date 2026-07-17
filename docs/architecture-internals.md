@@ -28,7 +28,6 @@
 |     |-- SmControlChannel                                           |
 |     |-- RpcRuntime                                                 |
 |     |-- TopicRuntime                                               |
-|     |-- ServiceHostRuntime                                         |
 |     `-- ConnectionManager                                          |
 |                                                                   |
 |   EventLoop / OwnerThreadExecutor                                  |
@@ -54,14 +53,19 @@ OmniBinder 的内部实现分成两个平面：
 
 - `src/core/omni_runtime.h`
 - `src/core/omni_runtime.cpp`
+- `src/core/omni_sm.cpp` — ServiceManager 控制面通信
+- `src/core/omni_service.cpp` — 本地服务注册 / 注销
+- `src/core/omni_connection.cpp` — 连接管理与心跳
+- `src/core/omni_rpc.cpp` — RPC 调用与回复
+- `src/core/omni_topic.cpp` — topic 发布/订阅/广播
+- `src/core/omni_dispatch.cpp` — 服务端请求分派
+- `src/core/omni_diag.cpp` — 诊断 watch 数据面
 - `src/core/sm_control_channel.h`
 - `src/core/sm_control_channel.cpp`
 - `src/core/rpc_runtime.h`
 - `src/core/rpc_runtime.cpp`
 - `src/core/topic_runtime.h`
 - `src/core/topic_runtime.cpp`
-- `src/core/service_host_runtime.h`
-- `src/core/service_host_runtime.cpp`
 - `src/core/connection_manager.h`
 - `src/core/connection_manager.cpp`
 - `src/core/event_loop.h`
@@ -75,12 +79,16 @@ OmniBinder 的内部实现分成两个平面：
 - `src/transport/tcp_transport.cpp`
 - `src/transport/shm_transport.h`
 - `src/transport/shm_transport.cpp`
-- `src/transport/transport_factory.h`
-- `src/transport/transport_factory.cpp`
+- `src/transport/transport_selector.h`
+- `src/transport/transport_selector.cpp`
 
 ### 3.3 控制面进程文件
 
-- `service_manager/main.cpp`
+- `service_manager/main.cpp` — 入口函数
+- `service_manager/service_manager_app.h/.cpp` — 主循环与消息分派
+- `service_manager/sm_registry.cpp` — 服务注册/发现控制面
+- `service_manager/sm_topic.cpp` — topic 发布/订阅控制面
+- `service_manager/sm_diag.cpp` — 诊断 watch 控制面
 - `service_manager/service_registry.h`
 - `service_manager/service_registry.cpp`
 - `service_manager/heartbeat_monitor.h`
@@ -111,7 +119,6 @@ OmniBinder 的内部实现分成两个平面：
 - `RpcRuntime rpc_runtime_`
 - `TopicRuntime topic_runtime_`
 - `ConnectionManager* conn_mgr_`
-- `std::shared_ptr<TransportFactory> transport_factory_`
 - `std::map<std::string, LocalServiceEntry*> local_services_`
 - `std::map<int, std::string> client_fd_to_service_`
 - `std::map<std::string, ServiceInfo> service_cache_`
@@ -122,8 +129,9 @@ OmniBinder 的内部实现分成两个平面：
 每个本地注册服务对应一个 `LocalServiceEntry`，包含：
 
 - `Service* service`
-- `std::unique_ptr<ITransportHost> tcp_host`
-- `std::unique_ptr<ITransportHost> shm_host`
+- `TcpTransportServer* server` — TCP listener
+- `ShmTransport* shm_transport` — SHM 服务端（UDS listener + per-client context）
+- `std::map<int, ITransport*> client_transports` — accept 的 TCP 客户端
 - `uint16_t port`
 - `std::string advertise_host`
 - `std::map<int, Buffer*> client_recv_buffers`
@@ -241,7 +249,7 @@ reply wait 期间只处理：
 - `callbacks_by_id_`
 - `tcp_subscribers_`
 - `shm_subscribers_`
-- `published_topics`
+- `published_topics_`（private，通过 `isTopicPublished()` / `getTopicId()` 访问）
 - `published_topic_owners_`
 
 ### 7.3 当前职责
@@ -268,52 +276,45 @@ reply wait 期间只处理：
 - 不直接发控制面消息
 - 不直接选择传输通道
 
-## 8. Hosted data-plane endpoints
+## 8. 本地服务托管与请求分派 (Hosting)
 
 ### 8.1 作用
 
-`TransportFactory` 的 host provider 创建 transport-neutral hosted endpoints。
+`OmniRuntime::Impl` 直接管理本地服务的数据面入口，不再经过独立的 Host 抽象层。
+每个本地注册的服务对应一个 `LocalServiceEntry`，直接持有 TCP listener 和 SHM 服务端实例。
 
-### 8.2 当前已承接的职责
+### 8.2 LocalServiceEntry 结构
 
-- TCP listener、accepted client、拆包 buffer 与 fd 生命周期
-- SHM UDS handshake、per-client context 与通知 fd 生命周期
-- 完整 Message 与 peer id 回调
-- 在具体 transport 销毁前移除 EventLoop 注册
+```cpp
+struct LocalServiceEntry {
+    Service*            service;              // 业务服务指针
+    TcpTransportServer* server;               // TCP listener
+    ShmTransport*       shm_transport;        // SHM 服务端（UDS listener + per-client context）
+    uint16_t            port;                 // 监听端口
+    std::map<int, ITransport*>  client_transports;   // accept 的 TCP 客户端
+    std::map<int, Buffer*>      client_recv_buffers; // 客户端拆包缓冲
+    bool                diag_enabled;
+    uint32_t            diag_topic_id;
+};
+```
 
-### 8.3 已下沉的方法
+### 8.3 已内联的方法
 
-- `ITransportHost::start(...)`
-- `ITransportHost::send(...)`
-- `ITransportHost::stop()`
-- `OmniRuntime::Impl::onHostedMessage(...)`
+以下原属于 `ServiceHostRuntime` 的功能，现已作为 `OmniRuntime::Impl` 的私有方法实现：
 
-### 8.4 当前未下沉的细节
+- `onServiceAccept()` — TCP accept 回调
+- `onServiceClientData()` — TCP 客户端数据回调（拆包 + 分派）
+- `onShmRequest()` — SHM 请求回调（拆帧 + 分派）
+- `onInvokeRequest()` — 处理 `MSG_INVOKE`
+- `onInvokeOneWayRequest()` — 处理 `MSG_INVOKE_ONEWAY`
+- `dispatchLocalInvoke()` — interface/IDL hash 校验、调用 `Service::onInvoke()`、构造 reply
 
-为了保持当前架构清晰和稳定，以下内容仍保留在 `OmniRuntime` 中：
+### 8.4 本地服务调用状态模型
 
-- invoke / oneway 的具体业务执行
-- invoke / oneway reply 的具体构造
-- topic 与 diagnostic 状态更新
+本地服务调用路径使用显式返回值模型：
 
-原因不是功能做不到，而是：
-
-- `Service::onInvoke()` 是 protected
-- 继续强行下沉会引入额外 adapter / bridge 层
-- 会使边界虽然更“纯”，但显著增加复杂度和侵入性
-
-当前实现选择的是**更清晰、可读、稳定的切分边界**。
-
-### 8.5 本地服务调用状态模型
-
-本地服务调用路径已经切换到显式返回值模型：
-
-- `Service::onInvoke()` 返回 `int`
-- `0` 为成功
-- 非 `0` 为业务 / 反序列化 / 序列化错误
+- `Service::onInvoke()` 返回 `int`，`0` 为成功，非 `0` 为错误
 - runtime 根据返回值构造 `MSG_INVOKE_REPLY`
-
-旧的 `invoke_error_code_` 旁路状态已移除。
 
 ## 9. ConnectionManager
 
@@ -324,8 +325,7 @@ reply wait 期间只处理：
 ### 9.2 当前职责
 
 - 服务连接池
-- 持有内部 `TransportFactory` provider registry
-- 按 context-aware priority 执行同机 / 跨机 transport 选择
+- 调用 `selectTransport()` 自由函数执行同机 / 跨机 transport 选择
 - SHM -> TCP fallback
 - 直连消息接收
 - 直连断开通知
@@ -333,21 +333,16 @@ reply wait 期间只处理：
 ### 9.3 选择逻辑
 
 1. 拿到目标服务 `ServiceInfo`
-2. 构造 `TransportClientContext`，包含 service name、TCP endpoint、双方 `host_id`、`ShmConfig` 和连接 timeout
-3. 从 `TransportFactory` 获取持有 provider `shared_ptr` 的有序 snapshot；registry mutex 在调用 provider 前已释放
-4. 同机默认顺序为 SHM、TCP；跨机默认顺序为 TCP、SHM（SHM 返回 `NOT_APPLICABLE`）
-5. provider 必须在 `SUCCESS` 时返回已处于 `CONNECTED` 状态且由结果独占的 transport
-6. `NOT_APPLICABLE` / `RETRYABLE_FAILURE` 继续候选，`FATAL_FAILURE` 停止
-7. 成功 transport 移入 `ServiceConnection` 的 `unique_ptr`，由连接生命周期负责关闭和释放
+2. 调用 `selectTransport(service_name, host, port, local_host_id, remote_host_id, shm_config)`
+3. 函数内部判断：同机先尝试 SHM，失败或跨机回退到 TCP
+4. 成功返回 `ITransport*`（`CONNECTED` 状态），移入 `ServiceConnection` 由连接生命周期管理
+5. 失败返回 `NULL`，上层返回 `ERR_CONNECT_FAILED`
 
-Registry 支持注入自定义 provider、拒绝空/重复 ID，并可 freeze；`createDefaultTransportFactory()` 返回已注册
-内置 SHM/TCP 但仍可扩展的 factory，生产 `ConnectionManager` 只 freeze 自己私有创建的默认实例。
-这是 `src/transport` 下的内部源码扩展点，不是动态插件 ABI。当前迁移范围仅为 `ConnectionManager` 出站数据面；
-服务 data-plane hosting 使用同一个 `TransportFactory` 的独立 host-provider registry：TCP
-provider 持有 listener/accepted clients，SHM provider 持有服务端握手、client-id 和通知 fd。
-host 在销毁具体 transport 前先移除全部 `EventLoop` 注册。ServiceManager 控制面仍固定使用
-TCP。release-1 曾意外导出的 factory 方法只作为 SONAME 1 兼容 shim 保留，详见
-[`transport-providers.md`](transport-providers.md)。
+`selectTransport()` 位于 `src/transport/transport_selector.cpp`，是源码级扩展点。
+如需添加新传输类型，在此函数中扩展。这不是动态插件 ABI。
+`ConnectionManager` 出站连接使用 `selectTransport()`；本地服务 hosting 在 `OmniRuntime::Impl` 中
+直接创建 `TcpTransportServer` 和 `ShmTransport`（不经过 `selectTransport()`）。
+ServiceManager 控制面仍固定使用 TCP。
 
 ## 10. ShmTransport
 
@@ -449,7 +444,7 @@ ClientShmContext:
 
 负责：
 
-- 心跳超时检测
+- 心跳超时检测（`missed_count` 已改为局部变量，不再持久化）
 - 定期检查服务是否死亡
 
 ### 11.3 DeathNotifier
@@ -529,7 +524,7 @@ Caller
   -> 发送 MSG_INVOKE
 
 Service Side
-  -> TcpTransportHost 拆 Message frame
+  -> TcpTransportServer 拆 Message frame
   -> OmniRuntime::onHostedMessage()
   -> OmniRuntime::onInvokeRequest()
   -> Service::onInvoke()
@@ -556,7 +551,7 @@ Caller
 
 Service Side
   -> EventLoop 被 master_eventfd 唤醒
-  -> ShmTransportHost 调用 ShmTransport::serverRecv() drain request ring
+  -> ShmTransport::serverRecv() drain request ring
   -> OmniRuntime::onHostedMessage()
   -> OmniRuntime 执行 invoke 细节与 reply 构造
   -> ShmTransport::serverSend(client_id) 写入对应 client 的 response ring
@@ -815,7 +810,7 @@ uint32_t delay_ms = interval_ms * (1u << (current_retry < 5 ? current_retry : 5)
 
 #### 服务端自动响应
 
-`ServiceHostRuntime` 自动响应 `MSG_HEARTBEAT`，无需业务代码干预：
+`OmniRuntime::Impl` 的 TCP/SHM 请求分派方法自动响应 `MSG_HEARTBEAT`，无需业务代码干预：
 
 ```cpp
 if (msg.getType() == MessageType::MSG_HEARTBEAT) {
