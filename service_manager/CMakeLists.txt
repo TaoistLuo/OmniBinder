@@ -2,6 +2,10 @@
 
 add_executable(service_manager
     main.cpp
+    service_manager_app.cpp
+    sm_registry.cpp
+    sm_topic.cpp
+    sm_diag.cpp
     service_registry.cpp
     heartbeat_monitor.cpp
     death_notifier.cpp
