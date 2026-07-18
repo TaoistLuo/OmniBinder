@@ -178,10 +178,10 @@ public:
     int reqEventFd() const { return req_eventfd_; }
 
     // 服务端: 获取 UDS 监听 fd（注册到 EventLoop 接受客户端 fd 交换）
-    int udsListenFd() const { return uds_listen_fd_; }
+    int handshakeListenFd() const { return handshake_listen_fd_; }
 
     // 服务端: 处理 UDS 客户端连接（接收 SHM 名称，发送 resp + master eventfd）
-    void onUdsClientConnect();
+    void onHandshakeClientConnect();
 
     // 是否启用了 eventfd 通知
     bool eventfdEnabled() const { return eventfd_enabled_; }
@@ -234,7 +234,7 @@ private:
 
 
     // 根据服务名生成确定性 UDS 路径
-    static std::string getShmUdsPath(const std::string& shm_name);
+    static std::string getHandshakePath(const std::string& shm_name);
 
     std::string     shm_name_;
     bool            is_server_;
@@ -257,8 +257,8 @@ private:
     int peer_notify_fd_; // 客户端：服务端主控 eventfd 副本（用于 send() 时 notify 服务端 epoll）
 
     // UDS
-    int uds_listen_fd_;
-    std::string uds_path_;
+    int handshake_listen_fd_;
+    std::string handshake_path_;
 
     // eventfd 是否启用
     bool eventfd_enabled_;

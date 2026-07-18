@@ -17,45 +17,19 @@
 
 #include <string>
 #include <stdint.h>
-
-#ifdef OMNIBINDER_LINUX
-    #include <sys/types.h>
-    #include <sys/socket.h>
-    #include <sys/epoll.h>
-    #include <sys/eventfd.h>
-    #include <poll.h>
-    #include <netinet/in.h>
-    #include <netinet/tcp.h>
-    #include <arpa/inet.h>
-    #include <unistd.h>
-    #include <fcntl.h>
-    #include <errno.h>
-    #include <signal.h>
-    #include <sys/mman.h>
-    #include <sys/stat.h>
-
-    typedef int SocketFd;
-    const SocketFd INVALID_SOCKET_FD = -1;
-#elif defined(OMNIBINDER_WINDOWS)
-    #ifndef WIN32_LEAN_AND_MEAN
-        #define WIN32_LEAN_AND_MEAN
-    #endif
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    #include <windows.h>
-    #ifdef ERROR
-        #undef ERROR
-    #endif
-    #ifdef IGNORE
-        #undef IGNORE
-    #endif
-
-    typedef SOCKET SocketFd;
-    const SocketFd INVALID_SOCKET_FD = INVALID_SOCKET;
-#endif
+#include <ctime>
 
 namespace omnibinder {
 namespace platform {
+
+// 不透明类型：头文件零平台 #ifdef，实现细节在 platform_linux.cpp / platform_win.cpp
+typedef intptr_t  SocketFd;
+const  SocketFd   INVALID_SOCKET_FD = (SocketFd)(-1);
+
+// Windows SOCKET 是 UINT_PTR，强转为 intptr_t 安全：
+//   Linux: int → intptr_t 零开销
+//   Windows: SOCKET → intptr_t 零开销，INVALID_SOCKET(~0) == (intptr_t)(-1)
+// 函数实现中如有需要可 static_cast<SOCKET> 回 Windows 类型
 
 // ============================================================
 // 网络 / Socket — 生产代码使用
@@ -105,20 +79,22 @@ void  shmDetach(void* addr, size_t size);
 void  shmUnlink(const std::string& name);
 
 // ============================================================
-// Unix Domain Socket — 生产代码使用
+// SHM 握手通道 — 跨进程交换 eventfd
+// Linux: 通过 Unix Domain Socket + SCM_RIGHTS 传递 fd
+// Windows: 通过 TCP loopback + Named Pipe 名称序列化模拟
 // ============================================================
 
-int  udsBindListen(const std::string& path, int backlog = 8);
-int  udsAccept(int listen_fd);
-int  udsConnect(const std::string& path);
-bool udsSendFds(int uds_fd, const int* fds, int fd_count,
-                const void* data, size_t data_len);
-bool udsRecvFds(int uds_fd, int* fds, int fd_count,
-                void* buf, size_t buf_size, size_t* out_data_len);
-bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
-                           int* out_new_fd);
-void udsClose(int fd);
-void udsUnlink(const std::string& path);
+int  shmHandshakeListen(const std::string& path, int backlog = 8);
+int  shmHandshakeAccept(int listen_fd);
+int  shmHandshakeConnect(const std::string& path);
+bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
+                         const void* data, size_t data_len);
+bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
+                         void* buf, size_t buf_size, size_t* out_data_len);
+bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventfd,
+                               int* out_new_fd);
+void shmHandshakeClose(int fd);
+void shmHandshakeCleanup(const std::string& path);
 
 // ============================================================
 // 时间 / 系统 — 生产代码使用
@@ -150,7 +126,7 @@ void memoryBarrier();
 // 平台能力查询
 // ============================================================
 
-bool isUdsAvailable();
+bool isShmHandshakeAvailable();
 
 // ============================================================
 // Test helpers — 仅测试代码引用

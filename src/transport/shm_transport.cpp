@@ -115,7 +115,7 @@ ShmTransport::ShmTransport(const std::string& shm_name, bool is_server,
     , req_eventfd_(-1)
     , event_fd_(-1)
     , peer_notify_fd_(-1)
-    , uds_listen_fd_(-1)
+    , handshake_listen_fd_(-1)
     , eventfd_enabled_(false)
     , next_client_id_(1)
 {
@@ -139,9 +139,9 @@ ShmTransport::~ShmTransport()
 bool ShmTransport::initServer()
 {
     // Create UDS listen socket for client handshake
-    uds_path_ = getShmUdsPath(shm_name_);
-    uds_listen_fd_ = platform::udsBindListen(uds_path_);
-    if (uds_listen_fd_ < 0) {
+    handshake_path_ = getHandshakePath(shm_name_);
+    handshake_listen_fd_ = platform::shmHandshakeListen(handshake_path_);
+    if (handshake_listen_fd_ < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS listen for '%s'", shm_name_.c_str());
         return false;
     }
@@ -150,17 +150,17 @@ bool ShmTransport::initServer()
     req_eventfd_ = platform::createEventFd();
     if (req_eventfd_ < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create master req_eventfd for '%s'", shm_name_.c_str());
-        platform::udsClose(uds_listen_fd_);
-        uds_listen_fd_ = -1;
-        platform::udsUnlink(uds_path_);
-        uds_path_.clear();
+        platform::shmHandshakeClose(handshake_listen_fd_);
+        handshake_listen_fd_ = -1;
+        platform::shmHandshakeCleanup(handshake_path_);
+        handshake_path_.clear();
         return false;
     }
 
     eventfd_enabled_ = true;
 
-    OMNI_LOG_INFO(LOG_TAG, "Server listening on UDS '%s' (uds_fd=%d, req_eventfd=%d)",
-                    uds_path_.c_str(), uds_listen_fd_, req_eventfd_);
+    OMNI_LOG_INFO(LOG_TAG, "Server listening on UDS '%s' (fd=%d, req_eventfd=%d)",
+                    handshake_path_.c_str(), handshake_listen_fd_, req_eventfd_);
     return true;
 }
 
@@ -169,7 +169,7 @@ bool ShmTransport::initServer()
 // ============================================================
 bool ShmTransport::initClient()
 {
-    // Save the server identifier (used for UDS path)
+    // Save the server identifier (used for handshake path)
     std::string server_name = shm_name_;
 
     // Generate unique SHM name for this client (atomic counter prevents
@@ -235,9 +235,9 @@ bool ShmTransport::initClient()
     ctrl_->ready_flag = 1;
 
     // Connect to server via UDS
-    std::string uds_path = getShmUdsPath(server_name);
-    int uds_fd = platform::udsConnect(uds_path);
-    if (uds_fd < 0) {
+    std::string path = getHandshakePath(server_name);
+    int fd = platform::shmHandshakeConnect(path);
+    if (fd < 0) {
         OMNI_LOG_WARN(LOG_TAG, "UDS connect failed for '%s', falling back from SHM",
                         server_name.c_str());
         cleanup();
@@ -247,11 +247,11 @@ bool ShmTransport::initClient()
     // Step 1: Send SHM name to server (no fds — server-side master eventfd
     //         will be sent to us in Step 2 for client→server notification)
     {
-        if (!platform::udsSendFds(uds_fd, NULL, 0,
+        if (!platform::shmHandshakeSendFds(fd, NULL, 0,
                                    shm_name_.c_str(), shm_name_.size())) {
             OMNI_LOG_WARN(LOG_TAG, "UDS send name failed for client '%s', falling back",
                             shm_name_.c_str());
-            platform::udsClose(uds_fd);
+            platform::shmHandshakeClose(fd);
             cleanup();
             return false;
         }
@@ -262,10 +262,10 @@ bool ShmTransport::initClient()
     //         master_eventfd → client notifies this when writing request → wakes server epoll
     {
         int recv_fds[2] = {-1, -1};
-        if (!platform::udsRecvFds(uds_fd, recv_fds, 2, NULL, 0, NULL)) {
+        if (!platform::shmHandshakeRecvFds(fd, recv_fds, 2, NULL, 0, NULL)) {
             OMNI_LOG_WARN(LOG_TAG, "UDS recv fds failed for client '%s', falling back",
                             shm_name_.c_str());
-            platform::udsClose(uds_fd);
+            platform::shmHandshakeClose(fd);
             cleanup();
             return false;
         }
@@ -273,7 +273,7 @@ bool ShmTransport::initClient()
         peer_notify_fd_ = recv_fds[1];
     }
 
-    platform::udsClose(uds_fd);
+    platform::shmHandshakeClose(fd);
 
     eventfd_enabled_ = (event_fd_ >= 0 && peer_notify_fd_ >= 0);
 
@@ -462,13 +462,13 @@ void ShmTransport::cleanup()
         }
 
         // Close UDS listen socket
-        if (uds_listen_fd_ >= 0) {
-            platform::udsClose(uds_listen_fd_);
-            uds_listen_fd_ = -1;
+        if (handshake_listen_fd_ >= 0) {
+            platform::shmHandshakeClose(handshake_listen_fd_);
+            handshake_listen_fd_ = -1;
         }
-        if (!uds_path_.empty()) {
-            platform::udsUnlink(uds_path_);
-            uds_path_.clear();
+        if (!handshake_path_.empty()) {
+            platform::shmHandshakeCleanup(handshake_path_);
+            handshake_path_.clear();
         }
     } else {
         // Client: close eventfds
@@ -569,7 +569,7 @@ int ShmTransport::send(const uint8_t* data, size_t length)
     ringWrite(req_ring, req_data, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
     ringWrite(req_ring, req_data, data, static_cast<uint32_t>(length));
 
-    // Notify server via master eventfd (received during UDS handshake)
+    // Notify server via master eventfd (received during handshake)
     if (was_empty && eventfd_enabled_ && peer_notify_fd_ >= 0) {
         platform::eventFdNotify(peer_notify_fd_);
     }
@@ -877,20 +877,20 @@ std::vector<uint32_t> ShmTransport::activeClientIds() const
 // UDS eventfd + SHM name exchange (server side)
 // ============================================================
 
-void ShmTransport::onUdsClientConnect()
+void ShmTransport::onHandshakeClientConnect()
 {
-    int client_fd = platform::udsAccept(uds_listen_fd_);
+    int client_fd = platform::shmHandshakeAccept(handshake_listen_fd_);
     if (client_fd < 0) {
         return;
     }
 
     // Step 1: Receive SHM name from the client (no fds expected;
-    //         udsRecvFds returns false when no SCM_RIGHTS, but data is still received)
+    //         shmHandshakeRecvFds returns false when no SCM_RIGHTS, but data is still received)
     int client_fds[1] = {-1};
     char name_buf[256] = {0};
     size_t data_len = 0;
 
-    bool has_fd = platform::udsRecvFds(client_fd, client_fds, 1,
+    bool has_fd = platform::shmHandshakeRecvFds(client_fd, client_fds, 1,
                                         name_buf, sizeof(name_buf) - 1, &data_len);
 
     std::string client_shm_name(name_buf, data_len);
@@ -901,8 +901,8 @@ void ShmTransport::onUdsClientConnect()
     }
 
     if (client_shm_name.empty()) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: empty SHM name from client");
-        platform::udsClose(client_fd);
+        OMNI_LOG_WARN(LOG_TAG, "handshake: empty SHM name from client");
+        platform::shmHandshakeClose(client_fd);
         return;
     }
 
@@ -911,55 +911,55 @@ void ShmTransport::onUdsClientConnect()
                      + SHM_DEFAULT_REQ_RING_CAPACITY + SHM_DEFAULT_RESP_RING_CAPACITY;
     void* addr = platform::shmCreate(client_shm_name, try_size, false);
     if (addr == NULL) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: failed to open client SHM '%s'",
+        OMNI_LOG_WARN(LOG_TAG, "handshake: failed to open client SHM '%s'",
                         client_shm_name.c_str());
-        platform::udsClose(client_fd);
+        platform::shmHandshakeClose(client_fd);
         return;
     }
 
     ShmControlBlock* ctrl = reinterpret_cast<ShmControlBlock*>(addr);
 
     if (ctrl->magic != SHM_MAGIC) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: invalid SHM magic 0x%08X for '%s'",
+        OMNI_LOG_WARN(LOG_TAG, "handshake: invalid SHM magic 0x%08X for '%s'",
                         ctrl->magic, client_shm_name.c_str());
         platform::shmDetach(addr, try_size);
-        platform::udsClose(client_fd);
+        platform::shmHandshakeClose(client_fd);
         return;
     }
 
     if (ctrl->version != 1) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: unsupported SHM version %u for '%s'",
+        OMNI_LOG_WARN(LOG_TAG, "handshake: unsupported SHM version %u for '%s'",
                         ctrl->version, client_shm_name.c_str());
         platform::shmDetach(addr, try_size);
-        platform::udsClose(client_fd);
+        platform::shmHandshakeClose(client_fd);
         return;
     }
 
     // Calculate exact size and re-map if needed
     size_t exact_size = calculateShmSize(ctrl->req_ring_capacity, ctrl->resp_ring_capacity, 1);
     if (exact_size == 0) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: invalid SHM capacities req=%u resp=%u for '%s'",
+        OMNI_LOG_WARN(LOG_TAG, "handshake: invalid SHM capacities req=%u resp=%u for '%s'",
                       ctrl->req_ring_capacity, ctrl->resp_ring_capacity,
                       client_shm_name.c_str());
         platform::shmDetach(addr, try_size);
-        platform::udsClose(client_fd);
+        platform::shmHandshakeClose(client_fd);
         return;
     }
     if (exact_size > try_size) {
         platform::shmDetach(addr, try_size);
         addr = platform::shmCreate(client_shm_name, exact_size, false);
         if (addr == NULL) {
-            OMNI_LOG_WARN(LOG_TAG, "UDS: failed to re-open client SHM '%s' with exact size",
+            OMNI_LOG_WARN(LOG_TAG, "handshake: failed to re-open client SHM '%s' with exact size",
                             client_shm_name.c_str());
-            platform::udsClose(client_fd);
+            platform::shmHandshakeClose(client_fd);
             return;
         }
         ctrl = reinterpret_cast<ShmControlBlock*>(addr);
         if (ctrl->magic != SHM_MAGIC || ctrl->version != 1) {
-            OMNI_LOG_WARN(LOG_TAG, "UDS: SHM control block mismatch after remap for '%s'",
+            OMNI_LOG_WARN(LOG_TAG, "handshake: SHM control block mismatch after remap for '%s'",
                             client_shm_name.c_str());
             platform::shmDetach(addr, exact_size);
-            platform::udsClose(client_fd);
+            platform::shmHandshakeClose(client_fd);
             return;
         }
     }
@@ -978,10 +978,10 @@ void ShmTransport::onUdsClientConnect()
             || req_ring->write_pos.load(std::memory_order_relaxed) >= req_ring->capacity
             || resp_ring->read_pos.load(std::memory_order_relaxed) >= resp_ring->capacity
             || resp_ring->write_pos.load(std::memory_order_relaxed) >= resp_ring->capacity) {
-            OMNI_LOG_WARN(LOG_TAG, "UDS: SHM ring header mismatch for '%s'",
+            OMNI_LOG_WARN(LOG_TAG, "handshake: SHM ring header mismatch for '%s'",
                             client_shm_name.c_str());
             platform::shmDetach(addr, exact_size);
-            platform::udsClose(client_fd);
+            platform::shmHandshakeClose(client_fd);
             return;
         }
     }
@@ -989,10 +989,10 @@ void ShmTransport::onUdsClientConnect()
     // Step 2: Create resp_eventfd for this client
     int resp_efd = platform::createEventFd();
     if (resp_efd < 0) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS: failed to create resp_eventfd for client '%s'",
+        OMNI_LOG_WARN(LOG_TAG, "handshake: failed to create resp_eventfd for client '%s'",
                         client_shm_name.c_str());
         platform::shmDetach(addr, exact_size);
-        platform::udsClose(client_fd);
+        platform::shmHandshakeClose(client_fd);
         return;
     }
 
@@ -1002,13 +1002,13 @@ void ShmTransport::onUdsClientConnect()
     //         Windows: platform creates per-client pipe and returns it via out_new_fd
     {
         int new_server_fd = -1;
-        if (!platform::udsSendServerResponse(client_fd, resp_efd, req_eventfd_,
+        if (!platform::shmHandshakeSendResponse(client_fd, resp_efd, req_eventfd_,
                                               &new_server_fd)) {
-            OMNI_LOG_WARN(LOG_TAG, "UDS: failed to send eventfds to client '%s'",
+            OMNI_LOG_WARN(LOG_TAG, "handshake: failed to send eventfds to client '%s'",
                             client_shm_name.c_str());
             platform::shmDetach(addr, exact_size);
             platform::closeEventFd(resp_efd);
-            platform::udsClose(client_fd);
+            platform::shmHandshakeClose(client_fd);
             return;
         }
         if (new_server_fd >= 0 && on_new_client_fd_cb_) {
@@ -1016,7 +1016,7 @@ void ShmTransport::onUdsClientConnect()
         }
     }
 
-    platform::udsClose(client_fd);
+    platform::shmHandshakeClose(client_fd);
 
     // Assign client ID and store context
     uint32_t assigned_id = next_client_id_++;
@@ -1037,15 +1037,15 @@ void ShmTransport::onUdsClientConnect()
         platform::eventFdNotify(req_eventfd_);
     }
 
-    OMNI_LOG_INFO(LOG_TAG, "UDS: client[%u] connected, shm='%s', resp_efd=%d",
+    OMNI_LOG_INFO(LOG_TAG, "handshake: client[%u] connected, shm='%s', resp_efd=%d",
                     assigned_id, client_shm_name.c_str(), resp_efd);
 }
 
 // ============================================================
-// getShmUdsPath
+// getHandshakePath
 // ============================================================
 
-std::string ShmTransport::getShmUdsPath(const std::string& shm_name)
+std::string ShmTransport::getHandshakePath(const std::string& shm_name)
 {
     // Use a hash-based path to stay safely within the Linux sun_path
     // limit (typically 108 bytes).  The full shm_name may be too long.

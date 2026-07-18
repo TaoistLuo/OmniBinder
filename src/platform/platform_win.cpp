@@ -2,6 +2,19 @@
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#ifdef ERROR
+    #undef ERROR
+#endif
+#ifdef IGNORE
+    #undef IGNORE
+#endif
+
 #include <cstring>
 #include <cstdio>
 #include <climits>
@@ -295,7 +308,7 @@ void iocpUnregisterPipeFd(int fd);
 int  iocpGetWakeupFd();
 bool iocpPostWakeup();
 
-// Eventfd entry with pipe name for udsSendFds serialization
+// Eventfd entry with pipe name for shmHandshakeSendFds serialization
 struct EventFdEntryV2 {
     HANDLE      pipe;
     bool        is_server;
@@ -345,7 +358,7 @@ int createEventFd() {
         return iocpGetWakeupFd();
     }
     // Subsequent calls are from SHM transport for cross-process notification.
-    // Each gets a uniquely-named pipe whose name is serialized by udsSendFds.
+    // Each gets a uniquely-named pipe whose name is serialized by shmHandshakeSendFds.
     int id = g_efd_next_2.fetch_add(1);
     std::string name = "auto_" + std::to_string(GetCurrentProcessId())
                        + "_" + std::to_string(id);
@@ -555,7 +568,7 @@ void getLocalTime(struct tm* out_tm, int* out_ms) {
 }
 
 // ============================================================
-// Unix Domain Socket — emulated via TCP loopback on Windows
+// handshake channel — emulated via TCP loopback on Windows
 //
 // Linux:  AF_UNIX + SCM_RIGHTS for fd transfer
 // Windows: TCP on 127.0.0.1.  fd values are sent as pipe NAME
@@ -572,7 +585,7 @@ static uint16_t udsPathToPort(const std::string& path) {
 }
 
 
-int udsBindListen(const std::string& path, int backlog) {
+int shmHandshakeListen(const std::string& path, int backlog) {
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return -1;
@@ -587,22 +600,22 @@ int udsBindListen(const std::string& path, int backlog) {
     addr.sin_port = htons(port);
 
     if (::bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "udsBindListen bind failed port=%u: %d", port, WSAGetLastError());
+        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeListen bind failed port=%u: %d", port, WSAGetLastError());
         closesocket(fd);
         return -1;
     }
     if (::listen(fd, backlog < 0 ? 8 : backlog) != 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "udsBindListen listen failed port=%u: %d", port, WSAGetLastError());
+        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeListen listen failed port=%u: %d", port, WSAGetLastError());
         closesocket(fd);
         return -1;
     }
 
-    OMNI_LOG_DEBUG(LOG_TAG, "udsBindListen: fd=%d port=%u path=%s",
+    OMNI_LOG_DEBUG(LOG_TAG, "shmHandshakeListen: fd=%d port=%u path=%s",
                    static_cast<int>(fd), port, path.c_str());
     return static_cast<int>(fd);
 }
 
-int udsAccept(int listen_fd) {
+int shmHandshakeAccept(int listen_fd) {
     SocketFd fd = ::accept(static_cast<SocketFd>(listen_fd), NULL, NULL);
     if (fd == INVALID_SOCKET) {
         int err = WSAGetLastError();
@@ -613,16 +626,16 @@ int udsAccept(int listen_fd) {
     // Make the accepted socket BLOCKING so recv(MSG_WAITALL) works.
     u_long mode = 0;
     ioctlsocket(fd, FIONBIO, &mode);
-    OMNI_LOG_DEBUG(LOG_TAG, "udsAccept: listen=%d → client=%d", listen_fd, static_cast<int>(fd));
+    OMNI_LOG_DEBUG(LOG_TAG, "shmHandshakeAccept: listen=%d → client=%d", listen_fd, static_cast<int>(fd));
     return static_cast<int>(fd);
 }
 
-int udsConnect(const std::string& path) {
+int shmHandshakeConnect(const std::string& path) {
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return -1;
 
-    // Blocking connect — matches Linux udsConnect (no SOCK_NONBLOCK).
+    // Blocking connect — matches Linux shmHandshakeConnect (no SOCK_NONBLOCK).
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -630,7 +643,7 @@ int udsConnect(const std::string& path) {
     addr.sin_port = htons(port);
 
     if (::connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        OMNI_LOG_WARN(LOG_TAG, "udsConnect failed port=%u: %d", port, WSAGetLastError());
+        OMNI_LOG_WARN(LOG_TAG, "shmHandshakeConnect failed port=%u: %d", port, WSAGetLastError());
         closesocket(fd);
         return -1;
     }
@@ -642,7 +655,7 @@ int udsConnect(const std::string& path) {
 
 // ── fd → pipe name serialization for SendFds / RecvFds ──
 
-bool udsSendFds(int uds_fd, const int* fds, int fd_count,
+bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
                 const void* data, size_t data_len) {
     // Wire format:
     //   [uint32_t data_len][uint8_t data[data_len]][uint32_t fd_count]
@@ -672,12 +685,12 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
         memcpy(p, eit->second.pipe_name.data(), name_len); p += name_len;
     }
 
-    int sent = ::send(static_cast<SocketFd>(uds_fd), payload.data(),
+    int sent = ::send(static_cast<SocketFd>(fd), payload.data(),
                       static_cast<int>(payload.size()), 0);
     return sent == static_cast<int>(payload.size());
 }
 
-bool udsRecvFds(int uds_fd, int* fds, int fd_count,
+bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
                 void* buf, size_t buf_size, size_t* out_data_len) {
     // Initialize outputs
     if (out_data_len) *out_data_len = 0;
@@ -689,19 +702,19 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
 
     // Step 1: Read data length and data
     uint32_t dlen = 0;
-    int n = ::recv(static_cast<SocketFd>(uds_fd), reinterpret_cast<char*>(&dlen),
+    int n = ::recv(static_cast<SocketFd>(fd), reinterpret_cast<char*>(&dlen),
                    4, MSG_WAITALL);
     if (n != 4) return false;
 
     if (dlen > 0) {
         if (buf && buf_size >= dlen) {
-            n = ::recv(static_cast<SocketFd>(uds_fd), static_cast<char*>(buf),
+            n = ::recv(static_cast<SocketFd>(fd), static_cast<char*>(buf),
                        static_cast<int>(dlen), MSG_WAITALL);
             if (n != static_cast<int>(dlen)) return false;
         } else {
             // Skip data bytes that don't fit or no buffer provided
             std::vector<char> skip(dlen);
-            n = ::recv(static_cast<SocketFd>(uds_fd), skip.data(),
+            n = ::recv(static_cast<SocketFd>(fd), skip.data(),
                        static_cast<int>(dlen), MSG_WAITALL);
             if (n != static_cast<int>(dlen)) return false;
         }
@@ -710,7 +723,7 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
 
     // Step 2: Read fd count and pipe names
     uint32_t count = 0;
-    n = ::recv(static_cast<SocketFd>(uds_fd), reinterpret_cast<char*>(&count),
+    n = ::recv(static_cast<SocketFd>(fd), reinterpret_cast<char*>(&count),
                4, MSG_WAITALL);
     if (n != 4) return false;
 
@@ -718,12 +731,12 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
                            ? count : static_cast<uint32_t>(fd_count);
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t name_len = 0;
-        n = ::recv(static_cast<SocketFd>(uds_fd), reinterpret_cast<char*>(&name_len),
+        n = ::recv(static_cast<SocketFd>(fd), reinterpret_cast<char*>(&name_len),
                    4, MSG_WAITALL);
         if (n != 4) return false;
 
         std::vector<char> name_buf(name_len + 1);
-        n = ::recv(static_cast<SocketFd>(uds_fd), name_buf.data(),
+        n = ::recv(static_cast<SocketFd>(fd), name_buf.data(),
                    static_cast<int>(name_len), MSG_WAITALL);
         if (n != static_cast<int>(name_len)) return false;
         name_buf[name_len] = '\0';
@@ -736,7 +749,7 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
     return true;
 }
 
-bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
+bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventfd,
                            int* out_new_fd) {
     *out_new_fd = -1;
 
@@ -745,7 +758,7 @@ bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
     int notify_efd = createEventFd();
     if (notify_efd >= 0) {
         int fds[2] = { resp_eventfd, notify_efd };
-        if (udsSendFds(client_fd, fds, 2, NULL, 0)) {
+        if (shmHandshakeSendFds(client_fd, fds, 2, NULL, 0)) {
             *out_new_fd = notify_efd;
             return true;
         }
@@ -754,14 +767,14 @@ bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
     }
 
     // Fallback: send only resp_eventfd (client won't have server notification)
-    return udsSendFds(client_fd, &resp_eventfd, 1, NULL, 0);
+    return shmHandshakeSendFds(client_fd, &resp_eventfd, 1, NULL, 0);
 }
 
-void udsClose(int fd) {
+void shmHandshakeClose(int fd) {
     if (fd >= 0) closesocket(static_cast<SocketFd>(fd));
 }
 
-void udsUnlink(const std::string& /*path*/) {
+void shmHandshakeCleanup(const std::string& /*path*/) {
     // TCP sockets: nothing to unlink
 }
 
@@ -783,7 +796,7 @@ void setupSignalHandlers(SignalHandler handler) {
     signal(SIGTERM, handler);
 }
 
-bool isUdsAvailable() {
+bool isShmHandshakeAvailable() {
     return true;  // Emulated via Named Pipes
 }
 

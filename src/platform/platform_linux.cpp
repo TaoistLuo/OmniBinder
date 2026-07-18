@@ -4,6 +4,23 @@
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
 
+// 平台实现依赖的系统头文件（原本在 platform.h 的 #ifdef 中，现已移至此）
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <poll.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+
 #include <cstring>
 #include <cstdio>
 #include <climits>
@@ -337,7 +354,7 @@ int createNamedEventFd(const std::string& /*name*/) {
 }
 
 int openNamedEventFd(const std::string& /*name*/) {
-    // Linux: fd exchange happens via UDS, not by name.
+    // Linux: fd exchange happens via handshake, not by name.
     return -1;
 }
 
@@ -422,11 +439,11 @@ void shmUnlink(const std::string& name) {
 
 
 // ============================================================
-// Unix Domain Socket（用于 SHM eventfd 交换）
+// handshake channel（用于 SHM eventfd 交换）
 // ============================================================
 
 
-int udsBindListen(const std::string& path, int backlog) {
+int shmHandshakeListen(const std::string& path, int backlog) {
     // 清理残留
     ::unlink(path.c_str());
 
@@ -448,7 +465,7 @@ int udsBindListen(const std::string& path, int backlog) {
     }
 
     if (listen(fd, backlog) < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "UDS listen failed on %s: %s", path.c_str(), strerror(errno));
+        OMNI_LOG_ERROR(LOG_TAG, "handshake listen failed on %s: %s", path.c_str(), strerror(errno));
         close(fd);
         ::unlink(path.c_str());
         return -1;
@@ -457,7 +474,7 @@ int udsBindListen(const std::string& path, int backlog) {
     return fd;
 }
 
-int udsAccept(int listen_fd) {
+int shmHandshakeAccept(int listen_fd) {
     int fd;
     do {
         fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
@@ -465,7 +482,7 @@ int udsAccept(int listen_fd) {
     return fd;
 }
 
-int udsConnect(const std::string& path) {
+int shmHandshakeConnect(const std::string& path) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS connect socket: %s", strerror(errno));
@@ -486,7 +503,7 @@ int udsConnect(const std::string& path) {
     return fd;
 }
 
-bool udsSendFds(int uds_fd, const int* fds, int fd_count,
+bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
                 const void* data, size_t data_len) {
     // 至少需要 1 字节的 iov 数据（即使 data_len == 0）
     char dummy = 0;
@@ -507,7 +524,7 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
     char cmsg_buf[256];
     if (fd_count > 0) {
         if (!fds) {
-            OMNI_LOG_ERROR(LOG_TAG, "udsSendFds: fd_count=%d but fds is NULL", fd_count);
+            OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeSendFds: fd_count=%d but fds is NULL", fd_count);
             return false;
         }
 
@@ -515,7 +532,7 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
         size_t cmsg_space = CMSG_SPACE(sizeof(int) * static_cast<size_t>(fd_count));
         // 使用栈上分配（fd_count 最多 2-3 个，cmsg_space 很小）
         if (cmsg_space > sizeof(cmsg_buf)) {
-            OMNI_LOG_ERROR(LOG_TAG, "udsSendFds: too many fds (%d)", fd_count);
+            OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeSendFds: too many fds (%d)", fd_count);
             return false;
         }
         memset(cmsg_buf, 0, cmsg_space);
@@ -531,17 +548,17 @@ bool udsSendFds(int uds_fd, const int* fds, int fd_count,
 
     ssize_t ret;
     do {
-        ret = sendmsg(uds_fd, &msg, MSG_NOSIGNAL);
+        ret = sendmsg(fd, &msg, MSG_NOSIGNAL);
     } while (ret < 0 && errno == EINTR);
 
     if (ret < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "udsSendFds failed: %s", strerror(errno));
+        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeSendFds failed: %s", strerror(errno));
         return false;
     }
     return true;
 }
 
-bool udsRecvFds(int uds_fd, int* fds, int fd_count,
+bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
                 void* buf, size_t buf_size, size_t* out_data_len) {
     char dummy;
     struct iovec iov;
@@ -556,7 +573,7 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
     size_t cmsg_space = CMSG_SPACE(sizeof(int) * static_cast<size_t>(fd_count));
     char cmsg_buf[256];
     if (cmsg_space > sizeof(cmsg_buf)) {
-        OMNI_LOG_ERROR(LOG_TAG, "udsRecvFds: too many fds (%d)", fd_count);
+        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeRecvFds: too many fds (%d)", fd_count);
         return false;
     }
     memset(cmsg_buf, 0, cmsg_space);
@@ -570,11 +587,11 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
 
     ssize_t ret;
     do {
-        ret = recvmsg(uds_fd, &msg, 0);
+        ret = recvmsg(fd, &msg, 0);
     } while (ret < 0 && errno == EINTR);
 
     if (ret < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "udsRecvFds failed: %s", strerror(errno));
+        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeRecvFds failed: %s", strerror(errno));
         return false;
     }
 
@@ -591,7 +608,7 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
 
     // No SCM_RIGHTS in message — valid for data-only datagrams (e.g., SHM name exchange)
     if (fd_count > 0) {
-        OMNI_LOG_DEBUG(LOG_TAG, "udsRecvFds: no SCM_RIGHTS in message");
+        OMNI_LOG_DEBUG(LOG_TAG, "shmHandshakeRecvFds: no SCM_RIGHTS in message");
     }
     for (int i = 0; i < fd_count; ++i) {
         fds[i] = -1;
@@ -599,20 +616,20 @@ bool udsRecvFds(int uds_fd, int* fds, int fd_count,
     return false;
 }
 
-bool udsSendServerResponse(int client_fd, int resp_eventfd, int master_eventfd,
+bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventfd,
                            int* out_new_fd) {
     *out_new_fd = -1;
     int fds[2] = { resp_eventfd, master_eventfd };
-    return udsSendFds(client_fd, fds, 2, NULL, 0);
+    return shmHandshakeSendFds(client_fd, fds, 2, NULL, 0);
 }
 
-void udsClose(int fd) {
+void shmHandshakeClose(int fd) {
     if (fd >= 0) {
         close(fd);
     }
 }
 
-void udsUnlink(const std::string& path) {
+void shmHandshakeCleanup(const std::string& path) {
     ::unlink(path.c_str());
 }
 
@@ -724,7 +741,7 @@ void setupSignalHandlers(SignalHandler handler) {
 #endif
 }
 
-bool isUdsAvailable() {
+bool isShmHandshakeAvailable() {
     return true;
 }
 

@@ -79,7 +79,7 @@ std::string OmniRuntime::Impl::resolveRegisterHost(Service* service,
 void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
                                               size_t req_ring_capacity, size_t resp_ring_capacity) {
     // Create server-side ShmTransport for UDS listening + per-client context management.
-    // Each connecting client creates its own SHM; the server opens it via UDS handshake.
+    // Each connecting client creates its own SHM; the server opens it via handshake.
     entry->shm_transport = new ShmTransport(generateShmName(name), true,
                                              req_ring_capacity, resp_ring_capacity);
     if (entry->shm_transport->state() != ConnectionState::CONNECTED) {
@@ -106,15 +106,15 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
             });
     }
 
-    loop_->addFd(entry->shm_transport->udsListenFd(), EventLoop::EVENT_READ,
+    loop_->addFd(entry->shm_transport->handshakeListenFd(), EventLoop::EVENT_READ,
         [this, entry](int, uint32_t) {
             if (entry->shm_transport) {
-                entry->shm_transport->onUdsClientConnect();
+                entry->shm_transport->onHandshakeClientConnect();
             }
         });
 
     // Register callback for per-client notification fds.
-    // On Linux: udsSendServerResponse never creates new fds, callback is a no-op.
+    // On Linux: shmHandshakeSendResponse never creates new fds, callback is a no-op.
     // On Windows: each new client gets a per-client pipe, registered here.
     entry->shm_transport->setOnNewClientNotifyFd(
         [this, entry, name](int fd) {
@@ -206,8 +206,8 @@ void OmniRuntime::Impl::removeServiceShmFromLoop(LocalServiceEntry* entry) {
     if (transport->reqEventFd() >= 0) {
         loop_->removeFd(transport->reqEventFd());
     }
-    if (transport->udsListenFd() >= 0) {
-        loop_->removeFd(transport->udsListenFd());
+    if (transport->handshakeListenFd() >= 0) {
+        loop_->removeFd(transport->handshakeListenFd());
     }
 
     for (std::set<int>::iterator it = entry->shm_client_notify_fds.begin();
