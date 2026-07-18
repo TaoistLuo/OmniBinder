@@ -1,4 +1,13 @@
 #include "core/omni_runtime.h"
+#include "core/omni_runtime_helpers.h"
+#include "omnibinder/buffer_view.h"
+#include "omnibinder/log.h"
+
+#include <thread>
+
+#define LOG_TAG "OmniRuntimeDiag"
+
+namespace omnibinder {
 
 // ============================================================
 // 辅助

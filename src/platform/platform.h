@@ -91,7 +91,7 @@ void  shmDetach(void* addr, size_t size);
 void  shmUnlink(const std::string& name);
 
 // ============================================================
-// SHM 握手通道 — 跨进程交换 eventfd
+// SHM 握手通道 — 跨进程交换通知句柄
 //
 // 适配指南：
 //   实现一个命名的双向通道（handshake channel），用于在 client/server
@@ -104,16 +104,20 @@ void  shmUnlink(const std::string& name);
 //
 //   平台参考：
 //     Linux:   AF_UNIX + SCM_RIGHTS，name = 文件系统路径
-//     Windows: TCP loopback + Named Pipe 名称序列化，name = 端口号
+//     Windows: TCP loopback + Named Pipe 名称序列化，name 映射为本地端口
 //
 //   注意：
-//     handshakeSend/handshakeRecv 在一次调用中同时传输数据和 fd，
-//     保证原子性（接收方要么同时拿到数据和 fd，要么都拿不到）。
-//     handshakeGetFd() 返回底层句柄，仅用于 EventLoop 注册，不做他用。
+//     listener owns its named endpoint; handshakeCloseListener closes it and
+//     removes the endpoint. Accepted/connected channels are independently owned.
+//     Each send transfers one bounded payload and 0..2 notification handles.
+//     Recv publishes payload/handles only after the complete frame is valid.
+//     handshakeGetFd() returns the channel readiness descriptor.
 // ============================================================
 
 struct handshake_listener;
 struct handshake_channel;
+
+const size_t HANDSHAKE_MAX_PAYLOAD = 64 * 1024;
 
 handshake_listener* handshakeListen(const std::string& name);
 handshake_channel*  handshakeAccept(handshake_listener* listener);
@@ -124,8 +128,10 @@ bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
                    const int* fds, int fd_count);
 bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
                    int* fds, int max_fds, int* out_fd_count);
+// Returns an optional server-owned notification fd created while sending.
+// Ownership transfers to the caller; Linux always returns -1.
+int  handshakeTakeLocalNotifyFd(handshake_channel* ch);
 void handshakeClose(handshake_channel* ch);
-void handshakeCleanup(const std::string& name);
 
 int  handshakeGetFd(handshake_channel* ch);
 int  handshakeGetListenerFd(handshake_listener* listener);

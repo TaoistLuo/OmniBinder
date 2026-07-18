@@ -1,45 +1,27 @@
 #include "service_manager_app.h"
 #include "omnibinder/log.h"
 #include "platform/platform.h"
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <string>
-#include <map>
-#include <vector>
-#include <memory>
-#include <algorithm>
 
 #define TAG "ServiceManager"
 
-namespace {
+namespace omnibinder {
 
-bool tryReadStringArg(const Message& msg, std::string& value) {
-    Buffer payload(msg.payload.data(), msg.payload.size());
-    if (!payload.tryReadString(value)) {
-        return false;
-    }
-    return true;
+ServiceManagerApp::ServiceManagerApp()
+    : server_(nullptr)
+    , heartbeat_timer_id_(0)
+    , shutdown_fd_(-1) {
 }
 
-bool tryReadExactStringArg(const Message& msg, std::string& value,
-                           size_t max_length) {
-    Buffer payload(msg.payload.data(), msg.payload.size());
-    return payload.tryReadString(value)
-        && !value.empty()
-        && value.size() <= max_length
-        && payload.remaining() == 0;
+ServiceManagerApp::~ServiceManagerApp() {
+    cleanup();
 }
 
-bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
-    return tryReadExactStringArg(msg, topic, MAX_TOPIC_NAME_LENGTH);
+int ServiceManagerApp::shutdownFd() const {
+    return shutdown_fd_;
 }
 
-}
- {
-}
-
- {
+bool ServiceManagerApp::init(const std::string& host, uint16_t port) {
         // Initialize network
         if (!platform::netInit()) {
             OMNI_LOG_ERROR(TAG, "Failed to initialize network");
@@ -84,17 +66,17 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         return true;
 }
 
- {
+void ServiceManagerApp::run() {
         OMNI_LOG_INFO(TAG, "ServiceManager started");
         loop_.run();
         OMNI_LOG_INFO(TAG, "ServiceManager stopped");
 }
 
- {
+void ServiceManagerApp::stop() {
         loop_.stop();
 }
 
- {
+void ServiceManagerApp::cleanup() {
         if (heartbeat_timer_id_ != 0) {
             loop_.cancelTimer(heartbeat_timer_id_);
             heartbeat_timer_id_ = 0;
@@ -127,7 +109,7 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         platform::netCleanup();
 }
 
- {
+void ServiceManagerApp::onAccept() {
         while (true) {
             ITransport* transport = server_->accept();
             if (!transport) {
@@ -152,7 +134,7 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         }
 }
 
- {
+void ServiceManagerApp::onClientEvent(int fd, uint32_t events) {
         auto it = clients_.find(fd);
         if (it == clients_.end()) {
             return;
@@ -184,7 +166,7 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         }
 }
 
- {
+void ServiceManagerApp::onClientRead(ClientConnection* conn) {
         // Read available data into the receive buffer
         uint8_t temp[4096];
         int n = conn->transport->recv(temp, sizeof(temp));
@@ -217,7 +199,7 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         processMessages(conn);
 }
 
- {
+void ServiceManagerApp::processMessages(ClientConnection* conn) {
         int fd = conn->fd;
         while (true) {
             size_t buf_size = conn->recv_buffer.size();
@@ -279,7 +261,7 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         }
 }
 
- {
+void ServiceManagerApp::dispatchMessage(ClientConnection* conn, const Message& msg) {
         MessageType type = msg.getType();
 
         OMNI_LOG_DEBUG(TAG, "Received %s from fd=%d (seq=%u, len=%u)",
@@ -352,13 +334,14 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         }
 }
 
- {
+void ServiceManagerApp::sendBoolReply(ClientConnection* conn, MessageType type,
+                                      uint32_t seq, bool ok) {
         Message reply(type, seq);
         reply.payload.writeBool(ok);
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::closeClient(int fd) {
         auto it = clients_.find(fd);
         if (it == clients_.end()) {
             return;
@@ -404,7 +387,7 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         OMNI_LOG_INFO(TAG, "Client closed: fd=%d", fd);
 }
 
- {
+void ServiceManagerApp::sendMessage(ClientConnection* conn, Message& msg) {
         Buffer output;
         if (!msg.serialize(output)) {
             OMNI_LOG_ERROR(TAG, "Failed to serialize message");
@@ -438,7 +421,7 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         }
 }
 
- {
+bool ServiceManagerApp::flushPendingSends(ClientConnection* conn) {
         while (conn->send_offset < conn->send_buffer.size()) {
             int sent = conn->transport->send(conn->send_buffer.data() + conn->send_offset,
                                              conn->send_buffer.size() - conn->send_offset);
@@ -459,11 +442,12 @@ bool tryReadExactTopicArg(const Message& msg, std::string& topic) {
         return true;
 }
 
- {
+void ServiceManagerApp::enableClientWriteEvents(ClientConnection* conn) {
         loop_.modifyFd(conn->fd, EventLoop::EVENT_READ | EventLoop::EVENT_WRITE);
 }
 
- {
+void ServiceManagerApp::disableClientWriteEvents(ClientConnection* conn) {
         loop_.modifyFd(conn->fd, EventLoop::EVENT_READ);
 }
 
+} // namespace omnibinder

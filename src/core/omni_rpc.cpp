@@ -1,4 +1,10 @@
 #include "core/omni_runtime.h"
+#include "core/omni_runtime_helpers.h"
+#include "omnibinder/log.h"
+
+#define LOG_TAG "OmniRuntimeRpc"
+
+namespace omnibinder {
 
 // ============================================================
 // 同步等待
@@ -157,3 +163,4 @@ int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uin
     return 0;
 }
 
+} // namespace omnibinder

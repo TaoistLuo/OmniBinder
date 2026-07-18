@@ -1,18 +1,13 @@
 #include "service_manager_app.h"
+#include "sm_parse_helpers.h"
 #include "omnibinder/log.h"
-#include "platform/platform.h"
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <string>
-#include <map>
-#include <vector>
-#include <memory>
 #include <algorithm>
 
 #define TAG "ServiceManager"
 
- {
+namespace omnibinder {
+
+void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& msg) {
         Buffer payload(msg.payload.data(), msg.payload.size());
         ServiceInfo info;
 
@@ -42,15 +37,16 @@
         sendRegisterReply(conn, msg.header.sequence, handle);
 }
 
- {
+void ServiceManagerApp::sendRegisterReply(ClientConnection* conn, uint32_t seq,
+                                          ServiceHandle handle) {
         Message reply(MessageType::MSG_REGISTER_REPLY, seq);
         reply.payload.writeUint32(handle);
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleUnregister(ClientConnection* conn, const Message& msg) {
         std::string name;
-        if (!tryReadStringArg(msg, name)) {
+        if (!sm_internal::tryReadStringArg(msg, name)) {
             OMNI_LOG_WARN(TAG, "Reject malformed unregister request from fd=%d", conn->fd);
             sendUnregisterReply(conn, msg.header.sequence, false);
             return;
@@ -85,15 +81,16 @@
         sendUnregisterReply(conn, msg.header.sequence, success);
 }
 
- {
+void ServiceManagerApp::sendUnregisterReply(ClientConnection* conn, uint32_t seq,
+                                            bool success) {
         Message reply(MessageType::MSG_UNREGISTER_REPLY, seq);
         reply.payload.writeBool(success);
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleHeartbeat(ClientConnection* conn, const Message& msg) {
         std::string name;
-        if (!tryReadExactStringArg(msg, name, MAX_SERVICE_NAME_LENGTH)) {
+        if (!sm_internal::tryReadExactStringArg(msg, name, MAX_SERVICE_NAME_LENGTH)) {
             OMNI_LOG_WARN(TAG, "Reject malformed heartbeat from fd=%d", conn->fd);
             return;
         }
@@ -108,14 +105,14 @@
         sendHeartbeatAck(conn, msg.header.sequence);
 }
 
- {
+void ServiceManagerApp::sendHeartbeatAck(ClientConnection* conn, uint32_t seq) {
         Message reply(MessageType::MSG_HEARTBEAT_ACK, seq);
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleLookup(ClientConnection* conn, const Message& msg) {
         std::string name;
-        if (!tryReadStringArg(msg, name)) {
+        if (!sm_internal::tryReadStringArg(msg, name)) {
             OMNI_LOG_WARN(TAG, "Reject malformed lookup request from fd=%d", conn->fd);
             sendLookupReply(conn, msg.header.sequence, false, ServiceInfo());
             return;
@@ -127,7 +124,8 @@
         sendLookupReply(conn, msg.header.sequence, found, found ? entry.info : ServiceInfo());
 }
 
- {
+void ServiceManagerApp::sendLookupReply(ClientConnection* conn, uint32_t seq, bool found,
+                                        const ServiceInfo& info) {
         Message reply(MessageType::MSG_LOOKUP_REPLY, seq);
         reply.payload.writeBool(found);
         if (found) {
@@ -136,7 +134,7 @@
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleListServices(ClientConnection* conn, const Message& msg) {
         std::vector<ServiceInfo> all_services = registry_.listServices();
         std::vector<ServiceInfo> services;
         for (size_t i = 0; i < all_services.size(); ++i) {
@@ -148,7 +146,9 @@
         sendListServicesReply(conn, msg.header.sequence, services);
 }
 
-void ServiceManagerApp::sendListServicesReply(ClientConnection* conn, uint32_t seq, {
+void ServiceManagerApp::sendListServicesReply(
+        ClientConnection* conn, uint32_t seq,
+        const std::vector<ServiceInfo>& services) {
         Message reply(MessageType::MSG_LIST_SERVICES_REPLY, seq);
         reply.payload.writeUint32(static_cast<uint32_t>(services.size()));
         for (size_t i = 0; i < services.size(); ++i) {
@@ -157,9 +157,9 @@ void ServiceManagerApp::sendListServicesReply(ClientConnection* conn, uint32_t s
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleQueryInterfaces(ClientConnection* conn, const Message& msg) {
         std::string name;
-        if (!tryReadStringArg(msg, name)) {
+        if (!sm_internal::tryReadStringArg(msg, name)) {
             OMNI_LOG_WARN(TAG, "Reject malformed query interfaces request from fd=%d", conn->fd);
             sendQueryInterfacesReply(conn, msg.header.sequence, false, std::vector<InterfaceInfo>());
             return;
@@ -172,7 +172,9 @@ void ServiceManagerApp::sendListServicesReply(ClientConnection* conn, uint32_t s
                                  found ? entry.info.interfaces : std::vector<InterfaceInfo>());
 }
 
-void ServiceManagerApp::sendQueryInterfacesReply(ClientConnection* conn, uint32_t seq, bool found, {
+void ServiceManagerApp::sendQueryInterfacesReply(
+        ClientConnection* conn, uint32_t seq, bool found,
+        const std::vector<InterfaceInfo>& interfaces) {
         Message reply(MessageType::MSG_QUERY_INTERFACES_REPLY, seq);
         reply.payload.writeBool(found);
         if (found) {
@@ -184,9 +186,9 @@ void ServiceManagerApp::sendQueryInterfacesReply(ClientConnection* conn, uint32_
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleSubscribeService(ClientConnection* conn, const Message& msg) {
         std::string target_service;
-        if (!tryReadStringArg(msg, target_service)) {
+        if (!sm_internal::tryReadStringArg(msg, target_service)) {
             OMNI_LOG_WARN(TAG, "Reject malformed subscribe service request from fd=%d", conn->fd);
             sendSubscribeServiceReply(conn, msg.header.sequence, false);
             return;
@@ -196,15 +198,16 @@ void ServiceManagerApp::sendQueryInterfacesReply(ClientConnection* conn, uint32_
         sendSubscribeServiceReply(conn, msg.header.sequence, success);
 }
 
- {
+void ServiceManagerApp::sendSubscribeServiceReply(ClientConnection* conn, uint32_t seq,
+                                                  bool success) {
         Message reply(MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, seq);
         reply.payload.writeBool(success);
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleUnsubscribeService(ClientConnection* conn, const Message& msg) {
         std::string target_service;
-        if (!tryReadStringArg(msg, target_service)) {
+        if (!sm_internal::tryReadStringArg(msg, target_service)) {
             OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe service request from fd=%d", conn->fd);
             return;
         }
@@ -213,7 +216,7 @@ void ServiceManagerApp::sendQueryInterfacesReply(ClientConnection* conn, uint32_
         // No reply needed for unsubscribe
 }
 
- {
+void ServiceManagerApp::onHeartbeatCheck() {
         std::vector<std::string> timed_out = heartbeat_.checkTimeouts();
 
         for (size_t i = 0; i < timed_out.size(); ++i) {
@@ -247,7 +250,7 @@ void ServiceManagerApp::sendQueryInterfacesReply(ClientConnection* conn, uint32_
         }
 }
 
- {
+void ServiceManagerApp::notifyServiceDeath(const std::string& service_name) {
         std::vector<int> subscribers = death_notifier_.notify(service_name);
 
         for (size_t i = 0; i < subscribers.size(); ++i) {
@@ -259,9 +262,11 @@ void ServiceManagerApp::sendQueryInterfacesReply(ClientConnection* conn, uint32_
         }
 }
 
- {
+void ServiceManagerApp::sendDeathNotify(ClientConnection* conn,
+                                        const std::string& service_name) {
         Message notify(MessageType::MSG_DEATH_NOTIFY, nextSequenceNumber());
         notify.payload.writeString(service_name);
         sendMessage(conn, notify);
 }
 
+} // namespace omnibinder

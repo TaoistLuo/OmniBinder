@@ -1,13 +1,19 @@
 #include "service_manager_app.h"
+#include "omnibinder/log.h"
 #include "platform/platform.h"
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 
+#define TAG "ServiceManager"
 
 // ============================================================
 // Global shutdown eventfd for signal handling
 // ============================================================
+namespace omnibinder {
+
 static volatile sig_atomic_t g_shutdown_fd = -1;
 
 static void signalHandler(int) {

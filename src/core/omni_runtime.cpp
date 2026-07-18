@@ -1,13 +1,5 @@
 #include "core/omni_runtime.h"
 #include "omnibinder/log.h"
-#include "omnibinder/buffer_view.h"
-
-#include "core/omni_runtime.h"
-#include "omnibinder/log.h"
-#include "omnibinder/buffer_view.h"
-#include <cstring>
-#include <algorithm>
-#include <sstream>
 
 #define LOG_TAG "OmniRuntime"
 
@@ -22,200 +14,6 @@ extern "C" void omni_ensure_allocator_linked();
 struct ForceLinkAllocator {
     ForceLinkAllocator() { omni_ensure_allocator_linked(); }
 } force_link_allocator;
-
-std::string normalizeAdvertiseHost(const std::string& host) {
-    if (host.empty() || host == "0.0.0.0") {
-        return "127.0.0.1";
-    }
-    return host;
-}
-
-const char* dataChannelKindName(TransportType type) {
-    return type == TransportType::SHM ? "SHM" : "TCP";
-}
-
-const uint32_t OMNI_DIAG_IFACE_ID = 0x4F4E4944;
-
-class RuntimeDiagService : public Service {
-public:
-    explicit RuntimeDiagService(const std::string& name) : Service(name) {
-        iface_.interface_id = OMNI_DIAG_IFACE_ID;
-        iface_.name = name;
-    }
-
-    virtual const char* serviceName() const { return name().c_str(); }
-    virtual const InterfaceInfo& interfaceInfo() const { return iface_; }
-
-protected:
-    virtual int onInvoke(uint32_t, const Buffer&, Buffer&) {
-        return static_cast<int>(ErrorCode::ERR_NOT_SUPPORTED);
-    }
-
-private:
-    InterfaceInfo iface_;
-};
-
-static void diag_serialize_event(Buffer& buf, uint8_t direction, const Message& msg) {
-    uint64_t ts_us = static_cast<uint64_t>(platform::currentTimeUs());
-    buf.writeUint8(direction);
-    uint8_t ts_buf[8];
-    for (int i = 7; i >= 0; --i) {
-        ts_buf[i] = static_cast<uint8_t>(ts_us); 
-        ts_us >>= 8; 
-    }
-    buf.writeRaw(ts_buf, 8);
-    buf.writeUint16(static_cast<uint16_t>(msg.getType()));
-    buf.writeUint32(msg.getSequence());
-    buf.writeUint32(static_cast<uint32_t>(msg.payload.size()));
-    if (msg.payload.size() > 0) buf.writeRaw(msg.payload.data(), msg.payload.size());
-}
-
-bool decodeInvokePayload(const Message& msg,
-                         uint32_t& interface_id,
-                         uint32_t& idl_hash,
-                         uint32_t& method_id,
-                         Buffer& request) {
-    BufferView req_buf(msg.payload.data(), msg.payload.size());
-    uint32_t payload_len = 0;
-    if (!req_buf.tryReadUint32(interface_id)
-        || !req_buf.tryReadUint32(idl_hash)
-        || !req_buf.tryReadUint32(method_id)
-        || !req_buf.tryReadUint32(payload_len)) {
-        return false;
-    }
-    if (req_buf.remaining() < payload_len) {
-        return false;
-    }
-
-    request.clear();
-    if (payload_len > 0) {
-        if (!request.writeRaw(req_buf.data() + req_buf.readPosition(), payload_len)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool decodeSubscribeBroadcastPayload(const Message& msg,
-                                     uint32_t& topic_id,
-                                     std::string& topic_name) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    if (!buf.tryReadUint32(topic_id) || !buf.tryReadString(topic_name)) {
-        return false;
-    }
-    return true;
-}
-
-bool decodeBroadcastPayload(const Message& msg,
-                            uint32_t& topic_id,
-                            Buffer& payload) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    uint32_t payload_len = 0;
-    if (!buf.tryReadUint32(topic_id) || !buf.tryReadUint32(payload_len)) {
-        return false;
-    }
-    if (buf.remaining() < payload_len) {
-        return false;
-    }
-
-    payload.clear();
-    if (payload_len > 0) {
-        if (!payload.writeRaw(buf.data() + buf.readPosition(), payload_len)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool decodeSingleStringPayload(const Message& msg, std::string& value) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    if (!buf.tryReadString(value)) {
-        return false;
-    }
-    return true;
-}
-
-bool decodeBoolReplyPayload(const Message& msg, bool& value) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    if (!buf.tryReadBool(value)) {
-        return false;
-    }
-    return true;
-}
-
-bool decodeUint32ReplyPayload(const Message& msg, uint32_t& value) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    if (!buf.tryReadUint32(value)) {
-        return false;
-    }
-    return true;
-}
-
-bool decodeInvokeReplyPayload(const Message& msg, int32_t& status, Buffer& response) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    uint32_t payload_len = 0;
-    if (!buf.tryReadInt32(status)) {
-        return false;
-    }
-    if (status != 0) {
-        response.clear();
-        return true;
-    }
-
-    if (!buf.tryReadUint32(payload_len)) {
-        return false;
-    }
-    if (buf.remaining() < payload_len) {
-        return false;
-    }
-
-    response.clear();
-    if (payload_len > 0) {
-        if (!response.writeRaw(buf.data() + buf.readPosition(), payload_len)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool writeInvokeErrorReply(Buffer& payload, ErrorCode error) {
-    return payload.writeInt32(static_cast<int32_t>(error))
-        && payload.writeUint32(0);
-}
-
-Message makeInvokeErrorReply(uint32_t seq, ErrorCode error) {
-    Message reply(MessageType::MSG_INVOKE_REPLY, seq);
-    if (!writeInvokeErrorReply(reply.payload, error)) {
-        OMNI_LOG_ERROR(LOG_TAG, "makeInvokeErrorReply serialization failed seq=%u", seq);
-    }
-    return reply;
-}
-
-Message makeInvokeSuccessReply(uint32_t seq, const Buffer& response) {
-    Message reply(MessageType::MSG_INVOKE_REPLY, seq);
-    reply.payload.writeInt32(0);
-    reply.payload.writeUint32(static_cast<uint32_t>(response.size()));
-    if (response.size() > 0) {
-        reply.payload.writeRaw(response.data(), response.size());
-    }
-    return reply;
-}
-
-bool decodeBroadcastPayload(const Message& msg, uint32_t& topic_id, Buffer& payload) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    uint32_t data_len = 0;
-    if (!buf.tryReadUint32(topic_id) || !buf.tryReadUint32(data_len)) {
-        return false;
-    }
-    if (buf.remaining() < data_len) {
-        return false;
-    }
-    payload.clear();
-    if (data_len > 0) {
-        payload.writeRaw(buf.data() + buf.readPosition(), data_len);
-    }
-    return true;
-}
 
 } // namespace
 
@@ -334,18 +132,18 @@ int OmniRuntime::unwatchPid(uint32_t pid) { return impl_->unwatchPid(pid); }
 
 OmniRuntime::Impl::Impl()
     : loop_(NULL)
-    , sm_channel_()
-    , rpc_runtime_()
-    , conn_mgr_(NULL)
-    , register_host_()
-    , sm_port_(0)
-    , heartbeat_interval_ms_(DEFAULT_HEARTBEAT_INTERVAL)
-    , heartbeat_timer_id_(0)
     , running_(false)
     , initialized_(false)
     , owner_(NULL)
     , loop_driver_active_(false)
+    , sm_channel_()
+    , rpc_runtime_()
     , sm_reconnect_needed_(false)
+    , sm_port_(0)
+    , heartbeat_interval_ms_(DEFAULT_HEARTBEAT_INTERVAL)
+    , heartbeat_timer_id_(0)
+    , conn_mgr_(NULL)
+    , register_host_()
     , diag_active_count_(0)
     , pid_(0)
     , process_name_()
@@ -506,3 +304,4 @@ void OmniRuntime::Impl::pollOnceWithoutFunctors(int timeout_ms) {
     if (loop_) loop_->pollOnceWithoutFunctors(timeout_ms);
 }
 
+} // namespace omnibinder

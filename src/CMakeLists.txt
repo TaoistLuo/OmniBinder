@@ -10,6 +10,7 @@ set(OMNIBINDER_SOURCES
     core/omni_allocator.cpp
     core/service.cpp
     core/omni_runtime.cpp
+    core/omni_runtime_helpers.cpp
     core/omni_sm.cpp
     core/omni_service.cpp
     core/omni_connection.cpp

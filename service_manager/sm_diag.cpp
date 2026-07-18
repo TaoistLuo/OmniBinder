@@ -1,18 +1,12 @@
 #include "service_manager_app.h"
 #include "omnibinder/log.h"
-#include "platform/platform.h"
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <string>
-#include <map>
-#include <vector>
-#include <memory>
 #include <algorithm>
 
 #define TAG "ServiceManager"
 
- {
+namespace omnibinder {
+
+void ServiceManagerApp::removePidFd(uint32_t pid, int fd) {
         std::map<uint32_t, std::vector<int> >::iterator it = pid_to_fds_.find(pid);
         if (it == pid_to_fds_.end()) {
             return;
@@ -24,7 +18,7 @@
         }
 }
 
- {
+void ServiceManagerApp::handleRuntimeHello(ClientConnection* conn, const Message& msg) {
         BufferView buf(msg.payload.data(), msg.payload.size());
         RuntimeInfo info;
         if (!deserializeRuntimeInfo(buf, info) || info.pid == 0) {
@@ -47,7 +41,7 @@
         sendBoolReply(conn, MessageType::MSG_RUNTIME_HELLO_REPLY, msg.header.sequence, true);
 }
 
- {
+void ServiceManagerApp::handleRuntimeList(ClientConnection* conn, const Message& msg) {
         Message reply(MessageType::MSG_RUNTIME_LIST_REPLY, msg.header.sequence);
         uint32_t count = 0;
         for (std::map<int, ClientConnection*>::const_iterator it = clients_.begin(); it != clients_.end(); ++it) {
@@ -79,7 +73,7 @@
         sendMessage(conn, reply);
 }
 
- {
+void ServiceManagerApp::handleDiagSetLogLevel(ClientConnection* conn, const Message& msg) {
         BufferView buf(msg.payload.data(), msg.payload.size());
         uint32_t pid = 0;
         uint32_t level = 0;
@@ -107,7 +101,7 @@
         sendBoolReply(conn, MessageType::MSG_DIAG_SET_LOG_LEVEL_REPLY, msg.header.sequence, sent);
 }
 
- {
+void ServiceManagerApp::handleDiagWatchStart(ClientConnection* conn, const Message& msg) {
         BufferView buf(msg.payload.data(), msg.payload.size());
         uint32_t pid = 0;
         if (!buf.tryReadUint32(pid)) {
@@ -139,7 +133,7 @@
         sendBoolReply(conn, MessageType::MSG_DIAG_WATCH_START_REPLY, msg.header.sequence, sent);
 }
 
- {
+void ServiceManagerApp::sendDiagWatchStopToPid(uint32_t pid, int except_fd) {
         std::map<uint32_t, std::vector<int> >::iterator pit = pid_to_fds_.find(pid);
         if (pit == pid_to_fds_.end()) {
             return;
@@ -154,7 +148,7 @@
         }
 }
 
- {
+void ServiceManagerApp::removeWatcherAndMaybeStopTarget(int watcher_fd) {
         std::map<int, uint32_t>::iterator watch_it = watcher_to_pid_.find(watcher_fd);
         if (watch_it == watcher_to_pid_.end()) {
             return;
@@ -178,7 +172,7 @@
         }
 }
 
- {
+void ServiceManagerApp::handleDiagWatchStop(ClientConnection* conn, const Message& msg) {
         BufferView buf(msg.payload.data(), msg.payload.size());
         uint32_t pid = 0;
         if (!buf.tryReadUint32(pid)) {
@@ -190,3 +184,4 @@
         sendBoolReply(conn, MessageType::MSG_DIAG_WATCH_STOP_REPLY, msg.header.sequence, true);
 }
 
+} // namespace omnibinder

@@ -4,7 +4,7 @@
  * @details     基于 POSIX 共享内存的高性能同机传输实现。采用 per-client SHM 架构：
  *              每个客户端创建自己的 SHM，通过握手通道将 SHM 名称 + eventfd 传递给服务端。
  *              服务端打开客户端 SHM，实现双向通信。无需共享请求队列、自旋锁、固定客户端上限。
- *              使用 eventfd 实现跨进程事件通知（通过 SCM_RIGHTS 交换 fd），
+ *              使用平台通知句柄实现跨进程事件通知，
  *              完全融入 EventLoop 的 epoll 事件驱动模型，无需轮询。
  *
  * @author      taoist.luo
@@ -60,7 +60,7 @@ namespace omnibinder {
 //
 // 握手流程:
 //   客户端 → 服务端: [shm_name as data, no fd]
-//   服务端 → 客户端: [resp_eventfd, master_eventfd via SCM_RIGHTS] (2 fds)
+//   服务端 → 客户端: [response notify, request notify] (2 handles)
 //   客户端 send() 时 notify master_eventfd → 唤醒服务端 epoll
 //   服务端 serverSend() 时 notify resp_eventfd → 唤醒客户端 epoll
 
@@ -177,8 +177,10 @@ public:
     // 服务端: 获取请求通知 eventfd（注册到 EventLoop 监听请求到达）
     int reqEventFd() const { return req_eventfd_; }
 
-    // 服务端: 获取 握手监听 fd（注册到 EventLoop 接受客户端 fd 交换）
-    int handshakeListenFd() const { return handshake_listen_fd_; }
+    // 服务端: 获取握手监听 fd（注册到 EventLoop 接受客户端句柄交换）
+    int handshakeListenFd() const {
+        return platform::handshakeGetListenerFd(handshake_listener_);
+    }
 
     // 服务端: 处理 握手客户端连接（接收 SHM 名称，发送 resp + master eventfd）
     void onHandshakeClientConnect();
@@ -256,8 +258,8 @@ private:
                           // 服务端：未使用
     int peer_notify_fd_; // 客户端：服务端主控 eventfd 副本（用于 send() 时 notify 服务端 epoll）
 
-    // 握手
-    int handshake_listen_fd_;
+    // 握手 listener owns the named endpoint until cleanup.
+    platform::handshake_listener* handshake_listener_;
     std::string handshake_path_;
 
     // eventfd 是否启用
@@ -267,7 +269,8 @@ private:
     std::map<uint32_t, ClientShmContext> client_contexts_;
     uint32_t next_client_id_;  // 单调递增的客户端 ID 分配器
 
-    // Windows per-client notification callback
+    // 平台按客户端创建的服务端通知句柄及其注册回调
+    std::vector<int> local_notify_fds_;
     std::function<void(int)> on_new_client_fd_cb_;
 };
 

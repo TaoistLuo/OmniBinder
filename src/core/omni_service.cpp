@@ -1,4 +1,11 @@
 #include "core/omni_runtime.h"
+#include "core/omni_runtime_helpers.h"
+#include "omnibinder/buffer_view.h"
+#include "omnibinder/log.h"
+
+#define LOG_TAG "OmniRuntimeService"
+
+namespace omnibinder {
 
 // ============================================================
 // 服务注册
@@ -113,9 +120,8 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
             }
         });
 
-    // Register callback for per-client notification fds.
-    // On Linux: shmHandshakeSendResponse never creates new fds, callback is a no-op.
-    // On Windows: each new client gets a per-client pipe, registered here.
+    // Register any platform-created per-client server notification descriptor.
+    // Linux reuses the master request descriptor and therefore returns none.
     entry->shm_transport->setOnNewClientNotifyFd(
         [this, entry, name](int fd) {
             entry->shm_client_notify_fds.insert(fd);
@@ -434,3 +440,4 @@ int OmniRuntime::Impl::queryPublishedTopicsInternal(
     return 0;
 }
 
+} // namespace omnibinder

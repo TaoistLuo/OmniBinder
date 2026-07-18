@@ -212,6 +212,47 @@ public:
         return hasOwnerThread() && owner_thread_id_ == std::this_thread::get_id();
     }
 
+    bool canRunInline() const {
+        return loop_ == NULL || !loop_owned_.load() || isOwnerThread();
+    }
+
+    template<typename F>
+    typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
+                            typename std::result_of<F()>::type>::type
+    invoke(F func) {
+        typedef typename std::result_of<F()>::type Result;
+        if (canRunInline()) {
+            return func();
+        }
+
+        std::shared_ptr< SyncCallState<Result> > state(new SyncCallState<Result>());
+        loop_->post([func, state]() {
+            state->completeSuccess(func());
+        });
+
+        ExecutionResult<Result> result = state->wait();
+        return result.ok() ? result.value() : Result();
+    }
+
+    template<typename F>
+    typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value,
+                            int>::type
+    invoke(F func) {
+        if (canRunInline()) {
+            func();
+            return 0;
+        }
+
+        std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
+        loop_->post([func, state]() {
+            func();
+            state->completeSuccess(0);
+        });
+
+        ExecutionResult<int> result = state->wait();
+        return result.ok() ? result.value() : -1;
+    }
+
     template<typename F>
     typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
                            typename std::result_of<F()>::type>::type

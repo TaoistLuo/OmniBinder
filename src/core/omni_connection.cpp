@@ -1,4 +1,9 @@
 #include "core/omni_runtime.h"
+#include "omnibinder/log.h"
+
+#define LOG_TAG "OmniRuntimeConnection"
+
+namespace omnibinder {
 
 // ============================================================
 // 连接管理
@@ -255,3 +260,4 @@ void OmniRuntime::Impl::sendHeartbeat() {
     }
 }
 
+} // namespace omnibinder

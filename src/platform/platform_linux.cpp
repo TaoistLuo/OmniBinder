@@ -27,6 +27,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <algorithm>
 
 
 #include <sys/time.h>
@@ -439,139 +440,175 @@ void shmUnlink(const std::string& name) {
 
 
 // ============================================================
-// handshake channel（用于 SHM eventfd 交换）
-// ============================================================
-
-
-
-// ============================================================
 // SHM 握手通道实现（Linux: AF_UNIX + SCM_RIGHTS）
 // ============================================================
-struct handshake_listener { int fd; };
+struct handshake_listener { int fd; std::string path; };
 struct handshake_channel   { int fd; };
 
-handshake_listener* handshakeListen(const std::string& name) {
-    int fd = shmHandshakeListenImpl(name, 8);
-    if (fd < 0) return NULL;
-    return new handshake_listener{fd};
+namespace {
+
+const uint32_t HANDSHAKE_MAGIC = 0x484E4453u;
+
+struct HandshakeHeader {
+    uint32_t magic;
+    uint32_t payload_len;
+    uint32_t fd_count;
+};
+
+bool validUnixPath(const std::string& path)
+{
+    return !path.empty() && path.size() < sizeof(sockaddr_un::sun_path);
 }
 
-// Internal: original implementation
-static int shmHandshakeListenImpl(const std::string& path, int backlog) {
-    // 清理残留
+bool sendAll(int fd, const char* data, size_t len)
+{
+    while (len > 0) {
+        ssize_t sent;
+        do {
+            sent = ::send(fd, data, len, MSG_NOSIGNAL);
+        } while (sent < 0 && errno == EINTR);
+        if (sent <= 0) return false;
+        data += sent;
+        len -= static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+bool recvAll(int fd, char* data, size_t len)
+{
+    while (len > 0) {
+        ssize_t received;
+        do {
+            received = ::recv(fd, data, len, 0);
+        } while (received < 0 && errno == EINTR);
+        if (received <= 0) return false;
+        data += received;
+        len -= static_cast<size_t>(received);
+    }
+    return true;
+}
+
+void closeReceivedFds(int* fds, int count)
+{
+    for (int i = 0; i < count; ++i) {
+        if (fds[i] >= 0) close(fds[i]);
+    }
+}
+
+} // namespace
+
+handshake_listener* handshakeListen(const std::string& path)
+{
+    if (!validUnixPath(path)) {
+        OMNI_LOG_ERROR(LOG_TAG, "Invalid handshake path length: %zu", path.size());
+        return NULL;
+    }
+
     ::unlink(path.c_str());
 
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS listen socket: %s", strerror(errno));
-        return -1;
+        return NULL;
     }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    memcpy(addr.sun_path, path.c_str(), path.size() + 1);
 
     if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "UDS bind failed on %s: %s", path.c_str(), strerror(errno));
         close(fd);
-        return -1;
+        return NULL;
     }
 
-    if (listen(fd, backlog) < 0) {
+    if (listen(fd, 8) < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "handshake listen failed on %s: %s", path.c_str(), strerror(errno));
         close(fd);
         ::unlink(path.c_str());
-        return -1;
+        return NULL;
     }
 
-    return fd;
+    handshake_listener* listener = new handshake_listener;
+    listener->fd = fd;
+    listener->path = path;
+    return listener;
 }
 
 handshake_channel* handshakeAccept(handshake_listener* listener) {
     if (!listener) return NULL;
-    int fd = shmHandshakeAcceptImpl(listener->fd);
-    if (fd < 0) return NULL;
-    return new handshake_channel{fd};
-}
-
-static int shmHandshakeAcceptImpl(int listen_fd) {
     int fd;
     do {
-        fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+        fd = accept4(listener->fd, NULL, NULL, SOCK_CLOEXEC);
     } while (fd < 0 && errno == EINTR);
-    return fd;
-}
-
-handshake_channel* handshakeConnect(const std::string& name) {
-    int fd = shmHandshakeConnectImpl(name);
     if (fd < 0) return NULL;
-    return new handshake_channel{fd};
+    handshake_channel* ch = new handshake_channel;
+    ch->fd = fd;
+    return ch;
 }
 
-static int shmHandshakeConnectImpl(const std::string& path) {
+handshake_channel* handshakeConnect(const std::string& path)
+{
+    if (!validUnixPath(path)) {
+        OMNI_LOG_ERROR(LOG_TAG, "Invalid handshake path length: %zu", path.size());
+        return NULL;
+    }
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS connect socket: %s", strerror(errno));
-        return -1;
+        return NULL;
     }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    memcpy(addr.sun_path, path.c_str(), path.size() + 1);
 
-    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+    int rc;
+    do {
+        rc = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    } while (rc < 0 && errno == EINTR);
+    if (rc < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "UDS connect failed to %s: %s", path.c_str(), strerror(errno));
         close(fd);
-        return -1;
+        return NULL;
     }
 
-    return fd;
+    handshake_channel* ch = new handshake_channel;
+    ch->fd = fd;
+    return ch;
 }
 
-void handshakeCloseListener(handshake_listener* listener) {
-    if (listener) { shmHandshakeCloseImpl(listener->fd); delete listener; }
+void handshakeCloseListener(handshake_listener* listener)
+{
+    if (!listener) return;
+    if (listener->fd >= 0) close(listener->fd);
+    if (!listener->path.empty()) ::unlink(listener->path.c_str());
+    delete listener;
 }
 
 bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
-                   const int* fds, int fd_count) {
-    if (!ch) return false;
-    return shmHandshakeSendFdsImpl(ch->fd, fds, fd_count, data, len);
-}
+                   const int* fds, int fd_count)
+{
+    if (!ch || len > HANDSHAKE_MAX_PAYLOAD || fd_count < 0 || fd_count > 2
+        || (len > 0 && !data) || (fd_count > 0 && !fds)) return false;
 
-static bool shmHandshakeSendFdsImpl(int fd, const int* fds, int fd_count,
-                const void* data, size_t data_len) {
-    // 至少需要 1 字节的 iov 数据（即使 data_len == 0）
-    char dummy = 0;
-    struct iovec iov;
-    if (data && data_len > 0) {
-        iov.iov_base = const_cast<void*>(data);
-        iov.iov_len = data_len;
-    } else {
-        iov.iov_base = &dummy;
-        iov.iov_len = 1;
-    }
+    HandshakeHeader header = {HANDSHAKE_MAGIC, static_cast<uint32_t>(len),
+                              static_cast<uint32_t>(fd_count)};
+    std::string frame(reinterpret_cast<const char*>(&header), sizeof(header));
+    if (len > 0) frame.append(static_cast<const char*>(data), len);
+
+    struct iovec iov = {const_cast<char*>(frame.data()), frame.size()};
 
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
 
-    char cmsg_buf[256];
+    char cmsg_buf[CMSG_SPACE(sizeof(int) * 2)];
     if (fd_count > 0) {
-        if (!fds) {
-            OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeSendFds: fd_count=%d but fds is NULL", fd_count);
-            return false;
-        }
-
-        // 构造 cmsg
         size_t cmsg_space = CMSG_SPACE(sizeof(int) * static_cast<size_t>(fd_count));
-        // 使用栈上分配（fd_count 最多 2-3 个，cmsg_space 很小）
-        if (cmsg_space > sizeof(cmsg_buf)) {
-            OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeSendFds: too many fds (%d)", fd_count);
-            return false;
-        }
         memset(cmsg_buf, 0, cmsg_space);
         msg.msg_control = cmsg_buf;
         msg.msg_controllen = cmsg_space;
@@ -585,102 +622,104 @@ static bool shmHandshakeSendFdsImpl(int fd, const int* fds, int fd_count,
 
     ssize_t ret;
     do {
-        ret = sendmsg(fd, &msg, MSG_NOSIGNAL);
+        ret = sendmsg(ch->fd, &msg, MSG_NOSIGNAL);
     } while (ret < 0 && errno == EINTR);
 
     if (ret < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeSendFds failed: %s", strerror(errno));
+        OMNI_LOG_ERROR(LOG_TAG, "handshakeSend failed: %s", strerror(errno));
         return false;
     }
-    return true;
+    size_t sent = static_cast<size_t>(ret);
+    return sent == frame.size() || sendAll(ch->fd, frame.data() + sent, frame.size() - sent);
 }
 
 bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
-                   int* fds, int max_fds, int* out_fd_count) {
-    if (!ch) return false;
-    return shmHandshakeRecvFdsImpl(ch->fd, fds, max_fds, buf, bufsz, out_len, out_fd_count);
-}
+                   int* fds, int max_fds, int* out_fd_count)
+{
+    if (out_len) *out_len = 0;
+    if (out_fd_count) *out_fd_count = 0;
+    if (fds && max_fds > 0) std::fill(fds, fds + max_fds, -1);
+    if (!ch || max_fds < 0 || max_fds > 2 || (max_fds > 0 && !fds)) return false;
 
-static bool shmHandshakeRecvFdsImpl(int fd, int* fds, int fd_count,
-                void* buf, size_t buf_size, size_t* out_data_len) {
-    char dummy;
-    struct iovec iov;
-    if (buf && buf_size > 0) {
-        iov.iov_base = buf;
-        iov.iov_len = buf_size;
-    } else {
-        iov.iov_base = &dummy;
-        iov.iov_len = 1;
-    }
-
-    size_t cmsg_space = CMSG_SPACE(sizeof(int) * static_cast<size_t>(fd_count));
-    char cmsg_buf[256];
-    if (cmsg_space > sizeof(cmsg_buf)) {
-        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeRecvFds: too many fds (%d)", fd_count);
-        return false;
-    }
-    memset(cmsg_buf, 0, cmsg_space);
+    HandshakeHeader header = {};
+    struct iovec iov = {&header, sizeof(header)};
+    char cmsg_buf[CMSG_SPACE(sizeof(int) * 2)];
+    memset(cmsg_buf, 0, sizeof(cmsg_buf));
 
     struct msghdr msg;
     memset(&msg, 0, sizeof(msg));
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
     msg.msg_control = cmsg_buf;
-    msg.msg_controllen = cmsg_space;
+    msg.msg_controllen = sizeof(cmsg_buf);
 
     ssize_t ret;
     do {
-        ret = recvmsg(fd, &msg, 0);
+        ret = recvmsg(ch->fd, &msg, MSG_CMSG_CLOEXEC | MSG_WAITALL);
     } while (ret < 0 && errno == EINTR);
 
     if (ret < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeRecvFds failed: %s", strerror(errno));
+        OMNI_LOG_ERROR(LOG_TAG, "handshakeRecv failed: %s", strerror(errno));
+        return false;
+    }
+    int received_fds[2] = {-1, -1};
+    int received_count = 0;
+    bool ancillary_valid = (msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) == 0;
+    for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg;
+         cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS
+            || cmsg->cmsg_len < CMSG_LEN(0)) {
+            ancillary_valid = false;
+            continue;
+        }
+        size_t bytes = cmsg->cmsg_len - CMSG_LEN(0);
+        if (bytes % sizeof(int) != 0 || bytes / sizeof(int) > 2
+            || received_count != 0) {
+            ancillary_valid = false;
+            continue;
+        }
+        received_count = static_cast<int>(bytes / sizeof(int));
+        memcpy(received_fds, CMSG_DATA(cmsg), bytes);
+    }
+
+    if (ret > 0 && ret < static_cast<ssize_t>(sizeof(header))
+        && !recvAll(ch->fd, reinterpret_cast<char*>(&header) + ret,
+                    sizeof(header) - static_cast<size_t>(ret))) {
+        closeReceivedFds(received_fds, received_count);
         return false;
     }
 
-    if (out_data_len) {
-        *out_data_len = static_cast<size_t>(ret);
+    if (ret <= 0 || header.magic != HANDSHAKE_MAGIC
+        || header.payload_len > HANDSHAKE_MAX_PAYLOAD || header.fd_count > 2
+        || static_cast<int>(header.fd_count) != received_count || !ancillary_valid
+        || header.payload_len > bufsz || (header.payload_len > 0 && !buf)
+        || received_count > max_fds) {
+        closeReceivedFds(received_fds, received_count);
+        return false;
     }
-
-    // 提取 fd
-    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-    if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-        memcpy(fds, CMSG_DATA(cmsg), sizeof(int) * static_cast<size_t>(fd_count));
-        return true;
+    std::string payload(header.payload_len, '\0');
+    if (header.payload_len > 0
+        && !recvAll(ch->fd, &payload[0], header.payload_len)) {
+        closeReceivedFds(received_fds, received_count);
+        return false;
     }
-
-    // No SCM_RIGHTS in message — valid for data-only datagrams (e.g., SHM name exchange)
-    if (fd_count > 0) {
-        OMNI_LOG_DEBUG(LOG_TAG, "shmHandshakeRecvFds: no SCM_RIGHTS in message");
-    }
-    for (int i = 0; i < fd_count; ++i) {
-        fds[i] = -1;
-    }
-    return false;
+    if (header.payload_len > 0) memcpy(buf, payload.data(), header.payload_len);
+    for (int i = 0; i < received_count; ++i) fds[i] = received_fds[i];
+    if (out_len) *out_len = header.payload_len;
+    if (out_fd_count) *out_fd_count = received_count;
+    return true;
 }
 
-// Internal: original SendResponse — only called by server after Recv
-static bool shmHandshakeSendResponseImpl(int client_fd, int resp_eventfd, int master_eventfd,
-                           int* out_new_fd) {
-    *out_new_fd = -1;
-    int fds[2] = { resp_eventfd, master_eventfd };
-    return shmHandshakeSendFdsImpl(client_fd, fds, 2, NULL, 0);
+int handshakeTakeLocalNotifyFd(handshake_channel*)
+{
+    return -1;
 }
 
-void handshakeClose(handshake_channel* ch) {
-    if (ch) { shmHandshakeCloseImpl(ch->fd); delete ch; }
-}
-
-static void shmHandshakeCloseImpl(int fd) {
-    if (fd >= 0) {
-        close(fd);
-    }
-}
-
-void handshakeCleanup(const std::string& name) { shmHandshakeCleanupImpl(name); }
-
-static void shmHandshakeCleanupImpl(const std::string& path) {
-    ::unlink(path.c_str());
+void handshakeClose(handshake_channel* ch)
+{
+    if (!ch) return;
+    if (ch->fd >= 0) close(ch->fd);
+    delete ch;
 }
 
 // ============================================================
@@ -793,7 +832,7 @@ void setupSignalHandlers(SignalHandler handler) {
 
 
 int handshakeGetFd(handshake_channel* ch) {
-    return ch ? -1 : -1;  // Linux: channel is transient, no persistent fd after close
+    return ch ? ch->fd : -1;
 }
 
 int handshakeGetListenerFd(handshake_listener* listener) {

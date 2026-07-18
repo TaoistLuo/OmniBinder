@@ -5,7 +5,7 @@
 #include "omnibinder/log.h"
 #include "omnibinder/message.h"
 #include "core/event_loop.h"
-#include "platform/platform.h"
+#include "transport/tcp_transport.h"
 #include "service_registry.h"
 #include "heartbeat_monitor.h"
 #include "death_notifier.h"
@@ -13,8 +13,8 @@
 #include <string>
 #include <map>
 #include <vector>
-#include <memory>
-#include <set>
+
+namespace omnibinder {
 
 struct ClientConnection {
     int fd;
@@ -50,11 +50,17 @@ struct ClientConnection {
 };
 
 class ServiceManagerApp {
+public:
+    ServiceManagerApp();
+    ~ServiceManagerApp();
+
     int shutdownFd() const;
     bool init(const std::string& host, uint16_t port);
     void run();
     void stop();
     void cleanup();
+
+private:
     void onAccept();
     void onClientEvent(int fd, uint32_t events);
     void onClientRead(ClientConnection* conn);
@@ -102,7 +108,6 @@ class ServiceManagerApp {
     void enableClientWriteEvents(ClientConnection* conn);
     void disableClientWriteEvents(ClientConnection* conn);
 
-private:
     EventLoop loop_;
     TcpTransportServer* server_;
     std::map<int, ClientConnection*> clients_;
@@ -116,5 +121,7 @@ private:
     uint32_t heartbeat_timer_id_;
     int shutdown_fd_;
 };
+
+} // namespace omnibinder
 
 #endif

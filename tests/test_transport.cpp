@@ -1,12 +1,10 @@
 #include <gtest/gtest.h>
 #include "transport/tcp_transport.h"
+#include "transport/transport_selector.h"
 #include "platform/platform.h"
-
-namespace {
-bool isSameMachine(const std::string& a, const std::string& b) {
-    return !a.empty() && !b.empty() && a == b;
-}
-}
+#ifndef _WIN32
+#include <sys/socket.h>
+#endif
 
 using namespace omnibinder;
 
@@ -107,13 +105,20 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
 }
 
 TEST_F(TransportTest, TransportPolicySameMachinePrefersShm) {
-    EXPECT_TRUE(isSameMachine("host-A", "host-A"));
+    EXPECT_EQ(chooseTransportPolicy("host-A", "host-A"),
+              TransportSelectionPolicy::PREFER_SHM);
 }
 
 TEST_F(TransportTest, TransportPolicyCrossMachineUsesTcp) {
-    EXPECT_FALSE(isSameMachine("host-A", "host-B"));
+    EXPECT_EQ(chooseTransportPolicy("host-A", "host-B"),
+              TransportSelectionPolicy::USE_TCP);
 }
 
 TEST_F(TransportTest, TransportPolicyEmptyHostIdsUsesTcp) {
-    EXPECT_FALSE(isSameMachine("", ""));
+    EXPECT_EQ(chooseTransportPolicy("", ""),
+              TransportSelectionPolicy::USE_TCP);
+    EXPECT_EQ(chooseTransportPolicy("host-A", ""),
+              TransportSelectionPolicy::USE_TCP);
+    EXPECT_EQ(chooseTransportPolicy("", "host-A"),
+              TransportSelectionPolicy::USE_TCP);
 }

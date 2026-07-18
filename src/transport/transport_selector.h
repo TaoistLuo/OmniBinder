@@ -10,6 +10,15 @@ namespace omnibinder {
 
 class ITransport;
 
+enum class TransportSelectionPolicy {
+    PREFER_SHM,
+    USE_TCP
+};
+
+TransportSelectionPolicy chooseTransportPolicy(
+    const std::string& local_host_id,
+    const std::string& remote_host_id);
+
 // 传输选择 — 扩展点。
 // 当前: 同机优先 SHM，失败/跨机使用 TCP。
 // 如需添加新传输 (如 I2C/UDP/RDMA)，在此函数中扩展。

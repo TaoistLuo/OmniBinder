@@ -1,4 +1,11 @@
 #include "core/omni_runtime.h"
+#include "core/omni_runtime_helpers.h"
+#include "omnibinder/buffer_view.h"
+#include "omnibinder/log.h"
+
+#define LOG_TAG "OmniRuntimeTopic"
+
+namespace omnibinder {
 
 // ============================================================
 // 死亡通知
@@ -378,3 +385,4 @@ int OmniRuntime::Impl::unsubscribeTopicInternal(const std::string& topic_name) {
     return 0;
 }
 
+} // namespace omnibinder

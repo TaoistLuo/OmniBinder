@@ -40,6 +40,7 @@
 #include <memory>
 #include <type_traits>
 #include <thread>
+#include <set>
 
 namespace omnibinder {
 
@@ -225,6 +226,26 @@ private:
     Impl(const Impl&);
     Impl& operator=(const Impl&);
 
+    struct ReconnectConfig {
+        bool     enabled;
+        uint32_t interval_ms;
+        uint32_t max_retries;
+        uint32_t current_retry;
+        uint32_t timer_id;
+        ReconnectConfig() : enabled(true), interval_ms(1000),
+                            max_retries(0), current_retry(0), timer_id(0) {}
+    };
+
+    struct HeartbeatState {
+        uint32_t interval_ms;
+        uint32_t timeout_ms;
+        uint32_t timer_id;
+        int64_t  last_ack_time;
+        bool     pending;
+        HeartbeatState() : interval_ms(5000), timeout_ms(10000),
+                           timer_id(0), last_ack_time(0), pending(false) {}
+    };
+
     // ============================================================
     // SM 协议 — 控制面底层通信
     // ============================================================
@@ -249,6 +270,8 @@ private:
     // ============================================================
     void onServiceAccept(const std::string& name, int listen_fd, uint32_t events);
     void onServiceClientData(const std::string& name, int client_fd, uint32_t events);
+    void processServiceClientMessages(const std::string& name,
+                                      LocalServiceEntry* entry, int client_fd);
     void onShmRequest(const std::string& name, LocalServiceEntry* entry,
                       uint32_t client_id, const uint8_t* data, size_t length);
     InvokeDispatchResult dispatchLocalInvoke(Service* service, const Message& msg,
@@ -354,26 +377,6 @@ private:
     Service*     diag_data_service_;
     uint32_t     diag_watch_topic_id_;
 
-    // 内嵌结构体
-    struct ReconnectConfig {
-        bool     enabled;
-        uint32_t interval_ms;
-        uint32_t max_retries;
-        uint32_t current_retry;
-        uint32_t timer_id;
-        ReconnectConfig() : enabled(true), interval_ms(1000),
-                           max_retries(0), current_retry(0), timer_id(0) {}
-    };
-
-    struct HeartbeatState {
-        uint32_t interval_ms;
-        uint32_t timeout_ms;
-        uint32_t timer_id;
-        int64_t  last_ack_time;
-        bool     pending;
-        HeartbeatState() : interval_ms(5000), timeout_ms(10000),
-                          timer_id(0), last_ack_time(0), pending(false) {}
-    };
 };
 
 template<typename F>

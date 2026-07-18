@@ -12,18 +12,18 @@ namespace omnibinder {
 // ============================================================
 
 TcpTransport::TcpTransport()
-    : fd_(INVALID_SOCKET_FD)
+    : fd_(platform::INVALID_SOCKET_FD)
     , state_(ConnectionState::DISCONNECTED)
     , remote_port_(0)
 {
 }
 
-TcpTransport::TcpTransport(SocketFd connected_fd)
+TcpTransport::TcpTransport(platform::SocketFd connected_fd)
     : fd_(connected_fd)
     , state_(ConnectionState::DISCONNECTED)
     , remote_port_(0)
 {
-    if (fd_ != INVALID_SOCKET_FD) {
+    if (fd_ != platform::INVALID_SOCKET_FD) {
         platform::setNonBlocking(fd_);
         platform::setTcpNoDelay(fd_);
         platform::setKeepAlive(fd_);
@@ -46,7 +46,7 @@ int TcpTransport::connect(const std::string& host, uint16_t port)
     }
 
     fd_ = platform::createTcpSocket();
-    if (fd_ == INVALID_SOCKET_FD) {
+    if (fd_ == platform::INVALID_SOCKET_FD) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create socket for connect to %s:%u",
                          host.c_str(), port);
         state_ = ConnectionState::ERROR;
@@ -78,7 +78,7 @@ int TcpTransport::connect(const std::string& host, uint16_t port)
         OMNI_LOG_ERROR(LOG_TAG, "Failed to connect to %s:%u (error=%d)",
                          host.c_str(), port, platform::getSocketError());
         platform::closeSocket(fd_);
-        fd_ = INVALID_SOCKET_FD;
+        fd_ = platform::INVALID_SOCKET_FD;
         state_ = ConnectionState::ERROR;
         return -1;
     }
@@ -169,10 +169,10 @@ int TcpTransport::recv(uint8_t* buf, size_t buf_size)
 
 void TcpTransport::close()
 {
-    if (fd_ != INVALID_SOCKET_FD) {
+    if (fd_ != platform::INVALID_SOCKET_FD) {
         OMNI_LOG_DEBUG(LOG_TAG, "Closing fd=%d", static_cast<int>(fd_));
         platform::closeSocket(fd_);
-        fd_ = INVALID_SOCKET_FD;
+        fd_ = platform::INVALID_SOCKET_FD;
     }
     state_ = ConnectionState::DISCONNECTED;
 }
@@ -226,7 +226,7 @@ bool TcpTransport::checkConnectComplete()
 // ============================================================
 
 TcpTransportServer::TcpTransportServer()
-    : listen_fd_(INVALID_SOCKET_FD)
+    : listen_fd_(platform::INVALID_SOCKET_FD)
     , listen_port_(0)
 {
 }
@@ -238,13 +238,13 @@ TcpTransportServer::~TcpTransportServer()
 
 int TcpTransportServer::listen(const std::string& host, uint16_t port)
 {
-    if (listen_fd_ != INVALID_SOCKET_FD) {
+    if (listen_fd_ != platform::INVALID_SOCKET_FD) {
         OMNI_LOG_WARN(LOG_TAG, "listen() called while already listening, closing old socket");
         close();
     }
 
     listen_fd_ = platform::createTcpSocket();
-    if (listen_fd_ == INVALID_SOCKET_FD) {
+    if (listen_fd_ == platform::INVALID_SOCKET_FD) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create listen socket");
         return -1;
     }
@@ -256,21 +256,21 @@ int TcpTransportServer::listen(const std::string& host, uint16_t port)
     if (!platform::setNonBlocking(listen_fd_)) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to set non-blocking on listen socket");
         platform::closeSocket(listen_fd_);
-        listen_fd_ = INVALID_SOCKET_FD;
+        listen_fd_ = platform::INVALID_SOCKET_FD;
         return -1;
     }
 
     if (!platform::bindSocket(listen_fd_, host, port)) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to bind on %s:%u", host.c_str(), port);
         platform::closeSocket(listen_fd_);
-        listen_fd_ = INVALID_SOCKET_FD;
+        listen_fd_ = platform::INVALID_SOCKET_FD;
         return -1;
     }
 
     if (!platform::listenSocket(listen_fd_)) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to listen on %s:%u", host.c_str(), port);
         platform::closeSocket(listen_fd_);
-        listen_fd_ = INVALID_SOCKET_FD;
+        listen_fd_ = platform::INVALID_SOCKET_FD;
         return -1;
     }
 
@@ -286,12 +286,12 @@ int TcpTransportServer::listen(const std::string& host, uint16_t port)
 
 void TcpTransportServer::close()
 {
-    if (listen_fd_ != INVALID_SOCKET_FD) {
+    if (listen_fd_ != platform::INVALID_SOCKET_FD) {
         OMNI_LOG_INFO(LOG_TAG, "Closing listen socket fd=%d (%s:%u)",
                         static_cast<int>(listen_fd_),
                         listen_host_.c_str(), listen_port_);
         platform::closeSocket(listen_fd_);
-        listen_fd_ = INVALID_SOCKET_FD;
+        listen_fd_ = platform::INVALID_SOCKET_FD;
     }
     listen_port_ = 0;
 }
@@ -308,16 +308,16 @@ int TcpTransportServer::fd() const
 
 ITransport* TcpTransportServer::accept()
 {
-    if (listen_fd_ == INVALID_SOCKET_FD) {
+    if (listen_fd_ == platform::INVALID_SOCKET_FD) {
         OMNI_LOG_ERROR(LOG_TAG, "accept() called on closed server");
         return NULL;
     }
 
     std::string remote_host;
     uint16_t remote_port = 0;
-    SocketFd client_fd = platform::acceptSocket(listen_fd_, remote_host, remote_port);
+    platform::SocketFd client_fd = platform::acceptSocket(listen_fd_, remote_host, remote_port);
 
-    if (client_fd == INVALID_SOCKET_FD) {
+    if (client_fd == platform::INVALID_SOCKET_FD) {
         // EAGAIN/EWOULDBLOCK is normal for non-blocking accept, not an error
         int err = platform::getSocketError();
         if (!platform::isWouldBlock(err)) {

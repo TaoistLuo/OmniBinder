@@ -115,7 +115,7 @@ ShmTransport::ShmTransport(const std::string& shm_name, bool is_server,
     , req_eventfd_(-1)
     , event_fd_(-1)
     , peer_notify_fd_(-1)
-    , handshake_listen_fd_(-1)
+    , handshake_listener_(NULL)
     , eventfd_enabled_(false)
     , next_client_id_(1)
 {
@@ -140,8 +140,8 @@ bool ShmTransport::initServer()
 {
     // Create 握手 listen socket for client handshake
     handshake_path_ = getHandshakePath(shm_name_);
-    handshake_listen_fd_ = platform::shmHandshakeListen(handshake_path_);
-    if (handshake_listen_fd_ < 0) {
+    handshake_listener_ = platform::handshakeListen(handshake_path_);
+    if (!handshake_listener_) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create 握手 listen for '%s'", shm_name_.c_str());
         return false;
     }
@@ -150,9 +150,8 @@ bool ShmTransport::initServer()
     req_eventfd_ = platform::createEventFd();
     if (req_eventfd_ < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create master req_eventfd for '%s'", shm_name_.c_str());
-        platform::handshakeCloseListener(handshake_listener_); handshake_listener_ = NULL;
-        
-        platform::handshakeCleanup(handshake_path);
+        platform::handshakeCloseListener(handshake_listener_);
+        handshake_listener_ = NULL;
         handshake_path_.clear();
         return false;
     }
@@ -160,7 +159,7 @@ bool ShmTransport::initServer()
     eventfd_enabled_ = true;
 
     OMNI_LOG_INFO(LOG_TAG, "Server listening on 握手通道 '%s' (fd=%d, req_eventfd=%d)",
-                    handshake_path_.c_str(), handshake_listen_fd_, req_eventfd_);
+                    handshake_path_.c_str(), handshakeListenFd(), req_eventfd_);
     return true;
 }
 
@@ -236,7 +235,7 @@ bool ShmTransport::initClient()
 
     // Connect to server via handshake
     std::string path = getHandshakePath(server_name);
-    int fd = platform::shmHandshakeConnect(path);
+    platform::handshake_channel* ch = platform::handshakeConnect(path);
     if (!ch) {
         OMNI_LOG_WARN(LOG_TAG, "握手 connect failed for '%s', falling back from SHM",
                         server_name.c_str());
@@ -247,8 +246,7 @@ bool ShmTransport::initClient()
     // Step 1: Send SHM name to server (no fds — server-side master eventfd
     //         will be sent to us in Step 2 for client→server notification)
     {
-        if (!platform::shmHandshakeSendFds(fd, NULL, 0,
-                                   shm_name_.c_str(), shm_name_.size())) {
+        if (!platform::handshakeSend(ch, shm_name_.data(), shm_name_.size(), NULL, 0)) {
             OMNI_LOG_WARN(LOG_TAG, "握手 send name failed for client '%s', falling back",
                             shm_name_.c_str());
             platform::handshakeClose(ch);
@@ -262,9 +260,16 @@ bool ShmTransport::initClient()
     //         master_eventfd → client notifies this when writing request → wakes server epoll
     {
         int recv_fds[2] = {-1, -1};
-        if (!platform::shmHandshakeRecvFds(fd, recv_fds, 2, NULL, 0, NULL)) {
+        size_t response_len = 0;
+        int recv_fd_count = 0;
+        if (!platform::handshakeRecv(ch, NULL, 0, &response_len,
+                                     recv_fds, 2, &recv_fd_count)
+            || response_len != 0 || recv_fd_count != 2) {
             OMNI_LOG_WARN(LOG_TAG, "握手 recv fds failed for client '%s', falling back",
                             shm_name_.c_str());
+            for (int i = 0; i < recv_fd_count; ++i) {
+                if (recv_fds[i] >= 0) platform::closeEventFd(recv_fds[i]);
+            }
             platform::handshakeClose(ch);
             cleanup();
             return false;
@@ -461,15 +466,18 @@ void ShmTransport::cleanup()
             req_eventfd_ = -1;
         }
 
-        // Close 握手 listen socket
+        for (std::vector<int>::iterator it = local_notify_fds_.begin();
+             it != local_notify_fds_.end(); ++it) {
+            platform::closeEventFd(*it);
+        }
+        local_notify_fds_.clear();
+
+        // Close handshake listener and remove its endpoint.
         if (handshake_listener_) {
-            platform::handshakeCloseListener(handshake_listener_); handshake_listener_ = NULL;
-            
+            platform::handshakeCloseListener(handshake_listener_);
+            handshake_listener_ = NULL;
         }
-        if (!handshake_path.empty()) {
-            platform::handshakeCleanup(handshake_path);
-            handshake_path_.clear();
-        }
+        handshake_path_.clear();
     } else {
         // Client: close eventfds
         if (peer_notify_fd_ >= 0) {
@@ -879,30 +887,28 @@ std::vector<uint32_t> ShmTransport::activeClientIds() const
 
 void ShmTransport::onHandshakeClientConnect()
 {
-    int client_fd = platform::shmHandshakeAccept(handshake_listen_fd_);
-    if (client_fd < 0) {
+    platform::handshake_channel* ch = platform::handshakeAccept(handshake_listener_);
+    if (!ch) {
         return;
     }
 
-    // Step 1: Receive SHM name from the client (no fds expected;
-    //         shmHandshakeRecvFds returns false when no SCM_RIGHTS, but data is still received)
-    int client_fds[1] = {-1};
+    // Step 1: Receive SHM name from the client; no handles are allowed.
     char name_buf[256] = {0};
     size_t data_len = 0;
-
-    bool has_fd = platform::shmHandshakeRecvFds(client_fd, client_fds, 1,
-                                        name_buf, sizeof(name_buf) - 1, &data_len);
+    int fd_count = 0;
+    if (!platform::handshakeRecv(ch, name_buf, sizeof(name_buf) - 1, &data_len,
+                                 NULL, 0, &fd_count)
+        || fd_count != 0 || data_len == 0) {
+        OMNI_LOG_WARN(LOG_TAG, "handshake: invalid client request");
+        platform::handshakeClose(ch);
+        return;
+    }
 
     std::string client_shm_name(name_buf, data_len);
 
-    // If client sent an fd (legacy or misbehaving), close it — we don't need it
-    if (has_fd && client_fds[0] >= 0) {
-        platform::closeEventFd(client_fds[0]);
-    }
-
     if (client_shm_name.empty()) {
         OMNI_LOG_WARN(LOG_TAG, "handshake: empty SHM name from client");
-        platform::shmHandshakeClose(client_fd);
+        platform::handshakeClose(ch);
         return;
     }
 
@@ -913,7 +919,7 @@ void ShmTransport::onHandshakeClientConnect()
     if (addr == NULL) {
         OMNI_LOG_WARN(LOG_TAG, "handshake: failed to open client SHM '%s'",
                         client_shm_name.c_str());
-        platform::shmHandshakeClose(client_fd);
+        platform::handshakeClose(ch);
         return;
     }
 
@@ -923,7 +929,7 @@ void ShmTransport::onHandshakeClientConnect()
         OMNI_LOG_WARN(LOG_TAG, "handshake: invalid SHM magic 0x%08X for '%s'",
                         ctrl->magic, client_shm_name.c_str());
         platform::shmDetach(addr, try_size);
-        platform::shmHandshakeClose(client_fd);
+        platform::handshakeClose(ch);
         return;
     }
 
@@ -931,7 +937,7 @@ void ShmTransport::onHandshakeClientConnect()
         OMNI_LOG_WARN(LOG_TAG, "handshake: unsupported SHM version %u for '%s'",
                         ctrl->version, client_shm_name.c_str());
         platform::shmDetach(addr, try_size);
-        platform::shmHandshakeClose(client_fd);
+        platform::handshakeClose(ch);
         return;
     }
 
@@ -942,7 +948,7 @@ void ShmTransport::onHandshakeClientConnect()
                       ctrl->req_ring_capacity, ctrl->resp_ring_capacity,
                       client_shm_name.c_str());
         platform::shmDetach(addr, try_size);
-        platform::shmHandshakeClose(client_fd);
+        platform::handshakeClose(ch);
         return;
     }
     if (exact_size > try_size) {
@@ -951,7 +957,7 @@ void ShmTransport::onHandshakeClientConnect()
         if (addr == NULL) {
             OMNI_LOG_WARN(LOG_TAG, "handshake: failed to re-open client SHM '%s' with exact size",
                             client_shm_name.c_str());
-            platform::shmHandshakeClose(client_fd);
+            platform::handshakeClose(ch);
             return;
         }
         ctrl = reinterpret_cast<ShmControlBlock*>(addr);
@@ -959,7 +965,7 @@ void ShmTransport::onHandshakeClientConnect()
             OMNI_LOG_WARN(LOG_TAG, "handshake: SHM control block mismatch after remap for '%s'",
                             client_shm_name.c_str());
             platform::shmDetach(addr, exact_size);
-            platform::shmHandshakeClose(client_fd);
+            platform::handshakeClose(ch);
             return;
         }
     }
@@ -981,7 +987,7 @@ void ShmTransport::onHandshakeClientConnect()
             OMNI_LOG_WARN(LOG_TAG, "handshake: SHM ring header mismatch for '%s'",
                             client_shm_name.c_str());
             platform::shmDetach(addr, exact_size);
-            platform::shmHandshakeClose(client_fd);
+            platform::handshakeClose(ch);
             return;
         }
     }
@@ -992,31 +998,33 @@ void ShmTransport::onHandshakeClientConnect()
         OMNI_LOG_WARN(LOG_TAG, "handshake: failed to create resp_eventfd for client '%s'",
                         client_shm_name.c_str());
         platform::shmDetach(addr, exact_size);
-        platform::shmHandshakeClose(client_fd);
+        platform::handshakeClose(ch);
         return;
     }
 
-    // Step 3: Send eventfd(s) back to client via platform-specific mechanism.
+    // Step 3: Send exactly [response notify, request notify]. The platform
+    // may substitute a server-owned local request notification internally.
     //         resp_eventfd → client epoll wakes when server writes response
     //         Linux: platform sends shared master_eventfd
-    //         Windows: platform creates per-client pipe and returns it via out_new_fd
+    //         Windows: platform creates and exposes a per-client local notify descriptor
     {
-        int new_server_fd = -1;
-        if (!platform::shmHandshakeSendResponse(client_fd, resp_efd, req_eventfd_,
-                                              &new_server_fd)) {
+        int response_fds[2] = {resp_efd, req_eventfd_};
+        if (!platform::handshakeSend(ch, NULL, 0, response_fds, 2)) {
             OMNI_LOG_WARN(LOG_TAG, "handshake: failed to send eventfds to client '%s'",
                             client_shm_name.c_str());
             platform::shmDetach(addr, exact_size);
             platform::closeEventFd(resp_efd);
-            platform::shmHandshakeClose(client_fd);
+            platform::handshakeClose(ch);
             return;
         }
-        if (new_server_fd >= 0 && on_new_client_fd_cb_) {
-            on_new_client_fd_cb_(new_server_fd);
+        int local_notify_fd = platform::handshakeTakeLocalNotifyFd(ch);
+        if (local_notify_fd >= 0) {
+            local_notify_fds_.push_back(local_notify_fd);
+            if (on_new_client_fd_cb_) on_new_client_fd_cb_(local_notify_fd);
         }
     }
 
-    platform::shmHandshakeClose(client_fd);
+    platform::handshakeClose(ch);
 
     // Assign client ID and store context
     uint32_t assigned_id = next_client_id_++;

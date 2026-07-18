@@ -83,16 +83,11 @@ void stopProcess(TestPid pid) {
 
 bool waitPortReady(uint16_t port, int timeout_sec) {
     for (int i = 0; i < timeout_sec * 10; ++i) {
-        SocketFd fd = platform::createTcpSocket();
-        if (fd != INVALID_SOCKET_FD) {
-            struct sockaddr_in addr;
-            memset(&addr, 0, sizeof(addr));
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(port);
-            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            int result = ::connect(fd, (struct sockaddr*)&addr, sizeof(addr));
+        platform::SocketFd fd = platform::createTcpSocket();
+        if (fd != platform::INVALID_SOCKET_FD) {
+            int result = platform::connectSocket(fd, "127.0.0.1", port);
             platform::closeSocket(fd);
-            if (result == 0) return true;
+            if (result >= 0) return true;
         }
         platform::sleepMs(100);
     }

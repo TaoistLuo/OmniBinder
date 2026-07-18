@@ -57,7 +57,7 @@ public:
     TcpTransport();
 
     // Create a transport from an already-connected socket (from accept)
-    explicit TcpTransport(SocketFd connected_fd);
+    explicit TcpTransport(platform::SocketFd connected_fd);
 
     virtual ~TcpTransport();
 
@@ -80,7 +80,7 @@ public:
     bool checkConnectComplete();
 
 private:
-    SocketFd         fd_;
+    platform::SocketFd fd_;
     ConnectionState  state_;
     std::string      remote_host_;
     uint16_t         remote_port_;
@@ -110,7 +110,7 @@ public:
     virtual ITransport* accept();
 
 private:
-    SocketFd    listen_fd_;
+    platform::SocketFd listen_fd_;
     uint16_t    listen_port_;
     std::string listen_host_;
 };

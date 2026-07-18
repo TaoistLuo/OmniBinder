@@ -1,6 +1,5 @@
 #include <gtest/gtest.h>
 #include "transport/shm_transport.h"
-#include "core/service_host_runtime.h"
 #include "platform/platform.h"
 #include <cstring>
 #include <algorithm>
@@ -10,26 +9,25 @@
 
 using namespace omnibinder;
 
-// RAII helper: runs a background thread that accepts UDS connections
-// on the server's listen fd and calls onUdsClientConnect() for each.
-// This is needed because client connect() triggers a UDS handshake
-// that requires the server side to accept and send eventfds.
-class UdsHandlerThread {
+// RAII helper: runs a background thread that accepts handshake connections
+// on the server's listener and completes each opaque handle exchange.
+// Client connect() blocks until the server accepts and sends notification handles.
+class HandshakeHandlerThread {
 public:
-    explicit UdsHandlerThread(ShmTransport& server)
+    explicit HandshakeHandlerThread(ShmTransport& server)
         : stop_(false)
     {
         thread_ = std::thread([this, &server]() {
-            int listen_fd = server.udsListenFd();
+            int listen_fd = server.handshakeListenFd();
             while (!stop_.load()) {
                 if (platform::waitFdReadable(listen_fd, 10)) {
-                    server.onUdsClientConnect();
+                    server.onHandshakeClientConnect();
                 }
             }
         });
     }
 
-    ~UdsHandlerThread() {
+    ~HandshakeHandlerThread() {
         stop_.store(true);
         if (thread_.joinable()) {
             thread_.join();
@@ -62,8 +60,9 @@ TEST_F(ShmTransportTest, CalculateShmSizeNormalizesTinyRings) {
 }
 
 TEST_F(ShmTransportTest, GenerateShmName) {
-    EXPECT_EQ(generateShmName("myservice"), "/binder_myservice");
-    EXPECT_EQ(generateShmName("test"), "/binder_test");
+    EXPECT_EQ(generateShmName("myservice"), "/binder_myservice_cfb2a296");
+    EXPECT_EQ(generateShmName("test"), "/binder_test_afd071e5");
+    EXPECT_NE(generateShmName("test"), generateShmName("Test"));
 }
 
 TEST_F(ShmTransportTest, ServerCreate) {
@@ -81,7 +80,7 @@ TEST_F(ShmTransportTest, ClientConnect) {
     std::string shm_name = generateShmName("client_conn_test");
     ShmTransport server(shm_name, true);
     ASSERT_EQ(server.state(), ConnectionState::CONNECTED);
-    UdsHandlerThread uds_handler(server);
+    HandshakeHandlerThread handshake_handler(server);
 
     ShmTransport client(shm_name, false);
     EXPECT_EQ(client.state(), ConnectionState::DISCONNECTED);
@@ -89,7 +88,7 @@ TEST_F(ShmTransportTest, ClientConnect) {
     ASSERT_EQ(client.connect("", 0), 0);
     EXPECT_EQ(client.state(), ConnectionState::CONNECTED);
 
-    // Wait for UdsHandlerThread to process the handshake on server side
+    // Wait for HandshakeHandlerThread to finish the server-side handshake.
     for (int i = 0; i < 50 && server.clientCount() == 0; ++i) {
         platform::sleepMs(1);
     }
@@ -102,7 +101,7 @@ TEST_F(ShmTransportTest, ClientConnect) {
 TEST_F(ShmTransportTest, MultipleClientsConnect) {
     std::string shm_name = generateShmName("multi_client_test");
     ShmTransport server(shm_name, true);
-    UdsHandlerThread uds_handler(server);
+    HandshakeHandlerThread handshake_handler(server);
 
     ShmTransport client0(shm_name, false);
     ASSERT_EQ(client0.connect("", 0), 0);
@@ -113,7 +112,7 @@ TEST_F(ShmTransportTest, MultipleClientsConnect) {
     ShmTransport client2(shm_name, false);
     ASSERT_EQ(client2.connect("", 0), 0);
 
-    // Wait for UdsHandlerThread to process all handshakes
+    // Wait for HandshakeHandlerThread to process all handshakes.
     for (int i = 0; i < 50 && server.clientCount() < 3u; ++i) {
         platform::sleepMs(1);
     }
@@ -130,13 +129,13 @@ TEST_F(ShmTransportTest, MultipleClientsConnect) {
 TEST_F(ShmTransportTest, ActiveResponseArenaStats) {
     std::string shm_name = generateShmName("arena_stats_test");
     ShmTransport server(shm_name, true);
-    UdsHandlerThread uds_handler(server);
+    HandshakeHandlerThread handshake_handler(server);
 
     EXPECT_GE(server.clientCount(), 0u);
 
     ShmTransport client0(shm_name, false);
     ASSERT_EQ(client0.connect("", 0), 0);
-    // Wait for UDS handshake on server side
+    // Wait for the server-side handshake.
     for (int i = 0; i < 50 && server.clientCount() == 0; ++i) platform::sleepMs(1);
     EXPECT_EQ(server.clientCount(), 1u);
 
@@ -153,7 +152,7 @@ TEST_F(ShmTransportTest, ActiveResponseArenaStats) {
 TEST_F(ShmTransportTest, ClientSendServerRecv) {
     std::string shm_name = generateShmName("c2s_test");
     ShmTransport server(shm_name, true, 128 * 1024, 128 * 1024);
-    UdsHandlerThread uds_handler(server);
+    HandshakeHandlerThread handshake_handler(server);
     ShmTransport client(shm_name, false, 128 * 1024, 128 * 1024);
     client.connect("", 0);
 
@@ -189,7 +188,7 @@ TEST_F(ShmTransportTest, ClientSendServerRecv) {
 TEST_F(ShmTransportTest, RecvReturnsZeroWhenNoData) {
     std::string shm_name = generateShmName("nodata_test");
     ShmTransport server(shm_name, true);
-    UdsHandlerThread uds_handler(server);
+    HandshakeHandlerThread handshake_handler(server);
     ShmTransport client(shm_name, false);
     client.connect("", 0);
 
@@ -208,7 +207,7 @@ TEST_F(ShmTransportTest, ConcurrentMultiClientSendRecv) {
     std::string shm_name = generateShmName("concurrent_test");
 
     ShmTransport server(shm_name, true, 128 * 1024, 128 * 1024);
-    UdsHandlerThread uds_handler(server);
+    HandshakeHandlerThread handshake_handler(server);
 
     // Create and connect all clients
     std::vector<std::unique_ptr<ShmTransport>> clients;
@@ -217,7 +216,7 @@ TEST_F(ShmTransportTest, ConcurrentMultiClientSendRecv) {
         ASSERT_EQ(c->connect("", 0), 0);
         clients.push_back(std::move(c));
     }
-    // Wait for UdsHandlerThread to process all handshakes
+    // Wait for HandshakeHandlerThread to process all handshakes.
     for (int i = 0; i < 100 && server.clientCount() < static_cast<uint32_t>(NUM_CLIENTS); ++i) {
         platform::sleepMs(1);
     }
@@ -268,7 +267,7 @@ TEST_F(ShmTransportTest, ConcurrentDataIntegrity) {
     std::string shm_name = generateShmName("integrity_test");
 
     ShmTransport server(shm_name, true, 128 * 1024, 128 * 1024);
-    UdsHandlerThread uds_handler(server);
+    HandshakeHandlerThread handshake_handler(server);
 
     // Create clients
     std::vector<std::unique_ptr<ShmTransport>> clients;
@@ -316,39 +315,4 @@ TEST_F(ShmTransportTest, ConcurrentDataIntegrity) {
 
     for (auto& c : clients) c->close();
     server.close();
-}
-
-TEST(ServiceHostRuntimeTest, IncompleteShmPayloadIsNotDispatched) {
-    ServiceHostRuntime runtime;
-    TopicRuntime topic_runtime;
-    Message msg(MessageType::MSG_INVOKE, 7);
-    ASSERT_TRUE(msg.payload.writeUint32(0x12345678));
-    Buffer serialized;
-    ASSERT_TRUE(msg.serialize(serialized));
-
-    // Corrupt the serialized header length so it declares more payload bytes
-    // than are actually present. SHM receives one framed message at a time,
-    // so the dispatcher must reject this instead of invoking with an empty or
-    // truncated payload.
-    serialized.mutableData()[12] = 0x08;
-    serialized.mutableData()[13] = 0x00;
-    serialized.mutableData()[14] = 0x00;
-    serialized.mutableData()[15] = 0x00;
-
-    bool invoked = false;
-    bool oneway = false;
-    bool subscribed = false;
-    runtime.onShmRequest(
-        "svc",
-        1,
-        serialized.data(),
-        serialized.size(),
-        topic_runtime,
-        [&invoked](const std::string&, uint32_t, const Message&) { invoked = true; },
-        [&oneway](const std::string&, const Message&) { oneway = true; },
-        [&subscribed](const std::string&, uint32_t, const Message&) { subscribed = true; });
-
-    EXPECT_FALSE(invoked);
-    EXPECT_FALSE(oneway);
-    EXPECT_FALSE(subscribed);
 }

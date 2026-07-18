@@ -1,3 +1,5 @@
+#ifdef OMNIBINDER_WINDOWS
+
 #include "platform/platform.h"
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
@@ -25,9 +27,8 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <algorithm>
 
-
-#ifdef OMNIBINDER_WINDOWS
 
 #define LOG_TAG "Platform"
 
@@ -308,7 +309,7 @@ void iocpUnregisterPipeFd(int fd);
 int  iocpGetWakeupFd();
 bool iocpPostWakeup();
 
-// Eventfd entry with pipe name for shmHandshakeSendFds serialization
+// Eventfd entry with pipe name for handshake token serialization
 struct EventFdEntryV2 {
     HANDLE      pipe;
     bool        is_server;
@@ -358,7 +359,7 @@ int createEventFd() {
         return iocpGetWakeupFd();
     }
     // Subsequent calls are from SHM transport for cross-process notification.
-    // Each gets a uniquely-named pipe whose name is serialized by shmHandshakeSendFds.
+    // Each gets a uniquely-named pipe whose name is serialized by handshakeSend.
     int id = g_efd_next_2.fetch_add(1);
     std::string name = "auto_" + std::to_string(GetCurrentProcessId())
                        + "_" + std::to_string(id);
@@ -568,7 +569,7 @@ void getLocalTime(struct tm* out_tm, int* out_ms) {
 }
 
 // ============================================================
-// handshake channel — emulated via TCP loopback on Windows
+// handshake channel — TCP loopback plus Named Pipe tokens on Windows
 //
 // Linux:  AF_UNIX + SCM_RIGHTS for fd transfer
 // Windows: TCP on 127.0.0.1.  fd values are sent as pipe NAME
@@ -583,26 +584,59 @@ static uint16_t udsPathToPort(const std::string& path) {
         h = ((h << 5) + h) + static_cast<unsigned char>(path[i]);
     return static_cast<uint16_t>(50000 + (h % 10000));
 }
+struct handshake_listener { SocketFd fd; };
+struct handshake_channel   { SocketFd fd; int local_notify_fd; };
 
+namespace {
 
+const size_t HANDSHAKE_MAX_PIPE_NAME = 512;
 
-struct handshake_listener { int fd; uint16_t port; };
-struct handshake_channel   { int fd; int notify_fd; };
-
-handshake_listener* handshakeListen(const std::string& name) { return shmHandshakeListenImpl(name, 8); }
-
-static handshake_listener* shmHandshakeListenImpl(const std::string& path, int backlog) {
-    int fd = shmHandshakeListenRaw(path, backlog);
-    if (fd < 0) return NULL;
-    uint16_t port = 0;
-    try { port = (uint16_t)std::stoi(path); } catch (...) {}
-    return new handshake_listener{fd, port};
+bool socketSendAll(SocketFd fd, const char* data, size_t len)
+{
+    while (len > 0) {
+        int chunk = len > static_cast<size_t>(INT_MAX) ? INT_MAX : static_cast<int>(len);
+        int sent = ::send(fd, data, chunk, 0);
+        if (sent == SOCKET_ERROR) {
+            if (WSAGetLastError() == WSAEINTR) continue;
+            return false;
+        }
+        if (sent == 0) return false;
+        data += sent;
+        len -= static_cast<size_t>(sent);
+    }
+    return true;
 }
 
-static int shmHandshakeListenRaw(const std::string& path, int backlog) {
+bool socketRecvAll(SocketFd fd, char* data, size_t len)
+{
+    while (len > 0) {
+        int chunk = len > static_cast<size_t>(INT_MAX) ? INT_MAX : static_cast<int>(len);
+        int received = ::recv(fd, data, chunk, 0);
+        if (received == SOCKET_ERROR) {
+            if (WSAGetLastError() == WSAEINTR) continue;
+            return false;
+        }
+        if (received == 0) return false;
+        data += received;
+        len -= static_cast<size_t>(received);
+    }
+    return true;
+}
+
+void closeOpenedEventFds(int* fds, int count)
+{
+    for (int i = 0; i < count; ++i) {
+        if (fds[i] >= 0) closeEventFd(fds[i]);
+    }
+}
+
+} // namespace
+
+handshake_listener* handshakeListen(const std::string& path)
+{
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd == INVALID_SOCKET) return -1;
+    if (fd == INVALID_SOCKET) return NULL;
 
     setReuseAddr(fd);
     setNonBlocking(fd);
@@ -614,55 +648,48 @@ static int shmHandshakeListenRaw(const std::string& path, int backlog) {
     addr.sin_port = htons(port);
 
     if (::bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeListen bind failed port=%u: %d", port, WSAGetLastError());
+        OMNI_LOG_ERROR(LOG_TAG, "handshakeListen bind failed port=%u: %d", port, WSAGetLastError());
         closesocket(fd);
-        return -1;
+        return NULL;
     }
-    if (::listen(fd, backlog < 0 ? 8 : backlog) != 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "shmHandshakeListen listen failed port=%u: %d", port, WSAGetLastError());
+    if (::listen(fd, 8) != 0) {
+        OMNI_LOG_ERROR(LOG_TAG, "handshakeListen listen failed port=%u: %d", port, WSAGetLastError());
         closesocket(fd);
-        return -1;
+        return NULL;
     }
 
-    OMNI_LOG_DEBUG(LOG_TAG, "shmHandshakeListen: fd=%d port=%u path=%s",
-                   static_cast<int>(fd), port, path.c_str());
-    return static_cast<int>(fd);
+    handshake_listener* listener = new handshake_listener;
+    listener->fd = fd;
+    OMNI_LOG_DEBUG(LOG_TAG, "handshakeListen: port=%u path=%s", port, path.c_str());
+    return listener;
 }
 
-handshake_channel* handshakeAccept(handshake_listener* listener) {
+handshake_channel* handshakeAccept(handshake_listener* listener)
+{
     if (!listener) return NULL;
-    int fd = shmHandshakeAcceptRaw(listener->fd);
-    if (fd < 0) return NULL;
-    return new handshake_channel{fd, -1};
-}
-
-static int shmHandshakeAcceptRaw(int listen_fd) {
-    SocketFd fd = ::accept(static_cast<SocketFd>(listen_fd), NULL, NULL);
+    SocketFd fd = ::accept(listener->fd, NULL, NULL);
     if (fd == INVALID_SOCKET) {
         int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return -1;
-        return -1;
+        if (err != WSAEWOULDBLOCK) {
+            OMNI_LOG_WARN(LOG_TAG, "handshakeAccept failed: %d", err);
+        }
+        return NULL;
     }
-    // accept() inherits non-blocking mode from the listen socket.
-    // Make the accepted socket BLOCKING so recv(MSG_WAITALL) works.
     u_long mode = 0;
     ioctlsocket(fd, FIONBIO, &mode);
-    OMNI_LOG_DEBUG(LOG_TAG, "shmHandshakeAccept: listen=%d → client=%d", listen_fd, static_cast<int>(fd));
-    return static_cast<int>(fd);
+    handshake_channel* ch = new handshake_channel;
+    ch->fd = fd;
+    ch->local_notify_fd = -1;
+    return ch;
 }
 
-handshake_channel* handshakeConnect(const std::string& name) {
-    int fd = shmHandshakeConnectRaw(name);
-    if (fd < 0) return NULL;
-    return new handshake_channel{fd, -1};
-}
-
-static int shmHandshakeConnectRaw(const std::string& path) {
+handshake_channel* handshakeConnect(const std::string& path)
+{
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return -1;
 
-    // Blocking connect — matches Linux shmHandshakeConnect (no SOCK_NONBLOCK).
+    // Blocking connect matches the Linux handshake channel.
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -670,39 +697,57 @@ static int shmHandshakeConnectRaw(const std::string& path) {
     addr.sin_port = htons(port);
 
     if (::connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        OMNI_LOG_WARN(LOG_TAG, "shmHandshakeConnect failed port=%u: %d", port, WSAGetLastError());
+        OMNI_LOG_WARN(LOG_TAG, "handshakeConnect failed port=%u: %d", port, WSAGetLastError());
         closesocket(fd);
-        return -1;
+        return NULL;
     }
-    return static_cast<int>(fd);
+    handshake_channel* ch = new handshake_channel;
+    ch->fd = fd;
+    ch->local_notify_fd = -1;
+    return ch;
 }
 
-
-
-
-// ── fd → pipe name serialization for SendFds / RecvFds ──
-
-void handshakeCloseListener(handshake_listener* listener) {
-    if (listener) { closesocket((SOCKET)listener->fd); delete listener; }
+void handshakeCloseListener(handshake_listener* listener)
+{
+    if (!listener) return;
+    if (listener->fd != INVALID_SOCKET) closesocket(listener->fd);
+    delete listener;
 }
 
 bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
-                   const int* fds, int fd_count) {
-    if (!ch) return false;
-    return shmHandshakeSendFdsRaw(ch->fd, fds, fd_count, data, len);
-}
+                   const int* fds, int fd_count)
+{
+    if (!ch || len > HANDSHAKE_MAX_PAYLOAD || fd_count < 0 || fd_count > 2
+        || (len > 0 && !data) || (fd_count > 0 && !fds)
+        || ch->local_notify_fd >= 0) return false;
 
-static bool shmHandshakeSendFdsRaw(int fd, const int* fds, int fd_count,
-                const void* data, size_t data_len) {
+    int wire_fds[2] = {-1, -1};
+    for (int i = 0; i < fd_count; ++i) wire_fds[i] = fds[i];
+
+    // A Windows Named Pipe endpoint is single-client. Replace the logical
+    // shared request notification with a server-owned per-client endpoint.
+    if (fd_count == 2) {
+        ch->local_notify_fd = createEventFd();
+        if (ch->local_notify_fd < 0) return false;
+        wire_fds[1] = ch->local_notify_fd;
+    }
+
     // Wire format:
     //   [uint32_t data_len][uint8_t data[data_len]][uint32_t fd_count]
     //   [for each fd: uint32_t name_len][char name[name_len]]
-    uint32_t dlen = (data && data_len > 0) ? static_cast<uint32_t>(data_len) : 0;
-    DWORD total = 4 + dlen + 4;
+    uint32_t dlen = static_cast<uint32_t>(len);
+    size_t total = sizeof(uint32_t) * 2 + len;
     for (int i = 0; i < fd_count; ++i) {
-        std::map<int, EventFdEntryV2>::iterator eit = g_efd_map2.find(fds[i]);
-        if (eit == g_efd_map2.end()) return false;
-        total += 4 + (DWORD)eit->second.pipe_name.size();
+        std::map<int, EventFdEntryV2>::iterator eit = g_efd_map2.find(wire_fds[i]);
+        if (eit == g_efd_map2.end() || eit->second.pipe_name.empty()
+            || eit->second.pipe_name.size() > HANDSHAKE_MAX_PIPE_NAME) {
+            if (ch->local_notify_fd >= 0) {
+                closeEventFd(ch->local_notify_fd);
+                ch->local_notify_fd = -1;
+            }
+            return false;
+        }
+        total += sizeof(uint32_t) + eit->second.pipe_name.size();
     }
 
     std::vector<char> payload(total);
@@ -716,113 +761,84 @@ static bool shmHandshakeSendFdsRaw(int fd, const int* fds, int fd_count,
         memcpy(p, &count32, 4); p += 4;
     }
     for (int i = 0; i < fd_count; ++i) {
-        std::map<int, EventFdEntryV2>::iterator eit = g_efd_map2.find(fds[i]);
-        uint32_t name_len = (uint32_t)eit->second.pipe_name.size();
+        std::map<int, EventFdEntryV2>::iterator eit = g_efd_map2.find(wire_fds[i]);
+        uint32_t name_len = static_cast<uint32_t>(eit->second.pipe_name.size());
         memcpy(p, &name_len, 4); p += 4;
         memcpy(p, eit->second.pipe_name.data(), name_len); p += name_len;
     }
 
-    int sent = ::send(static_cast<SocketFd>(fd), payload.data(),
-                      static_cast<int>(payload.size()), 0);
-    return sent == static_cast<int>(payload.size());
-}
-
-bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
-                   int* fds, int max_fds, int* out_fd_count) {
-    if (!ch) return false;
-    return shmHandshakeRecvFdsRaw(ch->fd, fds, max_fds, buf, bufsz, out_len, out_fd_count);
-}
-
-static bool shmHandshakeRecvFdsRaw(int fd, int* fds, int fd_count,
-                void* buf, size_t buf_size, size_t* out_data_len) {
-    // Initialize outputs
-    if (out_data_len) *out_data_len = 0;
-    for (int i = 0; i < fd_count; ++i) fds[i] = -1;
-
-    // Wire format:
-    //   [uint32_t data_len][uint8_t data[data_len]][uint32_t fd_count]
-    //   [for each fd: uint32_t name_len][char name[name_len]]
-
-    // Step 1: Read data length and data
-    uint32_t dlen = 0;
-    int n = ::recv(static_cast<SocketFd>(fd), reinterpret_cast<char*>(&dlen),
-                   4, MSG_WAITALL);
-    if (n != 4) return false;
-
-    if (dlen > 0) {
-        if (buf && buf_size >= dlen) {
-            n = ::recv(static_cast<SocketFd>(fd), static_cast<char*>(buf),
-                       static_cast<int>(dlen), MSG_WAITALL);
-            if (n != static_cast<int>(dlen)) return false;
-        } else {
-            // Skip data bytes that don't fit or no buffer provided
-            std::vector<char> skip(dlen);
-            n = ::recv(static_cast<SocketFd>(fd), skip.data(),
-                       static_cast<int>(dlen), MSG_WAITALL);
-            if (n != static_cast<int>(dlen)) return false;
+    if (!socketSendAll(ch->fd, payload.data(), payload.size())) {
+        if (ch->local_notify_fd >= 0) {
+            closeEventFd(ch->local_notify_fd);
+            ch->local_notify_fd = -1;
         }
-        if (out_data_len) *out_data_len = dlen;
-    }
-
-    // Step 2: Read fd count and pipe names
-    uint32_t count = 0;
-    n = ::recv(static_cast<SocketFd>(fd), reinterpret_cast<char*>(&count),
-               4, MSG_WAITALL);
-    if (n != 4) return false;
-
-    uint32_t num_to_open = (count < static_cast<uint32_t>(fd_count))
-                           ? count : static_cast<uint32_t>(fd_count);
-    for (uint32_t i = 0; i < count; ++i) {
-        uint32_t name_len = 0;
-        n = ::recv(static_cast<SocketFd>(fd), reinterpret_cast<char*>(&name_len),
-                   4, MSG_WAITALL);
-        if (n != 4) return false;
-
-        std::vector<char> name_buf(name_len + 1);
-        n = ::recv(static_cast<SocketFd>(fd), name_buf.data(),
-                   static_cast<int>(name_len), MSG_WAITALL);
-        if (n != static_cast<int>(name_len)) return false;
-        name_buf[name_len] = '\0';
-        std::string pipe_name(name_buf.data(), name_len);
-
-        if (i < num_to_open) {
-            fds[i] = openNamedEventFdByPipeName(pipe_name);
-        }
+        return false;
     }
     return true;
 }
 
-static bool shmHandshakeSendResponseRaw(int client_fd, int resp_eventfd, int master_eventfd,
-                           int* out_new_fd) {
-    *out_new_fd = -1;
+bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
+                   int* fds, int max_fds, int* out_fd_count)
+{
+    if (out_len) *out_len = 0;
+    if (out_fd_count) *out_fd_count = 0;
+    if (fds && max_fds > 0) std::fill(fds, fds + max_fds, -1);
+    if (!ch || max_fds < 0 || max_fds > 2 || (max_fds > 0 && !fds)) return false;
 
-    // Windows: named pipes can't be shared across clients.
-    // Create a per-client notification pipe instead of reusing master_eventfd.
-    int notify_efd = createEventFd();
-    if (notify_efd >= 0) {
-        int fds[2] = { resp_eventfd, notify_efd };
-        if (shmHandshakeSendFdsRaw(client_fd, fds, 2, NULL, 0)) {
-            *out_new_fd = notify_efd;
-            return true;
+    uint32_t dlen = 0;
+    if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&dlen), sizeof(dlen))
+        || dlen > HANDSHAKE_MAX_PAYLOAD || dlen > bufsz || (dlen > 0 && !buf)) return false;
+    std::vector<char> data(dlen);
+    if (dlen > 0 && !socketRecvAll(ch->fd, data.data(), dlen)) return false;
+
+    uint32_t count = 0;
+    if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&count), sizeof(count))
+        || count > 2 || count > static_cast<uint32_t>(max_fds)) return false;
+
+    int opened[2] = {-1, -1};
+    int opened_count = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t name_len = 0;
+        if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&name_len), sizeof(name_len))
+            || name_len == 0 || name_len > HANDSHAKE_MAX_PIPE_NAME) {
+            closeOpenedEventFds(opened, opened_count);
+            return false;
         }
-        closeEventFd(notify_efd);
-        return false;
+
+        std::vector<char> name_buf(name_len);
+        if (!socketRecvAll(ch->fd, name_buf.data(), name_len)) {
+            closeOpenedEventFds(opened, opened_count);
+            return false;
+        }
+        std::string pipe_name(name_buf.data(), name_len);
+        opened[opened_count] = openNamedEventFdByPipeName(pipe_name);
+        if (opened[opened_count] < 0) {
+            closeOpenedEventFds(opened, opened_count);
+            return false;
+        }
+        ++opened_count;
     }
-
-    // Fallback: send only resp_eventfd (client won't have server notification)
-    return shmHandshakeSendFdsRaw(client_fd, &resp_eventfd, 1, NULL, 0);
+    if (dlen > 0) memcpy(buf, data.data(), dlen);
+    for (int i = 0; i < opened_count; ++i) fds[i] = opened[i];
+    if (out_len) *out_len = dlen;
+    if (out_fd_count) *out_fd_count = opened_count;
+    return true;
 }
 
-void handshakeClose(handshake_channel* ch) {
-    if (ch) { shmHandshakeCloseRaw(ch->fd); delete ch; }
+int handshakeTakeLocalNotifyFd(handshake_channel* ch)
+{
+    if (!ch) return -1;
+    int fd = ch->local_notify_fd;
+    ch->local_notify_fd = -1;
+    return fd;
 }
 
-static void shmHandshakeCloseRaw(int fd) {
-    if (fd >= 0) closesocket(static_cast<SocketFd>(fd));
-}
-
-void shmHandshakeCleanup(const std::string& /*path*/) {
-    // TCP sockets: nothing to unlink
+void handshakeClose(handshake_channel* ch)
+{
+    if (!ch) return;
+    if (ch->local_notify_fd >= 0) closeEventFd(ch->local_notify_fd);
+    if (ch->fd != INVALID_SOCKET) closesocket(ch->fd);
+    delete ch;
 }
 
 bool checkSocketConnected(SocketFd fd, int* out_error) {
@@ -844,8 +860,8 @@ void setupSignalHandlers(SignalHandler handler) {
 }
 
 
-int handshakeGetFd(handshake_channel* ch) { return ch ? ch->notify_fd : -1; }
-int handshakeGetListenerFd(handshake_listener* l) { return l ? l->fd : -1; }
+int handshakeGetFd(handshake_channel* ch) { return ch ? static_cast<int>(ch->fd) : -1; }
+int handshakeGetListenerFd(handshake_listener* l) { return l ? static_cast<int>(l->fd) : -1; }
 
 bool isShmHandshakeAvailable() {
     return true;  // Emulated via Named Pipes

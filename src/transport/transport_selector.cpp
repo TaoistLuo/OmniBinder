@@ -9,17 +9,25 @@
 
 namespace omnibinder {
 
+TransportSelectionPolicy chooseTransportPolicy(
+    const std::string& local_host_id,
+    const std::string& remote_host_id)
+{
+    return !local_host_id.empty()
+        && !remote_host_id.empty()
+        && local_host_id == remote_host_id
+        ? TransportSelectionPolicy::PREFER_SHM
+        : TransportSelectionPolicy::USE_TCP;
+}
+
 ITransport* selectTransport(const std::string& service_name,
                             const std::string& host, uint16_t port,
                             const std::string& local_host_id,
                             const std::string& remote_host_id,
                             const ShmConfig& shm_config)
 {
-    bool same_machine = !local_host_id.empty()
-        && !remote_host_id.empty()
-        && local_host_id == remote_host_id;
-
-    if (same_machine) {
+    if (chooseTransportPolicy(local_host_id, remote_host_id)
+        == TransportSelectionPolicy::PREFER_SHM) {
         size_t req_cap = shm_config.req_ring_capacity > 0
             ? shm_config.req_ring_capacity : SHM_DEFAULT_REQ_RING_CAPACITY;
         size_t resp_cap = shm_config.resp_ring_capacity > 0

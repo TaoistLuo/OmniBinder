@@ -1,4 +1,12 @@
 #include "core/omni_runtime.h"
+#include "core/omni_runtime_helpers.h"
+#include "omnibinder/log.h"
+
+#include <cstring>
+
+#define LOG_TAG "OmniRuntimeDispatch"
+
+namespace omnibinder {
 
 // ============================================================
 // 本地服务 accept 和请求处理
@@ -45,11 +53,6 @@ void OmniRuntime::Impl::onServiceClientData(const std::string& service_name,
     uint8_t buf[4096];
     int ret = tit->second->recv(buf, sizeof(buf));
     if (ret < 0) {
-        client_fd_to_service_.erase(client_fd);
-        topic_runtime_.removeTcpSubscriberFd(client_fd);
-        if (entry->service) {
-            entry->service->onClientDisconnected("fd=" + std::to_string(client_fd));
-        }
         removeServiceClient(service_name, client_fd);
         return;
     }
@@ -61,10 +64,6 @@ void OmniRuntime::Impl::onServiceClientData(const std::string& service_name,
     if (bit->second->size() + static_cast<size_t>(ret) > MAX_CLIENT_RECV_BUFFER) {
         OMNI_LOG_ERROR(LOG_TAG, "client_recv_buffer overflow for fd=%d (>%zuMB)",
                        client_fd, MAX_CLIENT_RECV_BUFFER / (1024*1024));
-        topic_runtime_.removeTcpSubscriberFd(client_fd);
-        if (entry->service) {
-            entry->service->onClientDisconnected("fd=" + std::to_string(client_fd));
-        }
         removeServiceClient(service_name, client_fd);
         return;
     }
@@ -344,23 +343,6 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                                             const uint8_t* data, size_t length) {
     if (!entry || !entry->service) return;
 
-    // Handle MSG_HEARTBEAT on the SHM path — the TCP path handles this
-    // in ServiceHostRuntime::handleClientData(), but the SHM callback
-    // path has no equivalent handler, so we must send the ACK here.
-    if (length >= MESSAGE_HEADER_SIZE) {
-        MessageHeader hdr;
-        if (Message::parseHeader(data, length, hdr)
-            && Message::validateHeader(hdr)
-            && hdr.type == static_cast<uint16_t>(MessageType::MSG_HEARTBEAT)) {
-            Message ack(MessageType::MSG_HEARTBEAT_ACK, hdr.sequence);
-            Buffer ack_buf;
-            if (ack.serialize(ack_buf) && entry->shm_transport) {
-                entry->shm_transport->serverSend(client_id, ack_buf.data(), ack_buf.size());
-            }
-            return;
-        }
-    }
-
     if (length < MESSAGE_HEADER_SIZE) return;
     MessageHeader hdr;
     if (!Message::parseHeader(data, length, hdr) || !Message::validateHeader(hdr)) return;
@@ -376,8 +358,16 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
         msg.payload.assign(data + MESSAGE_HEADER_SIZE, hdr.length);
     }
 
-    MessageType type = msg.getType();
-    if (type == MessageType::MSG_INVOKE) {
+    switch (msg.getType()) {
+    case MessageType::MSG_HEARTBEAT: {
+        Message ack(MessageType::MSG_HEARTBEAT_ACK, msg.getSequence());
+        Buffer ack_buf;
+        if (ack.serialize(ack_buf) && entry->shm_transport) {
+            entry->shm_transport->serverSend(client_id, ack_buf.data(), ack_buf.size());
+        }
+        break;
+    }
+    case MessageType::MSG_INVOKE: {
         if (entry->diag_enabled && entry->diag_topic_id != 0) {
             Buffer diag_buf;
             diag_serialize_event(diag_buf, DIAG_EVENT_REQUEST, msg);
@@ -385,64 +375,71 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
         }
         emitDiagEvent(DIAG_EVENT_REQUEST, msg);
         InvokeDispatchResult result = dispatchLocalInvoke(entry->service, msg, "SHM",
-                                                           entry->service->serviceName());
-        Message reply_msg;
-        if (result.status == InvokeDispatchStatus::SUCCESS) {
-                reply_msg = makeInvokeSuccessReply(msg.getSequence(), result.response);
-            } else {
-                reply_msg = makeInvokeErrorReply(msg.getSequence(), static_cast<ErrorCode>(result.error_code));
+                                                          entry->service->serviceName());
+        Message reply = result.status == InvokeDispatchStatus::SUCCESS
+            ? makeInvokeSuccessReply(msg.getSequence(), result.response)
+            : makeInvokeErrorReply(msg.getSequence(),
+                                   static_cast<ErrorCode>(result.error_code));
+        if (entry->diag_enabled && entry->diag_topic_id != 0) {
+            Buffer diag_buf;
+            diag_serialize_event(diag_buf, DIAG_EVENT_RESPONSE, reply);
+            broadcastInternal(entry->diag_topic_id, diag_buf);
+        }
+        Buffer send_buf;
+        if (!reply.serialize(send_buf)) {
+            OMNI_LOG_ERROR(LOG_TAG,
+                           "shm_reply_serialize_failed service=%s client_id=%u seq=%u",
+                           entry->service->serviceName(), client_id, msg.getSequence());
+            break;
+        }
+        if (entry->shm_transport) {
+            int ret = entry->shm_transport->serverSend(client_id, send_buf.data(),
+                                                       send_buf.size());
+            if (ret <= 0) {
+                OMNI_LOG_ERROR(LOG_TAG,
+                               "shm_reply_send_failed service=%s client_id=%u seq=%u ret=%d",
+                               entry->service->serviceName(), client_id,
+                               msg.getSequence(), ret);
             }
-            if (entry->diag_enabled && entry->diag_topic_id != 0) {
-                Buffer diag_buf;
-                diag_serialize_event(diag_buf, DIAG_EVENT_RESPONSE, reply_msg);
-                broadcastInternal(entry->diag_topic_id, diag_buf);
-            }
-            Buffer send_buf;
-            if (!reply_msg.serialize(send_buf)) {
-                OMNI_LOG_ERROR(LOG_TAG, "shm_reply_serialize_failed service=%s client_id=%u seq=%u",
-                               entry->service->serviceName(), cid, msg.getSequence());
-                return;
-            }
-            if (entry->shm_transport) {
-                int send_ret = entry->shm_transport->serverSend(cid, send_buf.data(), send_buf.size());
-                if (send_ret <= 0) {
-                    OMNI_LOG_ERROR(LOG_TAG, "shm_reply_send_failed service=%s client_id=%u seq=%u ret=%d",
-                                   entry->service->serviceName(), cid, msg.getSequence(), send_ret);
-                }
-            }
-        },
-        [this, entry](const std::string& svc, const Message& msg) {
-            (void)svc;
-            if (entry->diag_enabled && entry->diag_topic_id != 0) {
-                Buffer diag_buf;
-                diag_serialize_event(diag_buf, DIAG_EVENT_ONE_WAY, msg);
-                broadcastInternal(entry->diag_topic_id, diag_buf);
-            }
-            emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
-            (void)dispatchLocalInvoke(entry->service, msg, "SHM", entry->service->serviceName());
-        },
-        [this](const std::string& svc, uint32_t cid, const Message& msg) {
-            (void)cid;
-            uint32_t topic_id = 0;
-            std::string topic_name;
-            if (!decodeSubscribeBroadcastPayload(msg, topic_id, topic_name)) {
-                OMNI_LOG_WARN(LOG_TAG,
-                              "malformed_subscribe_broadcast transport=SHM seq=%u service=%s err=%d",
-                              msg.getSequence(), svc.c_str(),
-                              static_cast<int>(ErrorCode::ERR_DESERIALIZE));
-                return;
-            }
-            {
-                std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(svc);
-                if (eit != local_services_.end() && eit->second->diag_enabled && eit->second->diag_topic_id != 0) {
-                    Buffer diag_buf;
-                    diag_serialize_event(diag_buf, DIAG_EVENT_SUBSCRIBE, msg);
-                    broadcastInternal(eit->second->diag_topic_id, diag_buf);
-                }
-            }
-            topic_runtime_.addShmSubscriberService(topic_id, svc, cid);
-            OMNI_LOG_INFO(LOG_TAG, "SHM broadcast subscriber for topic %s (0x%08x) on %s",
-                            topic_name.c_str(), topic_id, svc.c_str());
-        });
+        }
+        break;
+    }
+    case MessageType::MSG_INVOKE_ONEWAY:
+        if (entry->diag_enabled && entry->diag_topic_id != 0) {
+            Buffer diag_buf;
+            diag_serialize_event(diag_buf, DIAG_EVENT_ONE_WAY, msg);
+            broadcastInternal(entry->diag_topic_id, diag_buf);
+        }
+        emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
+        (void)dispatchLocalInvoke(entry->service, msg, "SHM",
+                                  entry->service->serviceName());
+        break;
+    case MessageType::MSG_SUBSCRIBE_BROADCAST: {
+        uint32_t topic_id = 0;
+        std::string topic_name;
+        if (!decodeSubscribeBroadcastPayload(msg, topic_id, topic_name)) {
+            OMNI_LOG_WARN(LOG_TAG,
+                          "malformed_subscribe_broadcast transport=SHM seq=%u service=%s err=%d",
+                          msg.getSequence(), service_name.c_str(),
+                          static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+            break;
+        }
+        if (entry->diag_enabled && entry->diag_topic_id != 0) {
+            Buffer diag_buf;
+            diag_serialize_event(diag_buf, DIAG_EVENT_SUBSCRIBE, msg);
+            broadcastInternal(entry->diag_topic_id, diag_buf);
+        }
+        topic_runtime_.addShmSubscriberService(topic_id, service_name, client_id);
+        OMNI_LOG_INFO(LOG_TAG,
+                      "SHM broadcast subscriber for topic %s (0x%08x) on %s",
+                      topic_name.c_str(), topic_id, service_name.c_str());
+        break;
+    }
+    default:
+        OMNI_LOG_DEBUG(LOG_TAG, "Unhandled SHM message for %s: %s",
+                       service_name.c_str(), messageTypeToString(msg.getType()));
+        break;
+    }
 }
 
+} // namespace omnibinder

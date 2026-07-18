@@ -49,6 +49,7 @@ enum class ErrorCode : int32_t {
     // 通用错误 (1-99)
     ERR_UNKNOWN             = -1,
     ERR_INVALID_PARAM       = -2,
+    ERR_OUT_OF_MEMORY       = -3,
     ERR_TIMEOUT             = -4,
     ERR_NOT_INITIALIZED     = -5,
     ERR_ALREADY_INITIALIZED = -6,
@@ -59,10 +60,12 @@ enum class ErrorCode : int32_t {
     ERR_CONNECT_FAILED      = -100,
     ERR_CONNECTION_CLOSED   = -101,
     ERR_SEND_FAILED         = -102,
+    ERR_RECV_FAILED         = -103,
     ERR_PROTOCOL_ERROR      = -104,
     ERR_SM_UNREACHABLE      = -105,
     ERR_BIND_FAILED         = -106,
     ERR_LISTEN_FAILED       = -107,
+    ERR_ACCEPT_FAILED       = -108,
 
     // 服务错误 (200-299)
     ERR_SERVICE_NOT_FOUND   = -200,
@@ -70,11 +73,15 @@ enum class ErrorCode : int32_t {
     ERR_SERVICE_OFFLINE     = -202,
     ERR_INTERFACE_NOT_FOUND = -203,
     ERR_METHOD_NOT_FOUND    = -204,
+    ERR_INVOKE_FAILED       = -205,
     ERR_REGISTER_FAILED     = -206,
+    ERR_UNREGISTER_FAILED   = -207,
     ERR_IDL_MISMATCH        = -208,
 
     // 话题错误 (300-399)
+    ERR_TOPIC_NOT_FOUND     = -300,
     ERR_TOPIC_EXISTS        = -301,
+    ERR_NOT_SUBSCRIBED      = -302,
     ERR_NOT_PUBLISHER       = -303,
 
     // 传输层错误 (400-499)
@@ -87,6 +94,7 @@ enum class ErrorCode : int32_t {
     // 序列化错误 (500-599)
     ERR_SERIALIZE           = -500,
     ERR_DESERIALIZE         = -501,
+    ERR_BUFFER_OVERFLOW     = -502,
     ERR_BUFFER_UNDERFLOW    = -503,
 };
 

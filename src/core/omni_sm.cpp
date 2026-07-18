@@ -1,4 +1,35 @@
 #include "core/omni_runtime.h"
+#include "core/omni_runtime_helpers.h"
+#include "omnibinder/buffer_view.h"
+#include "omnibinder/log.h"
+
+#include <sstream>
+
+#define LOG_TAG "OmniRuntimeSM"
+
+namespace omnibinder {
+namespace {
+
+class RuntimeDiagService : public Service {
+public:
+    explicit RuntimeDiagService(const std::string& name) : Service(name) {
+        iface_.interface_id = OMNI_DIAG_IFACE_ID;
+        iface_.name = name;
+    }
+
+    virtual const char* serviceName() const { return name().c_str(); }
+    virtual const InterfaceInfo& interfaceInfo() const { return iface_; }
+
+protected:
+    virtual int onInvoke(uint32_t, const Buffer&, Buffer&) {
+        return static_cast<int>(ErrorCode::ERR_NOT_SUPPORTED);
+    }
+
+private:
+    InterfaceInfo iface_;
+};
+
+} // namespace
 
 // ============================================================
 // SM 通信
@@ -269,3 +300,4 @@ void OmniRuntime::Impl::onSMMessage(const Message& msg) {
     }
 }
 
+} // namespace omnibinder

@@ -1,8 +1,7 @@
 #include <gtest/gtest.h>
-#include "test_common.h"
+#include <omnibinder/message.h>
 
 using namespace omnibinder;
-using namespace omnibinder::test;
 
 TEST(MessageTest, SerializeDeserialize) {
     Message msg(MessageType::MSG_REGISTER, 42);
@@ -20,6 +19,26 @@ TEST(MessageTest, SerializeDeserialize) {
     EXPECT_EQ(hdr.type, static_cast<uint16_t>(MessageType::MSG_REGISTER));
     EXPECT_EQ(hdr.sequence, 42u);
     EXPECT_EQ(hdr.length, msg.payload.size());
+}
+
+TEST(MessageTest, DeclaredPayloadMustFitAvailableFrame) {
+    Message msg(MessageType::MSG_INVOKE, 7);
+    ASSERT_TRUE(msg.payload.writeUint32(0x12345678));
+    Buffer serialized;
+    ASSERT_TRUE(msg.serialize(serialized));
+
+    // Preserve the malformed SHM-frame case at the message framing boundary:
+    // the header declares eight payload bytes, but only four are available.
+    serialized.mutableData()[12] = 0x08;
+    serialized.mutableData()[13] = 0x00;
+    serialized.mutableData()[14] = 0x00;
+    serialized.mutableData()[15] = 0x00;
+
+    MessageHeader header;
+    ASSERT_TRUE(Message::parseHeader(serialized.data(), serialized.size(), header));
+    ASSERT_TRUE(Message::validateHeader(header));
+    EXPECT_GT(MESSAGE_HEADER_SIZE + static_cast<size_t>(header.length),
+              serialized.size());
 }
 
 TEST(MessageTest, ServiceInfoSerializeDeserialize) {
