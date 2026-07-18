@@ -2,9 +2,9 @@
  * @file        shm_transport.h
  * @brief       共享内存传输层实现
  * @details     基于 POSIX 共享内存的高性能同机传输实现。采用 per-client SHM 架构：
- *              每个客户端创建自己的 SHM，通过 UDS 将 SHM 名称 + eventfd 传递给服务端。
+ *              每个客户端创建自己的 SHM，通过握手通道将 SHM 名称 + eventfd 传递给服务端。
  *              服务端打开客户端 SHM，实现双向通信。无需共享请求队列、自旋锁、固定客户端上限。
- *              使用 eventfd 实现跨进程事件通知（通过 UDS SCM_RIGHTS 交换 fd），
+ *              使用 eventfd 实现跨进程事件通知（通过 SCM_RIGHTS 交换 fd），
  *              完全融入 EventLoop 的 epoll 事件驱动模型，无需轮询。
  *
  * @author      taoist.luo
@@ -51,14 +51,14 @@ namespace omnibinder {
 // Per-client 共享内存布局
 // ============================================================
 //
-// 每个客户端创建自己的 SHM，服务端通过 UDS 获知 SHM 名称后打开。
+// 每个客户端创建自己的 SHM，服务端通过握手通道获知 SHM 名称后打开。
 //
 // 内存布局 (单客户端):
 //   [ShmControlBlock]
 //   [Request Ring header + data]   -- 客户端写入请求，服务端读取
 //   [Response Ring header + data]  -- 服务端写入响应，客户端读取
 //
-// UDS 握手流程:
+// 握手流程:
 //   客户端 → 服务端: [shm_name as data, no fd]
 //   服务端 → 客户端: [resp_eventfd, master_eventfd via SCM_RIGHTS] (2 fds)
 //   客户端 send() 时 notify master_eventfd → 唤醒服务端 epoll
@@ -100,7 +100,7 @@ struct ClientShmContext {
     void* shm_addr;           // 客户端 SHM 映射地址
     size_t shm_size;
     ShmControlBlock* ctrl;
-    int resp_eventfd;         // 服务端响应通知 fd（创建后通过 UDS 发送给客户端）
+    int resp_eventfd;         // 服务端响应通知 fd（创建后通过握手通道发送给客户端）
 };
 
 // ============================================================
@@ -108,10 +108,10 @@ struct ClientShmContext {
 // ============================================================
 //
 // 两种角色:
-//   - 服务端 (is_server=true): 创建 UDS 监听，接受客户端连接，
+//   - 服务端 (is_server=true): 创建握手监听，接受客户端连接，
 //     为每个客户端打开其 SHM，从请求 ring 读取请求，向响应 ring 写入响应。
 //     内部维护 client_contexts_ 管理所有已连接客户端。
-//   - 客户端 (is_server=false): 创建自己的 SHM，通过 UDS 将 SHM 名称
+//   - 客户端 (is_server=false): 创建自己的 SHM，通过握手通道将 SHM 名称
 //     发送给服务端，向自己的请求 ring 写入请求，从自己的响应 ring 读取响应。
 //
 // ITransport 接口适配:
@@ -126,7 +126,7 @@ struct ClientShmContext {
 //
 class ShmTransport : public ITransport {
 public:
-    // shm_name: 服务名（服务端用于生成 UDS 路径；客户端用于生成自身 SHM 名）
+    // shm_name: 服务名（服务端用于生成 握手路径；客户端用于生成自身 SHM 名）
     // is_server: true=服务端, false=客户端
     ShmTransport(const std::string& shm_name, bool is_server,
                  size_t req_ring_capacity = SHM_DEFAULT_REQ_RING_CAPACITY,
@@ -162,7 +162,7 @@ public:
     // 返回值: >0 = 写入的字节数, 0 = ring 满, <0 = 错误
     int serverSend(uint32_t client_id, const uint8_t* data, size_t length);
 
-    // 等待 SHM 就绪（客户端调用，UDS 握手完成后即就绪）
+    // 等待 SHM 就绪（客户端调用，handshake 完成后即就绪）
     bool waitReady(uint32_t timeout_ms);
 
     // 获取当前连接的客户端数
@@ -177,10 +177,10 @@ public:
     // 服务端: 获取请求通知 eventfd（注册到 EventLoop 监听请求到达）
     int reqEventFd() const { return req_eventfd_; }
 
-    // 服务端: 获取 UDS 监听 fd（注册到 EventLoop 接受客户端 fd 交换）
+    // 服务端: 获取 握手监听 fd（注册到 EventLoop 接受客户端 fd 交换）
     int handshakeListenFd() const { return handshake_listen_fd_; }
 
-    // 服务端: 处理 UDS 客户端连接（接收 SHM 名称，发送 resp + master eventfd）
+    // 服务端: 处理 握手客户端连接（接收 SHM 名称，发送 resp + master eventfd）
     void onHandshakeClientConnect();
 
     // 是否启用了 eventfd 通知
@@ -196,8 +196,8 @@ private:
     ShmTransport(const ShmTransport&);
     ShmTransport& operator=(const ShmTransport&);
 
-    bool initServer();   // 服务端：创建 UDS 监听
-    bool initClient();   // 客户端：创建 SHM + UDS 握手
+    bool initServer();   // 服务端：创建 握手通道 监听
+    bool initClient();   // 客户端：创建 SHM + 握手通道 握手
 
     void cleanup();
     void cleanupClientContext(ClientShmContext& ctx);
@@ -233,7 +233,7 @@ private:
     uint8_t*       getResponseData(const ClientShmContext& ctx) const;
 
 
-    // 根据服务名生成确定性 UDS 路径
+    // 根据服务名生成确定性 握手路径
     static std::string getHandshakePath(const std::string& shm_name);
 
     std::string     shm_name_;
@@ -251,12 +251,12 @@ private:
     ShmControlBlock* ctrl_;
 
     // eventfd 通知
-    int req_eventfd_;    // 服务端：主控 eventfd（epoll 注册用），通过 UDS 发送给客户端
+    int req_eventfd_;    // 服务端：主控 eventfd（epoll 注册用），通过 握手通道 发送给客户端
     int event_fd_;       // 客户端：服务端响应通知 fd 副本（fd() 返回此 fd）
                           // 服务端：未使用
     int peer_notify_fd_; // 客户端：服务端主控 eventfd 副本（用于 send() 时 notify 服务端 epoll）
 
-    // UDS
+    // 握手
     int handshake_listen_fd_;
     std::string handshake_path_;
 

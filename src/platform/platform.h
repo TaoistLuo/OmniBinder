@@ -11,6 +11,24 @@
  * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)
  *
  * MIT License
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  *************************************************************************************************/
 #ifndef OMNIBINDER_PLATFORM_H
 #define OMNIBINDER_PLATFORM_H
@@ -22,14 +40,8 @@
 namespace omnibinder {
 namespace platform {
 
-// 不透明类型：头文件零平台 #ifdef，实现细节在 platform_linux.cpp / platform_win.cpp
 typedef intptr_t  SocketFd;
 const  SocketFd   INVALID_SOCKET_FD = (SocketFd)(-1);
-
-// Windows SOCKET 是 UINT_PTR，强转为 intptr_t 安全：
-//   Linux: int → intptr_t 零开销
-//   Windows: SOCKET → intptr_t 零开销，INVALID_SOCKET(~0) == (intptr_t)(-1)
-// 函数实现中如有需要可 static_cast<SOCKET> 回 Windows 类型
 
 // ============================================================
 // 网络 / Socket — 生产代码使用
@@ -80,21 +92,43 @@ void  shmUnlink(const std::string& name);
 
 // ============================================================
 // SHM 握手通道 — 跨进程交换 eventfd
-// Linux: 通过 Unix Domain Socket + SCM_RIGHTS 传递 fd
-// Windows: 通过 TCP loopback + Named Pipe 名称序列化模拟
+//
+// 适配指南：
+//   实现一个命名的双向通道（handshake channel），用于在 client/server
+//   进程之间完成一次性握手：交换数据（SHM 名称）和文件描述符（eventfd）。
+//   通道在握手完成后关闭，不保持长连接。
+//
+//   流程：
+//     Server: Listen → Accept → Recv(SHM name) → Send(eventfds) → Close
+//     Client: Connect → Send(SHM name) → Recv(eventfds) → Close
+//
+//   平台参考：
+//     Linux:   AF_UNIX + SCM_RIGHTS，name = 文件系统路径
+//     Windows: TCP loopback + Named Pipe 名称序列化，name = 端口号
+//
+//   注意：
+//     handshakeSend/handshakeRecv 在一次调用中同时传输数据和 fd，
+//     保证原子性（接收方要么同时拿到数据和 fd，要么都拿不到）。
+//     handshakeGetFd() 返回底层句柄，仅用于 EventLoop 注册，不做他用。
 // ============================================================
 
-int  shmHandshakeListen(const std::string& path, int backlog = 8);
-int  shmHandshakeAccept(int listen_fd);
-int  shmHandshakeConnect(const std::string& path);
-bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
-                         const void* data, size_t data_len);
-bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
-                         void* buf, size_t buf_size, size_t* out_data_len);
-bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventfd,
-                               int* out_new_fd);
-void shmHandshakeClose(int fd);
-void shmHandshakeCleanup(const std::string& path);
+struct handshake_listener;
+struct handshake_channel;
+
+handshake_listener* handshakeListen(const std::string& name);
+handshake_channel*  handshakeAccept(handshake_listener* listener);
+handshake_channel*  handshakeConnect(const std::string& name);
+void                handshakeCloseListener(handshake_listener* listener);
+
+bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
+                   const int* fds, int fd_count);
+bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
+                   int* fds, int max_fds, int* out_fd_count);
+void handshakeClose(handshake_channel* ch);
+void handshakeCleanup(const std::string& name);
+
+int  handshakeGetFd(handshake_channel* ch);
+int  handshakeGetListenerFd(handshake_listener* listener);
 
 // ============================================================
 // 时间 / 系统 — 生产代码使用

@@ -585,7 +585,21 @@ static uint16_t udsPathToPort(const std::string& path) {
 }
 
 
-int shmHandshakeListen(const std::string& path, int backlog) {
+
+struct handshake_listener { int fd; uint16_t port; };
+struct handshake_channel   { int fd; int notify_fd; };
+
+handshake_listener* handshakeListen(const std::string& name) { return shmHandshakeListenImpl(name, 8); }
+
+static handshake_listener* shmHandshakeListenImpl(const std::string& path, int backlog) {
+    int fd = shmHandshakeListenRaw(path, backlog);
+    if (fd < 0) return NULL;
+    uint16_t port = 0;
+    try { port = (uint16_t)std::stoi(path); } catch (...) {}
+    return new handshake_listener{fd, port};
+}
+
+static int shmHandshakeListenRaw(const std::string& path, int backlog) {
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return -1;
@@ -615,7 +629,14 @@ int shmHandshakeListen(const std::string& path, int backlog) {
     return static_cast<int>(fd);
 }
 
-int shmHandshakeAccept(int listen_fd) {
+handshake_channel* handshakeAccept(handshake_listener* listener) {
+    if (!listener) return NULL;
+    int fd = shmHandshakeAcceptRaw(listener->fd);
+    if (fd < 0) return NULL;
+    return new handshake_channel{fd, -1};
+}
+
+static int shmHandshakeAcceptRaw(int listen_fd) {
     SocketFd fd = ::accept(static_cast<SocketFd>(listen_fd), NULL, NULL);
     if (fd == INVALID_SOCKET) {
         int err = WSAGetLastError();
@@ -630,7 +651,13 @@ int shmHandshakeAccept(int listen_fd) {
     return static_cast<int>(fd);
 }
 
-int shmHandshakeConnect(const std::string& path) {
+handshake_channel* handshakeConnect(const std::string& name) {
+    int fd = shmHandshakeConnectRaw(name);
+    if (fd < 0) return NULL;
+    return new handshake_channel{fd, -1};
+}
+
+static int shmHandshakeConnectRaw(const std::string& path) {
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return -1;
@@ -655,7 +682,17 @@ int shmHandshakeConnect(const std::string& path) {
 
 // ── fd → pipe name serialization for SendFds / RecvFds ──
 
-bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
+void handshakeCloseListener(handshake_listener* listener) {
+    if (listener) { closesocket((SOCKET)listener->fd); delete listener; }
+}
+
+bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
+                   const int* fds, int fd_count) {
+    if (!ch) return false;
+    return shmHandshakeSendFdsRaw(ch->fd, fds, fd_count, data, len);
+}
+
+static bool shmHandshakeSendFdsRaw(int fd, const int* fds, int fd_count,
                 const void* data, size_t data_len) {
     // Wire format:
     //   [uint32_t data_len][uint8_t data[data_len]][uint32_t fd_count]
@@ -690,7 +727,13 @@ bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
     return sent == static_cast<int>(payload.size());
 }
 
-bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
+bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
+                   int* fds, int max_fds, int* out_fd_count) {
+    if (!ch) return false;
+    return shmHandshakeRecvFdsRaw(ch->fd, fds, max_fds, buf, bufsz, out_len, out_fd_count);
+}
+
+static bool shmHandshakeRecvFdsRaw(int fd, int* fds, int fd_count,
                 void* buf, size_t buf_size, size_t* out_data_len) {
     // Initialize outputs
     if (out_data_len) *out_data_len = 0;
@@ -749,7 +792,7 @@ bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
     return true;
 }
 
-bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventfd,
+static bool shmHandshakeSendResponseRaw(int client_fd, int resp_eventfd, int master_eventfd,
                            int* out_new_fd) {
     *out_new_fd = -1;
 
@@ -758,7 +801,7 @@ bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventf
     int notify_efd = createEventFd();
     if (notify_efd >= 0) {
         int fds[2] = { resp_eventfd, notify_efd };
-        if (shmHandshakeSendFds(client_fd, fds, 2, NULL, 0)) {
+        if (shmHandshakeSendFdsRaw(client_fd, fds, 2, NULL, 0)) {
             *out_new_fd = notify_efd;
             return true;
         }
@@ -767,10 +810,14 @@ bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventf
     }
 
     // Fallback: send only resp_eventfd (client won't have server notification)
-    return shmHandshakeSendFds(client_fd, &resp_eventfd, 1, NULL, 0);
+    return shmHandshakeSendFdsRaw(client_fd, &resp_eventfd, 1, NULL, 0);
 }
 
-void shmHandshakeClose(int fd) {
+void handshakeClose(handshake_channel* ch) {
+    if (ch) { shmHandshakeCloseRaw(ch->fd); delete ch; }
+}
+
+static void shmHandshakeCloseRaw(int fd) {
     if (fd >= 0) closesocket(static_cast<SocketFd>(fd));
 }
 
@@ -795,6 +842,10 @@ void setupSignalHandlers(SignalHandler handler) {
     signal(SIGINT, handler);
     signal(SIGTERM, handler);
 }
+
+
+int handshakeGetFd(handshake_channel* ch) { return ch ? ch->notify_fd : -1; }
+int handshakeGetListenerFd(handshake_listener* l) { return l ? l->fd : -1; }
 
 bool isShmHandshakeAvailable() {
     return true;  // Emulated via Named Pipes

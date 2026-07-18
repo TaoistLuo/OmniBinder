@@ -134,15 +134,15 @@ ShmTransport::~ShmTransport()
 }
 
 // ============================================================
-// Server initialization: create UDS listener only
+// Server initialization: create 握手 listener only
 // ============================================================
 bool ShmTransport::initServer()
 {
-    // Create UDS listen socket for client handshake
+    // Create 握手 listen socket for client handshake
     handshake_path_ = getHandshakePath(shm_name_);
     handshake_listen_fd_ = platform::shmHandshakeListen(handshake_path_);
     if (handshake_listen_fd_ < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS listen for '%s'", shm_name_.c_str());
+        OMNI_LOG_ERROR(LOG_TAG, "Failed to create 握手 listen for '%s'", shm_name_.c_str());
         return false;
     }
 
@@ -150,22 +150,22 @@ bool ShmTransport::initServer()
     req_eventfd_ = platform::createEventFd();
     if (req_eventfd_ < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create master req_eventfd for '%s'", shm_name_.c_str());
-        platform::shmHandshakeClose(handshake_listen_fd_);
-        handshake_listen_fd_ = -1;
-        platform::shmHandshakeCleanup(handshake_path_);
+        platform::handshakeCloseListener(handshake_listener_); handshake_listener_ = NULL;
+        
+        platform::handshakeCleanup(handshake_path);
         handshake_path_.clear();
         return false;
     }
 
     eventfd_enabled_ = true;
 
-    OMNI_LOG_INFO(LOG_TAG, "Server listening on UDS '%s' (fd=%d, req_eventfd=%d)",
+    OMNI_LOG_INFO(LOG_TAG, "Server listening on 握手通道 '%s' (fd=%d, req_eventfd=%d)",
                     handshake_path_.c_str(), handshake_listen_fd_, req_eventfd_);
     return true;
 }
 
 // ============================================================
-// Client initialization: create own SHM + UDS name exchange
+// Client initialization: create own SHM + 握手 name exchange
 // ============================================================
 bool ShmTransport::initClient()
 {
@@ -234,11 +234,11 @@ bool ShmTransport::initClient()
     platform::memoryBarrier();
     ctrl_->ready_flag = 1;
 
-    // Connect to server via UDS
+    // Connect to server via handshake
     std::string path = getHandshakePath(server_name);
     int fd = platform::shmHandshakeConnect(path);
-    if (fd < 0) {
-        OMNI_LOG_WARN(LOG_TAG, "UDS connect failed for '%s', falling back from SHM",
+    if (!ch) {
+        OMNI_LOG_WARN(LOG_TAG, "握手 connect failed for '%s', falling back from SHM",
                         server_name.c_str());
         cleanup();
         return false;
@@ -249,9 +249,9 @@ bool ShmTransport::initClient()
     {
         if (!platform::shmHandshakeSendFds(fd, NULL, 0,
                                    shm_name_.c_str(), shm_name_.size())) {
-            OMNI_LOG_WARN(LOG_TAG, "UDS send name failed for client '%s', falling back",
+            OMNI_LOG_WARN(LOG_TAG, "握手 send name failed for client '%s', falling back",
                             shm_name_.c_str());
-            platform::shmHandshakeClose(fd);
+            platform::handshakeClose(ch);
             cleanup();
             return false;
         }
@@ -263,9 +263,9 @@ bool ShmTransport::initClient()
     {
         int recv_fds[2] = {-1, -1};
         if (!platform::shmHandshakeRecvFds(fd, recv_fds, 2, NULL, 0, NULL)) {
-            OMNI_LOG_WARN(LOG_TAG, "UDS recv fds failed for client '%s', falling back",
+            OMNI_LOG_WARN(LOG_TAG, "握手 recv fds failed for client '%s', falling back",
                             shm_name_.c_str());
-            platform::shmHandshakeClose(fd);
+            platform::handshakeClose(ch);
             cleanup();
             return false;
         }
@@ -273,7 +273,7 @@ bool ShmTransport::initClient()
         peer_notify_fd_ = recv_fds[1];
     }
 
-    platform::shmHandshakeClose(fd);
+    platform::handshakeClose(ch);
 
     eventfd_enabled_ = (event_fd_ >= 0 && peer_notify_fd_ >= 0);
 
@@ -461,13 +461,13 @@ void ShmTransport::cleanup()
             req_eventfd_ = -1;
         }
 
-        // Close UDS listen socket
-        if (handshake_listen_fd_ >= 0) {
-            platform::shmHandshakeClose(handshake_listen_fd_);
-            handshake_listen_fd_ = -1;
+        // Close 握手 listen socket
+        if (handshake_listener_) {
+            platform::handshakeCloseListener(handshake_listener_); handshake_listener_ = NULL;
+            
         }
-        if (!handshake_path_.empty()) {
-            platform::shmHandshakeCleanup(handshake_path_);
+        if (!handshake_path.empty()) {
+            platform::handshakeCleanup(handshake_path);
             handshake_path_.clear();
         }
     } else {
@@ -874,7 +874,7 @@ std::vector<uint32_t> ShmTransport::activeClientIds() const
 }
 
 // ============================================================
-// UDS eventfd + SHM name exchange (server side)
+// 握手 eventfd + SHM name exchange (server side)
 // ============================================================
 
 void ShmTransport::onHandshakeClientConnect()

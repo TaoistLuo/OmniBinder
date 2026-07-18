@@ -443,7 +443,21 @@ void shmUnlink(const std::string& name) {
 // ============================================================
 
 
-int shmHandshakeListen(const std::string& path, int backlog) {
+
+// ============================================================
+// SHM 握手通道实现（Linux: AF_UNIX + SCM_RIGHTS）
+// ============================================================
+struct handshake_listener { int fd; };
+struct handshake_channel   { int fd; };
+
+handshake_listener* handshakeListen(const std::string& name) {
+    int fd = shmHandshakeListenImpl(name, 8);
+    if (fd < 0) return NULL;
+    return new handshake_listener{fd};
+}
+
+// Internal: original implementation
+static int shmHandshakeListenImpl(const std::string& path, int backlog) {
     // 清理残留
     ::unlink(path.c_str());
 
@@ -474,7 +488,14 @@ int shmHandshakeListen(const std::string& path, int backlog) {
     return fd;
 }
 
-int shmHandshakeAccept(int listen_fd) {
+handshake_channel* handshakeAccept(handshake_listener* listener) {
+    if (!listener) return NULL;
+    int fd = shmHandshakeAcceptImpl(listener->fd);
+    if (fd < 0) return NULL;
+    return new handshake_channel{fd};
+}
+
+static int shmHandshakeAcceptImpl(int listen_fd) {
     int fd;
     do {
         fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
@@ -482,7 +503,13 @@ int shmHandshakeAccept(int listen_fd) {
     return fd;
 }
 
-int shmHandshakeConnect(const std::string& path) {
+handshake_channel* handshakeConnect(const std::string& name) {
+    int fd = shmHandshakeConnectImpl(name);
+    if (fd < 0) return NULL;
+    return new handshake_channel{fd};
+}
+
+static int shmHandshakeConnectImpl(const std::string& path) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS connect socket: %s", strerror(errno));
@@ -503,7 +530,17 @@ int shmHandshakeConnect(const std::string& path) {
     return fd;
 }
 
-bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
+void handshakeCloseListener(handshake_listener* listener) {
+    if (listener) { shmHandshakeCloseImpl(listener->fd); delete listener; }
+}
+
+bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
+                   const int* fds, int fd_count) {
+    if (!ch) return false;
+    return shmHandshakeSendFdsImpl(ch->fd, fds, fd_count, data, len);
+}
+
+static bool shmHandshakeSendFdsImpl(int fd, const int* fds, int fd_count,
                 const void* data, size_t data_len) {
     // 至少需要 1 字节的 iov 数据（即使 data_len == 0）
     char dummy = 0;
@@ -558,7 +595,13 @@ bool shmHandshakeSendFds(int fd, const int* fds, int fd_count,
     return true;
 }
 
-bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
+bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
+                   int* fds, int max_fds, int* out_fd_count) {
+    if (!ch) return false;
+    return shmHandshakeRecvFdsImpl(ch->fd, fds, max_fds, buf, bufsz, out_len, out_fd_count);
+}
+
+static bool shmHandshakeRecvFdsImpl(int fd, int* fds, int fd_count,
                 void* buf, size_t buf_size, size_t* out_data_len) {
     char dummy;
     struct iovec iov;
@@ -616,20 +659,27 @@ bool shmHandshakeRecvFds(int fd, int* fds, int fd_count,
     return false;
 }
 
-bool shmHandshakeSendResponse(int client_fd, int resp_eventfd, int master_eventfd,
+// Internal: original SendResponse — only called by server after Recv
+static bool shmHandshakeSendResponseImpl(int client_fd, int resp_eventfd, int master_eventfd,
                            int* out_new_fd) {
     *out_new_fd = -1;
     int fds[2] = { resp_eventfd, master_eventfd };
-    return shmHandshakeSendFds(client_fd, fds, 2, NULL, 0);
+    return shmHandshakeSendFdsImpl(client_fd, fds, 2, NULL, 0);
 }
 
-void shmHandshakeClose(int fd) {
+void handshakeClose(handshake_channel* ch) {
+    if (ch) { shmHandshakeCloseImpl(ch->fd); delete ch; }
+}
+
+static void shmHandshakeCloseImpl(int fd) {
     if (fd >= 0) {
         close(fd);
     }
 }
 
-void shmHandshakeCleanup(const std::string& path) {
+void handshakeCleanup(const std::string& name) { shmHandshakeCleanupImpl(name); }
+
+static void shmHandshakeCleanupImpl(const std::string& path) {
     ::unlink(path.c_str());
 }
 
@@ -739,6 +789,15 @@ void setupSignalHandlers(SignalHandler handler) {
 #ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
 #endif
+}
+
+
+int handshakeGetFd(handshake_channel* ch) {
+    return ch ? -1 : -1;  // Linux: channel is transient, no persistent fd after close
+}
+
+int handshakeGetListenerFd(handshake_listener* listener) {
+    return listener ? listener->fd : -1;
 }
 
 bool isShmHandshakeAvailable() {
