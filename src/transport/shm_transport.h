@@ -100,7 +100,11 @@ struct ClientShmContext {
     void* shm_addr;           // 客户端 SHM 映射地址
     size_t shm_size;
     ShmControlBlock* ctrl;
+    uint32_t req_ring_capacity;
+    uint32_t resp_ring_capacity;
     int resp_eventfd;         // 服务端响应通知 fd（创建后通过握手通道发送给客户端）
+    int request_notify_fd;    // 平台可选的服务端本地请求通知 fd
+    platform::handshake_channel* liveness_channel;
 };
 
 // ============================================================
@@ -137,6 +141,10 @@ public:
     int connect(const std::string& host, uint16_t port) override;
     int send(const uint8_t* data, size_t length) override;
     int recv(uint8_t* buf, size_t buf_size) override;
+
+    // Returns 1 and the validated complete frame length when a response is ready,
+    // 0 when no complete frame is available, and -1 on malformed ring metadata.
+    int nextRecvSize(size_t& out_length);
     void close() override;
     ConnectionState state() const override;
     int fd() const override;
@@ -148,12 +156,21 @@ public:
     // 获取客户端 ID（客户端侧有效）
     uint32_t clientId() const { return client_id_; }
 
-    // 服务端：从各客户端的请求 ring 读取一条请求
+    // 服务端：从各客户端的请求 ring 读取一条请求。
+    //
+    // 检测到损坏帧时触发 on_client_disconnected_cb_ 回调并返回 -1。
+    // 本方法不直接调用 removeClient() —— 清理由回调在 owner event-loop
+    // 内按序完成（先拆 Runtime 引用，最后 removeClient）。
+    //
     // buf: 输出缓冲区
     // buf_size: 缓冲区大小
     // out_client_id: 输出请求来源的 client_id
     // 返回值: >0 = 读取的字节数, 0 = 无数据, <0 = 错误
     int serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client_id);
+
+    // 服务端等效 nextRecvSize()。检测到损坏帧时触发
+    // on_client_disconnected_cb_ 回调并返回 -1（清理契约同 serverRecv()）。
+    int nextServerRecvSize(size_t& out_length, uint32_t& out_client_id);
 
     // 服务端：向指定客户端的响应 ring 写入响应
     // client_id: 目标客户端 ID
@@ -182,16 +199,49 @@ public:
         return platform::handshakeGetListenerFd(handshake_listener_);
     }
 
+    // Internal endpoint naming helper used by transport integration tests.
+    static std::string getHandshakePath(const std::string& shm_name);
+
     // 服务端: 处理 握手客户端连接（接收 SHM 名称，发送 resp + master eventfd）
     void onHandshakeClientConnect();
+
+    // 服务端: 移除指定客户端（清理链的最后一步）。
+    //
+    // 前置条件: 调用方必须已从 EventLoop 移除该客户端的 liveness fd
+    // 和 per-client notify fd，并已清理所有 Runtime 层资源
+    // （topic 订阅、LocalServiceEntry bookkeeping）。
+    //
+    // 本方法仅负责 transport 层资源释放:
+    //   - close eventfd / request_notify_fd
+    //   - munmap SHM
+    //   - close liveness channel
+    //   - erase from client_contexts_
+    bool removeClient(uint32_t client_id);
 
     // 是否启用了 eventfd 通知
     bool eventfdEnabled() const { return eventfd_enabled_; }
 
-    // 服务端: 设置回调，当新客户端连接并创建通知 fd 时调用
-    // (Windows 上为 per-client pipe，需注册到 EventLoop)
-    void setOnNewClientNotifyFd(const std::function<void(int)>& cb) {
-        on_new_client_fd_cb_ = cb;
+    // 服务端: 上下文所有权建立后通知 owner EventLoop 注册存活通道和
+    // 平台可选的 per-client 请求通知 fd。
+    typedef std::function<void(uint32_t, int, int)> ClientConnectedCallback;
+    void setOnClientConnected(const ClientConnectedCallback& cb) {
+        on_client_connected_cb_ = cb;
+    }
+    // Callback invoked when serverRecv() / nextServerRecvSize() detects a
+    // malformed client ring.  The callback MUST complete the full cleanup
+    // sequence on the owner event-loop:
+    //
+    //   1. Deregister liveness fd & per-client notify fd from EventLoop
+    //   2. Remove topic subscriptions linked to this client
+    //   3. Remove bookkeeping entries (e.g. LocalServiceEntry maps)
+    //   4. Call removeClient(client_id) as the FINAL step
+    //
+    // ShmTransport does NOT call removeClient() internally because it cannot
+    // safely release transport resources before the owner-loop has torn down
+    // its own references to those fds.
+    typedef std::function<void(uint32_t, int, int)> ClientDisconnectedCallback;
+    void setOnClientDisconnected(const ClientDisconnectedCallback& cb) {
+        on_client_disconnected_cb_ = cb;
     }
 
 private:
@@ -209,18 +259,26 @@ private:
                             const uint8_t* data, size_t length);
 
     // 环形缓冲区操作
-    uint32_t ringAvailableRead(const ShmRingHeader* ring) const;
-    uint32_t ringAvailableWrite(const ShmRingHeader* ring) const;
+    uint32_t ringAvailableRead(const ShmRingHeader* ring, uint32_t capacity) const;
+    uint32_t ringAvailableWrite(const ShmRingHeader* ring, uint32_t capacity) const;
     uint32_t ringWrite(ShmRingHeader* ring, uint8_t* ring_data,
-                       const uint8_t* data, uint32_t length);
+                       const uint8_t* data, uint32_t length, uint32_t capacity);
+    uint32_t ringWriteFrame(ShmRingHeader* ring, uint8_t* ring_data,
+                            const uint8_t* data, uint32_t length, uint32_t capacity);
     uint32_t ringRead(ShmRingHeader* ring, const uint8_t* ring_data,
-                      uint8_t* buf, uint32_t length);
+                      uint8_t* buf, uint32_t length, uint32_t capacity);
+    int inspectFrame(const ShmRingHeader* ring, const uint8_t* ring_data,
+                     uint32_t trusted_capacity, size_t& out_length) const;
+    bool validateMappedLayout(void* addr, size_t mapped_size,
+                              ShmControlBlock*& out_ctrl,
+                              uint32_t& out_req_capacity,
+                              uint32_t& out_resp_capacity) const;
 
     // 从 SHM 基址获取各 ring 指针（用于当前实例或客户端上下文）
     static ShmRingHeader* getRequestRingFromBase(uint8_t* base);
     static uint8_t*       getRequestDataFromBase(uint8_t* base);
-    static ShmRingHeader* getResponseRingFromBase(uint8_t* base, ShmControlBlock* ctrl);
-    static uint8_t*       getResponseDataFromBase(uint8_t* base, ShmControlBlock* ctrl);
+    static ShmRingHeader* getResponseRingFromBase(uint8_t* base, uint32_t req_capacity);
+    static uint8_t*       getResponseDataFromBase(uint8_t* base, uint32_t req_capacity);
 
     // 当前实例的 ring 指针（客户端侧：指向自己的 SHM）
     ShmRingHeader* getRequestRing() const;
@@ -234,9 +292,6 @@ private:
     ShmRingHeader* getResponseRing(const ClientShmContext& ctx) const;
     uint8_t*       getResponseData(const ClientShmContext& ctx) const;
 
-
-    // 根据服务名生成确定性 握手路径
-    static std::string getHandshakePath(const std::string& shm_name);
 
     std::string     shm_name_;
     bool            is_server_;
@@ -260,6 +315,7 @@ private:
 
     // 握手 listener owns the named endpoint until cleanup.
     platform::handshake_listener* handshake_listener_;
+    platform::handshake_channel* handshake_channel_;
     std::string handshake_path_;
 
     // eventfd 是否启用
@@ -269,9 +325,8 @@ private:
     std::map<uint32_t, ClientShmContext> client_contexts_;
     uint32_t next_client_id_;  // 单调递增的客户端 ID 分配器
 
-    // 平台按客户端创建的服务端通知句柄及其注册回调
-    std::vector<int> local_notify_fds_;
-    std::function<void(int)> on_new_client_fd_cb_;
+    ClientConnectedCallback on_client_connected_cb_;
+    ClientDisconnectedCallback on_client_disconnected_cb_;
 };
 
 // 计算单客户端共享内存总大小

@@ -2,6 +2,8 @@
 #include "core/omni_runtime_helpers.h"
 #include "omnibinder/buffer_view.h"
 #include "omnibinder/log.h"
+#include <memory>
+#include <new>
 
 #define LOG_TAG "OmniRuntimeService"
 
@@ -103,13 +105,7 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
                 platform::eventFdConsume(fd);
                 ShmTransport* transport = entry->shm_transport;
                 if (!transport) return;
-                uint8_t buf[65536];
-                uint32_t from_id = 0;
-                while (true) {
-                    int ret = transport->serverRecv(buf, sizeof(buf), from_id);
-                    if (ret <= 0) break;
-                    onShmRequest(name, entry, from_id, buf, static_cast<size_t>(ret));
-                }
+                drainServiceShm(name, entry);
             });
     }
 
@@ -120,25 +116,87 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
             }
         });
 
-    // Register any platform-created per-client server notification descriptor.
-    // Linux reuses the master request descriptor and therefore returns none.
-    entry->shm_transport->setOnNewClientNotifyFd(
-        [this, entry, name](int fd) {
-            entry->shm_client_notify_fds.insert(fd);
-            loop_->addFd(fd, EventLoop::EVENT_READ,
+    entry->shm_transport->setOnClientConnected(
+        [this, entry, name](uint32_t client_id, int liveness_fd, int notify_fd) {
+            entry->shm_client_liveness_fds[client_id] =
+                std::make_pair(liveness_fd, notify_fd);
+            loop_->addFd(liveness_fd, EventLoop::EVENT_READ | EventLoop::EVENT_ERROR,
+                [this, entry, name, client_id](int, uint32_t) {
+                    std::map<uint32_t, std::pair<int, int> >::iterator registration =
+                        entry->shm_client_liveness_fds.find(client_id);
+                    if (registration == entry->shm_client_liveness_fds.end()) return;
+                    int live_fd = registration->second.first;
+                    int request_fd = registration->second.second;
+                    cleanupServiceShmClient(name, entry, client_id, live_fd, request_fd);
+                });
+
+            if (notify_fd >= 0) {
+                entry->shm_client_notify_fds.insert(notify_fd);
+                loop_->addFd(notify_fd, EventLoop::EVENT_READ,
                 [this, entry, name](int efd, uint32_t) {
                     platform::eventFdConsume(efd);
                     ShmTransport* transport = entry->shm_transport;
                     if (!transport) return;
-                    uint8_t buf[65536];
-                    uint32_t from_id = 0;
-                    while (true) {
-                        int ret = transport->serverRecv(buf, sizeof(buf), from_id);
-                        if (ret <= 0) break;
-                        onShmRequest(name, entry, from_id, buf, static_cast<size_t>(ret));
-                    }
+                    drainServiceShm(name, entry);
                 });
+            }
         });
+
+    entry->shm_transport->setOnClientDisconnected(
+        [this, entry, name](uint32_t client_id, int liveness_fd, int notify_fd) {
+            cleanupServiceShmClient(name, entry, client_id, liveness_fd, notify_fd);
+        });
+}
+
+void OmniRuntime::Impl::cleanupServiceShmClient(const std::string& name,
+                                                LocalServiceEntry* entry,
+                                                uint32_t client_id,
+                                                int liveness_fd,
+                                                int notify_fd) {
+    if (!entry) return;
+    std::map<uint32_t, std::pair<int, int> >::iterator registration =
+        entry->shm_client_liveness_fds.find(client_id);
+    if (registration == entry->shm_client_liveness_fds.end()) return;
+
+    (void)liveness_fd;
+    (void)notify_fd;
+    int registered_liveness_fd = registration->second.first;
+    int registered_notify_fd = registration->second.second;
+    if (registered_liveness_fd >= 0) loop_->removeFd(registered_liveness_fd);
+    if (registered_notify_fd >= 0) {
+        loop_->removeFd(registered_notify_fd);
+        entry->shm_client_notify_fds.erase(registered_notify_fd);
+    }
+    entry->shm_client_liveness_fds.erase(registration);
+    topic_runtime_.removeShmSubscriberService(name, client_id);
+    if (entry->shm_transport) entry->shm_transport->removeClient(client_id);
+}
+
+void OmniRuntime::Impl::drainServiceShm(const std::string& name, LocalServiceEntry* entry) {
+    ShmTransport* transport = entry ? entry->shm_transport : NULL;
+    if (!transport) return;
+    while (true) {
+        size_t frame_size = 0;
+        uint32_t from_id = 0;
+        int ready = transport->nextServerRecvSize(frame_size, from_id);
+        if (ready <= 0) break;
+        std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[frame_size]);
+        if (!buf) {
+            OMNI_LOG_ERROR(LOG_TAG, "SHM request allocation failed for %s client[%u] (%zu bytes)",
+                           name.c_str(), from_id, frame_size);
+            std::map<uint32_t, std::pair<int, int> >::iterator registration =
+                entry->shm_client_liveness_fds.find(from_id);
+            if (registration != entry->shm_client_liveness_fds.end()) {
+                cleanupServiceShmClient(name, entry, from_id,
+                                        registration->second.first,
+                                        registration->second.second);
+            }
+            break;
+        }
+        int ret = transport->serverRecv(buf.get(), frame_size, from_id);
+        if (ret <= 0) break;
+        onShmRequest(name, entry, from_id, buf.get(), static_cast<size_t>(ret));
+    }
 }
 
 int OmniRuntime::Impl::registerServiceWithManager(const std::string& name, Service* service,
@@ -216,11 +274,18 @@ void OmniRuntime::Impl::removeServiceShmFromLoop(LocalServiceEntry* entry) {
         loop_->removeFd(transport->handshakeListenFd());
     }
 
+    for (std::map<uint32_t, std::pair<int, int> >::iterator it =
+             entry->shm_client_liveness_fds.begin();
+         it != entry->shm_client_liveness_fds.end(); ++it) {
+        loop_->removeFd(it->second.first);
+        if (it->second.second >= 0) loop_->removeFd(it->second.second);
+    }
     for (std::set<int>::iterator it = entry->shm_client_notify_fds.begin();
          it != entry->shm_client_notify_fds.end(); ++it) {
         loop_->removeFd(*it);
     }
     entry->shm_client_notify_fds.clear();
+    entry->shm_client_liveness_fds.clear();
 
     // Restore so the caller (which may wrap this in its own cleanup) can
     // still close and delete the transport through the entry.

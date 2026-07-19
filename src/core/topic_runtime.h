@@ -29,6 +29,7 @@ public:
     void removeTcpSubscriberFd(int client_fd);
     void addShmSubscriberService(uint32_t topic_id, const std::string& service_name,
                                  uint32_t client_id);
+    void removeShmSubscriberService(const std::string& service_name, uint32_t client_id);
 
     const std::vector<int>& tcpSubscribers(uint32_t topic_id) const;
     const std::vector<ShmSubscriber>& shmSubscribers(uint32_t topic_id) const;

@@ -86,7 +86,8 @@ void closeEventFd(int efd);
 // 共享内存 — 生产代码使用
 // ============================================================
 
-void* shmCreate(const std::string& name, size_t size, bool create);
+void* shmCreate(const std::string& name, size_t size, bool create,
+                size_t* mapped_size = NULL);
 void  shmDetach(void* addr, size_t size);
 void  shmUnlink(const std::string& name);
 
@@ -96,11 +97,13 @@ void  shmUnlink(const std::string& name);
 // 适配指南：
 //   实现一个命名的双向通道（handshake channel），用于在 client/server
 //   进程之间完成一次性握手：交换数据（SHM 名称）和文件描述符（eventfd）。
-//   通道在握手完成后关闭，不保持长连接。
+//   握手成功后，连接通道的所有权转移给对应的 client/server transport context；
+//   通道可作为不承载业务数据的 opaque liveness channel 保留，通过 EOF/HUP
+//   检测对端退出。
 //
 //   流程：
-//     Server: Listen → Accept → Recv(SHM name) → Send(eventfds) → Close
-//     Client: Connect → Send(SHM name) → Recv(eventfds) → Close
+//     Server: Listen → Accept → Recv(SHM name) → Send(eventfds) → Retain/Close
+//     Client: Connect → Send(SHM name) → Recv(eventfds) → Retain/Close
 //
 //   平台参考：
 //     Linux:   AF_UNIX + SCM_RIGHTS，name = 文件系统路径

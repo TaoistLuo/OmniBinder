@@ -70,6 +70,7 @@ struct LocalServiceEntry {
     std::map<int, ITransport*>  client_transports;
     std::map<int, Buffer*>      client_recv_buffers;
     std::set<int>               shm_client_notify_fds;
+    std::map<uint32_t, std::pair<int, int> > shm_client_liveness_fds;
 
     bool     diag_enabled;
     uint32_t diag_topic_id;
@@ -274,6 +275,9 @@ private:
                                       LocalServiceEntry* entry, int client_fd);
     void onShmRequest(const std::string& name, LocalServiceEntry* entry,
                       uint32_t client_id, const uint8_t* data, size_t length);
+    void drainServiceShm(const std::string& name, LocalServiceEntry* entry);
+    void cleanupServiceShmClient(const std::string& name, LocalServiceEntry* entry,
+                                 uint32_t client_id, int liveness_fd, int notify_fd);
     InvokeDispatchResult dispatchLocalInvoke(Service* service, const Message& msg,
                                               const char* transport, const char* svc_name);
     void onInvokeRequest(const std::string& name, int client_fd, const Message& msg,

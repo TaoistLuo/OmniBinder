@@ -116,6 +116,27 @@ void TopicRuntime::addShmSubscriberService(uint32_t topic_id, const std::string&
     subscribers.push_back(subscriber);
 }
 
+void TopicRuntime::removeShmSubscriberService(const std::string& service_name,
+                                               uint32_t client_id) {
+    for (std::map<uint32_t, std::vector<ShmSubscriber> >::iterator it = shm_subscribers_.begin();
+         it != shm_subscribers_.end();) {
+        std::vector<ShmSubscriber>& subscribers = it->second;
+        for (std::vector<ShmSubscriber>::iterator subscriber = subscribers.begin();
+             subscriber != subscribers.end();) {
+            if (subscriber->service_name == service_name && subscriber->client_id == client_id) {
+                subscriber = subscribers.erase(subscriber);
+            } else {
+                ++subscriber;
+            }
+        }
+        if (subscribers.empty()) {
+            it = shm_subscribers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 const std::vector<int>& TopicRuntime::tcpSubscribers(uint32_t topic_id) const {
     static const std::vector<int> empty;
     std::map<uint32_t, std::vector<int> >::const_iterator it = tcp_subscribers_.find(topic_id);

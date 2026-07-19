@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
 #include <omnibinder/omnibinder.h>
+#include "transport/shm_transport.h"
 #include "transport/tcp_transport.h"
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,9 @@
 #include <thread>
 #include <chrono>
 #include <signal.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -840,6 +844,9 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
 }
 
 TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
+#ifdef _WIN32
+    GTEST_SKIP() << "Deterministic named SHM endpoint invalidation is POSIX-only";
+#else
     FallbackServerCtx fallback_ctx;
     std::thread fallback_tid;
     fallback_tid = std::thread(fallbackServerThread, &fallback_ctx);
@@ -851,6 +858,11 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     ServiceInfo info;
     ASSERT_EQ(probe.lookupService("FallbackService", info), 0);
     ASSERT_EQ(info.port, fallback_ctx.service.port());
+    ASSERT_EQ(info.host_id, probe.hostId());
+
+    const std::string handshake_path = ShmTransport::getHandshakePath(
+        generateShmName("FallbackService"));
+    ASSERT_EQ(unlink(handshake_path.c_str()), 0);
 
     probe.clearServiceCache();
     probe.closeAllConnections();
@@ -863,9 +875,15 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     ASSERT_EQ(probe.invoke("FallbackService", IFACE_ID, METHOD_ADD, 0, req, resp, 5000), 0);
     EXPECT_EQ(mustRead<int32_t>(resp, &Buffer::tryReadInt32), 14);
 
+    RuntimeStats stats;
+    ASSERT_EQ(probe.getStats(stats), 0);
+    EXPECT_EQ(stats.tcp_connections, 1u);
+    EXPECT_EQ(stats.shm_connections, 0u);
+
     probe.stop();
     fallback_ctx.should_stop = true;
     fallback_tid.join();
+#endif
 }
 
 TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {

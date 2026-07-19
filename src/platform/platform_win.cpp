@@ -318,6 +318,9 @@ struct EventFdEntryV2 {
 
 thread_local std::map<int, EventFdEntryV2> g_efd_map2;
 static std::atomic<int>                     g_efd_next_2{1};  // process-wide: prevents pipe name collision across threads
+// Follow-up: thread-local eventfd/IOCP registry ownership across thread and
+// process teardown is not verified on Windows; keep this broader issue out of
+// the handshake change until it can be tested with a Windows toolchain.
 
 static std::string makePipeName(const std::string& name) {
     std::string path = "\\\\.\\pipe\\omnibinder_evt_";
@@ -351,7 +354,8 @@ int openNamedEventFdByPipeName(const std::string& pipe_name) {
 thread_local bool g_efd_first_call = true;
 
 int createEventFd() {
-    // First call is always from EventLoop for cross-thread wakeup.
+    // Legacy/risky first-call heuristic: the first call is assumed to be the
+    // EventLoop cross-thread wakeup; later calls are SHM notifications.
     // Use the IOCP magic singleton — no pipe needed within a single process.
     if (g_efd_first_call) {
         g_efd_first_call = false;
@@ -445,7 +449,10 @@ void closeEventFd(int efd) {
 static std::map<std::string, HANDLE> g_shm_handles;
 static std::mutex g_shm_handles_mutex;
 
-void* shmCreate(const std::string& name, size_t size, bool create) {
+void* shmCreate(const std::string& name, size_t size, bool create, size_t* mapped_size) {
+    if (mapped_size) {
+        *mapped_size = 0;
+    }
     std::string map_name = "Local\\omnibinder_" + name;
     HANDLE hMap;
     if (create) {
@@ -461,12 +468,24 @@ void* shmCreate(const std::string& name, size_t size, bool create) {
         g_shm_handles[name] = hMap;
     }
 
-    void* addr = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
+    void* addr = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, create ? size : 0);
     if (!addr) {
         CloseHandle(hMap);
         std::lock_guard<std::mutex> lock(g_shm_handles_mutex);
         g_shm_handles.erase(name);
         return NULL;
+    }
+    MEMORY_BASIC_INFORMATION mapping_info;
+    if (VirtualQuery(addr, &mapping_info, sizeof(mapping_info)) == 0
+        || mapping_info.RegionSize == 0) {
+        UnmapViewOfFile(addr);
+        CloseHandle(hMap);
+        std::lock_guard<std::mutex> lock(g_shm_handles_mutex);
+        g_shm_handles.erase(name);
+        return NULL;
+    }
+    if (mapped_size) {
+        *mapped_size = mapping_info.RegionSize;
     }
     return addr;
 }
@@ -585,19 +604,64 @@ static uint16_t udsPathToPort(const std::string& path) {
     return static_cast<uint16_t>(50000 + (h % 10000));
 }
 struct handshake_listener { SocketFd fd; };
-struct handshake_channel   { SocketFd fd; int local_notify_fd; };
+struct handshake_channel   {
+    SocketFd fd;
+    int local_notify_fd;
+    int64_t deadline_ms;
+};
+
+bool checkSocketConnected(SocketFd fd, int* out_error);
 
 namespace {
 
 const size_t HANDSHAKE_MAX_PIPE_NAME = 512;
+const int64_t HANDSHAKE_TRANSACTION_TIMEOUT_MS = 500;
 
-bool socketSendAll(SocketFd fd, const char* data, size_t len)
+bool waitForHandshakeIo(SocketFd fd, bool writable, int64_t deadline_ms)
+{
+    for (;;) {
+        int64_t remaining = deadline_ms - currentTimeMs();
+        if (remaining <= 0) return false;
+
+        fd_set read_fds;
+        fd_set write_fds;
+        fd_set except_fds;
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        FD_ZERO(&except_fds);
+        if (writable) {
+            FD_SET(fd, &write_fds);
+        } else {
+            FD_SET(fd, &read_fds);
+        }
+        FD_SET(fd, &except_fds);
+
+        struct timeval tv;
+        tv.tv_sec = static_cast<long>(remaining / 1000);
+        tv.tv_usec = static_cast<long>((remaining % 1000) * 1000);
+        int ret = select(0, &read_fds, &write_fds, &except_fds, &tv);
+        if (ret > 0) {
+            if (FD_ISSET(fd, &except_fds)) return false;
+            return writable ? FD_ISSET(fd, &write_fds) != 0
+                            : FD_ISSET(fd, &read_fds) != 0;
+        }
+        if (ret == 0) return false;
+        if (WSAGetLastError() != WSAEINTR) return false;
+    }
+}
+
+bool socketSendAll(SocketFd fd, const char* data, size_t len, int64_t deadline_ms)
 {
     while (len > 0) {
+        if (currentTimeMs() >= deadline_ms) return false;
         int chunk = len > static_cast<size_t>(INT_MAX) ? INT_MAX : static_cast<int>(len);
         int sent = ::send(fd, data, chunk, 0);
         if (sent == SOCKET_ERROR) {
-            if (WSAGetLastError() == WSAEINTR) continue;
+            int error = WSAGetLastError();
+            if (error == WSAEINTR) continue;
+            if (error == WSAEWOULDBLOCK || error == WSAEINPROGRESS) {
+                if (waitForHandshakeIo(fd, true, deadline_ms)) continue;
+            }
             return false;
         }
         if (sent == 0) return false;
@@ -607,13 +671,18 @@ bool socketSendAll(SocketFd fd, const char* data, size_t len)
     return true;
 }
 
-bool socketRecvAll(SocketFd fd, char* data, size_t len)
+bool socketRecvAll(SocketFd fd, char* data, size_t len, int64_t deadline_ms)
 {
     while (len > 0) {
+        if (currentTimeMs() >= deadline_ms) return false;
         int chunk = len > static_cast<size_t>(INT_MAX) ? INT_MAX : static_cast<int>(len);
         int received = ::recv(fd, data, chunk, 0);
         if (received == SOCKET_ERROR) {
-            if (WSAGetLastError() == WSAEINTR) continue;
+            int error = WSAGetLastError();
+            if (error == WSAEINTR) continue;
+            if (error == WSAEWOULDBLOCK) {
+                if (waitForHandshakeIo(fd, false, deadline_ms)) continue;
+            }
             return false;
         }
         if (received == 0) return false;
@@ -667,19 +736,29 @@ handshake_listener* handshakeListen(const std::string& path)
 handshake_channel* handshakeAccept(handshake_listener* listener)
 {
     if (!listener) return NULL;
-    SocketFd fd = ::accept(listener->fd, NULL, NULL);
-    if (fd == INVALID_SOCKET) {
+    int64_t accept_deadline_ms = currentTimeMs() + HANDSHAKE_TRANSACTION_TIMEOUT_MS;
+    SocketFd fd = INVALID_SOCKET;
+    for (;;) {
+        fd = ::accept(listener->fd, NULL, NULL);
+        if (fd != INVALID_SOCKET) break;
         int err = WSAGetLastError();
+        if (err == WSAEINTR) continue;
+        if (err == WSAEWOULDBLOCK) {
+            if (waitForHandshakeIo(listener->fd, false, accept_deadline_ms)) continue;
+        }
         if (err != WSAEWOULDBLOCK) {
             OMNI_LOG_WARN(LOG_TAG, "handshakeAccept failed: %d", err);
         }
         return NULL;
     }
-    u_long mode = 0;
-    ioctlsocket(fd, FIONBIO, &mode);
+    if (!setNonBlocking(fd)) {
+        closesocket(fd);
+        return NULL;
+    }
     handshake_channel* ch = new handshake_channel;
     ch->fd = fd;
     ch->local_notify_fd = -1;
+    ch->deadline_ms = currentTimeMs() + HANDSHAKE_TRANSACTION_TIMEOUT_MS;
     return ch;
 }
 
@@ -687,23 +766,40 @@ handshake_channel* handshakeConnect(const std::string& path)
 {
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd == INVALID_SOCKET) return -1;
+    if (fd == INVALID_SOCKET) return NULL;
 
-    // Blocking connect matches the Linux handshake channel.
+    int64_t deadline_ms = currentTimeMs() + HANDSHAKE_TRANSACTION_TIMEOUT_MS;
+    if (!setNonBlocking(fd)) {
+        closesocket(fd);
+        return NULL;
+    }
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
 
-    if (::connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        OMNI_LOG_WARN(LOG_TAG, "handshakeConnect failed port=%u: %d", port, WSAGetLastError());
-        closesocket(fd);
-        return NULL;
+    int result = ::connect(fd, (struct sockaddr*)&addr, sizeof(addr));
+    if (result != 0) {
+        int error = WSAGetLastError();
+        if (error == WSAEINTR || error == WSAEINPROGRESS || error == WSAEWOULDBLOCK) {
+            if (!waitForHandshakeIo(fd, true, deadline_ms)
+                || !checkSocketConnected(fd, &error)) {
+                OMNI_LOG_WARN(LOG_TAG, "handshakeConnect failed port=%u: %d", port, error);
+                closesocket(fd);
+                return NULL;
+            }
+        } else {
+            OMNI_LOG_WARN(LOG_TAG, "handshakeConnect failed port=%u: %d", port, error);
+            closesocket(fd);
+            return NULL;
+        }
     }
     handshake_channel* ch = new handshake_channel;
     ch->fd = fd;
     ch->local_notify_fd = -1;
+    ch->deadline_ms = deadline_ms;
     return ch;
 }
 
@@ -767,7 +863,7 @@ bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
         memcpy(p, eit->second.pipe_name.data(), name_len); p += name_len;
     }
 
-    if (!socketSendAll(ch->fd, payload.data(), payload.size())) {
+    if (!socketSendAll(ch->fd, payload.data(), payload.size(), ch->deadline_ms)) {
         if (ch->local_notify_fd >= 0) {
             closeEventFd(ch->local_notify_fd);
             ch->local_notify_fd = -1;
@@ -786,27 +882,35 @@ bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_l
     if (!ch || max_fds < 0 || max_fds > 2 || (max_fds > 0 && !fds)) return false;
 
     uint32_t dlen = 0;
-    if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&dlen), sizeof(dlen))
-        || dlen > HANDSHAKE_MAX_PAYLOAD || dlen > bufsz || (dlen > 0 && !buf)) return false;
-    std::vector<char> data(dlen);
-    if (dlen > 0 && !socketRecvAll(ch->fd, data.data(), dlen)) return false;
-
-    uint32_t count = 0;
-    if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&count), sizeof(count))
-        || count > 2 || count > static_cast<uint32_t>(max_fds)) return false;
-
     int opened[2] = {-1, -1};
     int opened_count = 0;
+    if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&dlen), sizeof(dlen), ch->deadline_ms)
+        || dlen > HANDSHAKE_MAX_PAYLOAD || dlen > bufsz || (dlen > 0 && !buf)) {
+        closeOpenedEventFds(opened, opened_count);
+        return false;
+    }
+    std::vector<char> data(dlen);
+    if (dlen > 0 && !socketRecvAll(ch->fd, data.data(), dlen, ch->deadline_ms)) {
+        closeOpenedEventFds(opened, opened_count);
+        return false;
+    }
+
+    uint32_t count = 0;
+    if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&count), sizeof(count), ch->deadline_ms)
+        || count > 2 || count > static_cast<uint32_t>(max_fds)) {
+        closeOpenedEventFds(opened, opened_count);
+        return false;
+    }
     for (uint32_t i = 0; i < count; ++i) {
         uint32_t name_len = 0;
-        if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&name_len), sizeof(name_len))
+        if (!socketRecvAll(ch->fd, reinterpret_cast<char*>(&name_len), sizeof(name_len), ch->deadline_ms)
             || name_len == 0 || name_len > HANDSHAKE_MAX_PIPE_NAME) {
             closeOpenedEventFds(opened, opened_count);
             return false;
         }
 
         std::vector<char> name_buf(name_len);
-        if (!socketRecvAll(ch->fd, name_buf.data(), name_len)) {
+        if (!socketRecvAll(ch->fd, name_buf.data(), name_len, ch->deadline_ms)) {
             closeOpenedEventFds(opened, opened_count);
             return false;
         }

@@ -379,7 +379,10 @@ void closeEventFd(int efd) {
 // 共享内存
 // ============================================================
 
-void* shmCreate(const std::string& name, size_t size, bool create) {
+void* shmCreate(const std::string& name, size_t size, bool create, size_t* mapped_size) {
+    if (mapped_size) {
+        *mapped_size = 0;
+    }
     int flags = O_RDWR;
     if (create) {
         flags |= O_CREAT;
@@ -424,6 +427,9 @@ void* shmCreate(const std::string& name, size_t size, bool create) {
         return NULL;
     }
 
+    if (mapped_size) {
+        *mapped_size = size;
+    }
     return addr;
 }
 
@@ -443,11 +449,12 @@ void shmUnlink(const std::string& name) {
 // SHM 握手通道实现（Linux: AF_UNIX + SCM_RIGHTS）
 // ============================================================
 struct handshake_listener { int fd; std::string path; };
-struct handshake_channel   { int fd; };
+struct handshake_channel   { int fd; int64_t deadline_ms; };
 
 namespace {
 
 const uint32_t HANDSHAKE_MAGIC = 0x484E4453u;
+const int64_t HANDSHAKE_TRANSACTION_TIMEOUT_MS = 500;
 
 struct HandshakeHeader {
     uint32_t magic;
@@ -460,30 +467,72 @@ bool validUnixPath(const std::string& path)
     return !path.empty() && path.size() < sizeof(sockaddr_un::sun_path);
 }
 
-bool sendAll(int fd, const char* data, size_t len)
+bool waitForHandshakeIo(int fd, short events, int64_t deadline_ms)
+{
+    for (;;) {
+        int64_t remaining = deadline_ms - currentTimeMs();
+        if (remaining <= 0) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fd;
+        pfd.events = events;
+        int timeout = remaining > INT_MAX ? INT_MAX : static_cast<int>(remaining);
+        int ret = poll(&pfd, 1, timeout);
+        if (ret > 0) {
+            return (pfd.revents & (events | POLLERR | POLLHUP | POLLNVAL)) != 0;
+        }
+        if (ret == 0) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+        if (errno != EINTR) return false;
+    }
+}
+
+bool sendAll(int fd, const char* data, size_t len, int64_t deadline_ms)
 {
     while (len > 0) {
-        ssize_t sent;
-        do {
-            sent = ::send(fd, data, len, MSG_NOSIGNAL);
-        } while (sent < 0 && errno == EINTR);
-        if (sent <= 0) return false;
-        data += sent;
-        len -= static_cast<size_t>(sent);
+        if (currentTimeMs() >= deadline_ms) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+        ssize_t sent = ::send(fd, data, len, MSG_NOSIGNAL);
+        if (sent > 0) {
+            data += sent;
+            len -= static_cast<size_t>(sent);
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) continue;
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (waitForHandshakeIo(fd, POLLOUT, deadline_ms)) continue;
+        }
+        return false;
     }
     return true;
 }
 
-bool recvAll(int fd, char* data, size_t len)
+bool recvAll(int fd, char* data, size_t len, int64_t deadline_ms)
 {
     while (len > 0) {
-        ssize_t received;
-        do {
-            received = ::recv(fd, data, len, 0);
-        } while (received < 0 && errno == EINTR);
-        if (received <= 0) return false;
-        data += received;
-        len -= static_cast<size_t>(received);
+        if (currentTimeMs() >= deadline_ms) {
+            errno = ETIMEDOUT;
+            return false;
+        }
+        ssize_t received = ::recv(fd, data, len, 0);
+        if (received > 0) {
+            data += received;
+            len -= static_cast<size_t>(received);
+            continue;
+        }
+        if (received < 0 && errno == EINTR) continue;
+        if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (waitForHandshakeIo(fd, POLLIN, deadline_ms)) continue;
+        }
+        return false;
     }
     return true;
 }
@@ -540,11 +589,12 @@ handshake_channel* handshakeAccept(handshake_listener* listener) {
     if (!listener) return NULL;
     int fd;
     do {
-        fd = accept4(listener->fd, NULL, NULL, SOCK_CLOEXEC);
+        fd = accept4(listener->fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
     } while (fd < 0 && errno == EINTR);
     if (fd < 0) return NULL;
     handshake_channel* ch = new handshake_channel;
     ch->fd = fd;
+    ch->deadline_ms = currentTimeMs() + HANDSHAKE_TRANSACTION_TIMEOUT_MS;
     return ch;
 }
 
@@ -554,7 +604,7 @@ handshake_channel* handshakeConnect(const std::string& path)
         OMNI_LOG_ERROR(LOG_TAG, "Invalid handshake path length: %zu", path.size());
         return NULL;
     }
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to create UDS connect socket: %s", strerror(errno));
         return NULL;
@@ -565,10 +615,20 @@ handshake_channel* handshakeConnect(const std::string& path)
     addr.sun_family = AF_UNIX;
     memcpy(addr.sun_path, path.c_str(), path.size() + 1);
 
-    int rc;
-    do {
-        rc = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
-    } while (rc < 0 && errno == EINTR);
+    int64_t deadline_ms = currentTimeMs() + HANDSHAKE_TRANSACTION_TIMEOUT_MS;
+    int rc = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    if (rc < 0 && (errno == EINPROGRESS || errno == EALREADY || errno == EINTR)) {
+        if (waitForHandshakeIo(fd, POLLOUT, deadline_ms)) {
+            int socket_error = 0;
+            socklen_t error_len = sizeof(socket_error);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0
+                && socket_error == 0) {
+                rc = 0;
+            } else {
+                errno = socket_error != 0 ? socket_error : errno;
+            }
+        }
+    }
     if (rc < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "UDS connect failed to %s: %s", path.c_str(), strerror(errno));
         close(fd);
@@ -577,6 +637,7 @@ handshake_channel* handshakeConnect(const std::string& path)
 
     handshake_channel* ch = new handshake_channel;
     ch->fd = fd;
+    ch->deadline_ms = deadline_ms;
     return ch;
 }
 
@@ -621,16 +682,27 @@ bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
     }
 
     ssize_t ret;
-    do {
+    for (;;) {
+        if (currentTimeMs() >= ch->deadline_ms) {
+            errno = ETIMEDOUT;
+            ret = -1;
+            break;
+        }
         ret = sendmsg(ch->fd, &msg, MSG_NOSIGNAL);
-    } while (ret < 0 && errno == EINTR);
+        if (ret >= 0) break;
+        if (errno == EINTR) continue;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK)
+            && waitForHandshakeIo(ch->fd, POLLOUT, ch->deadline_ms)) continue;
+        break;
+    }
 
-    if (ret < 0) {
+    if (ret <= 0) {
         OMNI_LOG_ERROR(LOG_TAG, "handshakeSend failed: %s", strerror(errno));
         return false;
     }
     size_t sent = static_cast<size_t>(ret);
-    return sent == frame.size() || sendAll(ch->fd, frame.data() + sent, frame.size() - sent);
+    return sent == frame.size()
+        || sendAll(ch->fd, frame.data() + sent, frame.size() - sent, ch->deadline_ms);
 }
 
 bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
@@ -654,9 +726,19 @@ bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_l
     msg.msg_controllen = sizeof(cmsg_buf);
 
     ssize_t ret;
-    do {
-        ret = recvmsg(ch->fd, &msg, MSG_CMSG_CLOEXEC | MSG_WAITALL);
-    } while (ret < 0 && errno == EINTR);
+    for (;;) {
+        if (currentTimeMs() >= ch->deadline_ms) {
+            errno = ETIMEDOUT;
+            ret = -1;
+            break;
+        }
+        ret = recvmsg(ch->fd, &msg, MSG_CMSG_CLOEXEC);
+        if (ret >= 0) break;
+        if (errno == EINTR) continue;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK)
+            && waitForHandshakeIo(ch->fd, POLLIN, ch->deadline_ms)) continue;
+        break;
+    }
 
     if (ret < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "handshakeRecv failed: %s", strerror(errno));
@@ -673,18 +755,26 @@ bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_l
             continue;
         }
         size_t bytes = cmsg->cmsg_len - CMSG_LEN(0);
-        if (bytes % sizeof(int) != 0 || bytes / sizeof(int) > 2
-            || received_count != 0) {
+        if (bytes % sizeof(int) != 0) {
             ancillary_valid = false;
             continue;
         }
-        received_count = static_cast<int>(bytes / sizeof(int));
-        memcpy(received_fds, CMSG_DATA(cmsg), bytes);
+        size_t count = bytes / sizeof(int);
+        const int* rights = reinterpret_cast<const int*>(CMSG_DATA(cmsg));
+        if (received_count != 0) ancillary_valid = false;
+        for (size_t i = 0; i < count; ++i) {
+            if (received_count < 2) {
+                received_fds[received_count++] = rights[i];
+            } else {
+                close(rights[i]);
+                ancillary_valid = false;
+            }
+        }
     }
 
     if (ret > 0 && ret < static_cast<ssize_t>(sizeof(header))
         && !recvAll(ch->fd, reinterpret_cast<char*>(&header) + ret,
-                    sizeof(header) - static_cast<size_t>(ret))) {
+                    sizeof(header) - static_cast<size_t>(ret), ch->deadline_ms)) {
         closeReceivedFds(received_fds, received_count);
         return false;
     }
@@ -699,7 +789,7 @@ bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_l
     }
     std::string payload(header.payload_len, '\0');
     if (header.payload_len > 0
-        && !recvAll(ch->fd, &payload[0], header.payload_len)) {
+        && !recvAll(ch->fd, &payload[0], header.payload_len, ch->deadline_ms)) {
         closeReceivedFds(received_fds, received_count);
         return false;
     }

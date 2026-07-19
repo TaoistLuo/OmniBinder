@@ -18,6 +18,10 @@ add_executable(test_message test_message.cpp)
 target_link_libraries(test_message PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_message COMMAND test_message)
 
+add_executable(test_error_compatibility test_error_compatibility.cpp)
+target_link_libraries(test_error_compatibility PRIVATE omnibinder_static gtest gtest_main)
+add_test(NAME test_error_compatibility COMMAND test_error_compatibility)
+
 add_executable(test_event_loop test_event_loop.cpp)
 target_link_libraries(test_event_loop PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_event_loop COMMAND test_event_loop)
@@ -65,6 +69,7 @@ add_test(NAME test_topic_manager COMMAND test_topic_manager)
 add_executable(test_shm_transport test_shm_transport.cpp)
 target_link_libraries(test_shm_transport PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_shm_transport COMMAND test_shm_transport)
+set_tests_properties(test_shm_transport PROPERTIES TIMEOUT 30)
 
 add_executable(test_idl_compiler
     test_idl_compiler.cpp
@@ -265,6 +270,7 @@ if(TARGET omni-idlc OR OMNIBINDER_HOST_IDLC)
     add_executable(test_soak_runner test_soak_runner.cpp)
     add_dependencies(test_soak_runner
         test_performance
+        test_performance_server
         test_full_integration
         test_control_plane_and_fallback
         test_threadsafe_client_and_reconnect

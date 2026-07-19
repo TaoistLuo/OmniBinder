@@ -36,7 +36,7 @@ static const char* g_program_path = nullptr;
 class CalcService : public Service {
 public:
     CalcService() : Service("CalcService"), invoke_count_(0) {
-        setShmConfig(ShmConfig(8 * 1024, 12 * 1024));
+        setShmConfig(ShmConfig(256 * 1024, 256 * 1024));
         iface_.interface_id = IFACE_ID;
         iface_.name = "CalcService";
         iface_.methods.push_back(MethodInfo(METHOD_ADD, "Add"));
@@ -194,6 +194,33 @@ TEST_F(FullIntegrationTest, InvokeViaShmEcho) {
     ASSERT_EQ(c.connectService("CalcService"), 0);
     ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ECHO, 0, req, resp, 5000), 0) << "invoke echo failed";
     EXPECT_EQ(mustReadString(resp), "SHM echo test");
+    c.stop();
+}
+
+TEST_F(FullIntegrationTest, InvokeViaShmLargeEchoThenSmall) {
+    OmniRuntime c;
+    ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0) << "client init failed";
+    ASSERT_EQ(c.connectService("CalcService"), 0);
+
+    const size_t large_size = 100 * 1024;
+    Buffer large_request;
+    std::vector<uint8_t> expected(large_size);
+    for (size_t i = 0; i < expected.size(); ++i) {
+        expected[i] = static_cast<uint8_t>((i * 29u + (i >> 7)) & 0xffu);
+    }
+    ASSERT_TRUE(large_request.writeRaw(expected.data(), expected.size()));
+    Buffer large_response;
+    ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ECHO, 0,
+                       large_request, large_response, 5000), 0);
+    ASSERT_EQ(large_response.size(), expected.size());
+    EXPECT_EQ(memcmp(large_response.data(), expected.data(), expected.size()), 0);
+
+    Buffer small_request;
+    ASSERT_TRUE(small_request.writeString("after-large"));
+    Buffer small_response;
+    ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ECHO, 0,
+                       small_request, small_response, 5000), 0);
+    EXPECT_EQ(mustReadString(small_response), "after-large");
     c.stop();
 }
 

@@ -27,3 +27,19 @@ TEST(EventLoopTest, Post) {
     loop.run();
     EXPECT_TRUE(called);
 }
+
+TEST(EventLoopTest, CallbackCanRemoveItsOwnFd) {
+    EventLoop loop;
+    int event_fd = platform::createEventFd();
+    ASSERT_GE(event_fd, 0);
+    bool continued_after_remove = false;
+    loop.addFd(event_fd, EventLoop::EVENT_READ,
+        [&loop, &continued_after_remove](int fd, uint32_t) {
+            loop.removeFd(fd);
+            continued_after_remove = true;
+        });
+    ASSERT_TRUE(platform::eventFdNotify(event_fd));
+    loop.pollOnce(100);
+    EXPECT_TRUE(continued_after_remove);
+    platform::closeEventFd(event_fd);
+}

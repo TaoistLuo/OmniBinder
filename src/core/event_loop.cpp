@@ -129,7 +129,8 @@ void EventLoop::pollOnceInternal(int timeout_ms, bool process_functors)
 
         std::map<int, FdEntry>::iterator it = fd_entries_.find(fd);
         if (it != fd_entries_.end() && it->second.callback) {
-            it->second.callback(fd, revents);
+            EventCallback callback = it->second.callback;
+            callback(fd, revents);
         }
     }
 

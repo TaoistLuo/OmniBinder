@@ -116,6 +116,7 @@ ShmTransport::ShmTransport(const std::string& shm_name, bool is_server,
     , event_fd_(-1)
     , peer_notify_fd_(-1)
     , handshake_listener_(NULL)
+    , handshake_channel_(NULL)
     , eventfd_enabled_(false)
     , next_client_id_(1)
 {
@@ -196,11 +197,22 @@ bool ShmTransport::initClient()
     }
 
     // Create the SHM region
-    shm_addr_ = platform::shmCreate(shm_name_, shm_size_, true);
+    size_t mapped_size = 0;
+    shm_addr_ = platform::shmCreate(shm_name_, shm_size_, true, &mapped_size);
     if (shm_addr_ == NULL) {
         OMNI_LOG_ERROR(LOG_TAG, "shmCreate failed for client '%s'", shm_name_.c_str());
         return false;
     }
+    if (mapped_size < shm_size_) {
+        OMNI_LOG_ERROR(LOG_TAG, "created SHM mapping too small: need=%zu mapped=%zu",
+                       shm_size_, mapped_size);
+        platform::shmDetach(shm_addr_, mapped_size);
+        shm_addr_ = NULL;
+        shm_size_ = 0;
+        platform::shmUnlink(shm_name_);
+        return false;
+    }
+    shm_size_ = mapped_size;
 
     // Zero-init control block + both ring headers
     memset(shm_addr_, 0, shm_size_);
@@ -278,7 +290,7 @@ bool ShmTransport::initClient()
         peer_notify_fd_ = recv_fds[1];
     }
 
-    platform::handshakeClose(ch);
+    handshake_channel_ = ch;
 
     eventfd_enabled_ = (event_fd_ >= 0 && peer_notify_fd_ >= 0);
 
@@ -301,15 +313,15 @@ uint8_t* ShmTransport::getRequestDataFromBase(uint8_t* base)
     return base + requestDataOffset();
 }
 
-ShmRingHeader* ShmTransport::getResponseRingFromBase(uint8_t* base, ShmControlBlock* ctrl)
+ShmRingHeader* ShmTransport::getResponseRingFromBase(uint8_t* base, uint32_t req_capacity)
 {
     return reinterpret_cast<ShmRingHeader*>(
-        base + responseRingOffset(ctrl->req_ring_capacity));
+        base + responseRingOffset(req_capacity));
 }
 
-uint8_t* ShmTransport::getResponseDataFromBase(uint8_t* base, ShmControlBlock* ctrl)
+uint8_t* ShmTransport::getResponseDataFromBase(uint8_t* base, uint32_t req_capacity)
 {
-    return base + responseDataOffset(ctrl->req_ring_capacity);
+    return base + responseDataOffset(req_capacity);
 }
 
 ShmRingHeader* ShmTransport::getRequestRing() const
@@ -327,13 +339,15 @@ uint8_t* ShmTransport::getRequestData() const
 ShmRingHeader* ShmTransport::getResponseRing() const
 {
     if (!shm_addr_ || !ctrl_) return NULL;
-    return getResponseRingFromBase(static_cast<uint8_t*>(shm_addr_), ctrl_);
+    return getResponseRingFromBase(static_cast<uint8_t*>(shm_addr_),
+                                   static_cast<uint32_t>(requested_req_ring_capacity_));
 }
 
 uint8_t* ShmTransport::getResponseData() const
 {
     if (!shm_addr_ || !ctrl_) return NULL;
-    return getResponseDataFromBase(static_cast<uint8_t*>(shm_addr_), ctrl_);
+    return getResponseDataFromBase(static_cast<uint8_t*>(shm_addr_),
+                                   static_cast<uint32_t>(requested_req_ring_capacity_));
 }
 
 ShmRingHeader* ShmTransport::getRequestRing(const ClientShmContext& ctx) const
@@ -351,24 +365,26 @@ uint8_t* ShmTransport::getRequestData(const ClientShmContext& ctx) const
 ShmRingHeader* ShmTransport::getResponseRing(const ClientShmContext& ctx) const
 {
     if (!ctx.shm_addr || !ctx.ctrl) return NULL;
-    return getResponseRingFromBase(static_cast<uint8_t*>(ctx.shm_addr), ctx.ctrl);
+    return getResponseRingFromBase(static_cast<uint8_t*>(ctx.shm_addr),
+                                   ctx.req_ring_capacity);
 }
 
 uint8_t* ShmTransport::getResponseData(const ClientShmContext& ctx) const
 {
     if (!ctx.shm_addr || !ctx.ctrl) return NULL;
-    return getResponseDataFromBase(static_cast<uint8_t*>(ctx.shm_addr), ctx.ctrl);
+    return getResponseDataFromBase(static_cast<uint8_t*>(ctx.shm_addr),
+                                   ctx.req_ring_capacity);
 }
 
 // ============================================================
 // Ring buffer operations
 // ============================================================
 
-uint32_t ShmTransport::ringAvailableRead(const ShmRingHeader* ring) const
+uint32_t ShmTransport::ringAvailableRead(const ShmRingHeader* ring, uint32_t cap) const
 {
+    if (!ring || cap < MIN_RING_CAPACITY || ring->capacity != cap) return 0;
     uint32_t w = ring->write_pos.load(std::memory_order_acquire);
     uint32_t r = ring->read_pos.load(std::memory_order_acquire);
-    uint32_t cap = ring->capacity;
     if (w >= cap || r >= cap) {
         return 0;
     }
@@ -378,23 +394,110 @@ uint32_t ShmTransport::ringAvailableRead(const ShmRingHeader* ring) const
     return cap - r + w;
 }
 
-uint32_t ShmTransport::ringAvailableWrite(const ShmRingHeader* ring) const
+uint32_t ShmTransport::ringAvailableWrite(const ShmRingHeader* ring, uint32_t capacity) const
 {
-    uint32_t used = ringAvailableRead(ring);
-    return ring->capacity - 1 - used;
+    if (!ring || capacity < MIN_RING_CAPACITY || ring->capacity != capacity
+        || ring->write_pos.load(std::memory_order_acquire) >= capacity
+        || ring->read_pos.load(std::memory_order_acquire) >= capacity) {
+        return 0;
+    }
+    uint32_t used = ringAvailableRead(ring, capacity);
+    return capacity - 1 - used;
+}
+
+int ShmTransport::inspectFrame(const ShmRingHeader* ring, const uint8_t* ring_data,
+                               uint32_t trusted_capacity, size_t& out_length) const
+{
+    out_length = 0;
+    if (!ring || !ring_data || trusted_capacity < MIN_RING_CAPACITY
+        || ring->capacity != trusted_capacity) {
+        return -1;
+    }
+
+    uint32_t r = ring->read_pos.load(std::memory_order_acquire);
+    uint32_t w = ring->write_pos.load(std::memory_order_acquire);
+    if (r >= trusted_capacity || w >= trusted_capacity) {
+        return -1;
+    }
+
+    uint32_t avail = w >= r ? w - r : trusted_capacity - r + w;
+    if (avail < sizeof(uint32_t)) {
+        return 0;
+    }
+
+    uint32_t msg_len = 0;
+    uint8_t* len_bytes = reinterpret_cast<uint8_t*>(&msg_len);
+    for (uint32_t i = 0; i < sizeof(uint32_t); ++i) {
+        len_bytes[i] = ring_data[(r + i) % trusted_capacity];
+    }
+
+    const uint32_t max_frame = trusted_capacity - 1u - sizeof(uint32_t);
+    if (msg_len == 0 || msg_len > MAX_MESSAGE_SIZE || msg_len > max_frame) {
+        return -1;
+    }
+    uint64_t total_needed = static_cast<uint64_t>(sizeof(uint32_t)) + msg_len;
+    if (total_needed > avail) {
+        return 0;
+    }
+    out_length = msg_len;
+    return 1;
+}
+
+bool ShmTransport::validateMappedLayout(void* addr, size_t mapped_size,
+                                        ShmControlBlock*& out_ctrl,
+                                        uint32_t& out_req_capacity,
+                                        uint32_t& out_resp_capacity) const
+{
+    out_ctrl = NULL;
+    out_req_capacity = 0;
+    out_resp_capacity = 0;
+    if (!addr || mapped_size < sizeof(ShmControlBlock)) {
+        return false;
+    }
+    ShmControlBlock* ctrl = reinterpret_cast<ShmControlBlock*>(addr);
+    if (ctrl->magic != SHM_MAGIC || ctrl->version != 1 || ctrl->ready_flag != 1) {
+        return false;
+    }
+    const uint32_t req_capacity = ctrl->req_ring_capacity;
+    const uint32_t resp_capacity = ctrl->resp_ring_capacity;
+    size_t layout_size = calculateShmSize(req_capacity, resp_capacity, 1);
+    if (layout_size == 0 || layout_size > mapped_size) {
+        return false;
+    }
+    ShmRingHeader* req_ring = getRequestRingFromBase(static_cast<uint8_t*>(addr));
+    ShmRingHeader* resp_ring = getResponseRingFromBase(static_cast<uint8_t*>(addr),
+                                                       req_capacity);
+    if (ctrl->req_ring_capacity != req_capacity
+        || ctrl->resp_ring_capacity != resp_capacity
+        || req_ring->capacity != req_capacity
+        || resp_ring->capacity != resp_capacity
+        || req_ring->read_pos.load(std::memory_order_relaxed) >= req_ring->capacity
+        || req_ring->write_pos.load(std::memory_order_relaxed) >= req_ring->capacity
+        || resp_ring->read_pos.load(std::memory_order_relaxed) >= resp_ring->capacity
+        || resp_ring->write_pos.load(std::memory_order_relaxed) >= resp_ring->capacity) {
+        return false;
+    }
+    out_ctrl = ctrl;
+    out_req_capacity = req_capacity;
+    out_resp_capacity = resp_capacity;
+    return true;
 }
 
 uint32_t ShmTransport::ringWrite(ShmRingHeader* ring, uint8_t* ring_data,
-                                 const uint8_t* data, uint32_t length)
+                                  const uint8_t* data, uint32_t length, uint32_t capacity)
 {
-    uint32_t avail = ringAvailableWrite(ring);
+    if (!ring || !ring_data || !data || ring->capacity != capacity
+        || ring->write_pos.load(std::memory_order_relaxed) >= capacity) {
+        return 0;
+    }
+    uint32_t avail = ringAvailableWrite(ring, capacity);
     uint32_t to_write = std::min(length, avail);
     if (to_write == 0) {
         return 0;
     }
 
     uint32_t w = ring->write_pos.load(std::memory_order_relaxed);
-    uint32_t cap = ring->capacity;
+    uint32_t cap = capacity;
 
     uint32_t first = std::min(to_write, cap - w);
     memcpy(ring_data + w, data, first);
@@ -408,17 +511,47 @@ uint32_t ShmTransport::ringWrite(ShmRingHeader* ring, uint8_t* ring_data,
     return to_write;
 }
 
-uint32_t ShmTransport::ringRead(ShmRingHeader* ring, const uint8_t* ring_data,
-                                uint8_t* buf, uint32_t length)
+uint32_t ShmTransport::ringWriteFrame(ShmRingHeader* ring, uint8_t* ring_data,
+                                      const uint8_t* data, uint32_t length,
+                                      uint32_t capacity)
 {
-    uint32_t avail = ringAvailableRead(ring);
+    if (!ring || !ring_data || !data || ring->capacity != capacity
+        || ring->write_pos.load(std::memory_order_relaxed) >= capacity) {
+        return 0;
+    }
+    uint32_t total = static_cast<uint32_t>(sizeof(uint32_t)) + length;
+    if (ringAvailableWrite(ring, capacity) < total) return 0;
+
+    uint32_t pos = ring->write_pos.load(std::memory_order_relaxed);
+    uint32_t first = std::min(static_cast<uint32_t>(sizeof(uint32_t)), capacity - pos);
+    memcpy(ring_data + pos, &length, first);
+    if (first < sizeof(uint32_t)) {
+        memcpy(ring_data, reinterpret_cast<const uint8_t*>(&length) + first,
+               sizeof(uint32_t) - first);
+    }
+    pos = (pos + sizeof(uint32_t)) % capacity;
+    first = std::min(length, capacity - pos);
+    memcpy(ring_data + pos, data, first);
+    if (first < length) memcpy(ring_data, data + first, length - first);
+    ring->write_pos.store((pos + length) % capacity, std::memory_order_release);
+    return total;
+}
+
+uint32_t ShmTransport::ringRead(ShmRingHeader* ring, const uint8_t* ring_data,
+                                uint8_t* buf, uint32_t length, uint32_t capacity)
+{
+    if (!ring || !ring_data || !buf || ring->capacity != capacity
+        || ring->read_pos.load(std::memory_order_relaxed) >= capacity) {
+        return 0;
+    }
+    uint32_t avail = ringAvailableRead(ring, capacity);
     uint32_t to_read = std::min(length, avail);
     if (to_read == 0) {
         return 0;
     }
 
     uint32_t r = ring->read_pos.load(std::memory_order_relaxed);
-    uint32_t cap = ring->capacity;
+    uint32_t cap = capacity;
 
     uint32_t first = std::min(to_read, cap - r);
     memcpy(buf, ring_data + r, first);
@@ -446,6 +579,14 @@ void ShmTransport::cleanupClientContext(ClientShmContext& ctx)
         platform::closeEventFd(ctx.resp_eventfd);
         ctx.resp_eventfd = -1;
     }
+    if (ctx.request_notify_fd >= 0) {
+        platform::closeEventFd(ctx.request_notify_fd);
+        ctx.request_notify_fd = -1;
+    }
+    if (ctx.liveness_channel) {
+        platform::handshakeClose(ctx.liveness_channel);
+        ctx.liveness_channel = NULL;
+    }
     ctx.ctrl = NULL;
     ctx.shm_size = 0;
 }
@@ -466,12 +607,6 @@ void ShmTransport::cleanup()
             req_eventfd_ = -1;
         }
 
-        for (std::vector<int>::iterator it = local_notify_fds_.begin();
-             it != local_notify_fds_.end(); ++it) {
-            platform::closeEventFd(*it);
-        }
-        local_notify_fds_.clear();
-
         // Close handshake listener and remove its endpoint.
         if (handshake_listener_) {
             platform::handshakeCloseListener(handshake_listener_);
@@ -479,6 +614,10 @@ void ShmTransport::cleanup()
         }
         handshake_path_.clear();
     } else {
+        if (handshake_channel_) {
+            platform::handshakeClose(handshake_channel_);
+            handshake_channel_ = NULL;
+        }
         // Client: close eventfds
         if (peer_notify_fd_ >= 0) {
             platform::closeEventFd(peer_notify_fd_);
@@ -549,7 +688,7 @@ int ShmTransport::send(const uint8_t* data, size_t length)
         return 0;
     }
 
-    if (length > 0x7FFFFFFF) {
+    if (length > MAX_MESSAGE_SIZE || length > 0x7FFFFFFF) {
         OMNI_LOG_ERROR(LOG_TAG, "send() message too large: %zu bytes", length);
         return -1;
     }
@@ -565,21 +704,29 @@ int ShmTransport::send(const uint8_t* data, size_t length)
         return -1;
     }
 
-    bool was_empty = (ringAvailableRead(req_ring) == 0);
-    uint32_t avail = ringAvailableWrite(req_ring);
+    uint32_t req_capacity = static_cast<uint32_t>(requested_req_ring_capacity_);
+    bool was_empty = (ringAvailableRead(req_ring, req_capacity) == 0);
+    uint32_t avail = ringAvailableWrite(req_ring, req_capacity);
     if (avail < total_needed) {
         OMNI_LOG_DEBUG(LOG_TAG, "send() request ring full: need %u, avail %u",
                          total_needed, avail);
         return 0;
     }
 
-    uint32_t len32 = static_cast<uint32_t>(length);
-    ringWrite(req_ring, req_data, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-    ringWrite(req_ring, req_data, data, static_cast<uint32_t>(length));
+    uint32_t write_start = req_ring->write_pos.load(std::memory_order_relaxed);
+    ringWriteFrame(req_ring, req_data, data, static_cast<uint32_t>(length), req_capacity);
 
-    // Notify server via master eventfd (received during handshake)
-    if (was_empty && eventfd_enabled_ && peer_notify_fd_ >= 0) {
+    if (!was_empty) {
+        was_empty = (req_ring->read_pos.load(std::memory_order_acquire) == write_start);
+    }
+
+    // Notify only on the empty-to-nonempty transition. If enqueue races with
+    // a drain of the previous contents, the post-write read position detects
+    // that this frame became the new empty-to-nonempty transition.
+    if (was_empty || req_ring->read_pos.load(std::memory_order_acquire) == write_start) {
+        if (eventfd_enabled_ && peer_notify_fd_ >= 0) {
         platform::eventFdNotify(peer_notify_fd_);
+        }
     }
 
     OMNI_LOG_DEBUG(LOG_TAG, "Client sent %zu bytes on shm '%s'",
@@ -598,10 +745,8 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
         return -1;
     }
 
-    int result = 0;
-
     if (buf_size == 0) {
-        goto consume_eventfd;
+        return 0;
     }
 
     {
@@ -613,29 +758,18 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
             return -1;
         }
 
-        uint32_t avail = ringAvailableRead(resp_ring);
-        if (avail < sizeof(uint32_t)) {
-            goto consume_eventfd;
+        size_t frame_size = 0;
+        int inspect = inspectFrame(resp_ring, resp_data,
+                                   static_cast<uint32_t>(requested_resp_ring_capacity_),
+                                   frame_size);
+        if (inspect <= 0) {
+            if (inspect < 0) {
+                OMNI_LOG_ERROR(LOG_TAG, "recv() malformed response ring");
+                state_ = ConnectionState::ERROR;
+            }
+            return inspect;
         }
-
-        // Peek at length prefix
-        uint32_t r = resp_ring->read_pos.load(std::memory_order_relaxed);
-        uint32_t cap = resp_ring->capacity;
-        uint32_t msg_len = 0;
-        uint8_t* len_bytes = reinterpret_cast<uint8_t*>(&msg_len);
-        for (uint32_t i = 0; i < sizeof(uint32_t); ++i) {
-            len_bytes[i] = resp_data[(r + i) % cap];
-        }
-
-        if (msg_len == 0) {
-            resp_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
-            goto consume_eventfd;
-        }
-
-        uint32_t total_needed = sizeof(uint32_t) + msg_len;
-        if (avail < total_needed) {
-            goto consume_eventfd;
-        }
+        uint32_t msg_len = static_cast<uint32_t>(frame_size);
 
         if (buf_size < msg_len) {
             OMNI_LOG_WARN(LOG_TAG, "recv() buffer too small: need %u, have %zu",
@@ -643,10 +777,11 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
             return -1;
         }
 
-        // Consume length prefix
+        uint32_t r = resp_ring->read_pos.load(std::memory_order_relaxed);
+        uint32_t cap = static_cast<uint32_t>(requested_resp_ring_capacity_);
         resp_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
 
-        uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len);
+        uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len, cap);
         if (read_bytes != msg_len) {
             OMNI_LOG_ERROR(LOG_TAG, "recv() failed to read payload (%u of %u)",
                              read_bytes, msg_len);
@@ -656,16 +791,21 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
 
         OMNI_LOG_DEBUG(LOG_TAG, "Client received %u bytes on shm '%s'",
                          msg_len, shm_name_.c_str());
-        result = static_cast<int>(msg_len);
+        return static_cast<int>(msg_len);
     }
+}
 
-consume_eventfd:
-    // Pair each notify with a consume so level-triggered epoll won't re-fire
-    // when the ring is empty (which onConnectionData would misread as disconnect)
-    if (event_fd_ >= 0) {
-        platform::eventFdConsume(event_fd_);
+int ShmTransport::nextRecvSize(size_t& out_length)
+{
+    out_length = 0;
+    if (is_server_ || state_ != ConnectionState::CONNECTED || !ctrl_) return -1;
+    int ret = inspectFrame(getResponseRing(), getResponseData(),
+                           static_cast<uint32_t>(requested_resp_ring_capacity_), out_length);
+    if (ret < 0) {
+        OMNI_LOG_ERROR(LOG_TAG, "nextRecvSize() malformed response ring");
+        state_ = ConnectionState::ERROR;
     }
-    return result;
+    return ret;
 }
 
 void ShmTransport::close()
@@ -723,35 +863,23 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
             continue;
         }
 
-        uint32_t avail = ringAvailableRead(req_ring);
-        if (avail < sizeof(uint32_t)) {
-            continue;
-        }
-
-        // Peek at length prefix
-        uint32_t r = req_ring->read_pos.load(std::memory_order_relaxed);
-        uint32_t cap = req_ring->capacity;
-
-        uint32_t msg_len = 0;
-        {
-            uint8_t* len_bytes = reinterpret_cast<uint8_t*>(&msg_len);
-            for (uint32_t i = 0; i < sizeof(uint32_t); ++i) {
-                len_bytes[i] = req_data[(r + i) % cap];
+        size_t frame_size = 0;
+        int inspect = inspectFrame(req_ring, req_data, ctx.req_ring_capacity,
+                                   frame_size);
+        if (inspect < 0) {
+            OMNI_LOG_ERROR(LOG_TAG, "serverRecv() malformed request ring from client[%u], disconnecting",
+                           cid);
+            // ShmTransport reports the abnormal client; the callback is
+            // contractually responsible for the full cleanup sequence
+            // (deregister fds → drop topics → removeClient).  See header.
+            if (on_client_disconnected_cb_) {
+                on_client_disconnected_cb_(cid, platform::handshakeGetFd(ctx.liveness_channel),
+                                           ctx.request_notify_fd);
             }
+            return -1;
         }
-
-        if (msg_len > req_ring->capacity) {
-            OMNI_LOG_ERROR(LOG_TAG, "serverRecv() invalid msg_len=%u cap=%u from client[%u], skipping",
-                             msg_len, req_ring->capacity, cid);
-            // Advance read_pos past the corrupted length prefix to avoid infinite loop
-            req_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
-            continue;
-        }
-
-        uint32_t total_needed = sizeof(uint32_t) + msg_len;
-        if (avail < total_needed) {
-            continue;
-        }
+        if (inspect == 0) continue;
+        uint32_t msg_len = static_cast<uint32_t>(frame_size);
 
         if (msg_len > 0 && buf_size < msg_len) {
             OMNI_LOG_WARN(LOG_TAG, "serverRecv() buffer too small: need %u, have %zu",
@@ -759,16 +887,13 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
             continue;
         }
 
-        // Consume length prefix
+        uint32_t r = req_ring->read_pos.load(std::memory_order_relaxed);
+        uint32_t cap = ctx.req_ring_capacity;
         req_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
 
         out_client_id = cid;
 
-        if (msg_len == 0) {
-            return 0;
-        }
-
-        uint32_t read_bytes = ringRead(req_ring, req_data, buf, msg_len);
+        uint32_t read_bytes = ringRead(req_ring, req_data, buf, msg_len, cap);
         if (read_bytes != msg_len) {
             OMNI_LOG_ERROR(LOG_TAG, "serverRecv() failed to read payload (%u of %u) from client[%u]",
                              read_bytes, msg_len, cid);
@@ -787,6 +912,37 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
     return 0;
 }
 
+int ShmTransport::nextServerRecvSize(size_t& out_length, uint32_t& out_client_id)
+{
+    out_length = 0;
+    if (!is_server_ || state_ != ConnectionState::CONNECTED) return -1;
+    for (std::map<uint32_t, ClientShmContext>::iterator it = client_contexts_.begin();
+         it != client_contexts_.end(); ++it) {
+        ClientShmContext& ctx = it->second;
+        int ret = inspectFrame(getRequestRing(ctx), getRequestData(ctx),
+                               ctx.req_ring_capacity, out_length);
+        if (ret < 0) {
+            uint32_t client_id = it->first;
+            OMNI_LOG_ERROR(LOG_TAG, "nextServerRecvSize() malformed ring from client[%u], disconnecting",
+                           client_id);
+            // Same cleanup contract as serverRecv(): callback → owner-loop
+            // cleanup → removeClient().  See header.
+            if (on_client_disconnected_cb_) {
+                on_client_disconnected_cb_(client_id,
+                                           platform::handshakeGetFd(ctx.liveness_channel),
+                                           ctx.request_notify_fd);
+            }
+            out_client_id = client_id;
+            return -1;
+        }
+        if (ret > 0) {
+            out_client_id = it->first;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int ShmTransport::serverSend(uint32_t client_id, const uint8_t* data, size_t length)
 {
     if (!is_server_ || state_ != ConnectionState::CONNECTED) {
@@ -802,6 +958,18 @@ int ShmTransport::serverSend(uint32_t client_id, const uint8_t* data, size_t len
     return serverSendToContext(it->second, client_id, data, length);
 }
 
+bool ShmTransport::removeClient(uint32_t client_id)
+{
+    if (!is_server_) return false;
+    std::map<uint32_t, ClientShmContext>::iterator it = client_contexts_.find(client_id);
+    if (it == client_contexts_.end()) return false;
+    cleanupClientContext(it->second);
+    client_contexts_.erase(it);
+    OMNI_LOG_INFO(LOG_TAG, "client[%u] disconnected from shm '%s'",
+                  client_id, shm_name_.c_str());
+    return true;
+}
+
 int ShmTransport::serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
                                        const uint8_t* data, size_t length)
 {
@@ -809,7 +977,7 @@ int ShmTransport::serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
         return 0;
     }
 
-    if (length > 0x7FFFFFFF) {
+    if (length > MAX_MESSAGE_SIZE || length > 0x7FFFFFFF) {
         return -1;
     }
 
@@ -822,8 +990,10 @@ int ShmTransport::serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
     }
 
     uint32_t total_needed = static_cast<uint32_t>(sizeof(uint32_t) + length);
-    bool was_empty = (ringAvailableRead(resp_ring) == 0);
-    uint32_t avail = ringAvailableWrite(resp_ring);
+    uint32_t resp_capacity = ctx.resp_ring_capacity;
+    bool was_empty = (ringAvailableRead(resp_ring, resp_capacity) == 0);
+    uint32_t write_start = resp_ring->write_pos.load(std::memory_order_relaxed);
+    uint32_t avail = ringAvailableWrite(resp_ring, resp_capacity);
 
     if (avail < total_needed) {
         OMNI_LOG_DEBUG(LOG_TAG, "serverSend() response ring full for client[%u]: need %u, avail %u",
@@ -831,11 +1001,14 @@ int ShmTransport::serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
         return 0;
     }
 
-    uint32_t len32 = static_cast<uint32_t>(length);
-    ringWrite(resp_ring, resp_data, reinterpret_cast<const uint8_t*>(&len32), sizeof(uint32_t));
-    ringWrite(resp_ring, resp_data, data, static_cast<uint32_t>(length));
+    ringWriteFrame(resp_ring, resp_data, data, static_cast<uint32_t>(length), resp_capacity);
 
-    if (was_empty && eventfd_enabled_ && ctx.resp_eventfd >= 0) {
+    if (!was_empty) {
+        was_empty = (resp_ring->read_pos.load(std::memory_order_acquire) == write_start);
+    }
+
+    if ((was_empty || resp_ring->read_pos.load(std::memory_order_acquire) == write_start)
+        && eventfd_enabled_ && ctx.resp_eventfd >= 0) {
         platform::eventFdNotify(ctx.resp_eventfd);
     }
 
@@ -913,9 +1086,9 @@ void ShmTransport::onHandshakeClientConnect()
     }
 
     // Open the client's SHM
-    size_t try_size = sizeof(ShmControlBlock) + sizeof(ShmRingHeader) * 2
-                     + SHM_DEFAULT_REQ_RING_CAPACITY + SHM_DEFAULT_RESP_RING_CAPACITY;
-    void* addr = platform::shmCreate(client_shm_name, try_size, false);
+    size_t mapped_size = 0;
+    void* addr = platform::shmCreate(client_shm_name, sizeof(ShmControlBlock), false,
+                                     &mapped_size);
     if (addr == NULL) {
         OMNI_LOG_WARN(LOG_TAG, "handshake: failed to open client SHM '%s'",
                         client_shm_name.c_str());
@@ -923,73 +1096,15 @@ void ShmTransport::onHandshakeClientConnect()
         return;
     }
 
-    ShmControlBlock* ctrl = reinterpret_cast<ShmControlBlock*>(addr);
-
-    if (ctrl->magic != SHM_MAGIC) {
-        OMNI_LOG_WARN(LOG_TAG, "handshake: invalid SHM magic 0x%08X for '%s'",
-                        ctrl->magic, client_shm_name.c_str());
-        platform::shmDetach(addr, try_size);
-        platform::handshakeClose(ch);
-        return;
-    }
-
-    if (ctrl->version != 1) {
-        OMNI_LOG_WARN(LOG_TAG, "handshake: unsupported SHM version %u for '%s'",
-                        ctrl->version, client_shm_name.c_str());
-        platform::shmDetach(addr, try_size);
-        platform::handshakeClose(ch);
-        return;
-    }
-
-    // Calculate exact size and re-map if needed
-    size_t exact_size = calculateShmSize(ctrl->req_ring_capacity, ctrl->resp_ring_capacity, 1);
-    if (exact_size == 0) {
-        OMNI_LOG_WARN(LOG_TAG, "handshake: invalid SHM capacities req=%u resp=%u for '%s'",
-                      ctrl->req_ring_capacity, ctrl->resp_ring_capacity,
+    ShmControlBlock* ctrl = NULL;
+    uint32_t req_capacity = 0;
+    uint32_t resp_capacity = 0;
+    if (!validateMappedLayout(addr, mapped_size, ctrl, req_capacity, resp_capacity)) {
+        OMNI_LOG_WARN(LOG_TAG, "handshake: SHM object does not cover a valid layout for '%s'",
                       client_shm_name.c_str());
-        platform::shmDetach(addr, try_size);
+        platform::shmDetach(addr, mapped_size);
         platform::handshakeClose(ch);
         return;
-    }
-    if (exact_size > try_size) {
-        platform::shmDetach(addr, try_size);
-        addr = platform::shmCreate(client_shm_name, exact_size, false);
-        if (addr == NULL) {
-            OMNI_LOG_WARN(LOG_TAG, "handshake: failed to re-open client SHM '%s' with exact size",
-                            client_shm_name.c_str());
-            platform::handshakeClose(ch);
-            return;
-        }
-        ctrl = reinterpret_cast<ShmControlBlock*>(addr);
-        if (ctrl->magic != SHM_MAGIC || ctrl->version != 1) {
-            OMNI_LOG_WARN(LOG_TAG, "handshake: SHM control block mismatch after remap for '%s'",
-                            client_shm_name.c_str());
-            platform::shmDetach(addr, exact_size);
-            platform::handshakeClose(ch);
-            return;
-        }
-    }
-
-    // Validate ring header consistency: capacities must match the control
-    // block and positions must be within bounds to prevent out-of-bounds
-    // memcpy from a malicious or corrupted peer.
-    {
-        ShmRingHeader* req_ring = getRequestRingFromBase(static_cast<uint8_t*>(addr));
-        ShmRingHeader* resp_ring = getResponseRingFromBase(
-            static_cast<uint8_t*>(addr), ctrl);
-        if (!req_ring || !resp_ring
-            || req_ring->capacity != ctrl->req_ring_capacity
-            || resp_ring->capacity != ctrl->resp_ring_capacity
-            || req_ring->read_pos.load(std::memory_order_relaxed) >= req_ring->capacity
-            || req_ring->write_pos.load(std::memory_order_relaxed) >= req_ring->capacity
-            || resp_ring->read_pos.load(std::memory_order_relaxed) >= resp_ring->capacity
-            || resp_ring->write_pos.load(std::memory_order_relaxed) >= resp_ring->capacity) {
-            OMNI_LOG_WARN(LOG_TAG, "handshake: SHM ring header mismatch for '%s'",
-                            client_shm_name.c_str());
-            platform::shmDetach(addr, exact_size);
-            platform::handshakeClose(ch);
-            return;
-        }
     }
 
     // Step 2: Create resp_eventfd for this client
@@ -997,7 +1112,7 @@ void ShmTransport::onHandshakeClientConnect()
     if (resp_efd < 0) {
         OMNI_LOG_WARN(LOG_TAG, "handshake: failed to create resp_eventfd for client '%s'",
                         client_shm_name.c_str());
-        platform::shmDetach(addr, exact_size);
+        platform::shmDetach(addr, mapped_size);
         platform::handshakeClose(ch);
         return;
     }
@@ -1012,19 +1127,14 @@ void ShmTransport::onHandshakeClientConnect()
         if (!platform::handshakeSend(ch, NULL, 0, response_fds, 2)) {
             OMNI_LOG_WARN(LOG_TAG, "handshake: failed to send eventfds to client '%s'",
                             client_shm_name.c_str());
-            platform::shmDetach(addr, exact_size);
+            platform::shmDetach(addr, mapped_size);
             platform::closeEventFd(resp_efd);
             platform::handshakeClose(ch);
             return;
         }
-        int local_notify_fd = platform::handshakeTakeLocalNotifyFd(ch);
-        if (local_notify_fd >= 0) {
-            local_notify_fds_.push_back(local_notify_fd);
-            if (on_new_client_fd_cb_) on_new_client_fd_cb_(local_notify_fd);
-        }
     }
 
-    platform::handshakeClose(ch);
+    int local_notify_fd = platform::handshakeTakeLocalNotifyFd(ch);
 
     // Assign client ID and store context
     uint32_t assigned_id = next_client_id_++;
@@ -1033,11 +1143,20 @@ void ShmTransport::onHandshakeClientConnect()
     ctx.client_id = assigned_id;
     ctx.shm_name = client_shm_name;
     ctx.shm_addr = addr;
-    ctx.shm_size = exact_size;
+    ctx.shm_size = mapped_size;
     ctx.ctrl = ctrl;
+    ctx.req_ring_capacity = req_capacity;
+    ctx.resp_ring_capacity = resp_capacity;
     ctx.resp_eventfd = resp_efd;
+    ctx.request_notify_fd = local_notify_fd;
+    ctx.liveness_channel = ch;
 
     client_contexts_[assigned_id] = ctx;
+
+    // The context owns every cleanup resource before the owner loop can observe it.
+    if (on_client_connected_cb_) {
+        on_client_connected_cb_(assigned_id, platform::handshakeGetFd(ch), local_notify_fd);
+    }
 
     // Notify the master eventfd to wake up the event loop (data from new client
     // may need servicing if server uses polling/scanning callback)

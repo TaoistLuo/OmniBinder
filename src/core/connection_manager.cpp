@@ -1,10 +1,13 @@
 #include "core/connection_manager.h"
 #include "core/event_loop.h"
 #include "transport/transport_selector.h"
+#include "transport/shm_transport.h"
 #include "platform/platform.h"
 #include "omnibinder/error.h"
 #include "omnibinder/log.h"
 #include <cstring>
+#include <memory>
+#include <new>
 
 #define LOG_TAG "ConnMgr"
 
@@ -295,9 +298,36 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         platform::eventFdConsume(conn->transport->fd());
 
         // 循环读取所有可用数据（可能有多条消息）
-        uint8_t buf[65536];
         while (true) {
-            int ret = conn->transport->recv(buf, sizeof(buf));
+            ShmTransport* shm = static_cast<ShmTransport*>(conn->transport);
+            size_t frame_size = 0;
+            int ready = shm->nextRecvSize(frame_size);
+            if (ready <= 0) {
+                if (ready < 0) {
+                    OMNI_LOG_WARN(LOG_TAG, "SHM connection to %s has invalid frame metadata",
+                                  service_name.c_str());
+                    conn->connected = false;
+                    loop_.removeFd(conn->transport->fd());
+                    if (disconnect_cb_) disconnect_cb_(service_name);
+                    std::map<std::string, ServiceConnection*>::iterator current =
+                        connections_.find(service_name);
+                    if (current == connections_.end() || current->second != conn) return;
+                }
+                break;
+            }
+            std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[frame_size]);
+            if (!buf) {
+                OMNI_LOG_ERROR(LOG_TAG, "SHM receive allocation failed for %s (%zu bytes)",
+                               service_name.c_str(), frame_size);
+                conn->connected = false;
+                loop_.removeFd(conn->transport->fd());
+                if (disconnect_cb_) disconnect_cb_(service_name);
+                std::map<std::string, ServiceConnection*>::iterator current =
+                    connections_.find(service_name);
+                if (current == connections_.end() || current->second != conn) return;
+                break;
+            }
+            int ret = conn->transport->recv(buf.get(), frame_size);
             if (ret <= 0) {
                 if (ret < 0) {
                     OMNI_LOG_WARN(LOG_TAG, "SHM connection to %s error",
@@ -330,7 +360,17 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                 }
                 break;
             }
-            conn->recv_buffer.writeRaw(buf, static_cast<size_t>(ret));
+            if (!conn->recv_buffer.writeRaw(buf.get(), static_cast<size_t>(ret))) {
+                OMNI_LOG_ERROR(LOG_TAG, "SHM recv_buffer allocation failed for %s",
+                               service_name.c_str());
+                conn->connected = false;
+                loop_.removeFd(conn->transport->fd());
+                if (disconnect_cb_) disconnect_cb_(service_name);
+                std::map<std::string, ServiceConnection*>::iterator current =
+                    connections_.find(service_name);
+                if (current == connections_.end() || current->second != conn) return;
+                break;
+            }
         }
 
         processMessages(conn);
