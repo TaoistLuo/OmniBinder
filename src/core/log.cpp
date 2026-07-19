@@ -79,3 +79,18 @@ void omni_log_print(omni_log_level_t level, const char* tag,
     omni_log_vprint(level, tag, fmt, args);
     va_end(args);
 }
+
+/* ============================================================
+ * C++ 包装
+ * ============================================================ */
+namespace omnibinder {
+
+void logPrint(LogLevel level, const char* tag, const char* fmt, ...) {
+    if (level > g_omni_log_level) return;
+    va_list args;
+    va_start(args, fmt);
+    omni_log_vprint(level, tag, fmt, args);
+    va_end(args);
+}
+
+} // namespace omnibinder

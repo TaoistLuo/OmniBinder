@@ -150,14 +150,7 @@ inline void enableTimestamp(bool enable) {
     omni_log_enable_timestamp(enable ? 1 : 0);
 }
 
-inline void logPrint(LogLevel level, const char* tag, const char* fmt, ...)
-{
-    if (level > g_omni_log_level) return;
-    va_list args;
-    va_start(args, fmt);
-    omni_log_vprint(level, tag, fmt, args);
-    va_end(args);
-}
+void logPrint(LogLevel level, const char* tag, const char* fmt, ...);
 
 } /* namespace omnibinder */
 

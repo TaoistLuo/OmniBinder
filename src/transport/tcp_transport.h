@@ -43,29 +43,33 @@
 namespace omnibinder {
 
 // ============================================================
-// TcpTransport - TCP client transport implementation
+// TcpTransport — TCP 客户端传输实现
 //
-// Wraps a TCP socket for non-blocking I/O. Can be created in
-// two ways:
-//   1. Default constructor + connect() for outgoing connections
-//   2. Constructor with existing fd for accepted connections
+// 封装非阻塞 TCP socket。两种构造方式：
+//   1. 默认构造 + connect() 发起主动连接
+//   2. 传入已连接的 fd（来自 accept）
 // ============================================================
 
 class TcpTransport : public ITransport {
 public:
-    // Create a disconnected transport (use connect() to establish connection)
+    /*
+     * @brief  创建未连接状态的传输，后续调用 connect() 建立连接
+     */
     TcpTransport();
 
-    // Create a transport from an already-connected socket (from accept)
+    /*
+     * @brief  从已建立的 socket 创建传输（来自 accept）
+     * @param[in]  connected_fd 已连接的 socket 描述符
+     */
     explicit TcpTransport(platform::SocketFd connected_fd);
 
     virtual ~TcpTransport();
 
-    // Disable copy
+    // 禁止拷贝
     TcpTransport(const TcpTransport&) = delete;
     TcpTransport& operator=(const TcpTransport&) = delete;
 
-    // ITransport interface
+    // ITransport 接口
     virtual int connect(const std::string& host, uint16_t port);
     virtual int send(const uint8_t* data, size_t length);
     virtual int recv(uint8_t* buf, size_t buf_size);
@@ -74,9 +78,11 @@ public:
     virtual int fd() const;
     virtual TransportType type() const;
 
-    // Check and update connection state after async connect completes
-    // Call this when the socket becomes writable during CONNECTING state
-    // Returns true if connected successfully, false on error
+    /*
+     * @brief  异步 connect 完成后检查连接状态
+     * @return true 连接成功，false 错误
+     * @note   当 socket 在 CONNECTING 状态下变为可写时调用
+     */
     bool checkConnectComplete();
 
 private:
@@ -87,10 +93,10 @@ private:
 };
 
 // ============================================================
-// TcpTransportServer - TCP server transport implementation
+// TcpTransportServer — TCP 服务端传输实现
 //
-// Creates a listening socket and accepts incoming connections.
-// Each accepted connection returns a new TcpTransport instance.
+// 创建监听 socket，接受入站连接。
+// 每个接受的连接返回一个新的 TcpTransport 实例。
 // ============================================================
 
 class TcpTransportServer : public ITransportServer {
@@ -98,11 +104,11 @@ public:
     TcpTransportServer();
     virtual ~TcpTransportServer();
 
-    // Disable copy
+    // 禁止拷贝
     TcpTransportServer(const TcpTransportServer&) = delete;
     TcpTransportServer& operator=(const TcpTransportServer&) = delete;
 
-    // ITransportServer interface
+    // ITransportServer 接口
     virtual int listen(const std::string& host, uint16_t port);
     virtual void close();
     virtual uint16_t port() const;

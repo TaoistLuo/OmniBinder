@@ -4,11 +4,13 @@ set(OMNIBINDER_SOURCES
     # core
     core/log.cpp
     core/buffer.cpp
+    core/buffer_view.cpp
     core/message.cpp
     core/error.cpp
     core/event_loop.cpp
     core/omni_allocator.cpp
     core/service.cpp
+    core/proxy_base.cpp
     core/omni_runtime.cpp
     core/runtime_helpers.cpp
     core/runtime_sm.cpp

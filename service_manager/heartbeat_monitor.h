@@ -45,46 +45,62 @@
 namespace omnibinder {
 
 // ============================================================
-// HeartbeatMonitor - Tracks heartbeat timestamps per service
+// HeartbeatMonitor — 跟踪每个服务的心跳时间戳
 //
-// Each registered service is expected to send periodic heartbeats.
-// The monitor tracks the last heartbeat time and can detect
-// services that have timed out (missed too many heartbeats).
+// 已注册服务定期发送心跳，监控器跟踪最近心跳时间，
+// 检测超过超时阈值的服务（连续丢失过多心跳）。
 // ============================================================
 class HeartbeatMonitor {
 public:
-    // Create a heartbeat monitor with the given timeout and max missed count.
-    // timeout_ms: time after which a single heartbeat is considered missed
-    // max_missed: number of consecutive missed heartbeats before declaring timeout
+    /*
+     * @brief  创建心跳监控器
+     * @param[in]  timeout_ms 单次心跳判定为丢失的超时时间
+     * @param[in]  max_missed 连续丢失多少次心跳后判定服务离线
+     */
     HeartbeatMonitor(uint32_t timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT,
                      uint32_t max_missed = DEFAULT_MAX_MISSED_HEARTBEATS);
 
     ~HeartbeatMonitor();
 
-    // Disable copy
+    // 禁止拷贝
     HeartbeatMonitor(const HeartbeatMonitor&) = delete;
     HeartbeatMonitor& operator=(const HeartbeatMonitor&) = delete;
 
-    // Record a heartbeat for the given service.
-    // If the service is not yet tracked, it will be added.
+    /*
+     * @brief  记录指定服务的本次心跳
+     * @param[in]  service_name 服务名称
+     * @note   如果该服务尚未被跟踪，自动开始跟踪
+     */
     void updateHeartbeat(const std::string& service_name);
 
-    // Start tracking a service (sets initial heartbeat time to now).
+    /*
+     * @brief  开始跟踪指定服务
+     * @param[in]  service_name 服务名称
+     * @note   心跳起始时间设为当前时刻
+     */
     void startTracking(const std::string& service_name);
 
-    // Stop tracking a service.
+    /*
+     * @brief  停止跟踪指定服务
+     * @param[in]  service_name 服务名称
+     */
     void stopTracking(const std::string& service_name);
 
-    // Check all tracked services for timeouts.
-    // Returns the list of service names that have timed out.
+    /*
+     * @brief  检查所有已跟踪服务是否超时
+     * @return 已超时的服务名称列表
+     */
     std::vector<std::string> checkTimeouts();
 
-    // Get the number of tracked services.
+    /*
+     * @brief  获取当前已跟踪的服务数量
+     * @return 已跟踪服务数
+     */
     size_t trackedCount() const;
 
 private:
     struct HeartbeatEntry {
-        int64_t last_heartbeat_ms;  // Timestamp of last heartbeat
+        int64_t last_heartbeat_ms;  // 最近一次心跳的时间戳
 
         HeartbeatEntry() : last_heartbeat_ms(0) {}
     };

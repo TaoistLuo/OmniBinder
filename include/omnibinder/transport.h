@@ -41,7 +41,7 @@
 namespace omnibinder {
 
 // ============================================================
-// Transport types and connection states
+// 传输类型与连接状态
 // ============================================================
 
 enum class TransportType {
@@ -57,82 +57,115 @@ enum class ConnectionState {
 };
 
 // ============================================================
-// Forward declaration
+// 前置声明
 // ============================================================
 class ITransport;
 
 // ============================================================
-// ITransportServer - Server-side transport interface
+// ITransportServer — 服务端传输接口
 //
-// Creates a listening endpoint and accepts incoming connections.
-// Designed for non-blocking use with EventLoop: register fd()
-// for read events, then call accept() when readable.
+// 创建监听端点，接受入站连接。
+// 配合 EventLoop 非阻塞使用：将 fd() 注册为读事件，
+// fd 可读时调用 accept()。
 // ============================================================
 
 class ITransportServer {
 public:
     virtual ~ITransportServer() {}
 
-    // Start listening on the given host and port.
-    // Pass port=0 to let the OS assign an ephemeral port.
-    // Returns the actual port on success, or -1 on failure.
+    /*
+     * @brief  在指定地址上开始监听
+     * @param[in]  host 监听地址
+     * @param[in]  port 监听端口（0 表示由 OS 分配临时端口）
+     * @return 成功返回实际端口号，失败返回 -1
+     */
     virtual int listen(const std::string& host, uint16_t port) = 0;
 
-    // Stop listening and release the socket.
+    /*
+     * @brief  停止监听并释放 socket
+     */
     virtual void close() = 0;
 
-    // Returns the port this server is listening on, or 0 if not listening.
+    /*
+     * @brief  返回当前监听端口
+     * @return 监听端口号，未监听时返回 0
+     */
     virtual uint16_t port() const = 0;
 
-    // Returns the underlying file descriptor for EventLoop registration.
-    // Returns -1 if not listening.
+    /*
+     * @brief  返回底层文件描述符
+     * @return fd，未监听时返回 -1
+     * @note   供 EventLoop 注册用
+     */
     virtual int fd() const = 0;
 
-    // Accept a pending connection. Returns a new ITransport in CONNECTED
-    // state, or NULL if no connection is pending (EAGAIN) or on error.
-    // Caller takes ownership of the returned pointer.
+    /*
+     * @brief  接受一个待处理的入站连接
+     * @return 成功返回 CONNECTED 状态的 ITransport 实例（调用方拥有所有权），
+     *         无待处理连接（EAGAIN）或出错时返回 NULL
+     */
     virtual ITransport* accept() = 0;
 };
 
 // ============================================================
-// ITransport - Client-side transport interface
+// ITransport — 客户端传输接口
 //
-// Represents a single bidirectional byte-stream connection.
-// All I/O is non-blocking. Designed for use with EventLoop:
-// register fd() for read/write events as needed.
+// 表示一条双向字节流连接。
+// 所有 I/O 为非阻塞模式，配合 EventLoop 使用：
+// 按需将 fd() 注册为读写事件。
 // ============================================================
 
 class ITransport {
 public:
     virtual ~ITransport() {}
 
-    // Initiate a non-blocking connection to the given host and port.
-    // Returns 0 on immediate success, 1 if connection is in progress
-    // (state becomes CONNECTING), or -1 on failure (state becomes ERROR).
+    /*
+     * @brief  发起非阻塞连接
+     * @param[in]  host 目标主机
+     * @param[in]  port 目标端口
+     * @return 0 立即成功，1 连接进行中（状态变为 CONNECTING），-1 失败（状态变为 ERROR）
+     */
     virtual int connect(const std::string& host, uint16_t port) = 0;
 
-    // Send data over the connection. Handles partial writes internally,
-    // looping until all bytes are sent or the socket would block.
-    // Returns the number of bytes sent (may be less than length if
-    // the socket would block), or -1 on error.
+    /*
+     * @brief  发送数据
+     * @param[in]  data   数据缓冲区
+     * @param[in]  length 数据长度
+     * @return 实际发送字节数（可能少于 length），-1 表示错误
+     * @note   内部处理部分写，循环直到全部发送或 socket 将阻塞
+     */
     virtual int send(const uint8_t* data, size_t length) = 0;
 
-    // Receive data from the connection (non-blocking).
-    // Returns the number of bytes read, 0 if the socket would block
-    // (no data available), or -1 on error (including peer disconnect).
+    /*
+     * @brief  接收数据（非阻塞）
+     * @param[out] buf      接收缓冲区
+     * @param[in]  buf_size 缓冲区大小
+     * @return 读取字节数，0 无数据（将阻塞），-1 错误（含对端断开）
+     */
     virtual int recv(uint8_t* buf, size_t buf_size) = 0;
 
-    // Close the connection and release the socket.
+    /*
+     * @brief  关闭连接并释放 socket
+     */
     virtual void close() = 0;
 
-    // Returns the current connection state.
+    /*
+     * @brief  返回当前连接状态
+     * @return 连接状态枚举值
+     */
     virtual ConnectionState state() const = 0;
 
-    // Returns the underlying file descriptor for EventLoop registration.
-    // Returns -1 if not connected.
+    /*
+     * @brief  返回底层文件描述符
+     * @return fd，未连接时返回 -1
+     * @note   供 EventLoop 注册用
+     */
     virtual int fd() const = 0;
 
-    // Returns the transport type.
+    /*
+     * @brief  返回传输类型
+     * @return TCP 或 SHM
+     */
     virtual TransportType type() const = 0;
 };
 

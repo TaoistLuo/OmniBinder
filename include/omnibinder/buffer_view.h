@@ -37,7 +37,6 @@
 #include <stddef.h>
 #include <string>
 #include <vector>
-#include <cstring>
 
 namespace omnibinder {
 
@@ -54,112 +53,19 @@ public:
         : data_(data), length_(length), read_pos_(0) {}
 
     // ---- 读取（与 Buffer 签名完全一致）----
-    bool tryReadBool(bool& value) noexcept {
-        uint8_t byte = 0;
-        if (!tryReadUint8(byte)) return false;
-        value = (byte != 0);
-        return true;
-    }
-
-    bool tryReadInt8(int8_t& value) noexcept {
-        uint8_t byte = 0;
-        if (!tryReadUint8(byte)) return false;
-        value = static_cast<int8_t>(byte);
-        return true;
-    }
-
-    bool tryReadUint8(uint8_t& value) noexcept {
-        if (read_pos_ + 1 > length_) return false;
-        value = data_[read_pos_++];
-        return true;
-    }
-
-    bool tryReadInt16(int16_t& value) noexcept {
-        uint16_t temp = 0;
-        if (!tryReadUint16(temp)) return false;
-        value = static_cast<int16_t>(temp);
-        return true;
-    }
-
-    bool tryReadUint16(uint16_t& value) noexcept {
-        if (read_pos_ + 2 > length_) return false;
-        value = static_cast<uint16_t>(data_[read_pos_])
-              | (static_cast<uint16_t>(data_[read_pos_ + 1]) << 8);
-        read_pos_ += 2;
-        return true;
-    }
-
-    bool tryReadInt32(int32_t& value) noexcept {
-        uint32_t temp = 0;
-        if (!tryReadUint32(temp)) return false;
-        value = static_cast<int32_t>(temp);
-        return true;
-    }
-
-    bool tryReadUint32(uint32_t& value) noexcept {
-        if (read_pos_ + 4 > length_) return false;
-        value = static_cast<uint32_t>(data_[read_pos_])
-              | (static_cast<uint32_t>(data_[read_pos_ + 1]) << 8)
-              | (static_cast<uint32_t>(data_[read_pos_ + 2]) << 16)
-              | (static_cast<uint32_t>(data_[read_pos_ + 3]) << 24);
-        read_pos_ += 4;
-        return true;
-    }
-
-    bool tryReadInt64(int64_t& value) noexcept {
-        uint64_t temp = 0;
-        if (!tryReadUint64(temp)) return false;
-        value = static_cast<int64_t>(temp);
-        return true;
-    }
-
-    bool tryReadUint64(uint64_t& value) noexcept {
-        if (read_pos_ + 8 > length_) return false;
-        value = static_cast<uint64_t>(data_[read_pos_])
-              | (static_cast<uint64_t>(data_[read_pos_ + 1]) << 8)
-              | (static_cast<uint64_t>(data_[read_pos_ + 2]) << 16)
-              | (static_cast<uint64_t>(data_[read_pos_ + 3]) << 24)
-              | (static_cast<uint64_t>(data_[read_pos_ + 4]) << 32)
-              | (static_cast<uint64_t>(data_[read_pos_ + 5]) << 40)
-              | (static_cast<uint64_t>(data_[read_pos_ + 6]) << 48)
-              | (static_cast<uint64_t>(data_[read_pos_ + 7]) << 56);
-        read_pos_ += 8;
-        return true;
-    }
-
-    bool tryReadFloat32(float& value) noexcept {
-        uint32_t bits = 0;
-        if (!tryReadUint32(bits)) return false;
-        memcpy(&value, &bits, sizeof(value));
-        return true;
-    }
-
-    bool tryReadFloat64(double& value) noexcept {
-        uint64_t bits = 0;
-        if (!tryReadUint64(bits)) return false;
-        memcpy(&value, &bits, sizeof(value));
-        return true;
-    }
-
-    bool tryReadString(std::string& value) noexcept {
-        uint32_t len = 0;
-        if (!tryReadUint32(len)) return false;
-        if (len == 0) { value.clear(); return true; }
-        if (len > length_ - read_pos_) return false;
-        value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
-        read_pos_ += len;
-        return true;
-    }
-
-    bool tryReadBytes(std::vector<uint8_t>& value) noexcept {
-        uint32_t len = 0;
-        if (!tryReadUint32(len)) return false;
-        if (len == 0) { value.clear(); return true; }
-        if (len > length_ - read_pos_) return false;
-        value.assign(data_ + read_pos_, data_ + read_pos_ + len);
-        read_pos_ += len;
-        return true;
-    }
+    bool tryReadBool(bool& value) noexcept;
+    bool tryReadInt8(int8_t& value) noexcept;
+    bool tryReadUint8(uint8_t& value) noexcept;
+    bool tryReadInt16(int16_t& value) noexcept;
+    bool tryReadUint16(uint16_t& value) noexcept;
+    bool tryReadInt32(int32_t& value) noexcept;
+    bool tryReadUint32(uint32_t& value) noexcept;
+    bool tryReadInt64(int64_t& value) noexcept;
+    bool tryReadUint64(uint64_t& value) noexcept;
+    bool tryReadFloat32(float& value) noexcept;
+    bool tryReadFloat64(double& value) noexcept;
+    bool tryReadString(std::string& value) noexcept;
+    bool tryReadBytes(std::vector<uint8_t>& value) noexcept;
 
     // ---- 缓冲区信息 ----
     const uint8_t* data() const noexcept { return data_; }
