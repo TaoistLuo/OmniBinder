@@ -1,6 +1,6 @@
 # OmniBinder Release Features
 
-OmniBinder 是一个面向嵌入式 Linux、多进程系统以及分布式多板系统的分布式 IPC/RPC 框架。
+OmniBinder 是一个面向嵌入式/分布式服务场景、多进程系统以及分布式多板系统的跨平台 IPC/RPC 框架。
 
 产品为复杂业务系统提供统一的服务通信能力，支持本机高性能通信与跨设备网络通信，适用于传感器、控制、算法、网关、HMI、工业控制等场景。
 

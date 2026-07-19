@@ -551,10 +551,14 @@ enum class ErrorCode : int32_t {
 
 ## 6.5 SHM 握手协议
 
-当客户端选择 SHM 通信时，需要通过 UDS 与服务端完成握手，交换 SHM 名称和 eventfd 文件描述符。
-协议从旧的基于 slot 的模型变更为每客户端独立 SHM 模型：
-不再有预分配的 32 个 slot，每个客户端创建自己的 SHM，服务端动态映射。
-不再发送 slot_id，客户端直接发送 SHM 名称（字符串，不附带 fd）。
+> **平台抽象**：SHM 握手机制通过 `platform.h` 的 `handshake_*` 接口统一抽象。
+> 不同平台的底层实现不同，但上层的协议时序一致：
+> - **Linux**：AF_UNIX + SCM_RIGHTS（传递 fd）
+> - **Windows**：TCP loopback + Named Pipe 名称序列化（fd 无法跨进程传递）
+> - **其他平台**：若 SHM 不可用（`isShmHandshakeAvailable() == false`），`transport_selector` 自动回退 TCP
+
+当客户端选择 SHM 通信时，需要通过握手通道（Linux: UDS, Windows: TCP loopback）与服务端完成握手，交换 SHM 名称和通知句柄。
+协议采用 per-client SHM 模型：每个客户端创建自己的 SHM，服务端动态映射。
 
 ### 握手流程
 

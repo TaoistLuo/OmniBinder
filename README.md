@@ -2,9 +2,9 @@
 
 中文 | [English](README.en.md)
 
-**面向嵌入式 Linux 与分布式服务场景的服务通信中间件**
+**面向嵌入式/分布式服务场景的跨平台服务通信中间件**
 
-OmniBinder 是一个面向嵌入式 Linux、分布式多板系统和多服务协作场景的服务通信中间件。
+OmniBinder 是一个面向嵌入式、桌面、分布式多板系统和多服务协作场景的跨平台服务通信中间件。当前支持 **Linux** 和 **Windows**，规划支持 Android、鸿蒙、FreeRTOS/ESP32 等。理论上，任何支持 TCP socket 和 C++11 编译器的平台均可适配——仅需实现约 20 个平台抽象函数，详见[平台适配指南](docs/platform-porting.md)。
 它的目标不是只解决“进程怎么传数据”，而是解决**多个服务之间如何以统一方式完成注册、发现、调用、广播和状态感知**。
 通过提供统一的服务通信与管理入口，以及自动选择的 SHM/TCP 数据通道，OmniBinder 让跨进程、跨板、跨设备的服务协作都能以一致模型完成集成。
 
@@ -48,7 +48,7 @@ OmniBinder 更适合的场景是：
 - 你希望把**同机进程通信**和**跨设备服务调用**统一到一套接口模型中
 - 你需要的不只是数据传输，还包括**服务注册发现、广播分发、死亡通知、运行时调试**等能力
 - 你希望通过 **统一 IDL、自动生成 Stub/Proxy 代码和一致的服务接入方式** 来减少重复封装与手写协议适配
-- 你的部署环境偏 Linux / 嵌入式，希望运行时足够轻量，并能同时支持 **C / C++** 接入
+- 你的部署环境偏嵌入式，希望运行时足够轻量，并能同时支持 **C / C++** 接入
 - 你希望业务代码关注“调用哪个服务”，而不是持续处理底层 transport、连接关系和接口编解码细节
 
 OmniBinder 的设计目标是：**作为多个服务之间的统一通信中间件，为分布式服务系统提供服务注册发现、服务调用、事件广播和状态感知能力；同时保持零外部依赖、C++11 编译、同机 SHM 高速通信与跨板 TCP 网络通信兼容，并提供 C / C++ 双接口。**
@@ -71,7 +71,7 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - **传输层自动选择** — 同机通信自动使用共享内存 (SHM)，跨机通信走 TCP
 - **服务级 SHM 配置** — 默认使用小容量 SHM ring（当前 `4KB / 4KB`），特殊服务可按需放大 request / response 容量
 - **IDL 代码生成** — 通过 `.bidl` 接口定义文件自动生成 Stub/Proxy 代码
-- **零外部依赖** — 仅依赖 POSIX API 和标准 C++11，无需第三方库
+- **零外部依赖** — 通过平台抽象层屏蔽 OS 差异，无需第三方库。核心库编译后仅约 **500KB**（strip 后），适合资源受限环境
 - **命令行工具** — `omni-cli` 支持运行时查询服务、调用接口，支持 JSON 格式输入输出
 
 ### 线程模型说明
@@ -105,33 +105,34 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - 测试服务 SHM ring：64KB / 64KB
 - Topic 预热轮数：100；Topic 测试轮数：1000 / 用例
 
-| 测试项 | 样本数 | 平均值 | 95% 情况 | 99% 情况 | 说明 |
-|--------|--------|--------|-----------|-----------|------|
-| RPC EchoBytes (0 bytes) | 1000 | 9.9 us | 17 us | 54 us | 空 payload，主要反映协议与调度开销 |
-| RPC EchoBytes (64 bytes) | 1000 | 13.4 us | 45 us | 55 us | 常见小 payload RPC |
-| RPC EchoBytes (256 bytes) | 1000 | 11.9 us | 45 us | 60 us | 常见小 payload RPC |
-| RPC EchoBytes (1024 bytes) | 1000 | 19.1 us | 48 us | 66 us | 1KB 级 payload |
-| RPC EchoBytes (4096 bytes) | 1000 | 44.9 us | 67 us | 97 us | 4KB payload，测试服务显式放大 SHM ring |
-| RPC EchoBytes (8192 bytes) | 1000 | 61.2 us | 84 us | 119 us | 8KB payload，测试服务显式放大 SHM ring |
-| RPC EchoInt32 | 1000 | 8.9 us | 9 us | 52 us | 小基础类型 RPC |
-| RPC EchoStruct | 1000 | 25.1 us | 58 us | 77 us | 结构体 RPC |
-| RPC Add (2 x int32) | 1000 | 9.6 us | 13 us | 54 us | 小计算型 RPC |
-| Topic pub/sub (0 bytes) | 1000 | 5.6 us | 10 us | 26 us | 空广播 payload |
-| Topic pub/sub (64 bytes) | 1000 | 4.9 us | 9 us | 15 us | 小广播数据，发布 → 订阅者回调 |
-| Topic pub/sub (256 bytes) | 1000 | 5.8 us | 11 us | 25 us | 常见小广播数据 |
-| Topic pub/sub (1024 bytes) | 1000 | 5.5 us | 10 us | 20 us | 1KB 广播数据 |
-| Topic pub/sub (4096 bytes) | 1000 | 10.8 us | 18 us | 24 us | 4KB 广播数据 |
-| Topic pub/sub (8192 bytes) | 1000 | 16.0 us | 26 us | 31 us | 8KB 广播数据 |
+> **测试环境**：Windows WSL2 Ubuntu 20.04，以下数据仅供参考相对量级。裸金属 Linux 性能更高，详见[性能测试报告](docs/performance-report.md)。
+
+| 测试项 | 样本数 | 去极值均值 | 95% 情况 | 说明 |
+|--------|--------|-----------|-----------|------|
+| RPC EchoBytes (0 bytes) | 1000 | 27.7 us | 46 us | 空 payload，主要反映协议与调度开销 |
+| RPC EchoBytes (64 bytes) | 1000 | 28.5 us | 45 us | 常见小 payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 28.9 us | 45 us | 常见小 payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 31.1 us | 47 us | 1KB 级 payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 41.7 us | 55 us | 4KB payload，测试服务显式放大 SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 52.8 us | 70 us | 8KB payload，测试服务显式放大 SHM ring |
+| RPC EchoInt32 | 1000 | 13.3 us | 40 us | 小基础类型 RPC |
+| RPC EchoStruct | 1000 | 19.0 us | 39 us | 结构体 RPC |
+| RPC Add (2 x int32) | 1000 | 14.0 us | 36 us | 小计算型 RPC |
+| Topic pub/sub (0 bytes) | 1000 | 4.0 us | 9 us | 空广播 payload |
+| Topic pub/sub (64 bytes) | 1000 | 4.4 us | 10 us | 小广播数据 |
+| Topic pub/sub (256 bytes) | 1000 | 4.1 us | 10 us | 常见小广播数据 |
+| Topic pub/sub (1024 bytes) | 1000 | 4.7 us | 11 us | 1KB 广播数据 |
+| Topic pub/sub (4096 bytes) | 1000 | 8.1 us | 15 us | 4KB 广播数据 |
+| Topic pub/sub (8192 bytes) | 1000 | 11.1 us | 20 us | 8KB 广播数据 |
 
 从报告中的完整数据看：
 
-- **0~1024 bytes 常见 RPC** 在当前机器上的平均值约为 **9.9~19.1 us**
-- **4096~8192 bytes payload RPC** 在显式放大 SHM ring 的测试配置下，平均值约为 **44.9~61.2 us**
-- **Topic pub/sub** 在当前机器上的平均值约为 **4.9~16.0 us**
+- **0~1024 bytes 常见 RPC** 在当前 WSL2 环境下的去极值均值约为 **27.7~31.1 us**
+- **4096~8192 bytes payload RPC** 在显式放大 SHM ring 的测试配置下，约为 **41.7~52.8 us**
+- **Topic pub/sub** 约为 **4.0~11.1 us**（单向广播，无 RPC 往返开销）
 
-> **性能说明**：当前 SHM 路径已使用 `eventfd + EventLoop` 的事件驱动模型。
-> 报告中的延迟数据主要反映序列化、共享内存拷贝、eventfd 唤醒、epoll 调度与业务处理开销。
-> 其中当前性能报告基于测试服务显式配置的 `64KB / 64KB` SHM ring，并不代表默认小容量 SHM ring 配置下的行为。
+> **性能说明**：数据在 WSL2 上采集，受虚拟化抖动影响，绝对数值仅供参考——裸金属 Linux 上延迟更低更稳定。
+> "去极值均值"是去掉最低/最高各 1% 后的均值，能更准确反映典型性能（排除 OS 调度抖动污染）。
 
 详细数据和分析见 [性能测试报告](docs/performance-report.md)。
 
@@ -141,7 +142,7 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 
 | 场景 | 说明 |
 |------|------|
-| **单板多进程服务系统** | 同一台 Linux 设备上的多个服务进程互相调用，形成统一的本地服务总线（自动走 SHM，低延迟） |
+| **单板多进程服务系统** | 同一台设备上的多个服务进程互相调用，形成统一的本地服务总线（同机自动走 SHM，低延迟） |
 | **局域网分布式服务系统** | 多台设备通过以太网组成分布式系统，服务跨板调用但仍保持统一接口与管理方式（走 TCP） |
 | **嵌入式网关 / 边缘节点** | 网关设备汇聚多个子板或外设服务，对内做服务桥接，对外统一暴露能力 |
 | **机器人 / 自动驾驶** | 传感器、感知、规划、控制等模块分布在不同计算单元上，需要稳定的服务调用与事件分发 |
@@ -553,7 +554,7 @@ omnibinder/
 
 ## 环境要求
 
-- **操作系统**: Linux（epoll / eventfd / POSIX SHM）或 Windows（MinGW / MSVC）
+- **操作系统**: Linux / Windows / 更多平台（详见[平台适配指南](docs/platform-porting.md)）
 - **编译器**: GCC 4.8+, Clang 3.4+, MinGW 7.3+, MSVC 2017+（支持 C++11）
 - **CMake**: 3.10+
 - **外部依赖**: 无

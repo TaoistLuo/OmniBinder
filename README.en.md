@@ -2,11 +2,9 @@
 
 [中文](README.md) | English
 
-**A service communication middleware for embedded Linux and distributed service systems**
+**A cross-platform service communication middleware for embedded, desktop, and distributed service systems**
 
-OmniBinder is a service communication middleware designed for embedded Linux, distributed multi-board deployments, and multi-service collaboration scenarios.
-Its goal is not just to move bytes between processes, but to provide a unified way for services to **register, discover, invoke, broadcast, and observe lifecycle state**.
-With a unified service communication and management entry point plus automatic SHM/TCP data path selection, OmniBinder enables cross-process, cross-board, and cross-device collaboration through one consistent programming model.
+OmniBinder is a cross-platform service communication middleware designed for embedded, desktop, distributed multi-board deployments, and multi-service collaboration scenarios. Currently supports **Linux** and **Windows**, with planned support for Android, HarmonyOS, and FreeRTOS/ESP32. In theory, any platform with TCP sockets and a C++11 compiler can be adapted — requiring only ~20 platform abstraction functions. See the [Platform Porting Guide](docs/platform-porting.md) for details.
 
 In one sentence: **OmniBinder acts as a communication bridge between distributed services, standardizing service connectivity, invocation, and data distribution.**
 
@@ -47,7 +45,7 @@ OmniBinder is especially suitable when:
 - you want to unify **same-host process communication** and **cross-device service invocation** under one interface model
 - you need more than just data transport, including **service registration/discovery, event broadcast, death notifications, and runtime debugging**
 - you want **unified IDL, generated Stub/Proxy code, and a consistent integration model** to reduce repetitive protocol adaptation work
-- your deployment targets Linux / embedded systems and you want a relatively lightweight runtime with both **C and C++** support
+- your deployment targets embedded / resource-constrained systems and you want a relatively lightweight runtime with both **C and C++** support
 - you want business code to focus on *which service to call*, not on transport details, connection state, or serialization plumbing
 
 OmniBinder is designed to provide **service registration and discovery, service invocation, event broadcasting, and service state awareness** for distributed service systems while keeping **zero external dependencies, C++11 compatibility, same-host SHM high-speed communication, cross-board TCP communication, and dual C/C++ APIs**.
@@ -70,7 +68,7 @@ OmniBinder covers both **service management** and **service-to-service data path
 - **Automatic transport selection** — SHM for same-host communication, TCP for cross-host communication
 - **Per-service SHM configuration** — default small SHM rings (`4KB / 4KB`) with optional per-service enlargement
 - **IDL code generation** — generate Stub/Proxy code from `.bidl` files
-- **Zero external dependencies** — only POSIX APIs and standard C++11
+- **Zero external dependencies** — platform abstraction layer shields OS differences, no third-party libraries required. Core library ~500KB (stripped), suitable for resource-constrained environments
 - **CLI tooling** — `omni-cli` for service inspection and invocation, with JSON I/O support
 
 ### Threading model notes
@@ -104,33 +102,32 @@ The following data highlights typical OmniBinder latency on the **same-host SHM 
 - Test service SHM ring: 64KB / 64KB
 - Topic warmup rounds: 100; topic measured rounds: 1000 per case
 
-| Test Item | Samples | Average | 95% Case | 99% Case | Notes |
-|-----------|---------|---------|----------|----------|-------|
-| RPC EchoBytes (0 bytes) | 1000 | 9.9 us | 17 us | 54 us | Empty payload, protocol overhead |
-| RPC EchoBytes (64 bytes) | 1000 | 13.4 us | 45 us | 55 us | Common small payload RPC |
-| RPC EchoBytes (256 bytes) | 1000 | 11.9 us | 45 us | 60 us | Common small payload RPC |
-| RPC EchoBytes (1024 bytes) | 1000 | 19.1 us | 48 us | 66 us | 1KB payload |
-| RPC EchoBytes (4096 bytes) | 1000 | 44.9 us | 67 us | 97 us | 4KB payload, enlarged SHM ring |
-| RPC EchoBytes (8192 bytes) | 1000 | 61.2 us | 84 us | 119 us | 8KB payload, enlarged SHM ring |
-| RPC EchoInt32 | 1000 | 8.9 us | 9 us | 52 us | Small primitive RPC |
-| RPC EchoStruct | 1000 | 25.1 us | 58 us | 77 us | Struct RPC |
-| RPC Add (2 x int32) | 1000 | 9.6 us | 13 us | 54 us | Small compute RPC |
-| Topic pub/sub (0 bytes) | 1000 | 5.6 us | 10 us | 26 us | Empty broadcast payload |
-| Topic pub/sub (64 bytes) | 1000 | 4.9 us | 9 us | 15 us | Small broadcast data |
-| Topic pub/sub (256 bytes) | 1000 | 5.8 us | 11 us | 25 us | Common small broadcast data |
-| Topic pub/sub (1024 bytes) | 1000 | 5.5 us | 10 us | 20 us | 1KB broadcast data |
-| Topic pub/sub (4096 bytes) | 1000 | 10.8 us | 18 us | 24 us | 4KB broadcast data |
-| Topic pub/sub (8192 bytes) | 1000 | 16.0 us | 26 us | 31 us | 8KB broadcast data |
+> **Test environment**: Windows WSL2 Ubuntu 20.04. Absolute values are for reference only — bare-metal Linux delivers lower, more stable latency. See [full performance report](docs/performance-report.md).
+
+| Test Item | Samples | Trimmed Mean | 95% Case | Notes |
+|-----------|---------|-------------|----------|-------|
+| RPC EchoBytes (0 bytes) | 1000 | 27.7 us | 46 us | Empty payload, protocol scheduling overhead |
+| RPC EchoBytes (64 bytes) | 1000 | 28.5 us | 45 us | Common small payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 28.9 us | 45 us | Common small payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 31.1 us | 47 us | 1KB payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 41.7 us | 55 us | 4KB payload, enlarged SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 52.8 us | 70 us | 8KB payload, enlarged SHM ring |
+| RPC EchoInt32 | 1000 | 13.3 us | 40 us | Small primitive RPC |
+| RPC EchoStruct | 1000 | 19.0 us | 39 us | Struct RPC |
+| RPC Add (2 x int32) | 1000 | 14.0 us | 36 us | Small compute RPC |
+| Topic pub/sub (0 bytes) | 1000 | 4.0 us | 9 us | Empty broadcast payload |
+| Topic pub/sub (256 bytes) | 1000 | 4.1 us | 10 us | Common small broadcast data |
+| Topic pub/sub (4096 bytes) | 1000 | 8.1 us | 15 us | 4KB broadcast data |
+| Topic pub/sub (8192 bytes) | 1000 | 11.1 us | 20 us | 8KB broadcast data |
 
 Based on the full report:
 
-- **Common 0~1024 byte RPC** averages around **9.9~19.1 us**
-- **4096~8192 byte RPC payloads** average around **44.9~61.2 us** under enlarged SHM-ring configuration
-- **Topic pub/sub** averages around **4.9~16.0 us**
+- **Common 0~1024 byte RPC** trimmed mean around **27.7~31.1 us** (WSL2 environment)
+- **4096~8192 byte RPC payloads** around **41.7~52.8 us** under enlarged SHM-ring configuration
+- **Topic pub/sub** around **4.0~11.1 us** (one-way broadcast, no RPC round-trip overhead)
 
-> **Performance note:** the current SHM path uses an `eventfd + EventLoop` event-driven model.
-> The latency numbers mainly reflect serialization, shared-memory copies, eventfd wakeups, epoll scheduling, and application-side handling.
-> The current performance report uses a service-level `64KB / 64KB` SHM ring rather than the default small SHM-ring configuration.
+> **Performance note**: Data collected on WSL2, affected by virtualization jitter — absolute values are for reference only.
+> "Trimmed mean" excludes the lowest/highest 1% of samples, providing a more accurate picture of typical performance by filtering out OS scheduling noise.
 
 ---
 
@@ -138,7 +135,7 @@ Based on the full report:
 
 | Scenario | Description |
 |---|---|
-| **Single-board multi-process systems** | Multiple services on one Linux device communicate through a unified local service bus, automatically using SHM for low latency |
+| **Single-board multi-process systems** | Multiple services on one device communicate through a unified local service bus, automatically using SHM for low latency |
 | **LAN-scale distributed service systems** | Multiple devices cooperate over Ethernet while preserving one unified service invocation and management model |
 | **Embedded gateways / edge nodes** | A gateway aggregates multiple board or peripheral services, bridges internal services, and exposes unified capabilities outward |
 | **Robotics / autonomous systems** | Sensors, perception, planning, and control modules run on different compute units and require stable RPC + event distribution |
@@ -482,7 +479,7 @@ omnibinder/
 
 ## Environment requirements
 
-- **OS**: Linux (epoll / eventfd / POSIX SHM) or Windows (MinGW / MSVC)
+- **OS**: Linux / Windows / more platforms (see [Platform Porting Guide](docs/platform-porting.md))
 - **Compiler**: GCC 4.8+, Clang 3.4+, MinGW 7.3+, or MSVC 2017+ with C++11 support
 - **CMake**: 3.10+
 - **External dependencies**: none

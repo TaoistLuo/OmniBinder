@@ -1206,14 +1206,14 @@ $OMNIBINDER_DIR/bin_host/service_manager &
 # 1. 生成代码
 $OMNIBINDER_DIR/bin_host/omni-idlc --lang=cpp --output=. my_service.bidl
 
-# 2. 编译服务端
-g++ -std=c++11 -I$OMNIBINDER_DIR/include \
+# 2. 编译服务端（Linux 示例，其他平台调整编译器和链接选项）
+${CXX:-g++} -std=c++11 -I$OMNIBINDER_DIR/include \
     server.cpp my_service.bidl.cpp \
     -L$OMNIBINDER_DIR/lib -lomnibinder -lpthread -lrt \
     -o my_server
 
 # 3. 编译客户端
-g++ -std=c++11 -I$OMNIBINDER_DIR/include \
+${CXX:-g++} -std=c++11 -I$OMNIBINDER_DIR/include \
     client.cpp my_service.bidl.cpp \
     -L$OMNIBINDER_DIR/lib -lomnibinder -lpthread -lrt \
     -o my_client
@@ -1226,13 +1226,13 @@ g++ -std=c++11 -I$OMNIBINDER_DIR/include \
 $OMNIBINDER_DIR/bin_host/omni-idlc --lang=c --output=. my_service.bidl
 
 # 2. 编译服务端（注意：链接时需要 -lstdc++ 因为 omnibinder 库是 C++ 实现）
-gcc -std=c99 -I$OMNIBINDER_DIR/include \
+${CC:-gcc} -std=c99 -I$OMNIBINDER_DIR/include \
     server.c my_service.bidl.c \
     -L$OMNIBINDER_DIR/lib -lomnibinder -lstdc++ -lpthread -lrt \
     -o my_server
 
 # 3. 编译客户端
-gcc -std=c99 -I$OMNIBINDER_DIR/include \
+${CC:-gcc} -std=c99 -I$OMNIBINDER_DIR/include \
     client.c my_service.bidl.c \
     -L$OMNIBINDER_DIR/lib -lomnibinder -lstdc++ -lpthread -lrt \
     -o my_client
