@@ -72,7 +72,10 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
 
     uint32_t seq = allocSequence();
     Message msg(MessageType::MSG_INVOKE, seq);
-    populateInvokeMessage(msg, interface_id, method_id, idl_hash, request);
+    if (!populateInvokeMessage(msg, interface_id, method_id, idl_hash, request)) {
+        stats_.total_rpc_failures++;
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
     emitDiagEvent(DIAG_EVENT_REQUEST, msg);
 
     uint32_t send_elapsed_ms = 0;
@@ -147,7 +150,10 @@ int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uin
     }
 
     Message msg(MessageType::MSG_INVOKE_ONEWAY, allocSequence());
-    populateInvokeMessage(msg, interface_id, method_id, idl_hash, request);
+    if (!populateInvokeMessage(msg, interface_id, method_id, idl_hash, request)) {
+        stats_.total_rpc_failures++;
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
     emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
 
     if (!conn_mgr_->sendMessage(service_name, msg)) {

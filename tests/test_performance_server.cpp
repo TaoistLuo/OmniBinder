@@ -87,11 +87,10 @@ int main(int argc, char* argv[]) {
             ++seq;
             perf::PerfTopic msg;
             msg.seq = static_cast<int32_t>(seq);
-            msg.send_time_us = nowUs();
             int sz = sizes[size_idx];
-            if (sz > 0) {
-                msg.payload.assign(static_cast<size_t>(sz), static_cast<uint8_t>(0xCD));
-            }
+            if (sz > 0) msg.payload.assign(static_cast<size_t>(sz), static_cast<uint8_t>(0xCD));
+            // 时间戳在 payload 构造之后、Broadcast 之前，确保只测量传输延迟
+            msg.send_time_us = nowUs();
             service.BroadcastPerfTopic(msg);
             size_idx = (size_idx + 1) % n_sizes;
             next_us += topic_interval_us;

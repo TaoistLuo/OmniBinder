@@ -11,6 +11,7 @@
 #include <signal.h>
 #ifndef _WIN32
 #include <unistd.h>
+#include <sys/socket.h>
 #endif
 
 using namespace omnibinder;
@@ -403,8 +404,10 @@ static void delayedReadServiceThread(void* arg) {
     }
 
     int rcvbuf = 4096;
+#ifndef _WIN32
     setsockopt(accepted->fd(), SOL_SOCKET, SO_RCVBUF,
                reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
+#endif
     std::this_thread::sleep_for(std::chrono::microseconds(300000));
 
     Buffer input;
@@ -1009,8 +1012,10 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     int rcvbuf = 4096;
+#ifndef _WIN32
     setsockopt(rogue.fd(), SOL_SOCKET, SO_RCVBUF,
                reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
+#endif
 
     std::vector<uint8_t> payload(512 * 1024, 0x6B);
     Message invoke(MessageType::MSG_INVOKE, 3002);

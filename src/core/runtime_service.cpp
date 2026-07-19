@@ -176,6 +176,10 @@ void OmniRuntime::Impl::drainServiceShm(const std::string& name, LocalServiceEnt
     ShmTransport* transport = entry ? entry->shm_transport : NULL;
     if (!transport) return;
     while (true) {
+        // 每轮循环前重新确认 entry 未被回调链中的 unregisterService 释放
+        std::map<std::string, LocalServiceEntry*>::iterator svc_it = local_services_.find(name);
+        if (svc_it == local_services_.end() || svc_it->second != entry) break;
+
         size_t frame_size = 0;
         uint32_t from_id = 0;
         int ready = transport->nextServerRecvSize(frame_size, from_id);

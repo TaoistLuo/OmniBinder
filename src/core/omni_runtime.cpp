@@ -156,6 +156,12 @@ OmniRuntime::Impl::Impl()
 OmniRuntime::Impl::~Impl() {
     stop();
     
+    // 排空 event-loop 中已就绪的 functor（已到期 timer callback 等），
+    // 避免 teardown 期间 callback 引用已释放的资源
+    if (loop_) {
+        loop_->pollOnce(0);
+    }
+    
     // Cancel heartbeat timer before cleanup
     if (loop_ && heartbeat_timer_id_ > 0) {
         loop_->cancelTimer(heartbeat_timer_id_);

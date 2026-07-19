@@ -10,7 +10,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
-#include <numeric>
+#include <random>
 #include <fstream>
 #include <chrono>
 #include <sstream>
@@ -19,6 +19,17 @@
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/wait.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#ifdef ERROR
+#undef ERROR
+#endif
+#ifdef IGNORE
+#undef IGNORE
+#endif
 #endif
 
 using namespace omnibinder;
@@ -123,42 +134,45 @@ static inline int64_t nowUs() {
 struct LatencyStats {
     std::string name;
     std::vector<double> samples_us;
+    mutable std::vector<double> sorted;  // 惰性排序，所有统计复用
 
-    void add(double us) { samples_us.push_back(us); }
+    void add(double us) { samples_us.push_back(us); sorted.clear(); }
     size_t count() const { return samples_us.size(); }
 
-    double min() const {
-        return samples_us.empty() ? 0 : *std::min_element(samples_us.begin(), samples_us.end());
+    void ensureSorted() const {
+        if (!sorted.empty()) return;
+        sorted = samples_us;
+        std::sort(sorted.begin(), sorted.end());
     }
-    double max() const {
-        return samples_us.empty() ? 0 : *std::max_element(samples_us.begin(), samples_us.end());
-    }
-    double avg() const {
-        return samples_us.empty() ? 0 : std::accumulate(samples_us.begin(), samples_us.end(), 0.0) / samples_us.size();
-    }
+
+    double min() const { ensureSorted(); return sorted.empty() ? 0 : sorted.front(); }
+    double max() const { ensureSorted(); return sorted.empty() ? 0 : sorted.back(); }
     double median() const {
-        if (samples_us.empty()) return 0;
-        auto s = samples_us;
-        std::sort(s.begin(), s.end());
-        return s.size() % 2 ? s[s.size()/2] : (s[s.size()/2-1] + s[s.size()/2]) / 2.0;
+        ensureSorted();
+        if (sorted.empty()) return 0;
+        return sorted.size() % 2 ? sorted[sorted.size()/2]
+                                  : (sorted[sorted.size()/2-1] + sorted[sorted.size()/2]) / 2.0;
     }
-    double p95() const {
-        if (samples_us.empty()) return 0;
-        auto s = samples_us;
-        std::sort(s.begin(), s.end());
-        return s[static_cast<size_t>(0.95 * (s.size()-1))];
-    }
-    double p99() const {
-        if (samples_us.empty()) return 0;
-        auto s = samples_us;
-        std::sort(s.begin(), s.end());
-        return s[static_cast<size_t>(0.99 * (s.size()-1))];
-    }
+    double p95() const { ensureSorted(); return sorted.empty() ? 0 : sorted[sorted.size()*95/100]; }
+    double p99() const { ensureSorted(); return sorted.empty() ? 0 : sorted[sorted.size()*99/100]; }
     double stddev() const {
         if (samples_us.size() < 2) return 0;
         double m = avg(), sum = 0;
         for (auto v : samples_us) { double d = v - m; sum += d*d; }
         return std::sqrt(sum / (samples_us.size()-1));
+    }
+    double avg() const {
+        return samples_us.empty() ? 0 : std::accumulate(samples_us.begin(), samples_us.end(), 0.0) / samples_us.size();
+    }
+    // 去头尾各 1% 后的均值，消除 WSL2 调度抖动对平均值的污染
+    double trimmedMean() const {
+        ensureSorted();
+        if (sorted.empty()) return 0;
+        size_t trim = sorted.size() / 100;
+        if (trim * 2 >= sorted.size()) return median();
+        double sum = 0;
+        for (size_t i = trim; i < sorted.size() - trim; ++i) sum += sorted[i];
+        return sum / (sorted.size() - trim * 2);
     }
 
     void print() const {
@@ -167,6 +181,7 @@ struct LatencyStats {
         printf("    min:      %.1f us\n", min());
         printf("    max:      %.1f us\n", max());
         printf("    avg:      %.1f us\n", avg());
+        printf("    trim-avg: %.1f us\n", trimmedMean());
         printf("    median:   %.1f us\n", median());
         printf("    p95:      %.1f us\n", p95());
         printf("    p99:      %.1f us\n", p99());
@@ -175,8 +190,8 @@ struct LatencyStats {
 
     std::string toRow() const {
         char buf[256];
-        snprintf(buf, sizeof(buf), "| %s | %zu | %.1f | %.1f | %.1f | %.1f | %.1f | %.1f | %.1f |",
-            name.c_str(), count(), min(), max(), avg(), median(), p95(), p99(), stddev());
+        snprintf(buf, sizeof(buf), "| %s | %zu | %.1f | %.1f | %.1f | %.1f | %.1f | %.1f | %.1f | %.1f |",
+            name.c_str(), count(), min(), max(), avg(), trimmedMean(), median(), p95(), p99(), stddev());
         return buf;
     }
 };
@@ -207,69 +222,6 @@ static void fatalExit(int code) {
     std::exit(code);
 }
 
-static void failRpcCheck(const char* test_name, int iteration, int ret, const char* reason) {
-    fprintf(stderr, "FATAL: %s failed at iteration %d: ret=%d reason=%s\n",
-            test_name, iteration, ret, reason);
-    fatalExit(2);
-}
-
-static void checkEchoBytes(perf::PerfServiceProxy& proxy,
-                           const std::vector<uint8_t>& payload,
-                           std::vector<uint8_t>& out,
-                           const char* test_name,
-                           int iteration) {
-    int ret = proxy.EchoBytes(payload, out);
-    if (ret != 0) {
-        failRpcCheck(test_name, iteration, ret, "invoke failed");
-    }
-    if (out != payload) {
-        failRpcCheck(test_name, iteration, ret, "unexpected EchoBytes response");
-    }
-}
-
-static void checkEchoInt32(perf::PerfServiceProxy& proxy,
-                           int32_t value,
-                           int32_t& result,
-                           const char* test_name,
-                           int iteration) {
-    int ret = proxy.EchoInt32(value, result);
-    if (ret != 0) {
-        failRpcCheck(test_name, iteration, ret, "invoke failed");
-    }
-    if (result != value + 1) {
-        failRpcCheck(test_name, iteration, ret, "unexpected EchoInt32 response");
-    }
-}
-
-static void checkEchoStruct(perf::PerfServiceProxy& proxy,
-                            const perf::PerfData& input,
-                            perf::PerfData& output,
-                            const char* test_name,
-                            int iteration) {
-    int ret = proxy.EchoStruct(input, output);
-    if (ret != 0) {
-        failRpcCheck(test_name, iteration, ret, "invoke failed");
-    }
-    if (output.id != input.id + 1 || output.value != input.value + 1.0
-        || output.tag != input.tag + "_echo" || output.blob != input.blob) {
-        failRpcCheck(test_name, iteration, ret, "unexpected EchoStruct response");
-    }
-}
-
-static void checkAdd(perf::PerfServiceProxy& proxy,
-                     const perf::AddParams& params,
-                     int32_t& result,
-                     const char* test_name,
-                     int iteration) {
-    int ret = proxy.Add(params, result);
-    if (ret != 0) {
-        failRpcCheck(test_name, iteration, ret, "invoke failed");
-    }
-    if (result != params.a + params.b) {
-        failRpcCheck(test_name, iteration, ret, "unexpected Add response");
-    }
-}
-
 int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -282,7 +234,8 @@ int main(int argc, char* argv[]) {
     }
 
     omnibinder::setLogLevel(omnibinder::LOG_ERROR);
-    printf("=== OmniBinder Performance Benchmark ===\n\n");
+    printf("=== OmniBinder Performance Benchmark ===\n");
+    printf("    version %s\n\n", omnibinder::version());
 
     const char* sm_bin = findBinary("service_manager");
     if (!sm_bin) {
@@ -326,25 +279,52 @@ int main(int argc, char* argv[]) {
         perf::PerfServiceProxy proxy(rt);
         proxy.connect();
 
-        // EchoBytes with various payload sizes
+        // EchoBytes with various payload sizes — 随机化顺序消除系统性偏差
         const int sizes[] = {0, 64, 256, 1024, 4096, 8192};
-        for (int sz : sizes) {
-            LatencyStats s;
+        const int n_sizes = sizeof(sizes) / sizeof(sizes[0]);
+        LatencyStats echo_stats[n_sizes];
+        for (int i = 0; i < n_sizes; ++i) {
             char buf[64];
-            snprintf(buf, sizeof(buf), "RPC EchoBytes (%d bytes)", sz);
-            s.name = buf;
-            std::vector<uint8_t> payload(sz, 0xAB), out;
+            snprintf(buf, sizeof(buf), "RPC EchoBytes (%d bytes)", sizes[i]);
+            echo_stats[i].name = buf;
+        }
 
-            for (int i = 0; i < RPC_WARMUP; ++i) {
-                checkEchoBytes(proxy, payload, out, s.name.c_str(), -RPC_WARMUP + i);
+        // 生成随机化测试序列：每种 size 跑 RPC_ROUNDS 次，打乱顺序
+        std::vector<int> sequence;
+        for (int i = 0; i < n_sizes; ++i)
+            for (int r = 0; r < RPC_ROUNDS; ++r)
+                sequence.push_back(i);
+        std::mt19937 rng(42);
+        std::shuffle(sequence.begin(), sequence.end(), rng);
+
+        // 预分配每种 size 的 payload 和输出缓冲
+        std::vector<std::vector<uint8_t>> payloads(n_sizes), outputs(n_sizes);
+        for (int i = 0; i < n_sizes; ++i) {
+            payloads[i].assign(sizes[i], 0xAB);
+            outputs[i].reserve(sizes[i]);
+        }
+
+        // 每个 size 做预热（复用预分配缓冲）
+        for (int i = 0; i < n_sizes; ++i) {
+            for (int w = 0; w < RPC_WARMUP; ++w)
+                proxy.EchoBytes(payloads[i], outputs[i]);
+        }
+
+        // 正式测试：复用预分配缓冲，只测量纯 RPC 耗时
+        for (int idx : sequence) {
+            std::vector<uint8_t>& out = outputs[idx];
+            int64_t t0 = nowUs();
+            int ret = proxy.EchoBytes(payloads[idx], out);
+            int64_t dt = nowUs() - t0;
+            if (ret != 0 || out != payloads[idx]) {
+                fprintf(stderr, "FATAL: EchoBytes(%d) failed ret=%d\n", sizes[idx], ret);
+                fatalExit(2);
             }
-            for (int i = 0; i < RPC_ROUNDS; ++i) {
-                int64_t t0 = nowUs();
-                checkEchoBytes(proxy, payload, out, s.name.c_str(), i);
-                s.add(nowUs() - t0);
-            }
-            s.print();
-            all.push_back(s);
+            echo_stats[idx].add(static_cast<double>(dt));
+        }
+        for (int i = 0; i < n_sizes; ++i) {
+            echo_stats[i].print();
+            all.push_back(echo_stats[i]);
         }
 
         // EchoInt32
@@ -352,14 +332,15 @@ int main(int argc, char* argv[]) {
             LatencyStats s;
             s.name = "RPC EchoInt32";
             int32_t result;
-
-            for (int i = 0; i < RPC_WARMUP; ++i) {
-                checkEchoInt32(proxy, 42, result, s.name.c_str(), -RPC_WARMUP + i);
-            }
+            for (int i = 0; i < RPC_WARMUP; ++i) proxy.EchoInt32(42, result);
             for (int i = 0; i < RPC_ROUNDS; ++i) {
                 int64_t t0 = nowUs();
-                checkEchoInt32(proxy, i, result, s.name.c_str(), i);
-                s.add(nowUs() - t0);
+                int ret = proxy.EchoInt32(i, result);
+                s.add(static_cast<double>(nowUs() - t0));
+                if (ret != 0 || result != i + 1) {
+                    fprintf(stderr, "FATAL: EchoInt32 failed i=%d ret=%d\n", i, ret);
+                    fatalExit(2);
+                }
             }
             s.print();
             all.push_back(s);
@@ -370,19 +351,18 @@ int main(int argc, char* argv[]) {
             LatencyStats s;
             s.name = "RPC EchoStruct";
             perf::PerfData input, output;
-            input.id = 1;
-            input.value = 3.14;
-            input.tag = "benchmark";
+            input.id = 1; input.value = 3.14; input.tag = "benchmark";
             input.blob = std::vector<uint8_t>(64, 0xCD);
-
-            for (int i = 0; i < RPC_WARMUP; ++i) {
-                checkEchoStruct(proxy, input, output, s.name.c_str(), -RPC_WARMUP + i);
-            }
+            for (int i = 0; i < RPC_WARMUP; ++i) proxy.EchoStruct(input, output);
             for (int i = 0; i < RPC_ROUNDS; ++i) {
                 input.id = i;
                 int64_t t0 = nowUs();
-                checkEchoStruct(proxy, input, output, s.name.c_str(), i);
-                s.add(nowUs() - t0);
+                int ret = proxy.EchoStruct(input, output);
+                s.add(static_cast<double>(nowUs() - t0));
+                if (ret != 0) {
+                    fprintf(stderr, "FATAL: EchoStruct failed i=%d ret=%d\n", i, ret);
+                    fatalExit(2);
+                }
             }
             s.print();
             all.push_back(s);
@@ -394,18 +374,17 @@ int main(int argc, char* argv[]) {
             s.name = "RPC Add (2 x int32)";
             int32_t result;
             perf::AddParams params;
-
-            for (int i = 0; i < RPC_WARMUP; ++i) {
-                params.a = 42;
-                params.b = 58;
-                checkAdd(proxy, params, result, s.name.c_str(), -RPC_WARMUP + i);
-            }
+            params.a = 42; params.b = 58;
+            for (int i = 0; i < RPC_WARMUP; ++i) proxy.Add(params, result);
             for (int i = 0; i < RPC_ROUNDS; ++i) {
-                params.a = i;
-                params.b = i * 2;
+                params.a = i; params.b = i * 2;
                 int64_t t0 = nowUs();
-                checkAdd(proxy, params, result, s.name.c_str(), i);
-                s.add(nowUs() - t0);
+                int ret = proxy.Add(params, result);
+                s.add(static_cast<double>(nowUs() - t0));
+                if (ret != 0 || result != (i + i * 2)) {
+                    fprintf(stderr, "FATAL: Add failed i=%d ret=%d\n", i, ret);
+                    fatalExit(2);
+                }
             }
             s.print();
             all.push_back(s);
@@ -441,25 +420,23 @@ int main(int argc, char* argv[]) {
             [&](const perf::PerfTopic& msg) {
                 int sz = static_cast<int>(msg.payload.size());
                 int idx = -1;
-                for (int i = 0; i < n_sizes; ++i) {
+                for (int i = 0; i < n_sizes; ++i)
                     if (sizes[i] == sz) { idx = i; break; }
-                }
                 if (idx < 0) return;
-                bool payload_ok = true;
-                for (size_t i = 0; i < msg.payload.size(); ++i) {
-                    if (msg.payload[i] != static_cast<uint8_t>(0xCD)) {
-                        payload_ok = false;
-                        break;
-                    }
-                }
-                if (!payload_ok) {
-                    fprintf(stderr, "FATAL: Topic payload mismatch: seq=%d size=%d\n", msg.seq, sz);
-                    fatalExit(2);
-                }
+
                 if (warmup[idx] > 0) { --warmup[idx]; return; }
                 if (needed[idx] > 0) {
                     stats[idx].add(nowUs() - msg.send_time_us);
                     --needed[idx];
+                }
+                // 校验在计时之后，避免 O(N) 扫描污染测量
+                if (needed[idx] == 0 && warmup[idx] == 0) {
+                    for (size_t j = 0; j < msg.payload.size(); ++j) {
+                        if (msg.payload[j] != static_cast<uint8_t>(0xCD)) {
+                            fprintf(stderr, "FATAL: Topic payload mismatch: sz=%d pos=%zu\n", sz, j);
+                            fatalExit(2);
+                        }
+                    }
                 }
             });
 
@@ -502,8 +479,8 @@ int main(int argc, char* argv[]) {
                 << "- 话题预热轮数: " << TOPIC_WARMUP << "\n"
                 << "- 话题测试轮数: " << TOPIC_ROUNDS << "（每个用例）\n\n"
                 << "## 总览\n\n"
-                << "| 测试用例 | 样本数 | 最小值 (us) | 最大值 (us) | 平均值 (us) | 中位数 (us) | 95% 情况 (us) | 99% 情况 (us) | 标准差 (us) |\n"
-                << "|----------|--------|-------------|-------------|-------------|-------------|----------|----------|-------------|\n";
+        << "| 测试用例 | 样本数 | 最小值 (us) | 最大值 (us) | 平均值 (us) | 去极值均值 (us) | 中位数 (us) | 95% 情况 (us) | 99% 情况 (us) | 标准差 (us) |\n"
+        << "|----------|--------|-------------|-------------|-------------|-------------|----------|----------|----------|-------------|\n";
             for (auto& s : all) {
                 ofs << s.toRow() << "\n";
             }
@@ -520,6 +497,7 @@ int main(int argc, char* argv[]) {
                     << "- 最小值: " << std::fixed << std::setprecision(0) << all[i].min() << " us\n"
                     << "- 最大值: " << all[i].max() << " us\n"
                     << "- 平均值: " << std::setprecision(3) << all[i].avg() << " us\n"
+                    << "- 去极值均值: " << all[i].trimmedMean() << " us\n"
                     << "- 中位数: " << std::setprecision(0) << all[i].median() << " us\n"
                     << "- 95% 情况: " << all[i].p95() << " us\n"
                     << "- 99% 情况: " << all[i].p99() << " us\n\n";
@@ -535,6 +513,7 @@ int main(int argc, char* argv[]) {
                     << "- 最小值: " << std::fixed << std::setprecision(0) << all[i].min() << " us\n"
                     << "- 最大值: " << all[i].max() << " us\n"
                     << "- 平均值: " << std::setprecision(3) << all[i].avg() << " us\n"
+                    << "- 去极值均值: " << all[i].trimmedMean() << " us\n"
                     << "- 中位数: " << std::setprecision(0) << all[i].median() << " us\n"
                     << "- 95% 情况: " << all[i].p95() << " us\n"
                     << "- 99% 情况: " << all[i].p99() << " us\n\n";

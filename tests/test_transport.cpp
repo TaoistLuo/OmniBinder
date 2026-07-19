@@ -2,9 +2,6 @@
 #include "transport/tcp_transport.h"
 #include "transport/transport_selector.h"
 #include "platform/platform.h"
-#ifndef _WIN32
-#include <sys/socket.h>
-#endif
 
 using namespace omnibinder;
 
@@ -31,8 +28,7 @@ TEST_F(TransportTest, TcpEcho) {
         for (int i = 0; i < 50; ++i) {
             client.checkConnectComplete();
             if (client.state() == ConnectionState::CONNECTED) break;
-            struct timespec ts = {0, 10000000};
-            nanosleep(&ts, NULL);
+            platform::sleepMs(10);
         }
     }
     ASSERT_EQ(client.state(), ConnectionState::CONNECTED);
@@ -44,8 +40,7 @@ TEST_F(TransportTest, TcpEcho) {
     int sent = client.send(reinterpret_cast<const uint8_t*>(msg), strlen(msg));
     ASSERT_EQ(sent, static_cast<int>(strlen(msg)));
 
-    struct timespec ts = {0, 50000000};
-    nanosleep(&ts, NULL);
+    platform::sleepMs(50);
 
     char buf[256] = {0};
     int recvd = accepted->recv(reinterpret_cast<uint8_t*>(buf), sizeof(buf));
@@ -57,6 +52,10 @@ TEST_F(TransportTest, TcpEcho) {
     client.close();
     server.close();
 }
+
+#ifndef _WIN32
+// 此测试依赖 POSIX socket API 控制发送缓冲区大小
+#include <sys/socket.h>
 
 TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
     TcpTransportServer server;
@@ -70,8 +69,7 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
         for (int i = 0; i < 50; ++i) {
             client.checkConnectComplete();
             if (client.state() == ConnectionState::CONNECTED) break;
-            struct timespec ts = {0, 10000000};
-            nanosleep(&ts, NULL);
+            platform::sleepMs(10);
         }
     }
     ASSERT_EQ(client.state(), ConnectionState::CONNECTED);
@@ -91,8 +89,7 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
         if (sent > 0 && sent < static_cast<int>(payload.size())) {
             break;
         }
-        struct timespec ts = {0, 10000000};
-        nanosleep(&ts, NULL);
+        platform::sleepMs(10);
     }
 
     EXPECT_GT(sent, 0);
@@ -103,6 +100,7 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
     client.close();
     server.close();
 }
+#endif
 
 TEST_F(TransportTest, TransportPolicySameMachinePrefersShm) {
     EXPECT_EQ(chooseTransportPolicy("host-A", "host-A"),

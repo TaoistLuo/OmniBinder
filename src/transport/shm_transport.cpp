@@ -575,6 +575,10 @@ void ShmTransport::cleanupClientContext(ClientShmContext& ctx)
         platform::shmDetach(ctx.shm_addr, ctx.shm_size);
         ctx.shm_addr = NULL;
     }
+    // 客户端已断开时，服务端负责清理 SHM 对象避免 /dev/shm 残留
+    if (is_server_ && !ctx.shm_name.empty()) {
+        platform::shmUnlink(ctx.shm_name);
+    }
     if (ctx.resp_eventfd >= 0) {
         platform::closeEventFd(ctx.resp_eventfd);
         ctx.resp_eventfd = -1;

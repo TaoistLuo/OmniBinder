@@ -325,7 +325,7 @@ private:
     bool isOwnerThread() const;
     void captureOwnerThread();
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
-    void populateInvokeMessage(Message& msg, uint32_t iface_id, uint32_t method_id,
+    bool populateInvokeMessage(Message& msg, uint32_t iface_id, uint32_t method_id,
                                 uint32_t idl_hash, const Buffer& req) const;
     int  lookupServiceInfo(const std::string& name, ServiceInfo& info);
     int  initializeServiceListener(LocalServiceEntry* entry, Service* service,

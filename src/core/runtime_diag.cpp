@@ -22,7 +22,7 @@ bool OmniRuntime::Impl::sendOnFd(ITransport* transport, const Message& msg) {
     return platform::socketSendAll(transport->fd(), buf.data(), buf.size(), effectiveTimeout(0), NULL);
 }
 
-void OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_id,
+bool OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_id,
                                               uint32_t method_id, uint32_t idl_hash,
                                               const Buffer& request) const {
     if (!msg.payload.writeUint32(interface_id)
@@ -33,7 +33,9 @@ void OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_i
         OMNI_LOG_ERROR(LOG_TAG,
                        "invoke_payload_serialize_failed iface=0x%08x method=0x%08x err=%d",
                        interface_id, method_id, static_cast<int>(ErrorCode::ERR_SERIALIZE));
+        return false;
     }
+    return true;
 }
 
 std::string OmniRuntime::Impl::topicPublisherServiceName(const std::string& topic_name) const {

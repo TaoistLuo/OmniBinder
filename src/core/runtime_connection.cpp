@@ -248,7 +248,10 @@ void OmniRuntime::Impl::checkHeartbeatTimeout(const std::string& service_name) {
 // ============================================================
 
 void OmniRuntime::Impl::sendHeartbeat() {
-    // Send heartbeat for each registered local service
+    // 先检查 SM 是否需要重连（客户端也可能没有注册服务，但仍需保持 SM 连接）
+    reconnectServiceManagerIfNeeded();
+
+    // 为每个已注册的本地服务向 SM 发送心跳
     for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
          it != local_services_.end(); ++it) {
         Message msg(MessageType::MSG_HEARTBEAT, 0);

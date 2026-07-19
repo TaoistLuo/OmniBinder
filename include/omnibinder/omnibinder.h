@@ -46,10 +46,14 @@
 
 namespace omnibinder {
 
-inline const char* version() { return "1.0.0"; }
+// 版本号由 CMakeLists.txt 的 project(VERSION ...) 注入，编译时通过 add_compile_definitions 传递
+// 升级版本：只改 CMakeLists.txt 一处即可
+inline const char* version() { return OMNIBINDER_VERSION; }
 
 inline void versionNumbers(int& major, int& minor, int& patch) {
-    major = 1; minor = 0; patch = 0;
+    major = OMNIBINDER_VERSION_MAJOR;
+    minor = OMNIBINDER_VERSION_MINOR;
+    patch = OMNIBINDER_VERSION_PATCH;
 }
 
 } // namespace omnibinder

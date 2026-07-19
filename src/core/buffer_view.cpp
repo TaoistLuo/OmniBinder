@@ -127,7 +127,11 @@ bool BufferView::tryReadString(std::string& value) noexcept {
     if (!tryReadUint32(len)) return false;
     if (len == 0) { value.clear(); return true; }
     if (len > length_ - read_pos_) return false;
-    value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
+    try {
+        value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
+    } catch (...) {
+        return false;
+    }
     read_pos_ += len;
     return true;
 }
@@ -137,7 +141,11 @@ bool BufferView::tryReadBytes(std::vector<uint8_t>& value) noexcept {
     if (!tryReadUint32(len)) return false;
     if (len == 0) { value.clear(); return true; }
     if (len > length_ - read_pos_) return false;
-    value.assign(data_ + read_pos_, data_ + read_pos_ + len);
+    try {
+        value.assign(data_ + read_pos_, data_ + read_pos_ + len);
+    } catch (...) {
+        return false;
+    }
     read_pos_ += len;
     return true;
 }

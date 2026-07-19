@@ -287,6 +287,14 @@ add_dependencies(test_transient_disconnect_recovery service_manager)
 add_test(NAME test_transient_disconnect_recovery COMMAND test_transient_disconnect_recovery WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
 
+# 系统级场景测试
+add_executable(test_system_scenarios test_system_scenarios.cpp)
+target_link_libraries(test_system_scenarios PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_system_scenarios service_manager)
+add_test(NAME test_system_scenarios COMMAND test_system_scenarios WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_system_scenarios PROPERTIES TIMEOUT 300)
+set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
+
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES RESOURCE_LOCK sm_port_lock)
 if(TARGET test_performance)
     set_tests_properties(test_performance test_soak_runner
