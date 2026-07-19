@@ -10,14 +10,14 @@ set(OMNIBINDER_SOURCES
     core/omni_allocator.cpp
     core/service.cpp
     core/omni_runtime.cpp
-    core/omni_runtime_helpers.cpp
-    core/omni_sm.cpp
-    core/omni_service.cpp
-    core/omni_connection.cpp
-    core/omni_rpc.cpp
-    core/omni_topic.cpp
-    core/omni_dispatch.cpp
-    core/omni_diag.cpp
+    core/runtime_helpers.cpp
+    core/runtime_sm.cpp
+    core/runtime_service.cpp
+    core/runtime_connection.cpp
+    core/runtime_rpc.cpp
+    core/runtime_topic.cpp
+    core/runtime_dispatch.cpp
+    core/runtime_diag.cpp
     core/sm_control_channel.cpp
     core/rpc_runtime.cpp
     core/topic_runtime.cpp

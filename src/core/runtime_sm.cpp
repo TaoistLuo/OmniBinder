@@ -1,5 +1,5 @@
 #include "core/omni_runtime.h"
-#include "core/omni_runtime_helpers.h"
+#include "core/runtime_helpers.h"
 #include "omnibinder/buffer_view.h"
 #include "omnibinder/log.h"
 

@@ -1,5 +1,5 @@
-#ifndef OMNIBINDER_OMNI_RUNTIME_HELPERS_H
-#define OMNIBINDER_OMNI_RUNTIME_HELPERS_H
+#ifndef OMNIBINDER_RUNTIME_HELPERS_H
+#define OMNIBINDER_RUNTIME_HELPERS_H
 
 #include "omnibinder/message.h"
 #include "omnibinder/error.h"
