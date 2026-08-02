@@ -55,7 +55,6 @@ public:
     void rememberPublishedTopic(const std::string& topic_name, uint32_t topic_id,
                                 const std::string& owner_service);
     void forgetPublishedTopic(const std::string& topic_name);
-    void forgetPublishedTopicsByIds(const std::vector<uint32_t>& topic_ids);
     void forgetPublishedTopicsByOwner(const std::string& owner_service);
     void addTcpSubscriber(uint32_t topic_id, int client_fd);
     void removeTcpSubscriberFd(int client_fd);
@@ -71,7 +70,6 @@ public:
     std::map<std::string, TopicCallback> subscriptions() const;
     std::map<std::string, std::string> publishedTopicOwners() const;
 
-    bool isTopicPublished(const std::string& name) const;
     uint32_t getTopicId(const std::string& name) const;
 
 private:

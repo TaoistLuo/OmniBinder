@@ -48,14 +48,14 @@ void ServiceManagerApp::handleUnregister(ClientConnection* conn, const Message& 
         std::string name;
         if (!sm_internal::tryReadStringArg(msg, name)) {
             OMNI_LOG_WARN(TAG, "Reject malformed unregister request from fd=%d", conn->fd);
-            sendUnregisterReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_UNREGISTER_REPLY, msg.header.sequence, false);
             return;
         }
 
         if (!registry_.ownsService(conn->fd, name)) {
             OMNI_LOG_WARN(TAG, "Reject unregister for %s from non-owner fd=%d",
                            name.c_str(), conn->fd);
-            sendUnregisterReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_UNREGISTER_REPLY, msg.header.sequence, false);
             return;
         }
 
@@ -78,14 +78,7 @@ void ServiceManagerApp::handleUnregister(ClientConnection* conn, const Message& 
                                             conn->registered_services.end());
         }
 
-        sendUnregisterReply(conn, msg.header.sequence, success);
-}
-
-void ServiceManagerApp::sendUnregisterReply(ClientConnection* conn, uint32_t seq,
-                                            bool success) {
-        Message reply(MessageType::MSG_UNREGISTER_REPLY, seq);
-        reply.payload.writeBool(success);
-        sendMessage(conn, reply);
+        sendBoolReply(conn, MessageType::MSG_UNREGISTER_REPLY, msg.header.sequence, success);
 }
 
 void ServiceManagerApp::handleHeartbeat(ClientConnection* conn, const Message& msg) {
@@ -190,19 +183,12 @@ void ServiceManagerApp::handleSubscribeService(ClientConnection* conn, const Mes
         std::string target_service;
         if (!sm_internal::tryReadStringArg(msg, target_service)) {
             OMNI_LOG_WARN(TAG, "Reject malformed subscribe service request from fd=%d", conn->fd);
-            sendSubscribeServiceReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, msg.header.sequence, false);
             return;
         }
 
         bool success = death_notifier_.subscribe(conn->fd, target_service);
-        sendSubscribeServiceReply(conn, msg.header.sequence, success);
-}
-
-void ServiceManagerApp::sendSubscribeServiceReply(ClientConnection* conn, uint32_t seq,
-                                                  bool success) {
-        Message reply(MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, seq);
-        reply.payload.writeBool(success);
-        sendMessage(conn, reply);
+        sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, msg.header.sequence, success);
 }
 
 void ServiceManagerApp::handleUnsubscribeService(ClientConnection* conn, const Message& msg) {

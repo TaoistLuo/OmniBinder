@@ -34,7 +34,6 @@
 #define OMNIBINDER_OWNER_THREAD_EXECUTOR_H
 
 #include "event_loop.h"
-#include "omnibinder/log.h"
 
 #include <atomic>
 #include <memory>
@@ -45,8 +44,6 @@
 #include <type_traits>
 
 namespace omnibinder {
-
-#define OWNER_THREAD_EXECUTOR_LOG_TAG "OwnerThreadExecutor"
 
 template<typename T>
 class ExecutionResult {
@@ -63,17 +60,9 @@ public:
         return result;
     }
 
-    static ExecutionResult makeFailure(const std::string& error) {
-        ExecutionResult result;
-        result.ok_ = false;
-        result.error_ = error;
-        return result;
-    }
-
     ExecutionResult(const ExecutionResult& other)
         : ok_(other.ok_)
-        , value_(other.value_ ? new T(*other.value_) : NULL)
-        , error_(other.error_) {
+        , value_(other.value_ ? new T(*other.value_) : NULL) {
     }
 
     ExecutionResult& operator=(const ExecutionResult& other) {
@@ -81,7 +70,6 @@ public:
             delete value_;
             ok_ = other.ok_;
             value_ = other.value_ ? new T(*other.value_) : NULL;
-            error_ = other.error_;
         }
         return *this;
     }
@@ -92,12 +80,10 @@ public:
 
     bool ok() const { return ok_; }
     const T& value() const { return *value_; }
-    const std::string& error() const { return error_; }
 
 private:
     bool ok_;
     T* value_;
-    std::string error_;
 };
 
 template<>
@@ -113,19 +99,10 @@ public:
         return result;
     }
 
-    static ExecutionResult makeFailure(const std::string& error) {
-        ExecutionResult result;
-        result.ok_ = false;
-        result.error_ = error;
-        return result;
-    }
-
     bool ok() const { return ok_; }
-    const std::string& error() const { return error_; }
 
 private:
     bool ok_;
-    std::string error_;
 };
 
 template<typename T>
@@ -142,10 +119,6 @@ public:
 
     void completeSuccess(const T& value) {
         complete(ExecutionResult<T>::makeSuccess(value));
-    }
-
-    void completeFailure(const std::string& error) {
-        complete(ExecutionResult<T>::makeFailure(error));
     }
 
     ExecutionResult<T> wait() {
@@ -188,10 +161,6 @@ public:
         complete(ExecutionResult<void>::makeSuccess());
     }
 
-    void completeFailure(const std::string& error) {
-        complete(ExecutionResult<void>::makeFailure(error));
-    }
-
     ExecutionResult<void> wait() {
         std::unique_lock<std::mutex> lock(mutex_);
         cond_.wait(lock, [this]{ return done_; });
@@ -220,8 +189,7 @@ class OwnerThreadExecutor {
 public:
     OwnerThreadExecutor()
         : loop_(NULL)
-        , owner_thread_id_()
-        , loop_owned_(false) {
+        , owner_thread_id_() {
     }
 
     void bindLoop(EventLoop* loop) {
@@ -236,58 +204,13 @@ public:
         return owner_thread_id_.load() != std::thread::id();
     }
 
-    void setLoopOwned(bool owned) {
-        loop_owned_.store(owned);
-    }
-
     bool isOwnerThread() const {
         return hasOwnerThread() && owner_thread_id_.load() == std::this_thread::get_id();
-    }
-
-    bool canRunInline() const {
-        return loop_ == NULL || !loop_owned_.load() || isOwnerThread();
     }
 
     template<typename F>
     typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
                             typename std::result_of<F()>::type>::type
-    invoke(F func) {
-        typedef typename std::result_of<F()>::type Result;
-        if (canRunInline()) {
-            return func();
-        }
-
-        std::shared_ptr< SyncCallState<Result> > state(new SyncCallState<Result>());
-        loop_->post([func, state]() {
-            state->completeSuccess(func());
-        });
-
-        ExecutionResult<Result> result = state->wait();
-        return result.ok() ? result.value() : Result();
-    }
-
-    template<typename F>
-    typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value,
-                            int>::type
-    invoke(F func) {
-        if (canRunInline()) {
-            func();
-            return 0;
-        }
-
-        std::shared_ptr< SyncCallState<int> > state(new SyncCallState<int>());
-        loop_->post([func, state]() {
-            func();
-            state->completeSuccess(0);
-        });
-
-        ExecutionResult<int> result = state->wait();
-        return result.ok() ? result.value() : -1;
-    }
-
-    template<typename F>
-    typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
-                           typename std::result_of<F()>::type>::type
     invokeOnOwner(F func) {
         typedef typename std::result_of<F()>::type Result;
         if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
@@ -321,18 +244,15 @@ public:
             state->completeSuccess();
         });
 
-        ExecutionResult<void> result = state->wait();
+        state->wait();
     }
 
     EventLoop* loop_;
     // atomic：owner_thread_id_ 可能被多线程并发首设（run/pollOnce 的 driver 争夺），
     // 无锁读写 std::thread::id 有数据竞争，改为 atomic 消除
     std::atomic<std::thread::id> owner_thread_id_;
-    std::atomic<bool> loop_owned_;
 };
 
 }
-
-#undef OWNER_THREAD_EXECUTOR_LOG_TAG
 
 #endif

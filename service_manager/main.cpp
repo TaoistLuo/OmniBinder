@@ -60,8 +60,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Set log level
-    if (log_level >= 0 && log_level <= 5) {
+    // Set log level（上限对齐 LogLevel 枚举最大值 OMNI_LOG_OFF=6）
+    if (log_level >= 0 && log_level <= static_cast<int>(OMNI_LOG_OFF)) {
         omnibinder::setLogLevel(static_cast<omnibinder::LogLevel>(log_level));
     }
 

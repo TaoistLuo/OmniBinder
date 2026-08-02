@@ -10,7 +10,7 @@ using namespace omnibinder;
 TEST(OwnerThreadExecutorTest, InlineWhenLoopNotOwned) {
     OwnerThreadExecutor executor;
     std::atomic<bool> called(false);
-    int value = executor.invoke([&called]() -> int {
+    int value = executor.invokeOnOwner([&called]() -> int {
         called.store(true);
         return 42;
     });
@@ -32,10 +32,8 @@ TEST(OwnerThreadExecutorTest, CrossThreadExecutesOnOwnerLoop) {
     std::thread loop_thread([&]() {
         owner_id = std::this_thread::get_id();
         executor.setOwnerThread(owner_id);
-        executor.setLoopOwned(true);
         ready.store(true);
         loop.run();
-        executor.setLoopOwned(false);
     });
 
     while (!ready.load()) {
@@ -43,7 +41,7 @@ TEST(OwnerThreadExecutorTest, CrossThreadExecutesOnOwnerLoop) {
     }
 
     std::thread worker([&]() {
-        result.store(executor.invoke([&]() -> int {
+        result.store(executor.invokeOnOwner([&]() -> int {
             worker_seen_id = std::this_thread::get_id();
             return 7;
         }));
@@ -69,10 +67,8 @@ TEST(OwnerThreadExecutorTest, VoidInvokePropagatesCompletion) {
 
     std::thread loop_thread([&]() {
         executor.setOwnerThread(std::this_thread::get_id());
-        executor.setLoopOwned(true);
         ready.store(true);
         loop.run();
-        executor.setLoopOwned(false);
     });
 
     while (!ready.load()) {
@@ -80,10 +76,9 @@ TEST(OwnerThreadExecutorTest, VoidInvokePropagatesCompletion) {
     }
 
     std::thread worker([&]() {
-        int ret = executor.invoke([&called]() {
+        executor.invokeOnOwner([&called]() {
             called.store(true);
         });
-        EXPECT_EQ(ret, 0);
         loop.stop();
     });
 

@@ -38,11 +38,6 @@ bool RpcRuntime::beginWait(uint32_t timeout_ms) {
     return !reentrant;
 }
 
-void RpcRuntime::endWait() {
-    in_wait_for_reply_ = false;
-    wait_deadline_ms_ = 0;
-}
-
 int64_t RpcRuntime::remainingWaitMs() const {
     return wait_deadline_ms_ - platform::currentTimeMs();
 }

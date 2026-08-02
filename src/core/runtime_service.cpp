@@ -402,8 +402,18 @@ int OmniRuntime::Impl::listServicesInternal(std::vector<ServiceInfo>& services) 
     if (!decodeUint32ReplyPayload(reply, count)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
+    // 容错：count 来自网络，必须与剩余 payload 字节匹配（每个 ServiceInfo 至少
+    // 含若干固定字段），否则畸形/损坏报文会导致 reserve 超大内存崩溃
+    if (count > reply.payload.size() / 32) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
     services.clear();
-    services.reserve(count);
+    try {
+        services.reserve(count);
+    } catch (const std::bad_alloc&) {
+        // 内存耗尽：返回错误而非崩溃（无异常传播原则）
+        return static_cast<int>(ErrorCode::ERR_OUT_OF_MEMORY);
+    }
 
     BufferView rbuf(reply.payload.data(), reply.payload.size());
     uint32_t ignored_count = 0;
@@ -455,7 +465,12 @@ int OmniRuntime::Impl::queryInterfacesInternal(const std::string& service_name,
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     interfaces.clear();
-    interfaces.reserve(count);
+    try {
+        interfaces.reserve(count);
+    } catch (const std::bad_alloc&) {
+        // 内存耗尽：返回错误而非崩溃（无异常传播原则）
+        return static_cast<int>(ErrorCode::ERR_OUT_OF_MEMORY);
+    }
     
     for (uint32_t i = 0; i < count; ++i) {
         InterfaceInfo info;

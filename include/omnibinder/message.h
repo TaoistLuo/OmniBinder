@@ -39,6 +39,8 @@
 #include "omnibinder/buffer.h"
 #include "omnibinder/buffer_view.h"
 #include <stdint.h>
+#include <new>
+#include <vector>
 
 namespace omnibinder {
 
@@ -205,7 +207,12 @@ bool deserializePublishedTopicsReply(BufT& buf, bool& found,
             || count > buf.remaining() / sizeof(uint32_t)) {
             return false;
         }
-        decoded_topics.reserve(count);
+        try {
+            decoded_topics.reserve(count);
+        } catch (const std::bad_alloc&) {
+            // 内存耗尽：返回失败而非崩溃（无异常传播原则）
+            return false;
+        }
         size_t aggregate_bytes = 0;
         for (uint32_t i = 0; i < count; ++i) {
             std::string topic;
@@ -268,7 +275,12 @@ bool deserializeServiceInfo(BufT& buf, ServiceInfo& info) {
     }
     info.shm_config.req_ring_capacity = req_ring_capacity;
     info.shm_config.resp_ring_capacity = resp_ring_capacity;
-    info.interfaces.resize(iface_count);
+    try {
+        info.interfaces.resize(iface_count);
+    } catch (const std::bad_alloc&) {
+        // 内存耗尽：返回失败而非崩溃（无异常传播原则）
+        return false;
+    }
     for (uint16_t i = 0; i < iface_count; ++i) {
         if (!deserializeInterfaceInfo(buf, info.interfaces[i])) {
             return false;
@@ -287,7 +299,12 @@ bool deserializeInterfaceInfo(BufT& buf, InterfaceInfo& info) {
         || !buf.tryReadUint16(method_count)) {
         return false;
     }
-    info.methods.resize(method_count);
+    try {
+        info.methods.resize(method_count);
+    } catch (const std::bad_alloc&) {
+        // 内存耗尽：返回失败而非崩溃（无异常传播原则）
+        return false;
+    }
     for (uint16_t i = 0; i < method_count; ++i) {
         if (!buf.tryReadUint32(info.methods[i].method_id)
             || !buf.tryReadString(info.methods[i].name)

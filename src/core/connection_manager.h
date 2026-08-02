@@ -54,9 +54,6 @@ class EventLoop;
 // ============================================================
 struct ServiceConnection {
     std::string     service_name;
-    std::string     host;
-    uint16_t        port;
-    std::string     host_id;
     ITransport*     transport;
     Buffer          recv_buffer;
     bool            connected;
@@ -66,7 +63,7 @@ struct ServiceConnection {
     std::string     topic_name;   // is_topic_publisher 时有效
 
     ServiceConnection()
-        : port(0), transport(NULL), connected(false)
+        : transport(NULL), connected(false)
         , is_topic_publisher(false), topic_name() {}
 
     ~ServiceConnection() {
@@ -89,9 +86,9 @@ class ConnectionManager {
 public:
     typedef std::function<void(const std::string& service_name,
                                const Message& msg)> MessageCallback;
-    typedef std::function<void(const std::string& service_name,
+    typedef std::function<void(std::string service_name,
                                bool is_topic_publisher,
-                               const std::string& topic_name)> DisconnectCallback;
+                               std::string topic_name)> DisconnectCallback;
 
     ConnectionManager(EventLoop& loop, const std::string& local_host_id);
     ~ConnectionManager();
@@ -139,8 +136,6 @@ public:
     // 关闭所有连接
     void closeAll();
 
-    // 获取所有连接的服务名
-    std::vector<std::string> connectedServices() const;
     uint32_t activeConnectionCount() const;
     uint32_t tcpConnectionCount() const;
     uint32_t shmConnectionCount() const;
@@ -148,6 +143,10 @@ public:
 private:
     ConnectionManager(const ConnectionManager&);
     ConnectionManager& operator=(const ConnectionManager&);
+
+    // 连接失败统一处理：connected=false → removeFd → disconnect_cb_ → 判活。
+    // 返回 false 表示回调链已删除该连接，调用方须立即停止使用 conn（约束 1/3）
+    bool failConnection(ServiceConnection* conn);
 
     void onConnectionData(const std::string& service_name, int fd);
     void processMessages(ServiceConnection* conn);

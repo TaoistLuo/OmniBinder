@@ -47,7 +47,6 @@ public:
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
     void setDefaultTimeout(uint32_t timeout_ms);
     bool beginWait(uint32_t timeout_ms);
-    void endWait();
     int64_t remainingWaitMs() const;
     bool isTimedOut() const;
     int waitForReply(uint32_t seq, uint32_t timeout_ms,

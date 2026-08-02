@@ -42,13 +42,13 @@ void ServiceManagerApp::handlePublishTopic(ClientConnection* conn, const Message
         if (!payload.tryReadString(topic)
             || topic.empty() || topic.size() > MAX_TOPIC_NAME_LENGTH) {
             OMNI_LOG_WARN(TAG, "Reject malformed publish topic request from fd=%d", conn->fd);
-            sendPublishTopicReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
             return;
         }
         ServiceInfo pub_info;
         if (!deserializeServiceInfo(payload, pub_info)) {
             OMNI_LOG_ERROR(TAG, "Failed to deserialize publisher info for topic %s", topic.c_str());
-            sendPublishTopicReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
             return;
         }
         uint32_t idl_hash = 0;
@@ -56,25 +56,25 @@ void ServiceManagerApp::handlePublishTopic(ClientConnection* conn, const Message
             && (!payload.tryReadUint32(idl_hash) || payload.remaining() != 0)) {
             OMNI_LOG_WARN(TAG, "Reject publish topic request with malformed tail from fd=%d",
                           conn->fd);
-            sendPublishTopicReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
             return;
         }
 
         if (pub_info.name.empty() || pub_info.name.size() > MAX_SERVICE_NAME_LENGTH) {
-            sendPublishTopicReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
             return;
         }
 
         if (!registry_.ownsService(conn->fd, pub_info.name)) {
             OMNI_LOG_WARN(TAG, "Reject publish topic %s from fd=%d for non-owned service %s",
                            topic.c_str(), conn->fd, pub_info.name.c_str());
-            sendPublishTopicReply(conn, msg.header.sequence, false);
+            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
             return;
         }
 
         bool success = topic_manager_.registerPublisher(topic, pub_info, conn->fd,
                                                         idl_hash);
-        sendPublishTopicReply(conn, msg.header.sequence, success);
+        sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, success);
 
         if (success) {
             // Notify existing subscribers about the new publisher
@@ -83,13 +83,6 @@ void ServiceManagerApp::handlePublishTopic(ClientConnection* conn, const Message
                 sendTopicPublisherNotify(subscribers[i], topic, pub_info);
             }
         }
-}
-
-void ServiceManagerApp::sendPublishTopicReply(ClientConnection* conn, uint32_t seq,
-                                              bool success) {
-        Message reply(MessageType::MSG_PUBLISH_TOPIC_REPLY, seq);
-        reply.payload.writeBool(success);
-        sendMessage(conn, reply);
 }
 
 void ServiceManagerApp::handleUnpublishTopic(ClientConnection* conn, const Message& msg) {

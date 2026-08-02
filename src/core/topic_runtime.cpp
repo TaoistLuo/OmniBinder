@@ -34,9 +34,12 @@ void TopicRuntime::setErrorCallback(const std::string& topic_name, const TopicEr
 
 void TopicRuntime::notifyError(uint32_t topic_id, ErrorCode error) {
     Buffer empty;
+    // 拷贝回调对象再调用：回调内可能 unsubscribeTopic → erase 本条目，
+    // 若持 map 迭代器调用则回调后迭代器已悬垂（约束 2）
     std::map<uint32_t, TopicErrorCallback>::iterator it = error_callbacks_.find(topic_id);
     if (it != error_callbacks_.end() && it->second) {
-        it->second(topic_id, error, empty);
+        TopicErrorCallback cb = it->second;
+        cb(topic_id, error, empty);
     }
 }
 
@@ -55,23 +58,6 @@ void TopicRuntime::forgetPublishedTopic(const std::string& topic_name) {
     shm_subscribers_.erase(it->second);
     published_topics_.erase(it);
     published_topic_owners_.erase(topic_name);
-}
-
-void TopicRuntime::forgetPublishedTopicsByIds(const std::vector<uint32_t>& topic_ids) {
-    for (size_t i = 0; i < topic_ids.size(); ++i) {
-        uint32_t topic_id = topic_ids[i];
-        tcp_subscribers_.erase(topic_id);
-        shm_subscribers_.erase(topic_id);
-        for (std::map<std::string, uint32_t>::iterator it = published_topics_.begin();
-             it != published_topics_.end();) {
-            if (it->second == topic_id) {
-                published_topic_owners_.erase(it->first);
-                it = published_topics_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
 }
 
 void TopicRuntime::forgetPublishedTopicsByOwner(const std::string& owner_service) {
@@ -159,10 +145,6 @@ void TopicRuntime::removeTcpSubscriber(uint32_t topic_id, int client_fd) {
             return;
         }
     }
-}
-
-bool TopicRuntime::isTopicPublished(const std::string& name) const {
-    return published_topics_.find(name) != published_topics_.end();
 }
 
 uint32_t TopicRuntime::getTopicId(const std::string& name) const {

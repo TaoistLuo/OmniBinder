@@ -176,6 +176,9 @@ bool isShmHandshakeAvailable();
 // ============================================================
 
 bool waitFdReadable(int fd, int timeout_ms);
+// 设置"父进程死亡时本进程自动收 SIGTERM"（Linux prctl；Windows 无对应机制，空实现）。
+// 用于测试框架：父测试进程被 ctest 超时杀掉后，子 service_manager 不再残留为孤儿。
+void setParentDeathSignal();
 
 } // namespace platform
 } // namespace omnibinder

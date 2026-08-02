@@ -1035,21 +1035,6 @@ int ShmTransport::serverSendToContext(ClientShmContext& ctx, uint32_t client_id,
     return static_cast<int>(length);
 }
 
-bool ShmTransport::waitReady(uint32_t timeout_ms)
-{
-    if (is_server_) {
-        return state_ == ConnectionState::CONNECTED;
-    }
-
-    uint32_t elapsed = 0;
-    const uint32_t interval = 1;
-    while (state_ != ConnectionState::CONNECTED && elapsed < timeout_ms) {
-        platform::sleepMs(interval);
-        elapsed += interval;
-    }
-    return state_ == ConnectionState::CONNECTED;
-}
-
 uint32_t ShmTransport::clientCount() const
 {
     if (is_server_) {

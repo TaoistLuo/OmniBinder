@@ -369,14 +369,4 @@ void EventLoop::processPendingFunctors()
     }
 }
 
-uint32_t EventLoop::toBackendEvents(uint32_t events)
-{
-    return events;
-}
-
-uint32_t EventLoop::fromBackendEvents(uint32_t backend_events)
-{
-    return backend_events;
-}
-
 } // namespace omnibinder

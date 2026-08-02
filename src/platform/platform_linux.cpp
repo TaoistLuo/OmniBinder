@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -926,6 +927,11 @@ void setupSignalHandlers(SignalHandler handler) {
 #ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
 #endif
+}
+
+void setParentDeathSignal() {
+    // 父进程（测试进程）死亡时本进程自动收 SIGTERM，避免孤儿残留
+    prctl(PR_SET_PDEATHSIG, SIGTERM);
 }
 
 

@@ -110,7 +110,6 @@ private:
     void handleRegister(ClientConnection* conn, const Message& msg);
     void sendRegisterReply(ClientConnection* conn, uint32_t seq, ServiceHandle handle);
     void handleUnregister(ClientConnection* conn, const Message& msg);
-    void sendUnregisterReply(ClientConnection* conn, uint32_t seq, bool success);
     void handleHeartbeat(ClientConnection* conn, const Message& msg);
     void sendHeartbeatAck(ClientConnection* conn, uint32_t seq);
     void handleLookup(ClientConnection* conn, const Message& msg);
@@ -122,10 +121,8 @@ private:
     void handleQueryPublishedTopics(ClientConnection* conn, const Message& msg);
     void sendQueryPublishedTopicsReply(ClientConnection* conn, uint32_t seq, bool found, const std::vector<std::string>& topics);
     void handleSubscribeService(ClientConnection* conn, const Message& msg);
-    void sendSubscribeServiceReply(ClientConnection* conn, uint32_t seq, bool success);
     void handleUnsubscribeService(ClientConnection* conn, const Message& msg);
     void handlePublishTopic(ClientConnection* conn, const Message& msg);
-    void sendPublishTopicReply(ClientConnection* conn, uint32_t seq, bool success);
     void handleUnpublishTopic(ClientConnection* conn, const Message& msg);
     void handleSubscribeTopic(ClientConnection* conn, const Message& msg);
     void sendSubscribeTopicReply(ClientConnection* conn, uint32_t seq, bool success, uint32_t idl_hash = 0);

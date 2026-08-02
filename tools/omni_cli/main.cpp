@@ -561,7 +561,7 @@ static int cmdWatch(omnibinder::OmniRuntime& runtime, uint32_t pid, const char* 
         uint8_t direction = p[0];
         uint64_t ts_us = 0;
         for (int i = 0; i < 8; ++i) {
-            ts_us = (ts_us << 8) | p[1 + i];
+            ts_us |= static_cast<uint64_t>(p[1 + i]) << (8 * i);
         }
         uint16_t orig_type = readLe16(p + 9);
         uint32_t orig_seq  = readLe32(p + 11);

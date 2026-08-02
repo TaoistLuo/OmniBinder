@@ -203,10 +203,10 @@ OmniRuntime::Impl::~Impl() {
     delete conn_mgr_;
     conn_mgr_ = NULL;
     
-    if (sm_channel_.transport) {
-        sm_channel_.transport->close();
-        delete sm_channel_.transport;
-        sm_channel_.transport = NULL;
+    if (sm_channel_.transport_) {
+        sm_channel_.transport_->close();
+        delete sm_channel_.transport_;
+        sm_channel_.transport_ = NULL;
     }
     
     delete loop_;
@@ -235,40 +235,42 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     loop_ = new EventLoop();
     owner_executor_.bindLoop(loop_);
     
-    sm_channel_.transport = new TcpTransport();
-    int ret = sm_channel_.transport->connect(sm_host, sm_port);
+    sm_channel_.transport_ = new TcpTransport();
+    int ret = sm_channel_.transport_->connect(sm_host, sm_port);
     if (ret < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "sm_connect_failed host=%s port=%u err=%d",
                        sm_host.c_str(), sm_port, static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE));
-        delete sm_channel_.transport;
-        sm_channel_.transport = NULL;
+        delete sm_channel_.transport_;
+        sm_channel_.transport_ = NULL;
         delete loop_;
         loop_ = NULL;
         return static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE);
     }
     
     if (ret == 1) {
-        platform::waitSocketWritable(sm_channel_.transport->fd(), 1000);
-        sm_channel_.transport->checkConnectComplete();
-        if (sm_channel_.transport->state() != ConnectionState::CONNECTED) {
+        platform::waitSocketWritable(sm_channel_.transport_->fd(), 1000);
+        sm_channel_.transport_->checkConnectComplete();
+        if (sm_channel_.transport_->state() != ConnectionState::CONNECTED) {
             OMNI_LOG_ERROR(LOG_TAG, "sm_connect_timeout host=%s port=%u timeout_ms=%u err=%d",
                            sm_host.c_str(), sm_port, 1000u, static_cast<int>(ErrorCode::ERR_TIMEOUT));
-            delete sm_channel_.transport;
-            sm_channel_.transport = NULL;
+            delete sm_channel_.transport_;
+            sm_channel_.transport_ = NULL;
             delete loop_;
             loop_ = NULL;
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
     }
     
-    loop_->addFd(sm_channel_.transport->fd(), EventLoop::EVENT_READ,
+    loop_->addFd(sm_channel_.transport_->fd(), EventLoop::EVENT_READ,
         [this](int fd, uint32_t events) { this->onSMData(fd, events); });
     
     conn_mgr_ = new ConnectionManager(*loop_, host_id_);
     conn_mgr_->setMessageCallback(
         [this](const std::string& svc, const Message& msg) { this->onDirectMessage(svc, msg); });
     conn_mgr_->setDisconnectCallback(
-        [this](const std::string& svc, bool is_topic_publisher, const std::string& topic_name) {
+        // 参数按值：onDirectDisconnect 内部会 removeConnection 删除 conn，
+        // 若传 conn 成员的引用，删除后引用悬垂（重构 failConnection 后暴露的 UAF）
+        [this](std::string svc, bool is_topic_publisher, std::string topic_name) {
             this->onDirectDisconnect(svc, is_topic_publisher, topic_name);
         });
     
@@ -308,10 +310,12 @@ void OmniRuntime::Impl::run() {
     }
 
     loop_alive_ = true;
-    owner_executor_.setLoopOwned(true);
     running_ = true;
     loop_->run();
-    owner_executor_.setLoopOwned(false);
+    // stop() 可能在 reply-wait 期间被调用：waitForReply 的 pollOnceWithoutFunctors
+    // 会把 loop_alive_ 重新置 true。run() 退出后必须强制复位，否则后续非 owner
+    // 线程的 API 调用会被投递到已停止的 event-loop，永久阻塞（违反停止后快速失败）。
+    loop_alive_ = false;
     loop_driver_active_ = false;
 }
 

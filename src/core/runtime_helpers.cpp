@@ -24,12 +24,8 @@ const char* dataChannelKindName(TransportType type) {
 void diag_serialize_event(Buffer& buf, uint8_t direction, const Message& msg) {
     uint64_t ts_us = static_cast<uint64_t>(platform::currentTimeUs());
     buf.writeUint8(direction);
-    uint8_t ts_buf[8];
-    for (int i = 7; i >= 0; --i) {
-        ts_buf[i] = static_cast<uint8_t>(ts_us);
-        ts_us >>= 8;
-    }
-    buf.writeRaw(ts_buf, 8);
+    // 时间戳与其他字段一致使用小端序（协议文档约定全协议小端）
+    buf.writeUint64(ts_us);
     buf.writeUint16(static_cast<uint16_t>(msg.getType()));
     buf.writeUint32(msg.getSequence());
     buf.writeUint32(static_cast<uint32_t>(msg.payload.size()));

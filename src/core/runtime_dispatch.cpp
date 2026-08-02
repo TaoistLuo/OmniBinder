@@ -13,6 +13,23 @@ namespace omnibinder {
 // 本地服务 accept 和请求处理
 // ============================================================
 
+bool OmniRuntime::Impl::isEntryAlive(const std::string& service_name,
+                                     LocalServiceEntry* entry) const {
+    std::map<std::string, LocalServiceEntry*>::const_iterator it =
+        local_services_.find(service_name);
+    // 对比指针地址即可，不解引用悬垂值
+    return it != local_services_.end() && it->second == entry;
+}
+
+void OmniRuntime::Impl::emitDiagHook(LocalServiceEntry* entry, uint8_t direction,
+                                     const Message& msg) {
+    if (entry && entry->diag_enabled && entry->diag_topic_id != 0) {
+        Buffer diag_buf;
+        diag_serialize_event(diag_buf, direction, msg);
+        broadcastInternal(entry->diag_topic_id, diag_buf);
+    }
+}
+
 void OmniRuntime::Impl::onServiceAccept(const std::string& service_name,
                                           int listen_fd, uint32_t events) {
     (void)listen_fd; (void)events;
@@ -85,8 +102,7 @@ void OmniRuntime::Impl::processServiceClientMessages(const std::string& service_
         // unregisterService → delete entry，recv_buf 随之悬垂（参照 drainServiceShm
         // 的判活模式）。同时重新定位 recv_buf：回调链中的 removeServiceClient
         // 可能已删除该 client 的 Buffer。
-        std::map<std::string, LocalServiceEntry*>::iterator alive = local_services_.find(service_name);
-        if (alive == local_services_.end() || alive->second != entry) return;
+        if (!isEntryAlive(service_name, entry)) return;
         bit = entry->client_recv_buffers.find(client_fd);
         if (bit == entry->client_recv_buffers.end()) return;
         recv_buf = bit->second;
@@ -161,11 +177,7 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name,
     Service* service = entry->service;
     if (!service) return;
 
-    if (entry->diag_enabled && entry->diag_topic_id != 0) {
-        Buffer diag_buf;
-        diag_serialize_event(diag_buf, DIAG_EVENT_REQUEST, msg);
-        broadcastInternal(entry->diag_topic_id, diag_buf);
-    }
+    emitDiagHook(entry, DIAG_EVENT_REQUEST, msg);
     emitDiagEvent(DIAG_EVENT_REQUEST, msg);
 
     std::map<int, ITransport*>::iterator transport_it = entry->client_transports.find(client_fd);
@@ -174,28 +186,19 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name,
     InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
 
     // dispatchLocalInvoke 内执行用户 onInvoke，回调可能 unregisterService → delete entry。
-    // 返回后必须重新判活（对比指针地址即可，不解引用悬垂值），避免访问已释放的 entry 字段。
-    std::map<std::string, LocalServiceEntry*>::iterator alive = local_services_.find(service_name);
-    if (alive == local_services_.end() || alive->second != entry) return;
+    // 返回后必须重新判活，避免访问已释放的 entry 字段。
+    if (!isEntryAlive(service_name, entry)) return;
 
     if (result.status == InvokeDispatchStatus::SUCCESS) {
         Message reply = makeInvokeSuccessReply(msg.getSequence(), result.response);
-        if (entry->diag_enabled && entry->diag_topic_id != 0) {
-            Buffer diag_buf;
-            diag_serialize_event(diag_buf, DIAG_EVENT_RESPONSE, reply);
-            broadcastInternal(entry->diag_topic_id, diag_buf);
-        }
+        emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=0",
                           service_name.c_str(), client_fd, msg.getSequence());
         }
     } else {
         Message reply = makeInvokeErrorReply(msg.getSequence(), static_cast<ErrorCode>(result.error_code));
-        if (entry->diag_enabled && entry->diag_topic_id != 0) {
-            Buffer diag_buf;
-            diag_serialize_event(diag_buf, DIAG_EVENT_RESPONSE, reply);
-            broadcastInternal(entry->diag_topic_id, diag_buf);
-        }
+        emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
                           service_name.c_str(), client_fd, msg.getSequence(), result.error_code);
@@ -210,11 +213,7 @@ void OmniRuntime::Impl::onInvokeOneWayRequest(const std::string& service_name,
     if (it == local_services_.end()) return;
     Service* service = it->second->service;
     if (!service) return;
-    if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
-        Buffer diag_buf;
-        diag_serialize_event(diag_buf, DIAG_EVENT_ONE_WAY, msg);
-        broadcastInternal(it->second->diag_topic_id, diag_buf);
-    }
+    emitDiagHook(it->second, DIAG_EVENT_ONE_WAY, msg);
     emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
 
     InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
@@ -284,7 +283,11 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
                             tid = topic_runtime_.getTopicId(diag_topic);
                         }
                     }
-                    if (tid != 0) {
+                    // publishTopicInternal 会阻塞等待 SM reply，期间可能经 SM 消息
+                    // 触发用户回调注销本服务（约束 1），返回后须重查 entry 存活
+                    entry = nullptr;
+                    for (auto& kv : local_services_) { if (kv.second->service == service) { entry = kv.second; break; } }
+                    if (tid != 0 && entry) {
                         entry->diag_topic_id = tid;
                         entry->diag_enabled = true;
                         diag_active_count_++;
@@ -384,10 +387,8 @@ void OmniRuntime::Impl::onSubscribeBroadcast(int client_fd, const Message& msg,
         std::map<int, std::string>::iterator fd_it = client_fd_to_service_.find(client_fd);
         if (fd_it != client_fd_to_service_.end()) {
             std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(fd_it->second);
-            if (eit != local_services_.end() && eit->second->diag_enabled && eit->second->diag_topic_id != 0) {
-                Buffer diag_buf;
-                diag_serialize_event(diag_buf, DIAG_EVENT_SUBSCRIBE, msg);
-                broadcastInternal(eit->second->diag_topic_id, diag_buf);
+            if (eit != local_services_.end()) {
+                emitDiagHook(eit->second, DIAG_EVENT_SUBSCRIBE, msg);
             }
         }
     }
@@ -531,31 +532,20 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
         break;
     }
     case MessageType::MSG_INVOKE: {
-        if (entry->diag_enabled && entry->diag_topic_id != 0) {
-            Buffer diag_buf;
-            diag_serialize_event(diag_buf, DIAG_EVENT_REQUEST, msg);
-            broadcastInternal(entry->diag_topic_id, diag_buf);
-        }
+        emitDiagHook(entry, DIAG_EVENT_REQUEST, msg);
         emitDiagEvent(DIAG_EVENT_REQUEST, msg);
         InvokeDispatchResult result = dispatchLocalInvoke(entry->service, msg, "SHM",
                                                           entry->service->serviceName());
 
         // dispatchLocalInvoke 执行用户 onInvoke，回调可能 unregisterService 释放 entry，
-        // 返回后重新判活（对比指针地址，不解引用悬垂值），避免访问已释放的 entry 字段
-        {
-            std::map<std::string, LocalServiceEntry*>::iterator alive = local_services_.find(service_name);
-            if (alive == local_services_.end() || alive->second != entry) return;
-        }
+        // 返回后重新判活，避免访问已释放的 entry 字段
+        if (!isEntryAlive(service_name, entry)) return;
 
         Message reply = result.status == InvokeDispatchStatus::SUCCESS
             ? makeInvokeSuccessReply(msg.getSequence(), result.response)
             : makeInvokeErrorReply(msg.getSequence(),
                                    static_cast<ErrorCode>(result.error_code));
-        if (entry->diag_enabled && entry->diag_topic_id != 0) {
-            Buffer diag_buf;
-            diag_serialize_event(diag_buf, DIAG_EVENT_RESPONSE, reply);
-            broadcastInternal(entry->diag_topic_id, diag_buf);
-        }
+        emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
         Buffer send_buf;
         if (!reply.serialize(send_buf)) {
             OMNI_LOG_ERROR(LOG_TAG,
@@ -576,11 +566,7 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
         break;
     }
     case MessageType::MSG_INVOKE_ONEWAY:
-        if (entry->diag_enabled && entry->diag_topic_id != 0) {
-            Buffer diag_buf;
-            diag_serialize_event(diag_buf, DIAG_EVENT_ONE_WAY, msg);
-            broadcastInternal(entry->diag_topic_id, diag_buf);
-        }
+        emitDiagHook(entry, DIAG_EVENT_ONE_WAY, msg);
         emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
         (void)dispatchLocalInvoke(entry->service, msg, "SHM",
                                   entry->service->serviceName());
@@ -595,11 +581,7 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
                           static_cast<int>(ErrorCode::ERR_DESERIALIZE));
             break;
         }
-        if (entry->diag_enabled && entry->diag_topic_id != 0) {
-            Buffer diag_buf;
-            diag_serialize_event(diag_buf, DIAG_EVENT_SUBSCRIBE, msg);
-            broadcastInternal(entry->diag_topic_id, diag_buf);
-        }
+        emitDiagHook(entry, DIAG_EVENT_SUBSCRIBE, msg);
         topic_runtime_.addShmSubscriberService(topic_id, service_name, client_id);
         OMNI_LOG_INFO(LOG_TAG,
                       "SHM broadcast subscriber for topic %s (0x%08x) on %s",

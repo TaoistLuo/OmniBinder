@@ -68,8 +68,8 @@ public:
     void eraseWait(uint32_t seq);
     void storeReply(uint32_t seq, const Message& msg);
 
-    TcpTransport* transport;
-    Buffer recv_buffer;
+    TcpTransport* transport_;
+    Buffer recv_buffer_;
 
 private:
     std::map<uint32_t, PendingReplySlot> pending_replies_;

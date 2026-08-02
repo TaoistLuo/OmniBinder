@@ -286,6 +286,9 @@ private:
     void storePendingReply(uint32_t seq, const Message& msg);
     bool storeAndConsumeReply(uint32_t seq, const Message& msg);
 
+    // 判活：服务是否仍注册且 entry 未被回调链释放（约束 1 的通用检查）
+    bool isEntryAlive(const std::string& service_name, LocalServiceEntry* entry) const;
+
     // ============================================================
     // 入站请求分派 — TCP accept / SHM 请求 / 本地调用
     // ============================================================
@@ -353,6 +356,8 @@ private:
     void destroyDiagDataService();
     bool isDiagDataTopic(uint32_t topic_id) const;
     void emitDiagEvent(uint8_t direction, const Message& msg);
+    // 按服务转发诊断事件到其专属 diag topic（entry 已判活时调用）
+    void emitDiagHook(LocalServiceEntry* entry, uint8_t direction, const Message& msg);
 
     // ============================================================
     // 成员变量 — 按子系统分组

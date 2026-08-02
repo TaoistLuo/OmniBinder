@@ -129,11 +129,7 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
         }
         if (!is_diag_topic) {
             for (auto& kv : local_services_) {
-                if (kv.second->diag_enabled && kv.second->diag_topic_id != 0) {
-                    Buffer diag_buf;
-                    diag_serialize_event(diag_buf, DIAG_EVENT_BROADCAST, msg);
-                    broadcastInternal(kv.second->diag_topic_id, diag_buf);
-                }
+                emitDiagHook(kv.second, DIAG_EVENT_BROADCAST, msg);
             }
         }
     }

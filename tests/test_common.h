@@ -103,6 +103,9 @@ inline TestPid startProcess(const char* path,
 #else
     pid_t pid = fork();
     if (pid == 0) {
+        // 父进程（测试进程）无论正常/异常/被超时杀掉，子进程自动收 SIGTERM，
+        // 彻底避免 ctest 超时后留下孤儿的 service_manager（平台差异见 platform.h）
+        platform::setParentDeathSignal();
         if (a1 && a2 && a3 && a4)
             execl(path, path, a1, a2, a3, a4, (char*)NULL);
         else if (a1 && a2 && a3)
@@ -126,8 +129,16 @@ inline void stopProcess(TestPid pid) {
     WaitForSingleObject(reinterpret_cast<HANDLE>(pid), 5000);
     CloseHandle(reinterpret_cast<HANDLE>(pid));
 #else
+    // SIGTERM 优雅退出；超时后 SIGKILL 兜底，避免测试进程卡在
+    // 阻塞 waitpid 而被 ctest 超时杀掉，留下孤儿子进程。
     kill(static_cast<pid_t>(pid), SIGTERM);
     int status = 0;
+    for (int i = 0; i < 50; ++i) {
+        pid_t ret = waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
+        if (ret == static_cast<pid_t>(pid)) return;
+        platform::sleepMs(100);
+    }
+    kill(static_cast<pid_t>(pid), SIGKILL);
     waitpid(static_cast<pid_t>(pid), &status, 0);
 #endif
 }

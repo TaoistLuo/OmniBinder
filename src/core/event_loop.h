@@ -145,12 +145,6 @@ private:
             , repeat(false), cancelled(false) {}
     };
 
-    // 初始化平台后端
-    void initBackend();
-
-    // 销毁平台后端
-    void destroyBackend();
-
     // 处理 eventfd 上的唤醒通知
     void onWakeup(int fd, uint32_t events);
 
@@ -167,12 +161,6 @@ private:
 
     // 唤醒事件循环
     void wakeup();
-
-    // 将内部事件标志转换为平台事件
-    static uint32_t toBackendEvents(uint32_t events);
-
-    // 将平台事件转换为内部事件标志
-    static uint32_t fromBackendEvents(uint32_t backend_events);
 
     // ============================================================
     // 成员变量

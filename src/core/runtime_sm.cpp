@@ -90,13 +90,13 @@ void OmniRuntime::Impl::onSMData(int fd, uint32_t events) {
                        sm_host_.c_str(), sm_port_, static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED));
         diag_watch_active_ = false;
         sm_reconnect_needed_ = true;
-        if (sm_channel_.transport && sm_channel_.transport->fd() >= 0) {
-            loop_->removeFd(sm_channel_.transport->fd());
+        if (sm_channel_.transport_ && sm_channel_.transport_->fd() >= 0) {
+            loop_->removeFd(sm_channel_.transport_->fd());
         }
-        if (sm_channel_.transport) {
-            sm_channel_.transport->close();
-            delete sm_channel_.transport;
-            sm_channel_.transport = NULL;
+        if (sm_channel_.transport_) {
+            sm_channel_.transport_->close();
+            delete sm_channel_.transport_;
+            sm_channel_.transport_ = NULL;
         }
         return;
     }
@@ -240,36 +240,36 @@ int OmniRuntime::Impl::reconnectServiceManager() {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
 
-    if (sm_channel_.transport && sm_channel_.transport->fd() >= 0) {
-        loop_->removeFd(sm_channel_.transport->fd());
+    if (sm_channel_.transport_ && sm_channel_.transport_->fd() >= 0) {
+        loop_->removeFd(sm_channel_.transport_->fd());
     }
-    if (sm_channel_.transport) {
-        sm_channel_.transport->close();
-        delete sm_channel_.transport;
-        sm_channel_.transport = NULL;
+    if (sm_channel_.transport_) {
+        sm_channel_.transport_->close();
+        delete sm_channel_.transport_;
+        sm_channel_.transport_ = NULL;
     }
     sm_channel_.clearReplies();
 
-    sm_channel_.transport = new TcpTransport();
-    int ret = sm_channel_.transport->connect(sm_host_, sm_port_);
+    sm_channel_.transport_ = new TcpTransport();
+    int ret = sm_channel_.transport_->connect(sm_host_, sm_port_);
     if (ret < 0) {
-        delete sm_channel_.transport;
-        sm_channel_.transport = NULL;
+        delete sm_channel_.transport_;
+        sm_channel_.transport_ = NULL;
         return static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE);
     }
 
     if (ret == 1) {
-        platform::waitSocketWritable(sm_channel_.transport->fd(), 1000);
-        sm_channel_.transport->checkConnectComplete();
-        if (sm_channel_.transport->state() != ConnectionState::CONNECTED) {
-            sm_channel_.transport->close();
-            delete sm_channel_.transport;
-            sm_channel_.transport = NULL;
+        platform::waitSocketWritable(sm_channel_.transport_->fd(), 1000);
+        sm_channel_.transport_->checkConnectComplete();
+        if (sm_channel_.transport_->state() != ConnectionState::CONNECTED) {
+            sm_channel_.transport_->close();
+            delete sm_channel_.transport_;
+            sm_channel_.transport_ = NULL;
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
     }
 
-    loop_->addFd(sm_channel_.transport->fd(), EventLoop::EVENT_READ,
+    loop_->addFd(sm_channel_.transport_->fd(), EventLoop::EVENT_READ,
         [this](int fd, uint32_t events) { this->onSMData(fd, events); });
     sm_reconnect_needed_ = false;
     stats_.sm_reconnect_successes++;
@@ -289,8 +289,19 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         return hello_ret;
     }
 
+    // 先拷贝 key 再遍历：waitForReply 期间 SM 消息可触发用户回调
+    // （如死亡通知回调内 unregisterService）修改 local_services_（约束 2）
+    std::vector<std::string> service_names;
+    service_names.reserve(local_services_.size());
     for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
          it != local_services_.end(); ++it) {
+        service_names.push_back(it->first);
+    }
+    for (size_t i = 0; i < service_names.size(); ++i) {
+        std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_names[i]);
+        if (it == local_services_.end()) {
+            continue;
+        }
         LocalServiceEntry* entry = it->second;
         if (!entry || !entry->service) {
             continue;
@@ -321,8 +332,18 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         }
     }
 
+    // 同上：waitForReply 期间用户可能 unsubscribeServiceDeath 修改 death_callbacks_（约束 2）
+    std::vector<std::string> death_names;
+    death_names.reserve(death_callbacks_.size());
     for (std::map<std::string, DeathCallback>::iterator it = death_callbacks_.begin();
          it != death_callbacks_.end(); ++it) {
+        death_names.push_back(it->first);
+    }
+    for (size_t i = 0; i < death_names.size(); ++i) {
+        std::map<std::string, DeathCallback>::iterator it = death_callbacks_.find(death_names[i]);
+        if (it == death_callbacks_.end()) {
+            continue;
+        }
         Message msg(MessageType::MSG_SUBSCRIBE_SERVICE, allocSequence());
         msg.payload.writeString(it->first);
         if (!sendToSM(msg)) {
@@ -439,6 +460,15 @@ int OmniRuntime::Impl::reconnectServiceManagerIfNeeded() {
             tryReconnectService(rc->first);
         }
     }
+
+    // 诊断 watch 恢复：SM 断线时 onSMData 只置 diag_watch_active_ = false 而保留
+    // diag_watch_topic_id_，重连成功后若该值非 0 说明之前 watch 活跃，重建数据服务。
+    // 需先清 topic_id：initDiagDataService 以 topic_id!=0 作幂等判断，
+    // 否则会直接返回而跳过 SM 侧重新注册/发布。
+    if (diag_watch_topic_id_ != 0 && !diag_watch_active_) {
+        diag_watch_topic_id_ = 0;
+        diag_watch_active_ = initDiagDataService();
+    }
     return 0;
 }
 
@@ -450,12 +480,18 @@ void OmniRuntime::Impl::sendHeartbeat() {
     // 先检查 SM 是否需要重连（客户端也可能没有注册服务，但仍需保持 SM 连接）
     reconnectServiceManagerIfNeeded();
 
-    // 为每个已注册的本地服务向 SM 发送心跳
+    // 先拷贝 key 再遍历：reconnectServiceManagerIfNeeded 可能触发 restore 流程，
+    // 其内部 waitForReply 期间用户回调可修改 local_services_（约束 2）
+    std::vector<std::string> names;
+    names.reserve(local_services_.size());
     for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
          it != local_services_.end(); ++it) {
+        names.push_back(it->first);
+    }
+    for (size_t i = 0; i < names.size(); ++i) {
         Message msg(MessageType::MSG_HEARTBEAT, 0);
-        if (!msg.payload.writeString(it->first)) {
-            OMNI_LOG_ERROR(LOG_TAG, "heartbeat_serialize_failed service=%s", it->first.c_str());
+        if (!msg.payload.writeString(names[i])) {
+            OMNI_LOG_ERROR(LOG_TAG, "heartbeat_serialize_failed service=%s", names[i].c_str());
             continue;
         }
         sendToSM(msg);

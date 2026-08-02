@@ -6,15 +6,15 @@
 namespace omnibinder {
 
 SmControlChannel::SmControlChannel()
-    : transport(NULL)
-    , recv_buffer() {}
+    : transport_(NULL)
+    , recv_buffer_() {}
 
 SmControlChannel::~SmControlChannel() {
     clearReplies();
 }
 
 bool SmControlChannel::isConnected() const {
-    return transport && transport->state() == ConnectionState::CONNECTED;
+    return transport_ && transport_->state() == ConnectionState::CONNECTED;
 }
 
 bool SmControlChannel::sendMessage(const Message& msg) {
@@ -31,45 +31,45 @@ bool SmControlChannel::sendMessageWithinTimeout(const Message& msg, uint32_t tim
 
     Buffer buf;
     msg.serialize(buf);
-    return platform::socketSendAll(transport->fd(), buf.data(), buf.size(), timeout_ms, elapsed_ms);
+    return platform::socketSendAll(transport_->fd(), buf.data(), buf.size(), timeout_ms, elapsed_ms);
 }
 
 int SmControlChannel::recvSome(uint8_t* data, size_t capacity) {
-    if (!transport) {
+    if (!transport_) {
         return -1;
     }
-    return transport->recv(data, capacity);
+    return transport_->recv(data, capacity);
 }
 
 void SmControlChannel::appendReceived(const uint8_t* data, size_t length) {
-    recv_buffer.writeRaw(data, length);
+    recv_buffer_.writeRaw(data, length);
 }
 
 bool SmControlChannel::tryPopMessage(Message& msg) {
-    size_t avail = recv_buffer.size() - recv_buffer.readPosition();
+    size_t avail = recv_buffer_.size() - recv_buffer_.readPosition();
     if (avail < MESSAGE_HEADER_SIZE) {
         return false;
     }
 
-    size_t pos = recv_buffer.readPosition();
+    size_t pos = recv_buffer_.readPosition();
     MessageHeader hdr;
-    if (!Message::parseHeader(recv_buffer.data() + pos, avail, hdr)) {
+    if (!Message::parseHeader(recv_buffer_.data() + pos, avail, hdr)) {
         return false;
     }
     if (!Message::validateHeader(hdr)) {
         // Corrupted header at current position. Skip one byte forward
         // and retry, rather than discarding the entire buffer.
-        if (!recv_buffer.trySetReadPosition(pos + 1)) {
-            recv_buffer.setWritePosition(0);
-            recv_buffer.trySetReadPosition(0);
+        if (!recv_buffer_.trySetReadPosition(pos + 1)) {
+            recv_buffer_.setWritePosition(0);
+            recv_buffer_.trySetReadPosition(0);
         } else {
-            size_t remaining = recv_buffer.size() - recv_buffer.readPosition();
-            if (remaining > 0 && recv_buffer.readPosition() > 0) {
-                memmove(recv_buffer.mutableData(),
-                        recv_buffer.data() + recv_buffer.readPosition(), remaining);
+            size_t remaining = recv_buffer_.size() - recv_buffer_.readPosition();
+            if (remaining > 0 && recv_buffer_.readPosition() > 0) {
+                memmove(recv_buffer_.mutableData(),
+                        recv_buffer_.data() + recv_buffer_.readPosition(), remaining);
             }
-            recv_buffer.setWritePosition(remaining);
-            recv_buffer.trySetReadPosition(0);
+            recv_buffer_.setWritePosition(remaining);
+            recv_buffer_.trySetReadPosition(0);
         }
         return false;
     }
@@ -82,20 +82,20 @@ bool SmControlChannel::tryPopMessage(Message& msg) {
     msg.header = hdr;
     msg.payload.clear();
     if (hdr.length > 0) {
-        msg.payload.assign(recv_buffer.data() + pos + MESSAGE_HEADER_SIZE, hdr.length);
+        msg.payload.assign(recv_buffer_.data() + pos + MESSAGE_HEADER_SIZE, hdr.length);
     }
-    if (!recv_buffer.trySetReadPosition(pos + total)) {
-        recv_buffer.setWritePosition(0);
-        recv_buffer.trySetReadPosition(0);
+    if (!recv_buffer_.trySetReadPosition(pos + total)) {
+        recv_buffer_.setWritePosition(0);
+        recv_buffer_.trySetReadPosition(0);
         return false;
     }
 
-    size_t remaining = recv_buffer.size() - recv_buffer.readPosition();
-    if (remaining > 0 && recv_buffer.readPosition() > 0) {
-        memmove(recv_buffer.mutableData(), recv_buffer.data() + recv_buffer.readPosition(), remaining);
+    size_t remaining = recv_buffer_.size() - recv_buffer_.readPosition();
+    if (remaining > 0 && recv_buffer_.readPosition() > 0) {
+        memmove(recv_buffer_.mutableData(), recv_buffer_.data() + recv_buffer_.readPosition(), remaining);
     }
-    recv_buffer.setWritePosition(remaining);
-    recv_buffer.trySetReadPosition(0);
+    recv_buffer_.setWritePosition(remaining);
+    recv_buffer_.trySetReadPosition(0);
     return true;
 }
 

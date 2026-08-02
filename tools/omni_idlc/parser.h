@@ -88,9 +88,6 @@ public:
     bool parse(AstFile& ast);
     bool hasError() const { return has_error_; }
     const std::string& errorMessage() const { return error_msg_; }
-    
-    /// 获取共享上下文
-    ParseContext& context() { return *ctx_; }
 
 private:
     Token expect(TokenType type);

@@ -963,6 +963,10 @@ void setupSignalHandlers(SignalHandler handler) {
     signal(SIGTERM, handler);
 }
 
+void setParentDeathSignal() {
+    // Windows 无父进程死亡信号机制（作业对象才能实现），测试场景空实现
+}
+
 
 int handshakeGetFd(handshake_channel* ch) { return ch ? static_cast<int>(ch->fd) : -1; }
 int handshakeGetListenerFd(handshake_listener* l) { return l ? static_cast<int>(l->fd) : -1; }

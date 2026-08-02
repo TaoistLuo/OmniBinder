@@ -179,9 +179,6 @@ public:
     // 返回值: >0 = 写入的字节数, 0 = ring 满, <0 = 错误
     int serverSend(uint32_t client_id, const uint8_t* data, size_t length);
 
-    // 等待 SHM 就绪（客户端调用，handshake 完成后即就绪）
-    bool waitReady(uint32_t timeout_ms);
-
     // 获取当前连接的客户端数
     uint32_t clientCount() const;
 

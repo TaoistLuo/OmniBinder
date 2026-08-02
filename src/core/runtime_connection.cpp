@@ -41,6 +41,9 @@ int OmniRuntime::Impl::connectServiceInternal(const std::string& service_name) {
         return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
 
+    // 记录显式连接：SM 重连恢复时数据面连接会被 closeAll 清空，
+    // 需要该记录才能在恢复流程中重建直连（约束 6：恢复必须覆盖数据面）
+    reconnect_configs_[service_name];  // 默认 enabled=true
     OMNI_LOG_INFO(LOG_TAG, "connectService success for %s", service_name.c_str());
     return 0;
 }
@@ -152,8 +155,8 @@ void OmniRuntime::Impl::scheduleReconnect(const std::string& service_name, uint3
 void OmniRuntime::Impl::startHeartbeat(const std::string& service_name, uint32_t interval_ms, uint32_t timeout_ms) {
     callSerialized([this, &service_name, interval_ms, timeout_ms]() {
         HeartbeatState& state = heartbeat_states_[service_name];
-        state.interval_ms = interval_ms > 0 ? interval_ms : 5000;
-        state.timeout_ms = timeout_ms > 0 ? timeout_ms : 10000;
+        state.interval_ms = interval_ms > 0 ? interval_ms : DEFAULT_HEARTBEAT_INTERVAL;
+        state.timeout_ms = timeout_ms > 0 ? timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT;
         resumeHeartbeat(service_name);
 
         OMNI_LOG_INFO(LOG_TAG, "Started heartbeat for %s (interval=%u ms, timeout=%u ms)",
