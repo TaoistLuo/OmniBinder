@@ -212,10 +212,10 @@ public:
     // 配置
     // ============================================================
     void setRegisterHost(const std::string& host);
-    const std::string& getRegisterHost() const;
+    std::string getRegisterHost() const;
     void setHeartbeatInterval(uint32_t ms);
     void setDefaultTimeout(uint32_t ms);
-    const std::string& hostId() const;
+    std::string hostId() const;
 
 private:
     // ============================================================
@@ -284,6 +284,7 @@ private:
     int  waitForReply(uint32_t seq, uint32_t timeout_ms, Message& reply,
                       const std::function<bool()>& is_alive = std::function<bool()>());
     void storePendingReply(uint32_t seq, const Message& msg);
+    bool storeAndConsumeReply(uint32_t seq, const Message& msg);
 
     // ============================================================
     // 入站请求分派 — TCP accept / SHM 请求 / 本地调用
@@ -304,14 +305,14 @@ private:
     void onInvokeOneWayRequest(const std::string& name, const Message& msg,
                                 const char* transport);
     void onSubscribeBroadcast(int client_fd, const Message& msg, const char* transport);
-    void onTopicBroadcastMessage(const Message& msg);
     void removeServiceClient(const std::string& name, int client_fd);
 
     // ============================================================
     // 数据面直连 — ConnectionManager 回调 / 消息发送
     // ============================================================
     void onDirectMessage(const std::string& name, const Message& msg);
-    void onDirectDisconnect(const std::string& name);
+    void onDirectDisconnect(const std::string& name, bool is_topic_publisher,
+                            const std::string& topic_name);
     void sendHeartbeatToService(const std::string& name);
     void checkHeartbeatTimeout(const std::string& name);
     void sendHeartbeat();
@@ -323,7 +324,6 @@ private:
     template<typename F>
     typename std::result_of<F()>::type callSerialized(F func);
     bool isOwnerThread() const;
-    void captureOwnerThread();
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
     bool populateInvokeMessage(Message& msg, uint32_t iface_id, uint32_t method_id,
                                 uint32_t idl_hash, const Buffer& req) const;
@@ -362,15 +362,17 @@ private:
     EventLoop*          loop_;
     OwnerThreadExecutor owner_executor_;
     std::atomic<bool>   running_;
+    std::atomic<bool>   loop_alive_;      // event-loop 是否仍会处理 functor（stop 后置 false）
     bool                initialized_;
     OmniRuntime*        owner_;
-    std::mutex          api_mutex_;
+    mutable std::recursive_mutex api_mutex_;  // recursive：回调链内重入 API 需可重入加锁
     std::atomic<bool>   loop_driver_active_;
 
     // 控制面
     SmControlChannel    sm_channel_;
     RpcRuntime          rpc_runtime_;
     std::atomic<bool>   sm_reconnect_needed_;
+    bool                restoring_ = false;   // 重连恢复流程重入保护
     std::string         sm_host_;
     uint16_t            sm_port_;
     std::string         host_id_;
@@ -402,11 +404,38 @@ private:
 
 };
 
+// ============================================================
+// callSerialized — 串行化入口
+// ============================================================
+
+// loop 已停止时 callSerialized 的快速失败返回值：
+// int → ERR_NOT_RUNNING；bool → false；其余类型 → 默认构造
+template<typename T>
+struct FailFastResult {
+    static T value() { return T(); }
+};
+
+template<>
+struct FailFastResult<int> {
+    static int value() { return static_cast<int>(ErrorCode::ERR_NOT_RUNNING); }
+};
+
+template<>
+struct FailFastResult<bool> {
+    static bool value() { return false; }
+};
+
 template<typename F>
 typename std::result_of<F()>::type OmniRuntime::Impl::callSerialized(F func) {
     if (!owner_executor_.hasOwnerThread()) {
-        std::lock_guard<std::mutex> lock(api_mutex_);
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
         return func();
+    }
+    // 非 owner 线程且 loop 已停止（stop 之后）：投递到 event-loop 的 functor
+    // 永远不会被处理，等待会永久阻塞。这里快速失败返回错误码（int）/默认值（bool）。
+    if (!loop_alive_.load()) {
+        OMNI_LOG_WARN("OmniRuntime", "callSerialized rejected: event-loop not running");
+        return FailFastResult<typename std::result_of<F()>::type>::value();
     }
     return owner_executor_.invokeOnOwner(func);
 }

@@ -264,7 +264,7 @@ void ServiceManagerApp::notifyServiceDeath(const std::string& service_name) {
 
 void ServiceManagerApp::sendDeathNotify(ClientConnection* conn,
                                         const std::string& service_name) {
-        Message notify(MessageType::MSG_DEATH_NOTIFY, nextSequenceNumber());
+        Message notify(MessageType::MSG_DEATH_NOTIFY, nextSMProactiveSequence());
         notify.payload.writeString(service_name);
         sendMessage(conn, notify);
 }

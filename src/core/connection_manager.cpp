@@ -28,13 +28,20 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
     const std::string& host,
     uint16_t port,
     const std::string& host_id,
-    const ShmConfig& shm_config)
+    const ShmConfig& shm_config,
+    bool is_topic_publisher,
+    const std::string& topic_name)
 {
     // 检查是否已有连接
     std::map<std::string, ServiceConnection*>::iterator it = connections_.find(service_name);
     if (it != connections_.end()) {
         if (it->second->connected) {
             return it->second;
+        }
+        // 已断开连接：先注销其 fd 再释放，避免 EventLoop 中残留悬垂 fd
+        // （部分错误路径只置 connected=false 而未 removeFd）
+        if (it->second->transport && it->second->transport->fd() >= 0) {
+            loop_.removeFd(it->second->transport->fd());
         }
         delete it->second;
         connections_.erase(it);
@@ -45,10 +52,23 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
     conn->host = host;
     conn->port = port;
     conn->host_id = host_id;
+    conn->is_topic_publisher = is_topic_publisher;
+    conn->topic_name = topic_name;
 
     conn->transport = selectTransport(service_name, host, port,
                                       local_host_id_, host_id, shm_config);
     if (!conn->transport) {
+        delete conn;
+        return NULL;
+    }
+
+    // 无效 fd 的传输不可用：不保留无效连接，避免无事件注册的僵尸连接
+    if (conn->transport->fd() < 0) {
+        OMNI_LOG_WARN(LOG_TAG, "Invalid transport fd for %s, connection rejected",
+                      service_name.c_str());
+        conn->transport->close();
+        delete conn->transport;
+        conn->transport = NULL;
         delete conn;
         return NULL;
     }
@@ -58,13 +78,11 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
 
     // 注册到 EventLoop
     int fd = conn->transport->fd();
-    if (fd >= 0) {
-        loop_.addFd(fd, EventLoop::EVENT_READ,
-            [this, service_name](int fd, uint32_t events) {
-                (void)events;
-                this->onConnectionData(service_name, fd);
-            });
-    }
+    loop_.addFd(fd, EventLoop::EVENT_READ,
+        [this, service_name](int fd, uint32_t events) {
+            (void)events;
+            this->onConnectionData(service_name, fd);
+        });
 
     OMNI_LOG_INFO(LOG_TAG, "Connected to %s via %s (fd=%d)",
                     service_name.c_str(),
@@ -153,6 +171,9 @@ bool ConnectionManager::sendRawWithDeadline(ServiceConnection* conn, const uint8
                     OMNI_LOG_WARN(LOG_TAG,
                                   "data_send_shm_ring_full service=%s sent=%zu/%zu timeout",
                                   conn->service_name.c_str(), sent, length);
+                    // 超时视为连接不可用：与 L2 发送失败路径语义一致，
+                    // 置 connected=false 使上层感知并触发重连
+                    conn->connected = false;
                     return false;
                 }
                 // Spin briefly (up to 1 ms) then recheck deadline to avoid
@@ -308,7 +329,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                                   service_name.c_str());
                     conn->connected = false;
                     loop_.removeFd(conn->transport->fd());
-                    if (disconnect_cb_) disconnect_cb_(service_name);
+                    if (disconnect_cb_) disconnect_cb_(service_name, conn->is_topic_publisher, conn->topic_name);
                     std::map<std::string, ServiceConnection*>::iterator current =
                         connections_.find(service_name);
                     if (current == connections_.end() || current->second != conn) return;
@@ -321,7 +342,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                                service_name.c_str(), frame_size);
                 conn->connected = false;
                 loop_.removeFd(conn->transport->fd());
-                if (disconnect_cb_) disconnect_cb_(service_name);
+                if (disconnect_cb_) disconnect_cb_(service_name, conn->is_topic_publisher, conn->topic_name);
                 std::map<std::string, ServiceConnection*>::iterator current =
                     connections_.find(service_name);
                 if (current == connections_.end() || current->second != conn) return;
@@ -335,7 +356,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                     conn->connected = false;
                     loop_.removeFd(conn->transport->fd());
                     if (disconnect_cb_) {
-                        disconnect_cb_(service_name);
+                        disconnect_cb_(service_name, conn->is_topic_publisher, conn->topic_name);
                     }
                     std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
                     if (current == connections_.end() || current->second != conn) {
@@ -352,7 +373,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                 conn->connected = false;
                 loop_.removeFd(conn->transport->fd());
                 if (disconnect_cb_) {
-                    disconnect_cb_(service_name);
+                    disconnect_cb_(service_name, conn->is_topic_publisher, conn->topic_name);
                 }
                 std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
                 if (current == connections_.end() || current->second != conn) {
@@ -365,7 +386,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                                service_name.c_str());
                 conn->connected = false;
                 loop_.removeFd(conn->transport->fd());
-                if (disconnect_cb_) disconnect_cb_(service_name);
+                if (disconnect_cb_) disconnect_cb_(service_name, conn->is_topic_publisher, conn->topic_name);
                 std::map<std::string, ServiceConnection*>::iterator current =
                     connections_.find(service_name);
                 if (current == connections_.end() || current->second != conn) return;
@@ -389,7 +410,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         conn->connected = false;
         loop_.removeFd(conn->transport->fd());
         if (disconnect_cb_) {
-            disconnect_cb_(service_name);
+            disconnect_cb_(service_name, conn->is_topic_publisher, conn->topic_name);
         }
         std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
         if (current == connections_.end() || current->second != conn) {
@@ -411,7 +432,7 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         conn->connected = false;
         loop_.removeFd(conn->transport->fd());
         if (disconnect_cb_) {
-            disconnect_cb_(service_name);
+            disconnect_cb_(service_name, conn->is_topic_publisher, conn->topic_name);
         }
         std::map<std::string, ServiceConnection*>::iterator current = connections_.find(service_name);
         if (current == connections_.end() || current->second != conn) {
@@ -445,9 +466,16 @@ void ConnectionManager::processMessages(ServiceConnection* conn) {
 
         // 验证消息头
         if (!Message::validateHeader(header)) {
-            OMNI_LOG_ERROR(LOG_TAG, "Invalid message header from %s",
+            OMNI_LOG_ERROR(LOG_TAG, "Invalid message header from %s, disconnecting",
                              conn->service_name.c_str());
+            // 与 onConnectionData 错误路径对齐：解除 fd 注册并回调断开，
+            // 避免校验失败后连接僵死（只置 connected=false 不清理）
             conn->connected = false;
+            loop_.removeFd(conn->transport->fd());
+            if (disconnect_cb_) {
+                disconnect_cb_(conn->service_name, conn->is_topic_publisher,
+                               conn->topic_name);
+            }
             return;
         }
 

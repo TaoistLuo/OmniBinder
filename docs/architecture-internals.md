@@ -53,13 +53,14 @@ OmniBinder 的内部实现分成两个平面：
 
 - `src/core/omni_runtime.h`
 - `src/core/omni_runtime.cpp`
-- `src/core/omni_sm.cpp` — ServiceManager 控制面通信
-- `src/core/omni_service.cpp` — 本地服务注册 / 注销
-- `src/core/omni_connection.cpp` — 连接管理与心跳
-- `src/core/omni_rpc.cpp` — RPC 调用与回复
-- `src/core/omni_topic.cpp` — topic 发布/订阅/广播
-- `src/core/omni_dispatch.cpp` — 服务端请求分派
-- `src/core/omni_diag.cpp` — 诊断 watch 数据面
+- `src/core/runtime_sm.cpp` — ServiceManager 控制面通信
+- `src/core/runtime_service.cpp` — 本地服务注册 / 注销
+- `src/core/runtime_connection.cpp` — 连接管理与心跳
+- `src/core/runtime_rpc.cpp` — RPC 调用与回复
+- `src/core/runtime_topic.cpp` — topic 发布/订阅/广播
+- `src/core/runtime_dispatch.cpp` — 服务端请求分派
+- `src/core/runtime_diag.cpp` — 诊断 watch 数据面
+- `src/core/runtime_config.cpp` — 配置 / 统计 / 线程模型基础设施
 - `src/core/sm_control_channel.h`
 - `src/core/sm_control_channel.cpp`
 - `src/core/rpc_runtime.h`

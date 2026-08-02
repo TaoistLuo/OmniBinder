@@ -44,9 +44,10 @@ class SmControlChannel {
 public:
     struct PendingReplySlot {
         bool ready;
+        bool failed;   // 连接重建后旧连接的回复不可能到达，标记失败让等待方快速退出
         Message message;
 
-        PendingReplySlot() : ready(false), message() {}
+        PendingReplySlot() : ready(false), failed(false), message() {}
     };
 
     SmControlChannel();
@@ -62,6 +63,7 @@ public:
     void beginWait(uint32_t seq);
     bool isWaiting(uint32_t seq) const;
     const Message* pendingReply(uint32_t seq) const;
+    bool isFailed(uint32_t seq) const;
     bool takeReply(uint32_t seq, Message& out);
     void eraseWait(uint32_t seq);
     void storeReply(uint32_t seq, const Message& msg);

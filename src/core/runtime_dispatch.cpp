@@ -1,5 +1,6 @@
 #include "core/omni_runtime.h"
 #include "core/runtime_helpers.h"
+#include "omnibinder/buffer_view.h"
 #include "omnibinder/log.h"
 
 #include <cstring>
@@ -79,6 +80,17 @@ void OmniRuntime::Impl::processServiceClientMessages(const std::string& service_
 
     Buffer* recv_buf = bit->second;
     while (true) {
+        // 每轮循环前重新确认 entry 存活：上一轮 dispatch（onInvokeRequest /
+        // onInvokeOneWayRequest / onSubscribeBroadcast）执行用户回调时可能
+        // unregisterService → delete entry，recv_buf 随之悬垂（参照 drainServiceShm
+        // 的判活模式）。同时重新定位 recv_buf：回调链中的 removeServiceClient
+        // 可能已删除该 client 的 Buffer。
+        std::map<std::string, LocalServiceEntry*>::iterator alive = local_services_.find(service_name);
+        if (alive == local_services_.end() || alive->second != entry) return;
+        bit = entry->client_recv_buffers.find(client_fd);
+        if (bit == entry->client_recv_buffers.end()) return;
+        recv_buf = bit->second;
+
         size_t avail = recv_buf->size() - recv_buf->readPosition();
         if (avail < MESSAGE_HEADER_SIZE) break;
 
@@ -145,26 +157,33 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name,
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_name);
     if (it == local_services_.end()) return;
 
-    Service* service = it->second->service;
+    LocalServiceEntry* entry = it->second;
+    Service* service = entry->service;
     if (!service) return;
 
-    if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
+    if (entry->diag_enabled && entry->diag_topic_id != 0) {
         Buffer diag_buf;
         diag_serialize_event(diag_buf, DIAG_EVENT_REQUEST, msg);
-        broadcastInternal(it->second->diag_topic_id, diag_buf);
+        broadcastInternal(entry->diag_topic_id, diag_buf);
     }
     emitDiagEvent(DIAG_EVENT_REQUEST, msg);
 
-    std::map<int, ITransport*>::iterator transport_it = it->second->client_transports.find(client_fd);
-    ITransport* transport = (transport_it != it->second->client_transports.end()) ? transport_it->second : nullptr;
+    std::map<int, ITransport*>::iterator transport_it = entry->client_transports.find(client_fd);
+    ITransport* transport = (transport_it != entry->client_transports.end()) ? transport_it->second : nullptr;
 
     InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
+
+    // dispatchLocalInvoke 内执行用户 onInvoke，回调可能 unregisterService → delete entry。
+    // 返回后必须重新判活（对比指针地址即可，不解引用悬垂值），避免访问已释放的 entry 字段。
+    std::map<std::string, LocalServiceEntry*>::iterator alive = local_services_.find(service_name);
+    if (alive == local_services_.end() || alive->second != entry) return;
+
     if (result.status == InvokeDispatchStatus::SUCCESS) {
         Message reply = makeInvokeSuccessReply(msg.getSequence(), result.response);
-        if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
+        if (entry->diag_enabled && entry->diag_topic_id != 0) {
             Buffer diag_buf;
             diag_serialize_event(diag_buf, DIAG_EVENT_RESPONSE, reply);
-            broadcastInternal(it->second->diag_topic_id, diag_buf);
+            broadcastInternal(entry->diag_topic_id, diag_buf);
         }
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=0",
@@ -172,10 +191,10 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name,
         }
     } else {
         Message reply = makeInvokeErrorReply(msg.getSequence(), static_cast<ErrorCode>(result.error_code));
-        if (it->second->diag_enabled && it->second->diag_topic_id != 0) {
+        if (entry->diag_enabled && entry->diag_topic_id != 0) {
             Buffer diag_buf;
             diag_serialize_event(diag_buf, DIAG_EVENT_RESPONSE, reply);
-            broadcastInternal(it->second->diag_topic_id, diag_buf);
+            broadcastInternal(entry->diag_topic_id, diag_buf);
         }
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s fd=%d seq=%u status=%d",
@@ -204,6 +223,137 @@ void OmniRuntime::Impl::onInvokeOneWayRequest(const std::string& service_name,
                        "oneway_idl_mismatch service=%s method=0x%08x err=%d — message discarded",
                        service_name.c_str(), 0, result.error_code);
     }
+}
+
+InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, const Message& msg,
+                                                            const char* transport_label,
+                                                            const char* service_name) {
+    // Diagnostic intercept
+    {
+        uint32_t diag_iface_id = 0;
+        uint32_t diag_idl_hash = 0;
+        uint32_t diag_method_id = 0;
+        uint32_t diag_payload_len = 0;
+        BufferView check_buf(msg.payload.data(), msg.payload.size());
+        if (check_buf.tryReadUint32(diag_iface_id) && check_buf.tryReadUint32(diag_idl_hash)
+            && check_buf.tryReadUint32(diag_method_id) && check_buf.tryReadUint32(diag_payload_len)) {
+            if (diag_iface_id == OMNI_DIAG_IFACE_ID) {
+                Buffer request;
+                if (diag_payload_len > 0) {
+                    if (!request.writeRaw(check_buf.data() + check_buf.readPosition(), diag_payload_len)) {
+                        InvokeDispatchResult result;
+                        result.status = InvokeDispatchStatus::DECODE_FAILED;
+                        result.error_code = static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+                        return result;
+                    }
+                }
+                InvokeDispatchResult result;
+                result.status = InvokeDispatchStatus::SUCCESS;
+                result.error_code = 0;
+                LocalServiceEntry* entry = nullptr;
+                for (auto& kv : local_services_) { if (kv.second->service == service) { entry = kv.second; break; } }
+                if (!entry) {
+                    result.status = InvokeDispatchStatus::INVOKE_FAILED;
+                    result.error_code = static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
+                    return result;
+                }
+                bool enable = (request.size() >= 1 && request.data()[0] != 0);
+                if (!enable && diag_active_count_ == 0) {
+                    result.response.writeUint8(0);
+                    return result;
+                }
+                if (enable && !entry->diag_enabled) {
+                    std::string diag_topic = "__diag__" + std::string(service_name);
+                    uint32_t tid = topic_runtime_.getTopicId(diag_topic);
+                    if (tid == 0) {
+                        int pub_ret = publishTopicInternal(diag_topic);
+                        if (pub_ret != 0) {
+                            result.status = InvokeDispatchStatus::INVOKE_FAILED;
+                            result.error_code = pub_ret;
+                        } else {
+                            tid = topic_runtime_.getTopicId(diag_topic);
+                        }
+                    }
+                    if (tid != 0) {
+                        entry->diag_topic_id = tid;
+                        entry->diag_enabled = true;
+                        diag_active_count_++;
+                        OMNI_LOG_INFO(LOG_TAG, "diag_enabled service=%s topic=%s topic_id=0x%08x",
+                                      service_name, diag_topic.c_str(), entry->diag_topic_id);
+                        result.response.writeUint8(0);
+                    } else {
+                        result.status = InvokeDispatchStatus::INVOKE_FAILED;
+                        result.error_code = -1;
+                    }
+                } else if (!enable) {
+                    entry->diag_enabled = false;
+                    entry->diag_topic_id = 0;
+                    OMNI_LOG_INFO(LOG_TAG, "diag_disabled service=%s", service_name);
+                    result.response.writeUint8(0);
+                } else {
+                    result.response.writeUint8(0);
+                }
+                return result;
+            }
+        }
+    }
+
+    InvokeDispatchResult result;
+    result.error_code = 0;
+
+    uint32_t interface_id = 0;
+    uint32_t client_idl_hash = 0;
+    uint32_t method_id = 0;
+    Buffer request;
+    if (!decodeInvokePayload(msg, interface_id, client_idl_hash, method_id, request)) {
+        OMNI_LOG_WARN(LOG_TAG,
+                      "malformed_invoke_payload service=%s transport=%s seq=%u err=%d",
+                      service_name, transport_label, msg.getSequence(),
+                      static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+        result.status = InvokeDispatchStatus::DECODE_FAILED;
+        result.error_code = static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+        return result;
+    }
+    if (service->interfaceInfo().interface_id != interface_id) {
+        result.status = InvokeDispatchStatus::INTERFACE_MISMATCH;
+        result.error_code = static_cast<int>(ErrorCode::ERR_INTERFACE_NOT_FOUND);
+        return result;
+    }
+
+    if (client_idl_hash != 0) {
+        uint32_t server_idl_hash = 0;
+        const InterfaceInfo& iface = service->interfaceInfo();
+        for (size_t i = 0; i < iface.methods.size(); ++i) {
+            if (iface.methods[i].method_id == method_id) {
+                server_idl_hash = iface.methods[i].idl_hash;
+                break;
+            }
+        }
+        if (server_idl_hash != 0 && client_idl_hash != server_idl_hash) {
+            OMNI_LOG_WARN(LOG_TAG,
+                          "idl_mismatch service=%s transport=%s method=0x%08x "
+                          "client_hash=0x%08x server_hash=0x%08x",
+                          service_name, transport_label, method_id,
+                          client_idl_hash, server_idl_hash);
+            result.status = InvokeDispatchStatus::IDL_MISMATCH;
+            result.error_code = static_cast<int>(ErrorCode::ERR_IDL_MISMATCH);
+            return result;
+        }
+    }
+
+    int invoke_status = service->onInvoke(method_id, request, result.response);
+    if (invoke_status != 0) {
+        OMNI_LOG_WARN(LOG_TAG,
+                      "invoke_failed service=%s transport=%s seq=%u method=0x%08x err=%d",
+                      service_name, transport_label, msg.getSequence(), method_id,
+                      invoke_status);
+        result.status = InvokeDispatchStatus::INVOKE_FAILED;
+        result.error_code = invoke_status;
+        return result;
+    }
+
+    result.status = InvokeDispatchStatus::SUCCESS;
+    return result;
 }
 
 void OmniRuntime::Impl::onSubscribeBroadcast(int client_fd, const Message& msg,
@@ -266,18 +416,15 @@ void OmniRuntime::Impl::onDirectMessage(const std::string& service_name, const M
     MessageType type = msg.getType();
     uint32_t seq = msg.getSequence();
 
+    // 只有 MSG_INVOKE_REPLY 才可能消费为 RPC 回复。其余消息类型（MSG_BROADCAST、
+    // MSG_HEARTBEAT_ACK 等主动消息）即使 seq 恰好命中正在等待的槽，也绝不进入
+    // pending 槽——否则会被误当成 invoke 回复（seq 碰撞应答错配）。
     if (type == MessageType::MSG_INVOKE_REPLY) {
-        storePendingReply(seq, msg);
-        if (sm_channel_.pendingReply(seq) != NULL) {
+        if (storeAndConsumeReply(seq, msg)) {
             return;
         }
     }
 
-    if (sm_channel_.isWaiting(seq)) {
-        storePendingReply(seq, msg);
-        return;
-    }
-    
     switch (type) {
     case MessageType::MSG_BROADCAST: {
         uint32_t topic_id = 0;
@@ -307,7 +454,9 @@ void OmniRuntime::Impl::onDirectMessage(const std::string& service_name, const M
     }
 }
 
-void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
+void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name,
+                                           bool is_topic_publisher,
+                                           const std::string& topic_name) {
     OMNI_LOG_WARN(LOG_TAG, "Direct connection to %s lost", service_name.c_str());
     stats_.connection_errors++;
     service_cache_.erase(service_name);
@@ -323,13 +472,14 @@ void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
         scheduleReconnect(service_name, rc_it->second.interval_ms);
     }
     
-    // If this was a topic publisher connection, clean up subscription state (fix #12)
-    static const std::string prefix = "topic_pub_";
-    if (service_name.compare(0, prefix.size(), prefix) == 0) {
-        std::string topic = service_name.substr(prefix.size());
-        topic_runtime_.forgetSubscription(topic);
+    // 话题发布者专属连接断开时，清理订阅状态（fix #12）。
+    // 通过连接上传递的结构化标记判定，而非解析 "topic_pub_" 连接名前缀。
+    if (is_topic_publisher) {
+        topic_runtime_.forgetSubscription(topic_name);
         OMNI_LOG_WARN(LOG_TAG, "Topic publisher for '%s' disconnected, subscription cleared",
-                        topic.c_str());
+                        topic_name.c_str());
+        // 连接断开是订阅方最明确的错误事件：通知订阅者的 on_err 回调
+        topic_runtime_.notifyError(fnv1a_32(topic_name), ErrorCode::ERR_CONNECTION_CLOSED);
     }
 }
 
@@ -376,6 +526,14 @@ void OmniRuntime::Impl::onShmRequest(const std::string& service_name,
         emitDiagEvent(DIAG_EVENT_REQUEST, msg);
         InvokeDispatchResult result = dispatchLocalInvoke(entry->service, msg, "SHM",
                                                           entry->service->serviceName());
+
+        // dispatchLocalInvoke 执行用户 onInvoke，回调可能 unregisterService 释放 entry，
+        // 返回后重新判活（对比指针地址，不解引用悬垂值），避免访问已释放的 entry 字段
+        {
+            std::map<std::string, LocalServiceEntry*>::iterator alive = local_services_.find(service_name);
+            if (alive == local_services_.end() || alive->second != entry) return;
+        }
+
         Message reply = result.status == InvokeDispatchStatus::SUCCESS
             ? makeInvokeSuccessReply(msg.getSequence(), result.response)
             : makeInvokeErrorReply(msg.getSequence(),

@@ -100,6 +100,8 @@ ctest --test-dir build -N
 - `test_heartbeat_reconnect`
 - `test_idl_mismatch`
 - `test_generated_runtime_integration`
+- `test_error_compatibility`
+- `test_system_scenarios`
 
 ## 4. 单元测试
 

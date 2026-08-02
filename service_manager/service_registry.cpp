@@ -43,9 +43,45 @@ ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_f
         return INVALID_HANDLE;
     }
 
-    // Check for duplicate name
-    if (services_by_name_.find(info.name) != services_by_name_.end()) {
-        OMNI_LOG_WARN(TAG, "Service already registered: %s", info.name.c_str());
+    // Check for duplicate name. Re-registration from the same runtime
+    // (same non-empty host_id) is treated as an idempotent update: refresh
+    // the ServiceInfo and control fd, keep the original handle, and succeed.
+    // This lets a client retry its full registration flow after a partial
+    // failure without being rejected. Different host_id with the same name
+    // remains a hard conflict.
+    std::map<std::string, ServiceEntry>::iterator existing = services_by_name_.find(info.name);
+    if (existing != services_by_name_.end()) {
+        if (!existing->second.info.host_id.empty()
+            && existing->second.info.host_id == info.host_id) {
+            int old_fd = existing->second.control_fd;
+            existing->second.info = info;
+            existing->second.control_fd = control_fd;
+
+            // Keep the fd -> services index consistent when the control
+            // connection changed (e.g. after a reconnect).
+            if (old_fd != control_fd) {
+                std::map<int, std::vector<std::string> >::iterator fd_it = fd_to_services_.find(old_fd);
+                if (fd_it != fd_to_services_.end()) {
+                    std::vector<std::string>& names = fd_it->second;
+                    for (std::vector<std::string>::iterator nit = names.begin(); nit != names.end(); ++nit) {
+                        if (*nit == info.name) {
+                            names.erase(nit);
+                            break;
+                        }
+                    }
+                    if (names.empty()) {
+                        fd_to_services_.erase(fd_it);
+                    }
+                }
+                fd_to_services_[control_fd].push_back(info.name);
+            }
+
+            OMNI_LOG_INFO(TAG, "Re-registered service (idempotent update): %s (handle=%u, fd=%d)",
+                          info.name.c_str(), existing->second.handle, control_fd);
+            return existing->second.handle;
+        }
+
+        OMNI_LOG_WARN(TAG, "Service already registered by a different host_id: %s", info.name.c_str());
         return INVALID_HANDLE;
     }
 

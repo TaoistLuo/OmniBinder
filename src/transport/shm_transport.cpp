@@ -36,6 +36,16 @@ size_t normalizeRingCapacity(size_t capacity)
     return capacity;
 }
 
+// (pos + delta) % capacity 的无溢出版，用于 ring 位置前进。
+// 前置条件：pos < capacity 且 delta <= capacity（所有调用处均已保证）。
+uint32_t advancePos(uint32_t pos, uint32_t delta, uint32_t capacity)
+{
+    if (delta >= capacity - pos) {
+        return delta - (capacity - pos);
+    }
+    return pos + delta;
+}
+
 size_t alignUp(size_t value, size_t alignment)
 {
     return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
@@ -506,7 +516,7 @@ uint32_t ShmTransport::ringWrite(ShmRingHeader* ring, uint8_t* ring_data,
         memcpy(ring_data, data + first, to_write - first);
     }
 
-    ring->write_pos.store((w + to_write) % cap, std::memory_order_release);
+    ring->write_pos.store(advancePos(w, to_write, cap), std::memory_order_release);
 
     return to_write;
 }
@@ -529,11 +539,11 @@ uint32_t ShmTransport::ringWriteFrame(ShmRingHeader* ring, uint8_t* ring_data,
         memcpy(ring_data, reinterpret_cast<const uint8_t*>(&length) + first,
                sizeof(uint32_t) - first);
     }
-    pos = (pos + sizeof(uint32_t)) % capacity;
+    pos = advancePos(pos, static_cast<uint32_t>(sizeof(uint32_t)), capacity);
     first = std::min(length, capacity - pos);
     memcpy(ring_data + pos, data, first);
     if (first < length) memcpy(ring_data, data + first, length - first);
-    ring->write_pos.store((pos + length) % capacity, std::memory_order_release);
+    ring->write_pos.store(advancePos(pos, length, capacity), std::memory_order_release);
     return total;
 }
 
@@ -560,7 +570,7 @@ uint32_t ShmTransport::ringRead(ShmRingHeader* ring, const uint8_t* ring_data,
         memcpy(buf + first, ring_data, to_read - first);
     }
 
-    ring->read_pos.store((r + to_read) % cap, std::memory_order_release);
+    ring->read_pos.store(advancePos(r, to_read, cap), std::memory_order_release);
 
     return to_read;
 }
@@ -783,7 +793,9 @@ int ShmTransport::recv(uint8_t* buf, size_t buf_size)
 
         uint32_t r = resp_ring->read_pos.load(std::memory_order_relaxed);
         uint32_t cap = static_cast<uint32_t>(requested_resp_ring_capacity_);
-        resp_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
+        resp_ring->read_pos.store(
+            advancePos(r, static_cast<uint32_t>(sizeof(uint32_t)), cap),
+            std::memory_order_release);
 
         uint32_t read_bytes = ringRead(resp_ring, resp_data, buf, msg_len, cap);
         if (read_bytes != msg_len) {
@@ -893,7 +905,9 @@ int ShmTransport::serverRecv(uint8_t* buf, size_t buf_size, uint32_t& out_client
 
         uint32_t r = req_ring->read_pos.load(std::memory_order_relaxed);
         uint32_t cap = ctx.req_ring_capacity;
-        req_ring->read_pos.store((r + sizeof(uint32_t)) % cap, std::memory_order_release);
+        req_ring->read_pos.store(
+            advancePos(r, static_cast<uint32_t>(sizeof(uint32_t)), cap),
+            std::memory_order_release);
 
         out_client_id = cid;
 
@@ -1107,6 +1121,10 @@ void ShmTransport::onHandshakeClientConnect()
         OMNI_LOG_WARN(LOG_TAG, "handshake: SHM object does not cover a valid layout for '%s'",
                       client_shm_name.c_str());
         platform::shmDetach(addr, mapped_size);
+        // 客户端 SHM 布局无效（典型场景：客户端在 ready_flag 发布前崩溃），
+        // 按 SHM 生命周期契约「服务端负责 shmUnlink」兜底清理，避免 /dev/shm 残留。
+        // 此时客户端已无法自行清理，unlink 是安全的。
+        platform::shmUnlink(client_shm_name);
         platform::handshakeClose(ch);
         return;
     }

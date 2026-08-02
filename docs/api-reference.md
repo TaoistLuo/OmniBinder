@@ -393,7 +393,7 @@ public:
 
     // 设置/获取服务注册到 ServiceManager 的默认可达地址
     void setRegisterHost(const std::string& host);
-    const std::string& getRegisterHost() const;
+    std::string getRegisterHost() const;
 
     // 设置心跳间隔（毫秒）
     void setHeartbeatInterval(uint32_t interval_ms);
@@ -402,7 +402,7 @@ public:
     void setDefaultTimeout(uint32_t timeout_ms);
 
     // 获取本机 host_id
-    const std::string& hostId() const;
+    std::string hostId() const;
 
     // 获取运行时统计信息
     int getStats(RuntimeStats& stats);
@@ -894,6 +894,7 @@ void           omni_buffer_destroy(omni_buffer_t* buf);
 void           omni_buffer_reset(omni_buffer_t* buf);
 const uint8_t* omni_buffer_data(const omni_buffer_t* buf);
 size_t         omni_buffer_size(const omni_buffer_t* buf);
+size_t         omni_buffer_remaining(const omni_buffer_t* buf);
 int            omni_buffer_read_ok(const omni_buffer_t* buf);
 void           omni_buffer_clear_error(omni_buffer_t* buf);
 void           omni_buffer_mark_error(omni_buffer_t* buf, int32_t error_code);

@@ -231,6 +231,10 @@ target_include_directories(test_generated_runtime_integration PRIVATE
 target_compile_definitions(test_generated_runtime_integration PRIVATE
     OMNI_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     OMNI_BUILD_DIR="${CMAKE_BINARY_DIR}"
+    OMNI_VERSION_FULL="${PROJECT_VERSION}"
+    OMNI_VERSION_MAJOR="${PROJECT_VERSION_MAJOR}"
+    OMNI_VERSION_MINOR="${PROJECT_VERSION_MINOR}"
+    OMNI_VERSION_PATCH="${PROJECT_VERSION_PATCH}"
 )
 target_link_libraries(test_generated_runtime_integration PRIVATE omnibinder_static gtest gtest_main)
 add_dependencies(test_generated_runtime_integration service_manager)

@@ -3,7 +3,7 @@
  * @brief       协议栈消息定义
  * @details     定义 OmniBinder 通信协议的消息格式，包括 16 字节固定消息头
  *              （magic + version + type + sequence + length）、消息类型枚举
- *              （控制通道：注册/发现/死亡通知/话题；数据通道：RPC 调用/广播/SHM 升级），
+ *              （控制通道：注册/发现/死亡通知/话题；数据通道：RPC 调用/广播），
  *              以及 ServiceInfo/InterfaceInfo 的序列化辅助函数。
  *
  * @author      taoist.luo

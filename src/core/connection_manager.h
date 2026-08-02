@@ -61,8 +61,13 @@ struct ServiceConnection {
     Buffer          recv_buffer;
     bool            connected;
 
+    // 话题发布者专属连接标记：由 ensureTopicPublisherConnection 创建的直连
+    bool            is_topic_publisher;
+    std::string     topic_name;   // is_topic_publisher 时有效
+
     ServiceConnection()
-        : port(0), transport(NULL), connected(false) {}
+        : port(0), transport(NULL), connected(false)
+        , is_topic_publisher(false), topic_name() {}
 
     ~ServiceConnection() {
         if (transport) {
@@ -84,7 +89,9 @@ class ConnectionManager {
 public:
     typedef std::function<void(const std::string& service_name,
                                const Message& msg)> MessageCallback;
-    typedef std::function<void(const std::string& service_name)> DisconnectCallback;
+    typedef std::function<void(const std::string& service_name,
+                               bool is_topic_publisher,
+                               const std::string& topic_name)> DisconnectCallback;
 
     ConnectionManager(EventLoop& loop, const std::string& local_host_id);
     ~ConnectionManager();
@@ -95,7 +102,9 @@ public:
         const std::string& host,
         uint16_t port,
         const std::string& host_id,
-        const ShmConfig& shm_config = ShmConfig());
+        const ShmConfig& shm_config = ShmConfig(),
+        bool is_topic_publisher = false,
+        const std::string& topic_name = std::string());
 
     // 获取已有连接
     ServiceConnection* getConnection(const std::string& service_name);

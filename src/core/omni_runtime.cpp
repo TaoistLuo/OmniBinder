@@ -111,10 +111,10 @@ int OmniRuntime::unsubscribeTopic(const std::string& topic) {
 }
 
 void OmniRuntime::setRegisterHost(const std::string& host) { impl_->setRegisterHost(host); }
-const std::string& OmniRuntime::getRegisterHost() const { return impl_->getRegisterHost(); }
+std::string OmniRuntime::getRegisterHost() const { return impl_->getRegisterHost(); }
 void OmniRuntime::setHeartbeatInterval(uint32_t ms) { impl_->setHeartbeatInterval(ms); }
 void OmniRuntime::setDefaultTimeout(uint32_t ms) { impl_->setDefaultTimeout(ms); }
-const std::string& OmniRuntime::hostId() const { return impl_->hostId(); }
+std::string OmniRuntime::hostId() const { return impl_->hostId(); }
 int OmniRuntime::getStats(RuntimeStats& stats) { return impl_->getStats(stats); }
 int OmniRuntime::resetStats() { return impl_->resetStats(); }
 void OmniRuntime::clearServiceCache() { impl_->clearServiceCache(); }
@@ -133,6 +133,7 @@ int OmniRuntime::unwatchPid(uint32_t pid) { return impl_->unwatchPid(pid); }
 OmniRuntime::Impl::Impl()
     : loop_(NULL)
     , running_(false)
+    , loop_alive_(false)
     , initialized_(false)
     , owner_(NULL)
     , loop_driver_active_(false)
@@ -221,7 +222,7 @@ OmniRuntime::Impl::~Impl() {
 // ============================================================
 
 int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
-    std::lock_guard<std::mutex> lock(api_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     if (initialized_) {
         return static_cast<int>(ErrorCode::ERR_ALREADY_INITIALIZED);
     }
@@ -267,7 +268,9 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     conn_mgr_->setMessageCallback(
         [this](const std::string& svc, const Message& msg) { this->onDirectMessage(svc, msg); });
     conn_mgr_->setDisconnectCallback(
-        [this](const std::string& svc) { this->onDirectDisconnect(svc); });
+        [this](const std::string& svc, bool is_topic_publisher, const std::string& topic_name) {
+            this->onDirectDisconnect(svc, is_topic_publisher, topic_name);
+        });
     
     heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
         [this]() { this->sendHeartbeat(); }, true);
@@ -276,7 +279,16 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     sm_reconnect_needed_ = false;
     pid_ = static_cast<uint32_t>(platform::getPid());
     process_name_ = runtimeProcessName();
-    sendRuntimeHello();
+
+    // hello 失败不阻塞 init（SM 可能随后恢复），但保留重连标志，
+    // 让后续心跳路径重试 hello + 控制面状态恢复
+    int hello_ret = sendRuntimeHello();
+    if (hello_ret != 0) {
+        OMNI_LOG_WARN(LOG_TAG, "sm_hello_failed host=%s port=%u err=%d, will retry via heartbeat",
+                      sm_host.c_str(), sm_port, hello_ret);
+        sm_reconnect_needed_ = true;
+    }
+
     OMNI_LOG_INFO(LOG_TAG, "Connected to SM at %s:%u, host_id=%s",
                     sm_host.c_str(), sm_port, host_id_.c_str());
     return 0;
@@ -284,8 +296,18 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
 
 void OmniRuntime::Impl::run() {
     if (!initialized_) return;
-    captureOwnerThread();
-    loop_driver_active_ = true;
+
+    // 双驱动守卫：先尝试成为 driver（原子 CAS），成功者才捕获 owner 线程；
+    // 已有 driver 且非本线程时拒绝，保持单驱动
+    bool expected = false;
+    if (loop_driver_active_.compare_exchange_strong(expected, true)) {
+        owner_executor_.setOwnerThread(std::this_thread::get_id());
+    } else if (!owner_executor_.isOwnerThread()) {
+        OMNI_LOG_WARN(LOG_TAG, "run rejected: event-loop already driven by another thread");
+        return;
+    }
+
+    loop_alive_ = true;
     owner_executor_.setLoopOwned(true);
     running_ = true;
     loop_->run();
@@ -295,18 +317,36 @@ void OmniRuntime::Impl::run() {
 
 void OmniRuntime::Impl::stop() {
     running_ = false;
+    loop_alive_ = false;
     if (loop_) loop_->stop();
 }
 
 bool OmniRuntime::Impl::isRunning() const { return running_; }
 
 void OmniRuntime::Impl::pollOnce(int timeout_ms) {
-    captureOwnerThread();
+    if (!initialized_) return;
+
+    // 双驱动守卫：与 run() 一致，防止第二个线程驱动 event-loop
+    bool expected = false;
+    if (loop_driver_active_.compare_exchange_strong(expected, true)) {
+        owner_executor_.setOwnerThread(std::this_thread::get_id());
+    } else if (!owner_executor_.isOwnerThread()) {
+        OMNI_LOG_WARN(LOG_TAG, "pollOnce rejected: event-loop already driven by another thread");
+        return;
+    }
+
+    loop_alive_ = true;
     if (loop_) loop_->pollOnce(timeout_ms);
     // SHM 通信现在完全通过 eventfd 事件驱动，不再需要轮询
 }
 
 void OmniRuntime::Impl::pollOnceWithoutFunctors(int timeout_ms) {
+    // 同步 reply wait 期间的内部驱动：只处理 fd/timer，不执行 functor。
+    // 不捕获 owner 线程、不争夺 driver 身份——真正的 driver 由 run()/pollOnce()
+    // 决定；否则 init 阶段的 hello 等待会把主线程误记为 driver，
+    // 导致真正的驱动线程（服务线程）被 pollOnce 守卫拒绝。
+    if (!initialized_) return;
+    loop_alive_ = true;
     if (loop_) loop_->pollOnceWithoutFunctors(timeout_ms);
 }
 

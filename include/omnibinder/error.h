@@ -55,6 +55,7 @@ enum class ErrorCode : int32_t {
     ERR_ALREADY_INITIALIZED = -6,
     ERR_NOT_SUPPORTED       = -7,
     ERR_INTERNAL            = -8,
+    ERR_NOT_RUNNING         = -9,  // event-loop 已停止，不能投递任务
 
     // 网络错误 (100-199)
     ERR_CONNECT_FAILED      = -100,

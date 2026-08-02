@@ -6,3 +6,4 @@ session-*.md
 tmp.txt
 /*.json
 /opencode*
+.omo/

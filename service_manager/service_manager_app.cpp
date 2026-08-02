@@ -7,10 +7,26 @@
 
 namespace omnibinder {
 
+// SM 主动下发消息（MSG_DEATH_NOTIFY、MSG_TOPIC_PUBLISHER_NOTIFY、MSG_DIAG_* 控制消息）
+// 使用的序列号基础值。客户端请求的 seq 由其 RpcRuntime 从小整数（1,2,3...）递增分配，
+// SM 主动消息若继续使用独立的小整数序列号，可能恰好命中客户端正在等待的请求 seq，
+// 导致客户端把主动消息误当作请求应答（onSMMessage 的 isWaiting() 分支）。从大值起点
+// 分配可彻底隔离两个序列号域。
+static const uint32_t SM_PROACTIVE_SEQ_BASE = 0x40000000u;
+
 ServiceManagerApp::ServiceManagerApp()
     : server_(nullptr)
     , heartbeat_timer_id_(0)
+    , sm_seq_counter_(SM_PROACTIVE_SEQ_BASE)
     , shutdown_fd_(-1) {
+}
+
+uint32_t ServiceManagerApp::nextSMProactiveSequence() {
+    uint32_t seq = sm_seq_counter_++;
+    if (sm_seq_counter_ < SM_PROACTIVE_SEQ_BASE) {
+        sm_seq_counter_ = SM_PROACTIVE_SEQ_BASE;
+    }
+    return seq;
 }
 
 ServiceManagerApp::~ServiceManagerApp() {

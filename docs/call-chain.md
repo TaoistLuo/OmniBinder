@@ -292,14 +292,15 @@ watcher runtime
 
 | 文件 | 当前职责 |
 |------|----------|
-| `src/core/omni_runtime.cpp` | Runtime 编排入口（已拆分为 8 个文件） |
-| `src/core/omni_sm.cpp` | ServiceManager 控制面通信 |
-| `src/core/omni_service.cpp` | 本地服务注册 / 注销 |
-| `src/core/omni_connection.cpp` | 连接管理与心跳 |
-| `src/core/omni_rpc.cpp` | RPC 调用与回复 |
-| `src/core/omni_topic.cpp` | topic 发布/订阅/广播 |
-| `src/core/omni_dispatch.cpp` | 服务端 TCP/SHM 请求分派 |
-| `src/core/omni_diag.cpp` | 诊断 watch 数据面 |
+| `src/core/omni_runtime.cpp` | Runtime 编排入口（已拆分为多个 runtime_*.cpp） |
+| `src/core/runtime_sm.cpp` | ServiceManager 控制面通信（注册/发现/心跳/死亡通知/重连恢复） |
+| `src/core/runtime_service.cpp` | 本地服务注册 / 注销 |
+| `src/core/runtime_connection.cpp` | 数据面连接管理与服务心跳 |
+| `src/core/runtime_rpc.cpp` | RPC 调用与回复 |
+| `src/core/runtime_topic.cpp` | topic 发布/订阅/广播 |
+| `src/core/runtime_dispatch.cpp` | 服务端 TCP/SHM 请求分派 |
+| `src/core/runtime_diag.cpp` | 诊断子系统（watch 数据面 + 诊断服务生命周期） |
+| `src/core/runtime_config.cpp` | 配置 / 统计 / 线程模型基础设施 |
 | `src/core/omni_runtime.h` | `OmniRuntime::Impl` 状态与内部 API |
 | `src/core/rpc_runtime.cpp` | sequence、默认超时、`waitForReply()` 等 RPC 等待状态 |
 | `src/core/sm_control_channel.cpp` | SM 控制连接收发缓冲与 pending reply slots |

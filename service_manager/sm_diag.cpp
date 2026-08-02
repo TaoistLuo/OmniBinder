@@ -86,15 +86,23 @@ void ServiceManagerApp::handleDiagSetLogLevel(ClientConnection* conn, const Mess
             sendBoolReply(conn, MessageType::MSG_DIAG_SET_LOG_LEVEL_REPLY, msg.header.sequence, false);
             return;
         }
+        std::vector<int> fds = pit->second;
         bool sent = false;
-        for (size_t i = 0; i < pit->second.size(); ++i) {
-            std::map<int, ClientConnection*>::iterator cit = clients_.find(pit->second[i]);
+        for (size_t i = 0; i < fds.size(); ++i) {
+            int fd = fds[i];
+            std::map<int, ClientConnection*>::iterator cit = clients_.find(fd);
             if (cit == clients_.end() || cit->second == conn) {
                 continue;
             }
-            Message ctrl(MessageType::MSG_DIAG_SET_LOG_LEVEL, nextSequenceNumber());
+            Message ctrl(MessageType::MSG_DIAG_SET_LOG_LEVEL, nextSMProactiveSequence());
             ctrl.payload.writeUint32(level);
             sendMessage(cit->second, ctrl);
+            // sendMessage 失败时可能 closeClient(fd)（删除 conn 并 erase clients_），
+            // 需重新查询确认存活后再访问，避免 UAF。
+            cit = clients_.find(fd);
+            if (cit == clients_.end()) {
+                continue;
+            }
             cit->second->log_level = level;
             sent = true;
         }
@@ -113,13 +121,16 @@ void ServiceManagerApp::handleDiagWatchStart(ClientConnection* conn, const Messa
             sendBoolReply(conn, MessageType::MSG_DIAG_WATCH_START_REPLY, msg.header.sequence, false);
             return;
         }
+        // 先拷贝 fd 列表：sendMessage 失败时 closeClient -> removePidFd 会修改
+        // pid_to_fds_（甚至删除当前条目），直接迭代 pit->second 属于未定义行为。
+        std::vector<int> fds = pit->second;
         bool sent = false;
-        for (size_t i = 0; i < pit->second.size(); ++i) {
-            std::map<int, ClientConnection*>::iterator cit = clients_.find(pit->second[i]);
+        for (size_t i = 0; i < fds.size(); ++i) {
+            std::map<int, ClientConnection*>::iterator cit = clients_.find(fds[i]);
             if (cit == clients_.end() || cit->second == conn) {
                 continue;
             }
-            Message ctrl(MessageType::MSG_DIAG_WATCH_START, nextSequenceNumber());
+            Message ctrl(MessageType::MSG_DIAG_WATCH_START, nextSMProactiveSequence());
             sendMessage(cit->second, ctrl);
             sent = true;
         }
@@ -138,12 +149,14 @@ void ServiceManagerApp::sendDiagWatchStopToPid(uint32_t pid, int except_fd) {
         if (pit == pid_to_fds_.end()) {
             return;
         }
-        for (size_t i = 0; i < pit->second.size(); ++i) {
-            std::map<int, ClientConnection*>::iterator cit = clients_.find(pit->second[i]);
+        // 先拷贝 fd 列表，避免迭代期间 sendMessage -> closeClient -> removePidFd 修改容器
+        std::vector<int> fds = pit->second;
+        for (size_t i = 0; i < fds.size(); ++i) {
+            std::map<int, ClientConnection*>::iterator cit = clients_.find(fds[i]);
             if (cit == clients_.end() || cit->second->fd == except_fd) {
                 continue;
             }
-            Message ctrl(MessageType::MSG_DIAG_WATCH_STOP, nextSequenceNumber());
+            Message ctrl(MessageType::MSG_DIAG_WATCH_STOP, nextSMProactiveSequence());
             sendMessage(cit->second, ctrl);
         }
 }

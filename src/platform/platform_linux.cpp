@@ -388,7 +388,8 @@ void* shmCreate(const std::string& name, size_t size, bool create, size_t* mappe
         flags |= O_CREAT;
     }
 
-    std::string shm_name = "/" + name;
+    // 调用方（generateShmName 等）传入的名称已带前导 "/"，避免拼出 "//binder_..."。
+    std::string shm_name = (!name.empty() && name[0] == '/') ? name : ("/" + name);
     int fd = shm_open(shm_name.c_str(), flags, 0600);
     if (fd < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "shm_open failed for %s: %s",
@@ -400,6 +401,8 @@ void* shmCreate(const std::string& name, size_t size, bool create, size_t* mappe
         if (ftruncate(fd, static_cast<off_t>(size)) < 0) {
             OMNI_LOG_ERROR(LOG_TAG, "ftruncate failed: %s", strerror(errno));
             close(fd);
+            // shm_open(O_CREAT) 已创建对象，失败路径必须 unlink 避免 /dev/shm 残留
+            shm_unlink(shm_name.c_str());
             return NULL;
         }
     } else {
@@ -424,6 +427,10 @@ void* shmCreate(const std::string& name, size_t size, bool create, size_t* mappe
 
     if (addr == MAP_FAILED) {
         OMNI_LOG_ERROR(LOG_TAG, "mmap failed: %s", strerror(errno));
+        // create 模式下对象由本进程创建，mmap 失败同样 unlink，防止 /dev/shm 残留
+        if (create) {
+            shm_unlink(shm_name.c_str());
+        }
         return NULL;
     }
 
@@ -440,7 +447,8 @@ void shmDetach(void* addr, size_t size) {
 }
 
 void shmUnlink(const std::string& name) {
-    std::string shm_name = "/" + name;
+    // 与 shmCreate 的名称归一化保持一致（调用方可能已带前导 "/"）
+    std::string shm_name = (!name.empty() && name[0] == '/') ? name : ("/" + name);
     shm_unlink(shm_name.c_str());
 }
 

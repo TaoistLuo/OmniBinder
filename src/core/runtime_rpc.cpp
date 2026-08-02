@@ -29,19 +29,21 @@ void OmniRuntime::Impl::storePendingReply(uint32_t seq, const Message& msg) {
     sm_channel_.storeReply(seq, msg);
 }
 
-uint32_t OmniRuntime::Impl::effectiveTimeout(uint32_t timeout_ms) const {
-    return rpc_runtime_.effectiveTimeout(timeout_ms);
+bool OmniRuntime::Impl::storeAndConsumeReply(uint32_t seq, const Message& msg) {
+    // 若 seq 已有 ready 的回复则直接消费；否则若正处于等待则存储并消费；
+    // 两者都不是则返回 false（消息交由调用方按原类型处理）
+    if (sm_channel_.pendingReply(seq) != NULL) {
+        return true;
+    }
+    if (sm_channel_.isWaiting(seq)) {
+        storePendingReply(seq, msg);
+        return true;
+    }
+    return false;
 }
 
-void OmniRuntime::Impl::emitDiagEvent(uint8_t direction, const Message& msg) {
-    if (!diag_watch_active_) {
-        return;
-    }
-    Buffer event_payload;
-    diag_serialize_event(event_payload, direction, msg);
-    if (diag_watch_topic_id_ != 0) {
-        broadcastInternal(diag_watch_topic_id_, event_payload);
-    }
+uint32_t OmniRuntime::Impl::effectiveTimeout(uint32_t timeout_ms) const {
+    return rpc_runtime_.effectiveTimeout(timeout_ms);
 }
 
 // ============================================================

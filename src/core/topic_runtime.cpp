@@ -176,10 +176,13 @@ bool TopicRuntime::dispatch(uint32_t topic_id, const Buffer& data) const {
         return false;
     }
 
+    // 先拷贝到局部副本再遍历：用户回调内可能 unsubscribeTopic → forgetSubscription
+    // erase callbacks_by_id_，若直接持容器迭代器遍历将悬垂（use-after-free）
+    std::vector<TopicCallback> callbacks = it->second;
     bool dispatched = false;
-    for (size_t i = 0; i < it->second.size(); ++i) {
-        if (it->second[i]) {
-            it->second[i](topic_id, data);
+    for (size_t i = 0; i < callbacks.size(); ++i) {
+        if (callbacks[i]) {
+            callbacks[i](topic_id, data);
             dispatched = true;
         }
     }

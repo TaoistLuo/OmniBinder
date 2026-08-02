@@ -34,7 +34,7 @@ OmniBinder 使用自定义的二进制协议进行通信，所有通信（控制
 | Magic | 4 bytes | 固定值 `0x42494E44`（ASCII "BIND"），用于帧同步 |
 | Version | 2 bytes | 协议版本号，当前为 `0x0001` |
 | Type | 2 bytes | 消息类型，见下文 |
-| Sequence | 4 bytes | 序列号，用于请求/响应匹配 |
+| Sequence | 4 bytes | 序列号，用于请求/响应匹配。客户端请求从小整数递增；SM 主动消息（死亡通知/发布者通知/诊断控制）从 `0x40000000` 起独立分配，避免与客户端等待序列碰撞 |
 | Length | 4 bytes | Payload 长度（字节数） |
 | Payload | N bytes | 消息体，根据 Type 不同有不同结构 |
 
@@ -92,6 +92,8 @@ static_assert(sizeof(MessageHeader) == 16, "MessageHeader size mismatch");
 | 0x0034 | MSG_TOPIC_PUBLISHER_NOTIFY | SM -> Service | 通知订阅者发布者地址 |
 | 0x0035 | MSG_UNPUBLISH_TOPIC | Service -> SM | 取消发布话题 |
 | 0x0036 | MSG_UNSUBSCRIBE_TOPIC | Service -> SM | 取消订阅话题 |
+| 0x0037 | MSG_QUERY_PUBLISHED_TOPICS | Service -> SM | 查询某服务已发布的话题列表 |
+| 0x0038 | MSG_QUERY_PUBLISHED_TOPICS_REPLY | SM -> Service | 查询响应（found + topic 列表） |
 | 0x0040 | MSG_RUNTIME_HELLO | Runtime -> SM | 上报 runtime PID / 进程名 / 诊断能力 |
 | 0x0041 | MSG_RUNTIME_HELLO_REPLY | SM -> Runtime | runtime hello 响应 |
 | 0x0042 | MSG_DIAG_SET_LOG_LEVEL | CLI/SM -> Runtime | 按 PID 设置 runtime 日志级别 |
@@ -112,8 +114,6 @@ static_assert(sizeof(MessageHeader) == 16, "MessageHeader size mismatch");
 | 0x0102 | MSG_INVOKE_ONEWAY | Client -> Server | 单向调用（服务端不发送回复） |
 | 0x0110 | MSG_BROADCAST | Publisher -> Subscriber | 广播消息 |
 | 0x0111 | MSG_SUBSCRIBE_BROADCAST | Subscriber -> Publisher | 订阅者直连发布者后发送，携带 topic_id |
-| 0x0120 | MSG_PING | Any | 连接保活 |
-| 0x0121 | MSG_PONG | Any | 保活响应 |
 
 ### 3.3 C++ 枚举定义
 
@@ -151,6 +151,8 @@ enum class MessageType : uint16_t {
     MSG_TOPIC_PUBLISHER_NOTIFY= 0x0034,
     MSG_UNPUBLISH_TOPIC       = 0x0035,
     MSG_UNSUBSCRIBE_TOPIC     = 0x0036,
+    MSG_QUERY_PUBLISHED_TOPICS = 0x0037,
+    MSG_QUERY_PUBLISHED_TOPICS_REPLY = 0x0038,
 
     // 控制通道 - 运行时诊断
     MSG_RUNTIME_HELLO         = 0x0040,
@@ -172,10 +174,6 @@ enum class MessageType : uint16_t {
     // 数据通道 - 广播
     MSG_BROADCAST             = 0x0110,
     MSG_SUBSCRIBE_BROADCAST   = 0x0111,  // 订阅者直连发布者后发送
-
-    // 数据通道 - 保活
-    MSG_PING                  = 0x0120,
-    MSG_PONG                  = 0x0121,
 };
 
 } // namespace omnibinder
@@ -362,6 +360,28 @@ host_id, shm_config, interfaces[]）。
 | topic_name_len   | topic_name       | serialized publisher ServiceInfo |
 | (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       |
 +------------------+------------------+------------------------------+
+```
+
+### 4.13.1 查询已发布话题（MSG_QUERY_PUBLISHED_TOPICS / _REPLY）
+
+请求 payload：
+
+```
++--------------------+------------------+
+| service_name_len   | service_name     |
+| (4 bytes)          | (N bytes)        |
++--------------------+------------------+
+```
+
+响应 payload：
+
+```
++-----------+---------------+----------------+-------------------+
+| found     | topic_count   | topic_1_len    | topic_1 ...       |
+| (1 byte)  | (4 bytes)     | (4 bytes)      | (变长)            |
++-----------+---------------+----------------+-------------------+
+| topic_count 个 topic 依次排列；found = false 时仅 1 字节，无后续字段 |
++-----------------------------------------------------------------+
 ```
 
 ### 4.14 接口调用（MSG_INVOKE）

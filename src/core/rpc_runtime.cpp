@@ -72,6 +72,15 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
 
+        // 连接重建（clearReplies 标记失败）后旧连接的回复不可能到达，快速失败，
+        // 避免空转至超时
+        if (channel.isFailed(seq)) {
+            channel.eraseWait(seq);
+            in_wait_for_reply_ = prev_in_wait;
+            wait_deadline_ms_ = prev_deadline;
+            return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
+        }
+
         int64_t remaining = remainingWaitMs();
         poll_once(static_cast<int>(remaining));
 

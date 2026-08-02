@@ -7,7 +7,6 @@
 
 #ifndef _WIN32
   #include <climits>
-  #include <unistd.h>
 #endif
 
 namespace omnic {

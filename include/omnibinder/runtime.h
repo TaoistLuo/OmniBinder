@@ -391,7 +391,7 @@ public:
      * @brief  获取服务注册时的对外通告地址
      * @return 通告地址字符串
      */
-    const std::string& getRegisterHost() const;
+    std::string getRegisterHost() const;
 
     /*
      * @brief  设置全局心跳间隔
@@ -409,7 +409,7 @@ public:
      * @brief  获取本机标识符（用于判断同机通信）
      * @return 本机标识字符串
      */
-    const std::string& hostId() const;
+    std::string hostId() const;
 
 private:
     OmniRuntime(const OmniRuntime&);

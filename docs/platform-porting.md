@@ -4,7 +4,7 @@
 
 OmniBinder 设计为跨平台 IPC/RPC 框架。当前支持 Linux 和 Windows，未来计划支持 Android、鸿蒙、FreeRTOS、ESP32 等。
 
-适配新平台的核心工作是**实现平台抽象层**（`platform.h` 声明的 51 个函数）和**事件驱动后端**（`EventBackend` 接口）。传输层（TCP/SHM）、序列化、协议栈、运行时逻辑均为平台无关的 C++11 代码，不需要修改。
+适配新平台的核心工作是**实现平台抽象层**（`platform.h` 声明的 53 个函数）和**事件驱动后端**（`EventBackend` 接口）。传输层（TCP/SHM）、序列化、协议栈、运行时逻辑均为平台无关的 C++11 代码，不需要修改。
 
 ## 适配级别
 
@@ -91,6 +91,7 @@ OmniBinder 设计为跨平台 IPC/RPC 框架。当前支持 Linux 和 Windows，
 | `getHostName()` | 固定字符串如 `"mcu-node"` |
 | `getPid()` | `xPortGetCoreID() << 16 \| uxTaskGetTaskNumber()` |
 | `getProcessName()` | `pcTaskGetName(NULL)` |
+| `getLocalTime(out_tm, out_ms)` | 填充本地时间与毫秒（无 RTC 时返回启动以来时间） |
 | `sleepMs(ms)` | `vTaskDelay(pdMS_TO_TICKS(ms))` |
 | `setupSignalHandlers(handler)` | 空函数（MCU 无信号） |
 | `memoryBarrier()` | `__sync_synchronize()` 或 `asm volatile("":::"memory")` |

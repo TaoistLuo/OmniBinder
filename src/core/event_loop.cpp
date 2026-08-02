@@ -14,6 +14,7 @@ EventLoop::EventLoop()
     , backend_(NULL)
     , wakeup_fd_(-1)
     , next_timer_id_(1)
+    , functor_wakeup_pending_(false)
 {
     backend_ = platform::createEventBackend();
     if (!backend_->init()) {
@@ -107,6 +108,14 @@ void EventLoop::pollOnceInternal(int timeout_ms, bool process_functors)
         return;
     }
 
+    // 若上一次以 process_functors=false 消费唤醒时积压了 functor（reply wait 期间
+    // 只处理 fd/timer、不执行 functor），本次优先补处理，避免唤醒被吞掉后
+    // 投递线程一直等不到执行（唤醒丢失 → 永久挂起）。
+    if (process_functors && functor_wakeup_pending_) {
+        functor_wakeup_pending_ = false;
+        processPendingFunctors();
+    }
+
     int actual_timeout = calculateTimeout(timeout_ms);
 
     const int MAX_EVENTS = 64;
@@ -138,6 +147,13 @@ void EventLoop::pollOnceInternal(int timeout_ms, bool process_functors)
 
     if (process_functors) {
         processPendingFunctors();
+    } else {
+        // reply wait 语义：本轮不执行 functor，但记录是否有积压，
+        // 使下一次 pollOnce(true) 在阻塞前立即补处理
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        if (!pending_functors_.empty()) {
+            functor_wakeup_pending_ = true;
+        }
     }
 }
 

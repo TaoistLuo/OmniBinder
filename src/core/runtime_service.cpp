@@ -316,6 +316,10 @@ int OmniRuntime::Impl::unregisterServiceInternal(Service* service) {
     sendToSM(msg);
     
     LocalServiceEntry* entry = it->second;
+    // 先从 local_services_ 摘除 entry，再执行 onStop()：onStop() 回调内若
+    // 重入 unregisterService/registerService，不会 double-free 或操作已释放的
+    // entry（各判活路径发现 map 中已无该服务会立即返回）
+    local_services_.erase(it);
     removeServiceListenerFromLoop(entry);
     removeServiceShmFromLoop(entry);
     
@@ -331,7 +335,6 @@ int OmniRuntime::Impl::unregisterServiceInternal(Service* service) {
     service->onStop();
     service->runtime_ = NULL;
     delete entry;
-    local_services_.erase(it);
     
     OMNI_LOG_INFO(LOG_TAG, "Unregistered service %s", name.c_str());
     return 0;

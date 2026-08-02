@@ -1,4 +1,5 @@
 #include "core/omni_runtime.h"
+#include "core/runtime_helpers.h"
 #include "omnibinder/log.h"
 
 #define LOG_TAG "OmniRuntimeConnection"
@@ -107,7 +108,11 @@ void OmniRuntime::Impl::tryReconnectService(const std::string& service_name) {
             config.enabled = false;
             config.timer_id = 0;
         } else {
-            uint32_t delay_ms = config.interval_ms * (1u << (config.current_retry < 5 ? config.current_retry : 5));
+            // 指数退避：用 int64 计算避免 uint32 溢出，并 clamp 到 30s 上限
+            uint32_t shift = config.current_retry < 5 ? config.current_retry : 5;
+            int64_t delay64 = static_cast<int64_t>(config.interval_ms)
+                              * (static_cast<int64_t>(1) << shift);
+            uint32_t delay_ms = delay64 > 30000 ? 30000 : static_cast<uint32_t>(delay64);
             scheduleReconnect(service_name, delay_ms);
         }
     }
@@ -244,23 +249,69 @@ void OmniRuntime::Impl::checkHeartbeatTimeout(const std::string& service_name) {
 }
 
 // ============================================================
-// 心跳
+// 数据面辅助
 // ============================================================
 
-void OmniRuntime::Impl::sendHeartbeat() {
-    // 先检查 SM 是否需要重连（客户端也可能没有注册服务，但仍需保持 SM 连接）
-    reconnectServiceManagerIfNeeded();
-
-    // 为每个已注册的本地服务向 SM 发送心跳
-    for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
-         it != local_services_.end(); ++it) {
-        Message msg(MessageType::MSG_HEARTBEAT, 0);
-        if (!msg.payload.writeString(it->first)) {
-            OMNI_LOG_ERROR(LOG_TAG, "heartbeat_serialize_failed service=%s", it->first.c_str());
-            continue;
-        }
-        sendToSM(msg);
+bool OmniRuntime::Impl::sendOnFd(ITransport* transport, const Message& msg) {
+    if (!transport) return false;
+    Buffer buf;
+    if (!msg.serialize(buf)) {
+        return false;
     }
+    // 通过 ITransport 抽象发送：循环处理部分写；ret<=0 表示 socket 暂不可写或出错
+    size_t sent = 0;
+    while (sent < buf.size()) {
+        int ret = transport->send(buf.data() + sent, buf.size() - sent);
+        if (ret <= 0) {
+            return false;
+        }
+        sent += static_cast<size_t>(ret);
+    }
+    return true;
+}
+
+bool OmniRuntime::Impl::populateInvokeMessage(Message& msg, uint32_t interface_id,
+                                              uint32_t method_id, uint32_t idl_hash,
+                                              const Buffer& request) const {
+    if (!msg.payload.writeUint32(interface_id)
+        || !msg.payload.writeUint32(idl_hash)
+        || !msg.payload.writeUint32(method_id)
+        || !msg.payload.writeUint32(static_cast<uint32_t>(request.size()))
+        || (request.size() > 0 && !msg.payload.writeRaw(request.data(), request.size()))) {
+        OMNI_LOG_ERROR(LOG_TAG,
+                       "invoke_payload_serialize_failed iface=0x%08x method=0x%08x err=%d",
+                       interface_id, method_id, static_cast<int>(ErrorCode::ERR_SERIALIZE));
+        return false;
+    }
+    return true;
+}
+
+std::string OmniRuntime::Impl::topicPublisherServiceName(const std::string& topic_name) const {
+    return "topic_pub_" + topic_name;
+}
+
+bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_name,
+                                                      const ServiceInfo& pub_info) {
+    std::string pub_name = !pub_info.name.empty() ? pub_info.name : topicPublisherServiceName(topic_name);
+    // 仅当使用自动生成的 "topic_pub_" 连接名时标记为话题发布者专属连接，
+    // 使 onDirectDisconnect 的订阅清理与原先字符串前缀判定的触发范围一致
+    bool is_auto_topic_name = pub_info.name.empty();
+    ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
+        pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config,
+        is_auto_topic_name, topic_name);
+    if (!conn) {
+        return false;
+    }
+
+    uint32_t topic_id = fnv1a_32(topic_name);
+    Message sub_msg(MessageType::MSG_SUBSCRIBE_BROADCAST, 0);
+    sub_msg.payload.writeUint32(topic_id);
+    sub_msg.payload.writeString(topic_name);
+
+    OMNI_LOG_INFO(LOG_TAG, "Topic %s uses %s data path to publisher %s",
+                    topic_name.c_str(), dataChannelKindName(conn->transport->type()),
+                    pub_name.c_str());
+    return conn_mgr_->sendMessage(pub_name, sub_msg);
 }
 
 } // namespace omnibinder

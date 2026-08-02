@@ -868,6 +868,10 @@ protected:
 
     static std::string getIncludeFlags() {
         return std::string("-DOMNIBINDER_LINUX") +
+               " -D'OMNIBINDER_VERSION=\"" + std::string(OMNI_VERSION_FULL) + "\"'" +
+               " -D'OMNIBINDER_VERSION_MAJOR=" + std::string(OMNI_VERSION_MAJOR) + "'" +
+               " -D'OMNIBINDER_VERSION_MINOR=" + std::string(OMNI_VERSION_MINOR) + "'" +
+               " -D'OMNIBINDER_VERSION_PATCH=" + std::string(OMNI_VERSION_PATCH) + "'" +
                " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/include") +
                " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/src") +
                " -I" + shellQuote(dir_);

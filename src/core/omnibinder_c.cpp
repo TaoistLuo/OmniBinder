@@ -449,7 +449,11 @@ const char* omni_runtime_get_register_host(const omni_runtime_t* runtime) {
     if (!runtime) {
         return NULL;
     }
-    return runtime->runtime.getRegisterHost().c_str();
+    // getRegisterHost() 按值返回，用线程局部缓冲持有拷贝，
+    // 保证返回指针在下次调用前有效
+    static thread_local std::string holder;
+    holder = runtime->runtime.getRegisterHost();
+    return holder.c_str();
 }
 
 void omni_runtime_set_heartbeat_interval(omni_runtime_t* runtime, uint32_t interval_ms) {
@@ -462,7 +466,10 @@ void omni_runtime_set_default_timeout(omni_runtime_t* runtime, uint32_t timeout_
 
 const char* omni_runtime_host_id(const omni_runtime_t* runtime) {
     if (!runtime) return NULL;
-    return runtime->runtime.hostId().c_str();
+    // hostId() 按值返回，用线程局部缓冲持有拷贝，保证返回指针在下次调用前有效
+    static thread_local std::string holder;
+    holder = runtime->runtime.hostId();
+    return holder.c_str();
 }
 
 void omni_runtime_poll_once(omni_runtime_t* runtime, int timeout_ms) {

@@ -192,6 +192,10 @@ private:
     // 投递队列（线程安全）
     std::mutex                  pending_mutex_;
     std::vector<Functor>        pending_functors_;
+
+    // 上一次 poll 以 process_functors=false 消费了唤醒、但未执行 functor 时置位。
+    // 使下一次 pollOnce(true) 优先补处理，避免"唤醒丢失"导致投递线程等待超时/永久挂起。
+    bool                        functor_wakeup_pending_;
 };
 
 } // namespace omnibinder

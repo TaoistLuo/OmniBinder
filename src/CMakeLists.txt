@@ -20,6 +20,7 @@ set(OMNIBINDER_SOURCES
     core/runtime_topic.cpp
     core/runtime_dispatch.cpp
     core/runtime_diag.cpp
+    core/runtime_config.cpp
     core/sm_control_channel.cpp
     core/rpc_runtime.cpp
     core/topic_runtime.cpp
@@ -38,7 +39,7 @@ set(OMNIBINDER_SOURCES
     platform/event_backend_win.cpp
 )
 
-# 创建静态库和共享库
+# 创建静态库
 add_library(omnibinder_static STATIC ${OMNIBINDER_SOURCES})
 target_include_directories(omnibinder_static PUBLIC
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -48,20 +49,8 @@ target_include_directories(omnibinder_static PUBLIC
 target_link_libraries(omnibinder_static PUBLIC ${OMNIBINDER_PLATFORM_LIBS})
 set_target_properties(omnibinder_static PROPERTIES OUTPUT_NAME omnibinder)
 
-add_library(omnibinder SHARED ${OMNIBINDER_SOURCES})
-target_include_directories(omnibinder PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>
-    $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(omnibinder PUBLIC ${OMNIBINDER_PLATFORM_LIBS})
-set_target_properties(omnibinder PROPERTIES
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
-)
-
 # 安装
-install(TARGETS omnibinder omnibinder_static
+install(TARGETS omnibinder_static
     EXPORT OmniBinderTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

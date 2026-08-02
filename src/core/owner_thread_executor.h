@@ -229,11 +229,11 @@ public:
     }
 
     void setOwnerThread(const std::thread::id& tid) {
-        owner_thread_id_ = tid;
+        owner_thread_id_.store(tid);
     }
 
     bool hasOwnerThread() const {
-        return owner_thread_id_ != std::thread::id();
+        return owner_thread_id_.load() != std::thread::id();
     }
 
     void setLoopOwned(bool owned) {
@@ -241,7 +241,7 @@ public:
     }
 
     bool isOwnerThread() const {
-        return hasOwnerThread() && owner_thread_id_ == std::this_thread::get_id();
+        return hasOwnerThread() && owner_thread_id_.load() == std::this_thread::get_id();
     }
 
     bool canRunInline() const {
@@ -325,7 +325,9 @@ public:
     }
 
     EventLoop* loop_;
-    std::thread::id owner_thread_id_;
+    // atomic：owner_thread_id_ 可能被多线程并发首设（run/pollOnce 的 driver 争夺），
+    // 无锁读写 std::thread::id 有数据竞争，改为 atomic 消除
+    std::atomic<std::thread::id> owner_thread_id_;
     std::atomic<bool> loop_owned_;
 };
 

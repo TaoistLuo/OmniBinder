@@ -101,6 +101,7 @@ private:
     void sendBoolReply(ClientConnection* conn, MessageType type, uint32_t seq, bool ok);
     void handleRuntimeHello(ClientConnection* conn, const Message& msg);
     void handleRuntimeList(ClientConnection* conn, const Message& msg);
+    uint32_t nextSMProactiveSequence();
     void handleDiagSetLogLevel(ClientConnection* conn, const Message& msg);
     void handleDiagWatchStart(ClientConnection* conn, const Message& msg);
     void sendDiagWatchStopToPid(uint32_t pid, int except_fd);
@@ -150,6 +151,7 @@ private:
     DeathNotifier death_notifier_;
     TopicManager topic_manager_;
     uint32_t heartbeat_timer_id_;
+    uint32_t sm_seq_counter_;
     int shutdown_fd_;
 };
 

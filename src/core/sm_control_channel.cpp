@@ -100,7 +100,18 @@ bool SmControlChannel::tryPopMessage(Message& msg) {
 }
 
 void SmControlChannel::clearReplies() {
-    pending_replies_.clear();
+    // 连接重建后，旧连接上尚未返回的回复不可能再到达。
+    // 正在等待的槽保留并标记 failed，让外层 waitForReply 快速失败而非空转至超时；
+    // 已就绪（ready）的槽直接清除。
+    for (std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.begin();
+         it != pending_replies_.end();) {
+        if (it->second.ready) {
+            pending_replies_.erase(it++);
+        } else {
+            it->second.failed = true;
+            ++it;
+        }
+    }
 }
 
 void SmControlChannel::beginWait(uint32_t seq) {
@@ -115,12 +126,13 @@ void SmControlChannel::beginWait(uint32_t seq) {
         return;
     }
     it->second.ready = false;
+    it->second.failed = false;
     it->second.message.payload.clear();
 }
 
 bool SmControlChannel::isWaiting(uint32_t seq) const {
     std::map<uint32_t, PendingReplySlot>::const_iterator it = pending_replies_.find(seq);
-    return it != pending_replies_.end() && !it->second.ready;
+    return it != pending_replies_.end() && !it->second.ready && !it->second.failed;
 }
 
 const Message* SmControlChannel::pendingReply(uint32_t seq) const {
@@ -132,6 +144,11 @@ const Message* SmControlChannel::pendingReply(uint32_t seq) const {
         return NULL;
     }
     return &it->second.message;
+}
+
+bool SmControlChannel::isFailed(uint32_t seq) const {
+    std::map<uint32_t, PendingReplySlot>::const_iterator it = pending_replies_.find(seq);
+    return it != pending_replies_.end() && it->second.failed;
 }
 
 bool SmControlChannel::takeReply(uint32_t seq, Message& out) {

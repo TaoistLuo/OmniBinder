@@ -70,7 +70,9 @@ public:
 
     // Add a new service to the registry.
     // Returns the assigned ServiceHandle, or INVALID_HANDLE if the service
-    // name is already registered.
+    // name is already registered by a different host_id. Re-registration
+    // from the same runtime (same non-empty host_id) updates the existing
+    // entry and returns its original handle.
     ServiceHandle addService(const ServiceInfo& info, int control_fd);
 
     // Remove a service by name.

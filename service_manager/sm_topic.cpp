@@ -117,12 +117,15 @@ void ServiceManagerApp::handleSubscribeTopic(ClientConnection* conn, const Messa
         bool added = topic_manager_.addSubscriber(topic, conn->fd);
         uint32_t idl_hash = 0;
         topic_manager_.getIdlHash(topic, idl_hash);
+        // sendSubscribeTopicReply 发送失败时可能 closeClient 删除 conn，
+        // 先保存 fd 副本，后续只用 fd 值，避免对已释放 conn 解引用。
+        int fd = conn->fd;
         sendSubscribeTopicReply(conn, msg.header.sequence, added, idl_hash);
 
         // If there's already a publisher, notify the subscriber
         ServiceInfo pub_info;
         if (topic_manager_.getPublisher(topic, pub_info)) {
-            sendTopicPublisherNotify(conn->fd, topic, pub_info);
+            sendTopicPublisherNotify(fd, topic, pub_info);
         }
 }
 
@@ -155,7 +158,7 @@ void ServiceManagerApp::sendTopicPublisherNotify(int subscriber_fd,
             return;
         }
 
-        Message notify(MessageType::MSG_TOPIC_PUBLISHER_NOTIFY, nextSequenceNumber());
+        Message notify(MessageType::MSG_TOPIC_PUBLISHER_NOTIFY, nextSMProactiveSequence());
         notify.payload.writeString(topic);
         serializeServiceInfo(pub_info, notify.payload);
         sendMessage(it->second, notify);
