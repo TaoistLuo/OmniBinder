@@ -219,9 +219,12 @@ void OmniRuntime::Impl::onInvokeOneWayRequest(const std::string& service_name,
 
     InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label, service_name.c_str());
     if (result.status == InvokeDispatchStatus::IDL_MISMATCH) {
+        uint32_t iface_id = 0, idl_hash = 0, method_id = 0;
+        Buffer ignored;
+        decodeInvokePayload(msg, iface_id, idl_hash, method_id, ignored);
         OMNI_LOG_ERROR(LOG_TAG,
-                       "oneway_idl_mismatch service=%s method=0x%08x err=%d — message discarded",
-                       service_name.c_str(), 0, result.error_code);
+                       "oneway_idl_mismatch service=%s method=0x%08x err=%d message discarded",
+                       service_name.c_str(), method_id, result.error_code);
     }
 }
 
@@ -240,6 +243,13 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
             if (diag_iface_id == OMNI_DIAG_IFACE_ID) {
                 Buffer request;
                 if (diag_payload_len > 0) {
+                    // 防御：payload_len 来自网络，必须不超过剩余可读字节，否则 writeRaw 越界读
+                    if (diag_payload_len > check_buf.remaining()) {
+                        InvokeDispatchResult result;
+                        result.status = InvokeDispatchStatus::DECODE_FAILED;
+                        result.error_code = static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+                        return result;
+                    }
                     if (!request.writeRaw(check_buf.data() + check_buf.readPosition(), diag_payload_len)) {
                         InvokeDispatchResult result;
                         result.status = InvokeDispatchStatus::DECODE_FAILED;
@@ -286,6 +296,9 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
                         result.error_code = -1;
                     }
                 } else if (!enable) {
+                    if (entry->diag_enabled && diag_active_count_ > 0) {
+                        diag_active_count_--;
+                    }
                     entry->diag_enabled = false;
                     entry->diag_topic_id = 0;
                     OMNI_LOG_INFO(LOG_TAG, "diag_disabled service=%s", service_name);

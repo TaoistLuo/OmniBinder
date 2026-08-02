@@ -15,7 +15,12 @@ bool OmniRuntime::Impl::sendToSM(const Message& msg) {
     if (reconnectServiceManagerIfNeeded() != 0) {
         return false;
     }
-    return sm_channel_.sendMessage(msg);
+    bool ok = sm_channel_.sendMessage(msg);
+    if (!ok) {
+        // 发送失败（半开连接/对端关闭）：标记重连，让后续心跳或 API 触发恢复
+        sm_reconnect_needed_ = true;
+    }
+    return ok;
 }
 
 bool OmniRuntime::Impl::sendToSMWithinTimeout(const Message& msg, uint32_t timeout_ms,
@@ -26,7 +31,12 @@ bool OmniRuntime::Impl::sendToSMWithinTimeout(const Message& msg, uint32_t timeo
         }
         return false;
     }
-    return sm_channel_.sendMessageWithinTimeout(msg, timeout_ms, elapsed_ms);
+    bool ok = sm_channel_.sendMessageWithinTimeout(msg, timeout_ms, elapsed_ms);
+    if (!ok) {
+        // 发送失败（半开连接/对端关闭）：标记重连，让后续心跳或 API 触发恢复
+        sm_reconnect_needed_ = true;
+    }
+    return ok;
 }
 
 int OmniRuntime::Impl::sendSMRequestAndWaitReply(Message& msg, Message& reply) {
@@ -38,6 +48,11 @@ int OmniRuntime::Impl::sendSMRequestAndWaitReply(Message& msg, Message& reply,
     uint32_t total_timeout_ms = effectiveTimeout(timeout_ms);
     uint32_t send_elapsed_ms = 0;
     if (!sendToSMWithinTimeout(msg, total_timeout_ms, &send_elapsed_ms)) {
+        // 与数据面 invoke 语义对齐：发送阶段耗尽超时预算 → ERR_TIMEOUT，
+        // 真实发送错误（连接不可用）→ ERR_SEND_FAILED
+        if (send_elapsed_ms >= total_timeout_ms) {
+            return static_cast<int>(ErrorCode::ERR_TIMEOUT);
+        }
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
     uint32_t reply_timeout_ms = total_timeout_ms > send_elapsed_ms

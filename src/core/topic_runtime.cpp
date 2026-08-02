@@ -35,7 +35,7 @@ void TopicRuntime::setErrorCallback(const std::string& topic_name, const TopicEr
 void TopicRuntime::notifyError(uint32_t topic_id, ErrorCode error) {
     Buffer empty;
     std::map<uint32_t, TopicErrorCallback>::iterator it = error_callbacks_.find(topic_id);
-    if (it != error_callbacks_.end()) {
+    if (it != error_callbacks_.end() && it->second) {
         it->second(topic_id, error, empty);
     }
 }

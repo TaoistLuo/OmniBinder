@@ -122,7 +122,7 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
     }
 
     // Diagnostic BROADCAST hook (skip for diag topics to prevent recursion)
-    if (diag_active_count_ > 0) {
+    if (diag_active_count_ > 0 && !isDiagDataTopic(topic_id)) {
         bool is_diag_topic = false;
         for (auto& kv : local_services_) {
             if (kv.second->diag_topic_id == topic_id) { is_diag_topic = true; break; }
