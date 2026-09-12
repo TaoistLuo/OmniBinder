@@ -27,8 +27,8 @@ TEST(MessageTest, DeclaredPayloadMustFitAvailableFrame) {
     Buffer serialized;
     ASSERT_TRUE(msg.serialize(serialized));
 
-    // Preserve the malformed SHM-frame case at the message framing boundary:
-    // the header declares eight payload bytes, but only four are available.
+    // 保留 message 分帧边界上的畸形 SHM 帧场景：
+    // header 声明 8 字节 payload，但实际只有 4 字节可用。
     serialized.mutableData()[12] = 0x08;
     serialized.mutableData()[13] = 0x00;
     serialized.mutableData()[14] = 0x00;

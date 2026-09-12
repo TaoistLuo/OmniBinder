@@ -4,7 +4,6 @@
 #define TAG "DeathNotifier"
 
 namespace omnibinder {
-
 DeathNotifier::DeathNotifier()
 {
 }
@@ -15,9 +14,7 @@ DeathNotifier::~DeathNotifier()
 
 bool DeathNotifier::subscribe(int subscriber_fd, const std::string& target_service)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    // Check if already subscribed
+    // 检查是否已订阅
     auto& subs = service_to_subscribers_[target_service];
     if (subs.find(subscriber_fd) != subs.end()) {
         OMNI_LOG_DEBUG(TAG, "fd=%d already subscribed to %s",
@@ -35,9 +32,7 @@ bool DeathNotifier::subscribe(int subscriber_fd, const std::string& target_servi
 
 bool DeathNotifier::unsubscribe(int subscriber_fd, const std::string& target_service)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    // Remove from service -> subscribers map
+    // 从 service -> subscribers 映射中移除
     auto sit = service_to_subscribers_.find(target_service);
     if (sit == service_to_subscribers_.end()) {
         return false;
@@ -53,7 +48,7 @@ bool DeathNotifier::unsubscribe(int subscriber_fd, const std::string& target_ser
         service_to_subscribers_.erase(sit);
     }
 
-    // Remove from subscriber -> services map
+    // 从 subscriber -> services 映射中移除
     auto sub_it = subscriber_to_services_.find(subscriber_fd);
     if (sub_it != subscriber_to_services_.end()) {
         sub_it->second.erase(target_service);
@@ -69,8 +64,6 @@ bool DeathNotifier::unsubscribe(int subscriber_fd, const std::string& target_ser
 
 std::vector<int> DeathNotifier::notify(const std::string& dead_service_name)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<int> result;
 
     auto sit = service_to_subscribers_.find(dead_service_name);
@@ -78,12 +71,12 @@ std::vector<int> DeathNotifier::notify(const std::string& dead_service_name)
         return result;
     }
 
-    // Collect all subscriber fds
+    // 收集全部订阅者 fd
     for (auto it = sit->second.begin(); it != sit->second.end(); ++it) {
         result.push_back(*it);
     }
 
-    // Clean up: remove the dead service from all subscriber -> services maps
+    // 清理：从所有 subscriber -> services 映射中移除该死亡服务
     for (size_t i = 0; i < result.size(); ++i) {
         int fd = result[i];
         auto sub_it = subscriber_to_services_.find(fd);
@@ -95,7 +88,7 @@ std::vector<int> DeathNotifier::notify(const std::string& dead_service_name)
         }
     }
 
-    // Remove the dead service entry
+    // 移除死亡服务的条目
     service_to_subscribers_.erase(sit);
 
     OMNI_LOG_INFO(TAG, "Service %s died, notifying %zu subscribers",
@@ -106,14 +99,12 @@ std::vector<int> DeathNotifier::notify(const std::string& dead_service_name)
 
 void DeathNotifier::removeSubscriber(int subscriber_fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto sub_it = subscriber_to_services_.find(subscriber_fd);
     if (sub_it == subscriber_to_services_.end()) {
         return;
     }
 
-    // Remove this subscriber from all service -> subscribers maps
+    // 从所有 service -> subscribers 映射中移除此订阅者
     const std::set<std::string>& services = sub_it->second;
     for (auto it = services.begin(); it != services.end(); ++it) {
         auto sit = service_to_subscribers_.find(*it);
@@ -132,8 +123,6 @@ void DeathNotifier::removeSubscriber(int subscriber_fd)
 
 std::vector<std::string> DeathNotifier::getWatchedServices(int subscriber_fd) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<std::string> result;
 
     auto sub_it = subscriber_to_services_.find(subscriber_fd);
@@ -148,8 +137,6 @@ std::vector<std::string> DeathNotifier::getWatchedServices(int subscriber_fd) co
 
 size_t DeathNotifier::subscriberCount(const std::string& service_name) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto sit = service_to_subscribers_.find(service_name);
     if (sit == service_to_subscribers_.end()) {
         return 0;

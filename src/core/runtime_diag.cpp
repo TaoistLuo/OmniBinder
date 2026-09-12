@@ -10,7 +10,9 @@
 namespace omnibinder {
 namespace {
 
-// 诊断专用本地服务：被 SM 的 watch 流程作为独立发布者注册
+/*
+ * @brief  诊断专用本地服务：被 SM 的 watch 流程作为独立发布者注册
+ */
 class RuntimeDiagService : public Service {
 public:
     explicit RuntimeDiagService(const std::string& name) : Service(name) {
@@ -49,7 +51,7 @@ std::string OmniRuntime::Impl::runtimeProcessName() const {
 
 std::string OmniRuntime::Impl::diagDataServiceName(uint32_t pid) const {
     std::ostringstream os;
-    os << "__diag_pid_" << pid;
+    os << DIAG_SERVICE_NAME_PREFIX << pid;
     return os.str();
 }
 
@@ -61,7 +63,7 @@ bool OmniRuntime::Impl::initDiagDataService() {
     RuntimeDiagService* service = NULL;
     if (local_services_.empty()) {
         service = new RuntimeDiagService(name);
-        service->setShmConfig(ShmConfig(SHM_DEFAULT_REQ_RING_CAPACITY, SHM_DEFAULT_RESP_RING_CAPACITY));
+        service->setShmConfig(ShmConfig());
         int register_ret = registerServiceInternal(service);
         if (register_ret != 0) {
             delete service;
@@ -69,7 +71,7 @@ bool OmniRuntime::Impl::initDiagDataService() {
         }
         diag_data_service_ = service;
     }
-    int ret = publishTopicInternal(name);
+    int ret = publishTopicInternal(name, 0);
     if (ret != 0) {
         if (service) {
             unregisterServiceInternal(service);
@@ -145,9 +147,8 @@ int OmniRuntime::Impl::setLogLevelByPid(uint32_t pid, uint32_t level) {
         Message reply;
         int ret = sendSMRequestAndWaitReply(msg, reply);
         if (ret != 0) return ret;
-        BufferView buf(reply.payload.data(), reply.payload.size());
         bool ok = false;
-        if (!buf.tryReadBool(ok)) {
+        if (!decodeBoolReplyPayload(reply, ok)) {
             return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
         }
         return ok ? 0 : static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
@@ -177,23 +178,28 @@ int OmniRuntime::Impl::listRuntimes(std::vector<RuntimeInfo>& runtimes) {
     });
 }
 
+int OmniRuntime::Impl::requestDiagWatch(uint32_t pid) {
+    Message msg(MessageType::MSG_DIAG_WATCH_START, allocSequence());
+    msg.payload.writeUint32(pid);
+    Message reply;
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) return ret;
+    bool ok = false;
+    if (!decodeBoolReplyPayload(reply, ok)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
+    if (!ok) {
+        return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
+    }
+    return 0;
+}
+
 int OmniRuntime::Impl::watchPid(uint32_t pid, const DiagEventCallback& callback) {
     return callSerialized([this, pid, &callback]() -> int {
-        Message msg(MessageType::MSG_DIAG_WATCH_START, allocSequence());
-        msg.payload.writeUint32(pid);
-        Message reply;
-        int ret = sendSMRequestAndWaitReply(msg, reply);
+        int ret = requestDiagWatch(pid);
         if (ret != 0) return ret;
-        BufferView buf(reply.payload.data(), reply.payload.size());
-        bool ok = false;
-        if (!buf.tryReadBool(ok)) {
-            return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
-        }
-        if (!ok) {
-            return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
-        }
         std::string topic_name = diagDataServiceName(pid);
-        ret = subscribeTopicInternal(topic_name,
+        ret = subscribeTopicInternal(topic_name, 0,
             [callback](uint32_t, const Buffer& data) {
                 if (callback) {
                     callback(data);
@@ -206,21 +212,70 @@ int OmniRuntime::Impl::watchPid(uint32_t pid, const DiagEventCallback& callback)
             sendSMRequestAndWaitReply(stop_msg, stop_reply);
             return ret;
         }
+        // 本地登记 watcher：SM 重连后据此重放 WATCH_START（约束 6）
+        DiagWatcherEntry& entry = diag_watchers_[pid];
+        entry.callback = callback;
+        entry.topic_name = topic_name;
+        entry.active = true;
         return 0;
     });
 }
 
+int OmniRuntime::Impl::restoreDiagWatchers() {
+    if (diag_watchers_.empty()) {
+        return 0;
+    }
+
+    // 先拷贝待重放 pid 再遍历：requestDiagWatch 的 waitForReply 期间用户回调
+    // 可能 watchPid/unwatchPid 修改 diag_watchers_（约束 2）
+    std::vector<uint32_t> pids;
+    pids.reserve(diag_watchers_.size());
+    for (std::map<uint32_t, DiagWatcherEntry>::iterator it = diag_watchers_.begin();
+         it != diag_watchers_.end(); ++it) {
+        if (!it->second.active) {
+            pids.push_back(it->first);
+        }
+    }
+
+    for (size_t i = 0; i < pids.size(); ++i) {
+        // 重放期间用户可能已 unwatch 移除登记（约束 1），逐项重查
+        std::map<uint32_t, DiagWatcherEntry>::iterator it = diag_watchers_.find(pids[i]);
+        if (it == diag_watchers_.end() || it->second.active) {
+            continue;
+        }
+        int ret = requestDiagWatch(pids[i]);
+        it = diag_watchers_.find(pids[i]);
+        if (it == diag_watchers_.end()) {
+            continue;
+        }
+        if (ret == 0) {
+            it->second.active = true;
+        } else {
+            // 目标可能晚于 watcher 重连；不阻断恢复流程，心跳周期兜底重试
+            OMNI_LOG_WARN(LOG_TAG, "diag_watch_restore_failed pid=%u err=%d", pids[i], ret);
+        }
+    }
+    return 0;
+}
+
+void OmniRuntime::Impl::retryInactiveDiagWatchers() {
+    if (diag_watchers_.empty()) {
+        return;
+    }
+    restoreDiagWatchers();
+}
+
 int OmniRuntime::Impl::unwatchPid(uint32_t pid) {
     return callSerialized([this, pid]() -> int {
+        diag_watchers_.erase(pid);
         unsubscribeTopicInternal(diagDataServiceName(pid));
         Message msg(MessageType::MSG_DIAG_WATCH_STOP, allocSequence());
         msg.payload.writeUint32(pid);
         Message reply;
         int ret = sendSMRequestAndWaitReply(msg, reply);
         if (ret != 0) return ret;
-        BufferView buf(reply.payload.data(), reply.payload.size());
         bool ok = false;
-        if (!buf.tryReadBool(ok)) {
+        if (!decodeBoolReplyPayload(reply, ok)) {
             return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
         }
         return ok ? 0 : static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);

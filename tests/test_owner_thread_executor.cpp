@@ -95,3 +95,26 @@ TEST(OwnerThreadExecutorTest, InvokeOnOwnerReturnsFuncResult) {
     });
     EXPECT_EQ(value, 42);
 }
+
+TEST(OwnerThreadExecutorTest, InvokeOnOwnerFailsFastWhenLoopStopped) {
+    EventLoop loop;
+    OwnerThreadExecutor executor;
+    executor.bindLoop(&loop);
+    executor.setOwnerThread(std::this_thread::get_id());
+    loop.stop();
+
+    std::atomic<bool> called(false);
+    std::atomic<bool> post_ok(true);
+    int out = -1;
+    std::thread worker([&]() {
+        // worker 非 owner：post 到已关闭的 loop 必须立即失败，不得阻塞等待
+        post_ok.store(executor.tryInvokeOnOwner([&called]() -> int {
+            called.store(true);
+            return 11;
+        }, out));
+    });
+    worker.join();
+    EXPECT_FALSE(post_ok.load());
+    EXPECT_FALSE(called.load());
+    EXPECT_EQ(out, -1);
+}

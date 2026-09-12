@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "test_common.h"
 #include "transport/tcp_transport.h"
 #include "transport/transport_selector.h"
 #include "platform/platform.h"
@@ -16,12 +17,13 @@ protected:
 };
 
 TEST_F(TransportTest, TcpEcho) {
-    TcpTransportServer server;
-    int port = server.listen("127.0.0.1", 0);
+    test::TcpTestServer server;
+    ASSERT_TRUE(server.start());
+    uint16_t port = server.port();
     ASSERT_GT(port, 0);
 
-    TcpTransport client;
-    int ret = client.connect("127.0.0.1", static_cast<uint16_t>(port));
+    TcpClientTransport client;
+    int ret = client.connect("127.0.0.1", port);
     ASSERT_GE(ret, 0);
 
     if (ret == 1) {
@@ -33,7 +35,7 @@ TEST_F(TransportTest, TcpEcho) {
     }
     ASSERT_EQ(client.state(), ConnectionState::CONNECTED);
 
-    ITransport* accepted = server.accept();
+    IClientTransport* accepted = server.waitAccept();
     ASSERT_NE(accepted, nullptr);
 
     const char* msg = "Hello OmniBinder!";
@@ -47,8 +49,6 @@ TEST_F(TransportTest, TcpEcho) {
     ASSERT_EQ(recvd, static_cast<int>(strlen(msg)));
     EXPECT_STREQ(buf, msg);
 
-    accepted->close();
-    delete accepted;
     client.close();
     server.close();
 }
@@ -58,12 +58,13 @@ TEST_F(TransportTest, TcpEcho) {
 #include <sys/socket.h>
 
 TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
-    TcpTransportServer server;
-    int port = server.listen("127.0.0.1", 0);
+    test::TcpTestServer server;
+    ASSERT_TRUE(server.start());
+    uint16_t port = server.port();
     ASSERT_GT(port, 0);
 
-    TcpTransport client;
-    int ret = client.connect("127.0.0.1", static_cast<uint16_t>(port));
+    TcpClientTransport client;
+    int ret = client.connect("127.0.0.1", port);
     ASSERT_GE(ret, 0);
     if (ret == 1) {
         for (int i = 0; i < 50; ++i) {
@@ -74,7 +75,7 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
     }
     ASSERT_EQ(client.state(), ConnectionState::CONNECTED);
 
-    ITransport* accepted = server.accept();
+    IClientTransport* accepted = server.waitAccept();
     ASSERT_NE(accepted, nullptr);
 
     int sndbuf = 4096;
@@ -95,8 +96,6 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
     EXPECT_GT(sent, 0);
     EXPECT_LT(sent, static_cast<int>(payload.size()));
 
-    accepted->close();
-    delete accepted;
     client.close();
     server.close();
 }

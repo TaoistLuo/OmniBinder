@@ -4,7 +4,6 @@
 #define TAG "ServiceRegistry"
 
 namespace omnibinder {
-
 ServiceRegistry::ServiceRegistry()
     : next_handle_(1)
 {
@@ -16,8 +15,8 @@ ServiceRegistry::~ServiceRegistry()
 
 ServiceHandle ServiceRegistry::generateHandle()
 {
-    // Handle 0 is INVALID_HANDLE. Skip it and any handle still in use so a
-    // wrap-around of the 32-bit counter cannot alias a live registration.
+    // Handle 0 是 INVALID_HANDLE。跳过它以及仍在使用的 handle，
+    // 避免 32 位计数器回绕后与存活注册的 handle 冲突。
     for (;;) {
         ServiceHandle h = next_handle_++;
         if (next_handle_ == INVALID_HANDLE) {
@@ -31,8 +30,6 @@ ServiceHandle ServiceRegistry::generateHandle()
 
 ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     if (info.name.empty()) {
         OMNI_LOG_ERROR(TAG, "Cannot register service with empty name");
         return INVALID_HANDLE;
@@ -43,12 +40,10 @@ ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_f
         return INVALID_HANDLE;
     }
 
-    // Check for duplicate name. Re-registration from the same runtime
-    // (same non-empty host_id) is treated as an idempotent update: refresh
-    // the ServiceInfo and control fd, keep the original handle, and succeed.
-    // This lets a client retry its full registration flow after a partial
-    // failure without being rejected. Different host_id with the same name
-    // remains a hard conflict.
+    // 检查重名。同一 runtime（相同且非空 host_id）重复注册视为幂等更新：
+    // 刷新 ServiceInfo 和控制 fd，保留原 handle 并返回成功。这样客户端在
+    // 部分失败后可重试完整注册流程而不被拒绝。不同 host_id 使用相同名称
+    // 仍是硬冲突。
     std::map<std::string, ServiceEntry>::iterator existing = services_by_name_.find(info.name);
     if (existing != services_by_name_.end()) {
         if (!existing->second.info.host_id.empty()
@@ -57,22 +52,9 @@ ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_f
             existing->second.info = info;
             existing->second.control_fd = control_fd;
 
-            // Keep the fd -> services index consistent when the control
-            // connection changed (e.g. after a reconnect).
+            // 控制连接变化时（例如重连后）保持 fd -> services 索引一致
             if (old_fd != control_fd) {
-                std::map<int, std::vector<std::string> >::iterator fd_it = fd_to_services_.find(old_fd);
-                if (fd_it != fd_to_services_.end()) {
-                    std::vector<std::string>& names = fd_it->second;
-                    for (std::vector<std::string>::iterator nit = names.begin(); nit != names.end(); ++nit) {
-                        if (*nit == info.name) {
-                            names.erase(nit);
-                            break;
-                        }
-                    }
-                    if (names.empty()) {
-                        fd_to_services_.erase(fd_it);
-                    }
-                }
+                removeFromFdIndex(old_fd, info.name);
                 fd_to_services_[control_fd].push_back(info.name);
             }
 
@@ -103,10 +85,26 @@ ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_f
     return handle;
 }
 
+void ServiceRegistry::removeFromFdIndex(int fd, const std::string& name)
+{
+    auto fd_it = fd_to_services_.find(fd);
+    if (fd_it == fd_to_services_.end()) {
+        return;
+    }
+    std::vector<std::string>& names = fd_it->second;
+    for (auto nit = names.begin(); nit != names.end(); ++nit) {
+        if (*nit == name) {
+            names.erase(nit);
+            break;
+        }
+    }
+    if (names.empty()) {
+        fd_to_services_.erase(fd_it);
+    }
+}
+
 bool ServiceRegistry::removeService(const std::string& name)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = services_by_name_.find(name);
     if (it == services_by_name_.end()) {
         return false;
@@ -116,25 +114,12 @@ bool ServiceRegistry::removeService(const std::string& name)
     ServiceHandle handle = entry.handle;
     int fd = entry.control_fd;
 
-    // Remove from handle map
+    // 从 handle 映射中移除
     handle_to_name_.erase(handle);
 
-    // Remove from fd map
-    auto fd_it = fd_to_services_.find(fd);
-    if (fd_it != fd_to_services_.end()) {
-        std::vector<std::string>& names = fd_it->second;
-        for (auto nit = names.begin(); nit != names.end(); ++nit) {
-            if (*nit == name) {
-                names.erase(nit);
-                break;
-            }
-        }
-        if (names.empty()) {
-            fd_to_services_.erase(fd_it);
-        }
-    }
+    removeFromFdIndex(fd, name);
 
-    // Remove from name map
+    // 从名称映射中移除
     services_by_name_.erase(it);
 
     OMNI_LOG_INFO(TAG, "Unregistered service: %s (handle=%u)", name.c_str(), handle);
@@ -143,8 +128,6 @@ bool ServiceRegistry::removeService(const std::string& name)
 
 bool ServiceRegistry::removeServiceByHandle(ServiceHandle handle)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto hit = handle_to_name_.find(handle);
     if (hit == handle_to_name_.end()) {
         return false;
@@ -155,23 +138,7 @@ bool ServiceRegistry::removeServiceByHandle(ServiceHandle handle)
 
     auto it = services_by_name_.find(name);
     if (it != services_by_name_.end()) {
-        int fd = it->second.control_fd;
-
-        // Remove from fd map
-        auto fd_it = fd_to_services_.find(fd);
-        if (fd_it != fd_to_services_.end()) {
-            std::vector<std::string>& names = fd_it->second;
-            for (auto nit = names.begin(); nit != names.end(); ++nit) {
-                if (*nit == name) {
-                    names.erase(nit);
-                    break;
-                }
-            }
-            if (names.empty()) {
-                fd_to_services_.erase(fd_it);
-            }
-        }
-
+        removeFromFdIndex(it->second.control_fd, name);
         services_by_name_.erase(it);
     }
 
@@ -181,8 +148,6 @@ bool ServiceRegistry::removeServiceByHandle(ServiceHandle handle)
 
 std::vector<std::string> ServiceRegistry::removeByFd(int fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<std::string> removed;
 
     auto fd_it = fd_to_services_.find(fd);
@@ -190,7 +155,7 @@ std::vector<std::string> ServiceRegistry::removeByFd(int fd)
         return removed;
     }
 
-    // Copy the list since we'll be modifying the map
+    // 先拷贝列表，后续会修改 map
     removed = fd_it->second;
     fd_to_services_.erase(fd_it);
 
@@ -209,8 +174,6 @@ std::vector<std::string> ServiceRegistry::removeByFd(int fd)
 
 bool ServiceRegistry::findService(const std::string& name, ServiceEntry& entry) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = services_by_name_.find(name);
     if (it == services_by_name_.end()) {
         return false;
@@ -222,8 +185,6 @@ bool ServiceRegistry::findService(const std::string& name, ServiceEntry& entry) 
 
 bool ServiceRegistry::findServiceByHandle(ServiceHandle handle, ServiceEntry& entry) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto hit = handle_to_name_.find(handle);
     if (hit == handle_to_name_.end()) {
         return false;
@@ -240,8 +201,6 @@ bool ServiceRegistry::findServiceByHandle(ServiceHandle handle, ServiceEntry& en
 
 std::vector<ServiceInfo> ServiceRegistry::listServices() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<ServiceInfo> result;
     result.reserve(services_by_name_.size());
 
@@ -254,20 +213,16 @@ std::vector<ServiceInfo> ServiceRegistry::listServices() const
 
 size_t ServiceRegistry::count() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
     return services_by_name_.size();
 }
 
 bool ServiceRegistry::exists(const std::string& name) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
     return services_by_name_.find(name) != services_by_name_.end();
 }
 
 int ServiceRegistry::getControlFd(const std::string& name) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = services_by_name_.find(name);
     if (it == services_by_name_.end()) {
         return -1;
@@ -276,10 +231,18 @@ int ServiceRegistry::getControlFd(const std::string& name) const
     return it->second.control_fd;
 }
 
+std::vector<std::string> ServiceRegistry::listServiceNamesByFd(int fd) const
+{
+    std::map<int, std::vector<std::string> >::const_iterator it = fd_to_services_.find(fd);
+    if (it == fd_to_services_.end()) {
+        return std::vector<std::string>();
+    }
+
+    return it->second;
+}
+
 bool ServiceRegistry::ownsService(int fd, const std::string& name) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::map<std::string, ServiceEntry>::const_iterator it = services_by_name_.find(name);
     return it != services_by_name_.end() && it->second.control_fd == fd;
 }

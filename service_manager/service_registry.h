@@ -4,7 +4,7 @@
  * @details     ServiceManager 的核心数据结构，存储所有已注册服务的元信息
  *              （ServiceInfo、ServiceHandle、控制连接 fd）。支持按名称、句柄、
  *              fd 进行增删查操作，内部维护多重索引以实现 O(1) 查找。
- *              线程安全，所有方法均可从任意线程调用。
+ *              仅 ServiceManager owner 线程访问（SM 为单线程事件循环）。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -39,83 +39,135 @@
 #include <string>
 #include <map>
 #include <vector>
-#include <mutex>
 
 namespace omnibinder {
 
 // ============================================================
-// ServiceEntry - Internal storage for a registered service
+// ServiceEntry - 已注册服务的内部存储
+//
+// @brief  已注册服务的内部存储条目
 // ============================================================
 struct ServiceEntry {
     ServiceInfo info;
     ServiceHandle handle;
-    int control_fd;  // TCP fd for the service's control connection
+    int control_fd;  // 服务的控制连接 TCP fd
 
     ServiceEntry() : handle(INVALID_HANDLE), control_fd(-1) {}
 };
 
 // ============================================================
-// ServiceRegistry - Stores and manages registered services
+// ServiceRegistry - 存储并管理已注册的服务
 //
-// Thread-safe: all methods can be called from any thread.
+// @brief  存储并管理已注册的服务
+// @details 仅 owner 线程访问：ServiceManager 由单个 event-loop 线程驱动。
 // ============================================================
 class ServiceRegistry {
 public:
     ServiceRegistry();
     ~ServiceRegistry();
 
-    // Disable copy
+    // 禁止拷贝
     ServiceRegistry(const ServiceRegistry&) = delete;
     ServiceRegistry& operator=(const ServiceRegistry&) = delete;
 
-    // Add a new service to the registry.
-    // Returns the assigned ServiceHandle, or INVALID_HANDLE if the service
-    // name is already registered by a different host_id. Re-registration
-    // from the same runtime (same non-empty host_id) updates the existing
-    // entry and returns its original handle.
+    /*
+     * @brief  向注册表添加新服务
+     * @param[in]  info       服务信息
+     * @param[in]  control_fd 服务的控制连接 TCP fd
+     * @return 新分配的 ServiceHandle；服务名已被不同 host_id 注册时返回 INVALID_HANDLE
+     * @note   同一 runtime（相同且非空 host_id）重复注册视为更新：刷新条目
+     *         并返回原 handle
+     */
     ServiceHandle addService(const ServiceInfo& info, int control_fd);
 
-    // Remove a service by name.
-    // Returns true if the service was found and removed.
+    /*
+     * @brief  按名称移除服务
+     * @param[in]  name 服务名称
+     * @return true 表示服务已找到并移除
+     */
     bool removeService(const std::string& name);
 
-    // Remove a service by its handle.
-    // Returns true if the service was found and removed.
+    /*
+     * @brief  按 handle 移除服务
+     * @param[in]  handle 服务 handle
+     * @return true 表示服务已找到并移除
+     */
     bool removeServiceByHandle(ServiceHandle handle);
 
-    // Remove all services associated with a given control fd.
-    // Returns the list of service names that were removed.
+    /*
+     * @brief  移除指定控制 fd 关联的全部服务
+     * @param[in]  fd 控制连接 fd
+     * @return 被移除的服务名列表
+     */
     std::vector<std::string> removeByFd(int fd);
 
-    // Find a service by name.
-    // Returns true if found, and fills in the entry.
+    /*
+     * @brief  按名称查找服务
+     * @param[in]   name  服务名称
+     * @param[out]  entry 找到时填充的服务条目
+     * @return true 表示找到
+     */
     bool findService(const std::string& name, ServiceEntry& entry) const;
 
-    // Find a service by handle.
-    // Returns true if found, and fills in the entry.
+    /*
+     * @brief  按 handle 查找服务
+     * @param[in]   handle 服务 handle
+     * @param[out]  entry  找到时填充的服务条目
+     * @return true 表示找到
+     */
     bool findServiceByHandle(ServiceHandle handle, ServiceEntry& entry) const;
 
-    // List all registered services.
+    /*
+     * @brief  列出全部已注册服务
+     * @return 服务信息列表
+     */
     std::vector<ServiceInfo> listServices() const;
 
-    // Get the number of registered services.
+    /*
+     * @brief  获取已注册服务数量
+     * @return 已注册服务数量
+     */
     size_t count() const;
 
-    // Check if a service exists by name.
+    /*
+     * @brief  检查指定名称的服务是否存在
+     * @param[in]  name 服务名称
+     * @return true 表示存在
+     */
     bool exists(const std::string& name) const;
 
-    // Get the control fd for a service by name.
-    // Returns -1 if not found.
+    /*
+     * @brief  按名称获取服务的控制连接 fd
+     * @param[in]  name 服务名称
+     * @return 控制连接 fd；未找到时返回 -1
+     */
     int getControlFd(const std::string& name) const;
 
-    // Check whether the given fd owns the specified service.
+    /*
+     * @brief  获取某个控制连接 fd 当前拥有的全部服务名
+     * @param[in]  fd 控制连接 fd
+     * @return 该 fd 名下的服务名列表；无归属时返回空列表
+     * @note   fd 索引是"服务归属"的唯一权威来源，连接断开清理应以此为据
+     */
+    std::vector<std::string> listServiceNamesByFd(int fd) const;
+
+    /*
+     * @brief  检查指定 fd 是否为该服务的归属连接
+     * @param[in]  fd   控制连接 fd
+     * @param[in]  name 服务名称
+     * @return true 表示该 fd 归属此服务
+     */
     bool ownsService(int fd, const std::string& name) const;
 
 private:
-    // Generate a unique handle for a new service
+    /*
+     * @brief  为新服务生成唯一 handle
+     * @return 新的 ServiceHandle
+     */
     ServiceHandle generateHandle();
 
-    mutable std::mutex mutex_;
+    void removeFromFdIndex(int fd, const std::string& name);
+
     std::map<std::string, ServiceEntry> services_by_name_;
     std::map<ServiceHandle, std::string> handle_to_name_;
     std::map<int, std::vector<std::string>> fd_to_services_;

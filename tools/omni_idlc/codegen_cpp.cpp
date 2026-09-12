@@ -4,42 +4,6 @@
 
 namespace omnic {
 
-static void emitGeneratedFileBanner(std::ostream& os,
-                                    const std::string& generated_name,
-                                    const std::string& source_idl,
-                                    const char* brief,
-                                    const char* details) {
-    os << "/**************************************************************************************************\n";
-    os << " * @file        " << generated_name << "\n";
-    os << " * @brief       " << brief << "\n";
-    os << " * @details     " << details << "\n";
-    os << " *              Source IDL: " << source_idl << ".bidl\n";
-    os << " *              This file is auto-generated. DO NOT EDIT MANUALLY.\n";
-    os << " *\n";
-    os << " * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)\n";
-    os << " *\n";
-    os << " * MIT License\n";
-    os << " *\n";
-    os << " * Permission is hereby granted, free of charge, to any person obtaining a copy\n";
-    os << " * of this software and associated documentation files (the \"Software\"), to deal\n";
-    os << " * in the Software without restriction, including without limitation the rights\n";
-    os << " * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n";
-    os << " * copies of the Software, and to permit persons to whom the Software is\n";
-    os << " * furnished to do so, subject to the following conditions:\n";
-    os << " *\n";
-    os << " * The above copyright notice and this permission notice shall be included in all\n";
-    os << " * copies or substantial portions of the Software.\n";
-    os << " *\n";
-    os << " * THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n";
-    os << " * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n";
-    os << " * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n";
-    os << " * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n";
-    os << " * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n";
-    os << " * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n";
-    os << " * SOFTWARE.\n";
-    os << " *************************************************************************************************/\n";
-}
-
 std::string cppTypeName(const TypeRef& type) {
     switch (type.primitive) {
     case TYPE_BOOL:    return "bool";
@@ -75,7 +39,10 @@ bool isReferenceType(const TypeRef& type) {
            type.primitive == TYPE_CUSTOM || type.primitive == TYPE_ARRAY;
 }
 
-// Maps primitive type to Buffer read/write method suffix (e.g., "Int32", "String")
+/* @brief 将基础类型映射到 Buffer 读写方法后缀
+ * @param[in] type 类型引用
+ * @return 方法后缀（如 "Int32"、"String"）
+ */
 std::string bufferMethodSuffix(const TypeRef& type) {
     switch (type.primitive) {
     case TYPE_BOOL:    return "Bool";
@@ -92,26 +59,6 @@ std::string bufferMethodSuffix(const TypeRef& type) {
     case TYPE_STRING:  return "String";
     case TYPE_BYTES:   return "Bytes";
     default: return "";
-    }
-}
-
-static size_t minimumWireSize(const TypeRef& type) {
-    switch (type.primitive) {
-    case TYPE_BOOL:
-    case TYPE_INT8:
-    case TYPE_UINT8: return 1;
-    case TYPE_INT16:
-    case TYPE_UINT16: return 2;
-    case TYPE_INT32:
-    case TYPE_UINT32:
-    case TYPE_FLOAT32:
-    case TYPE_STRING:
-    case TYPE_BYTES:
-    case TYPE_ARRAY: return 4;
-    case TYPE_INT64:
-    case TYPE_UINT64:
-    case TYPE_FLOAT64: return 8;
-    default: return 0;
     }
 }
 
@@ -267,49 +214,9 @@ bool CppCodeGen::validateTypeSupported(const TypeRef& type, const std::string& c
 }
 
 bool CppCodeGen::validateAst(const AstFile& ast) {
-    for (size_t i = 0; i < ast.structs.size(); ++i) {
-        const StructDef& s = ast.structs[i];
-        for (size_t j = 0; j < s.fields.size(); ++j) {
-            const FieldDef& f = s.fields[j];
-            if (!validateTypeSupported(f.type,
-                                       "struct '" + s.name + "' field '" + f.name + "'",
-                                       false)) {
-                return false;
-            }
-        }
-    }
-
-    for (size_t i = 0; i < ast.topics.size(); ++i) {
-        const TopicDef& t = ast.topics[i];
-        for (size_t j = 0; j < t.fields.size(); ++j) {
-            const FieldDef& f = t.fields[j];
-            if (!validateTypeSupported(f.type,
-                                       "topic '" + t.name + "' field '" + f.name + "'",
-                                       false)) {
-                return false;
-            }
-        }
-    }
-
-    for (size_t i = 0; i < ast.services.size(); ++i) {
-        const ServiceDef& svc = ast.services[i];
-        for (size_t j = 0; j < svc.methods.size(); ++j) {
-            const MethodDef& m = svc.methods[j];
-            if (!validateTypeSupported(m.return_type,
-                                       "service '" + svc.name + "' method '" + m.name + "' return type",
-                                       true)) {
-                return false;
-            }
-            if (m.has_param &&
-                !validateTypeSupported(m.param.type,
-                                       "service '" + svc.name + "' method '" + m.name + "' parameter '" + m.param.name + "'",
-                                       false)) {
-                return false;
-            }
-        }
-    }
-
-    return true;
+    return validateAstCommon(ast, [this](const TypeRef& t, const std::string& ctx, bool allow_void) {
+        return this->validateTypeSupported(t, ctx, allow_void);
+    });
 }
 
 void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::string& filename) {
@@ -345,7 +252,7 @@ void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std:
     os << "namespace " << pkg_ << " {\n\n";
     
     for (size_t i = 0; i < ast.structs.size(); ++i) genStruct(ast.structs[i], os);
-    for (size_t i = 0; i < ast.topics.size(); ++i) genTopic(ast.topics[i], os);
+    for (size_t i = 0; i < ast.topics.size(); ++i) genTopic(ast.topics[i], ast, os);
     for (size_t i = 0; i < ast.services.size(); ++i) {
         genStub(ast.services[i], os);
         genProxy(ast.services[i], os);
@@ -374,12 +281,23 @@ void CppCodeGen::genStruct(const StructDef& s, std::ostream& os) {
     os << "};\n\n";
 }
 
-void CppCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
+void CppCodeGen::genTopic(const TopicDef& t, const AstFile& ast, std::ostream& os) {
     os << "struct " << t.name << " {\n";
     for (size_t i = 0; i < t.fields.size(); ++i) {
         os << "    " << cppTypeName(t.fields[i].type) << " " << t.fields[i].name << ";\n";
     }
+    uint32_t topic_idl_hash = computeTopicHash(t, ast);
     os << "\n    static const uint32_t TOPIC_ID = 0x" << std::hex << fnv1a_hash(t.name) << std::dec << "u;\n";
+    os << "    static const uint32_t TOPIC_IDL_HASH = 0x" << std::hex << topic_idl_hash << std::dec << "u;\n";
+    os << "\n    " << t.name << "()";
+    bool first = true;
+    for (size_t i = 0; i < t.fields.size(); ++i) {
+        if (!isReferenceType(t.fields[i].type)) {
+            os << (first ? " : " : ", ") << t.fields[i].name << "(0)";
+            first = false;
+        }
+    }
+    os << " {}\n";
     os << "    bool serialize(omnibinder::Buffer& buf) const;\n";
     os << "    bool deserialize(omnibinder::Buffer& buf);\n";
     os << "};\n\n";
@@ -407,6 +325,7 @@ void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
     }
     
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
+        os << "    void Publish" << svc.publishes[i] << "();\n";
         os << "    void Broadcast" << svc.publishes[i] << "(const " << svc.publishes[i] << "& msg);\n";
     }
     
@@ -461,7 +380,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
     os << "#include <stdexcept>\n\n";
     os << "namespace " << pkg_ << " {\n\n";
     
-    // Struct serialize/deserialize
+    // 结构体序列化/反序列化
     for (size_t i = 0; i < ast.structs.size(); ++i) {
         const StructDef& s = ast.structs[i];
         os << "bool " << s.name << "::serialize(omnibinder::Buffer& buf) const {\n";
@@ -473,7 +392,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "    return true;\n}\n\n";
     }
     
-    // Topic serialize/deserialize
+    // topic 序列化/反序列化
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         const TopicDef& t = ast.topics[i];
         os << "bool " << t.name << "::serialize(omnibinder::Buffer& buf) const {\n";
@@ -485,7 +404,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "    return true;\n}\n\n";
     }
     
-    // Topic IDL hash constants (for runtime IDL compatibility verification)
+    // topic IDL hash 常量（用于运行时 IDL 兼容性校验）
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         const TopicDef& t = ast.topics[i];
         uint32_t topic_hash = computeTopicHash(t, ast);
@@ -494,7 +413,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
     }
     if (!ast.topics.empty()) os << "\n";
     
-    // Service Stub implementation
+    // 服务 Stub 实现
     for (size_t si = 0; si < ast.services.size(); ++si) {
         const ServiceDef& svc = ast.services[si];
         uint32_t iface_id = fnv1a_hash(pkg_ + "." + svc.name);
@@ -565,6 +484,9 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
             const std::string& topic = svc.publishes[pi];
             uint32_t tid = fnv1a_hash(topic);
+            os << "void " << svc.name << "Stub::Publish" << topic << "() {\n";
+            os << "    if (runtime()) runtime()->publishTopic(\"" << topic << "\", s_" << topic << "_topic_idl_hash);\n";
+            os << "}\n\n";
             os << "void " << svc.name << "Stub::Broadcast" << topic << "(const " << topic << "& msg) {\n";
             os << "    omnibinder::Buffer buf;\n";
             os << "    msg.serialize(buf);\n";
@@ -572,7 +494,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "}\n\n";
         }
         
-        // Proxy implementation - methods only (connect/disconnect inherited from ServiceProxyBase)
+        // Proxy 实现 - 仅方法（connect/disconnect 继承自 ServiceProxyBase）
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
@@ -626,7 +548,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
             const std::string& topic = svc.publishes[pi];
             os << "void " << svc.name << "Proxy::Subscribe" << topic << "(const std::function<void(const " << topic << "&)>& callback) {\n";
-            os << "    runtime_.subscribeTopic(\"" << topic << "\", [callback](uint32_t, const omnibinder::Buffer& data) {\n";
+            os << "    runtime_.subscribeTopic(\"" << topic << "\", s_" << topic << "_topic_idl_hash, [callback](uint32_t, const omnibinder::Buffer& data) {\n";
             os << "        " << topic << " msg;\n";
             os << "        omnibinder::Buffer buf(data.data(), data.size());\n";
             os << "        if (!msg.deserialize(buf)) return;\n";

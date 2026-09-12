@@ -313,6 +313,7 @@ int main() {
     runtime.init("127.0.0.1", 9900);
 
     MySensorService service;
+    service.setShmConfig(omnibinder::ShmConfig(64 * 1024, 64 * 1024));
     runtime.registerService(&service);
     runtime.publishTopic("SensorUpdate");
     runtime.publishTopic("AsyncResultReady");
@@ -481,7 +482,7 @@ omnibinder/
 
 - **OS**: Linux / Windows / more platforms (see [Platform Porting Guide](docs/platform-porting.md))
 - **Compiler**: GCC 4.8+, Clang 3.4+, MinGW 7.3+, or MSVC 2017+ with C++11 support
-- **CMake**: 3.10+
+- **CMake**: 3.12+
 - **External dependencies**: none
 
 ---

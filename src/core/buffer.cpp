@@ -1,4 +1,5 @@
 #include "omnibinder/buffer.h"
+#include "buffer_read_utils.h"
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -112,8 +113,8 @@ void Buffer::grow(size_t min_capacity) noexcept {
         write_failed_ = true;
         return;
     }
-    if (data_ && capacity_ > 0) {
-        std::memcpy(new_data, data_, capacity_);
+    if (data_ && write_pos_ > 0) {
+        std::memcpy(new_data, data_, write_pos_);
     }
     omni_free(data_);
     data_ = new_data;
@@ -246,151 +247,58 @@ bool Buffer::writeRaw(const void* data, size_t length) noexcept {
     return true;
 }
 
+// ---- 读取方法（共享原语，上限为 write_pos_）----
+
 bool Buffer::tryReadBool(bool& value) noexcept {
-    uint8_t byte = 0;
-    if (!tryReadUint8(byte)) {
-        return false;
-    }
-    value = byte != 0;
-    return true;
+    return buffer_read::readBool(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadInt8(int8_t& value) noexcept {
-    uint8_t byte = 0;
-    if (!tryReadUint8(byte)) {
-        return false;
-    }
-    value = static_cast<int8_t>(byte);
-    return true;
+    return buffer_read::readInt8(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadUint8(uint8_t& value) noexcept {
-    if (read_pos_ + 1 > write_pos_) {
-        return false;
-    }
-    value = data_[read_pos_++];
-    return true;
+    return buffer_read::readUint8(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadInt16(int16_t& value) noexcept {
-    uint16_t temp = 0;
-    if (!tryReadUint16(temp)) {
-        return false;
-    }
-    value = static_cast<int16_t>(temp);
-    return true;
+    return buffer_read::readInt16(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadUint16(uint16_t& value) noexcept {
-    if (read_pos_ + 2 > write_pos_) {
-        return false;
-    }
-    value = static_cast<uint16_t>(data_[read_pos_])
-          | (static_cast<uint16_t>(data_[read_pos_ + 1]) << 8);
-    read_pos_ += 2;
-    return true;
+    return buffer_read::readUint16(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadInt32(int32_t& value) noexcept {
-    uint32_t temp = 0;
-    if (!tryReadUint32(temp)) {
-        return false;
-    }
-    value = static_cast<int32_t>(temp);
-    return true;
+    return buffer_read::readInt32(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadUint32(uint32_t& value) noexcept {
-    if (read_pos_ + 4 > write_pos_) {
-        return false;
-    }
-    value = static_cast<uint32_t>(data_[read_pos_])
-          | (static_cast<uint32_t>(data_[read_pos_ + 1]) << 8)
-          | (static_cast<uint32_t>(data_[read_pos_ + 2]) << 16)
-          | (static_cast<uint32_t>(data_[read_pos_ + 3]) << 24);
-    read_pos_ += 4;
-    return true;
+    return buffer_read::readUint32(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadInt64(int64_t& value) noexcept {
-    uint64_t temp = 0;
-    if (!tryReadUint64(temp)) {
-        return false;
-    }
-    value = static_cast<int64_t>(temp);
-    return true;
+    return buffer_read::readInt64(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadUint64(uint64_t& value) noexcept {
-    if (read_pos_ + 8 > write_pos_) {
-        return false;
-    }
-    value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value |= static_cast<uint64_t>(data_[read_pos_ + i]) << (i * 8);
-    }
-    read_pos_ += 8;
-    return true;
+    return buffer_read::readUint64(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadFloat32(float& value) noexcept {
-    uint32_t bits = 0;
-    if (!tryReadUint32(bits)) {
-        return false;
-    }
-    memcpy(&value, &bits, sizeof(value));
-    return true;
+    return buffer_read::readFloat32(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadFloat64(double& value) noexcept {
-    uint64_t bits = 0;
-    if (!tryReadUint64(bits)) {
-        return false;
-    }
-    memcpy(&value, &bits, sizeof(value));
-    return true;
+    return buffer_read::readFloat64(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadString(std::string& value) noexcept {
-    uint32_t len = 0;
-    if (!tryReadUint32(len)) {
-        return false;
-    }
-    if (len == 0) {
-        value.clear();
-        return true;
-    }
-    if (len > write_pos_ - read_pos_) {
-        return false;
-    }
-    try {
-        value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
-    } catch (...) {
-        return false;
-    }
-    read_pos_ += len;
-    return true;
+    return buffer_read::readString(data_, write_pos_, read_pos_, value);
 }
 
 bool Buffer::tryReadBytes(std::vector<uint8_t>& value) noexcept {
-    uint32_t len = 0;
-    if (!tryReadUint32(len)) {
-        return false;
-    }
-    if (len == 0) {
-        value.clear();
-        return true;
-    }
-    if (len > write_pos_ - read_pos_) {
-        return false;
-    }
-    try {
-        value.assign(data_ + read_pos_, data_ + read_pos_ + len);
-    } catch (...) {
-        return false;
-    }
-    read_pos_ += len;
-    return true;
+    return buffer_read::readBytes(data_, write_pos_, read_pos_, value);
 }
 
 // ---- 缓冲区管理 ----
@@ -439,6 +347,11 @@ size_t Buffer::writePosition() const noexcept {
 }
 
 void Buffer::setWritePosition(size_t pos) noexcept {
+    // 镜像 trySetReadPosition 的校验：写游标不得回退到读游标之前，
+    // 否则 remaining()/compact() 会下溢（write_pos_ - read_pos_ 变为巨大值）
+    if (pos < read_pos_) {
+        return;
+    }
     if (pos > capacity_) {
         reserve(pos);
         if (write_failed_) return;
@@ -466,6 +379,15 @@ void Buffer::assign(const uint8_t* data, size_t length) noexcept {
 
 bool Buffer::writeOk() const noexcept {
     return !write_failed_;
+}
+
+void Buffer::compact() noexcept {
+    size_t remaining = write_pos_ - read_pos_;
+    if (remaining > 0 && read_pos_ > 0) {
+        memmove(data_, data_ + read_pos_, remaining);
+    }
+    write_pos_ = remaining;
+    read_pos_ = 0;
 }
 
 } // namespace omnibinder

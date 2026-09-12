@@ -48,7 +48,9 @@ enum PrimitiveType {
     TYPE_VOID, TYPE_CUSTOM, TYPE_ARRAY
 };
 
-// 类型引用
+/**
+ * @brief 类型引用
+ */
 struct TypeRef {
     PrimitiveType primitive;
     std::string   custom_name;   // TYPE_CUSTOM 时使用
@@ -58,7 +60,10 @@ struct TypeRef {
     TypeRef() : primitive(TYPE_VOID), element_type(NULL) {}
     ~TypeRef() { delete element_type; }
     
-    // 拷贝构造函数（深拷贝 element_type）
+    /* @brief 拷贝构造函数
+     * @param[in] other 源对象
+     * @note 深拷贝 element_type
+     */
     TypeRef(const TypeRef& other)
         : primitive(other.primitive)
         , custom_name(other.custom_name)
@@ -66,7 +71,11 @@ struct TypeRef {
         , element_type(other.element_type ? new TypeRef(*other.element_type) : NULL)
     {}
     
-    // 赋值运算符（深拷贝 element_type）
+    /* @brief 赋值运算符
+     * @param[in] other 源对象
+     * @return 自身引用
+     * @note 深拷贝 element_type
+     */
     TypeRef& operator=(const TypeRef& other) {
         if (this != &other) {
             primitive = other.primitive;
@@ -83,31 +92,41 @@ struct TypeRef {
     bool isArray() const { return primitive == TYPE_ARRAY; }
 };
 
-// 字段定义
+/**
+ * @brief 字段定义
+ */
 struct FieldDef {
     TypeRef     type;
     std::string name;
 };
 
-// 结构体定义
+/**
+ * @brief 结构体定义
+ */
 struct StructDef {
     std::string name;
     std::vector<FieldDef> fields;
 };
 
-// 话题定义
+/**
+ * @brief 话题定义
+ */
 struct TopicDef {
     std::string name;
     std::vector<FieldDef> fields;
 };
 
-// 方法参数
+/**
+ * @brief 方法参数
+ */
 struct ParamDef {
     TypeRef     type;
     std::string name;
 };
 
-// 方法定义
+/**
+ * @brief 方法定义
+ */
 struct MethodDef {
     std::string name;
     TypeRef     return_type;
@@ -117,24 +136,28 @@ struct MethodDef {
     MethodDef() : has_param(false) {}
 };
 
-// 服务定义
+/**
+ * @brief 服务定义
+ */
 struct ServiceDef {
     std::string name;
     std::vector<MethodDef> methods;
     std::vector<std::string> publishes;  // 发布的话题名
 };
 
-// 整个 IDL 文件的 AST
+/**
+ * @brief 整个 IDL 文件的 AST
+ */
 struct AstFile {
     std::string package_name;
     std::string file_path;                  // 源文件路径
     std::vector<std::string> imports;       // import 路径列表
-    std::vector<std::string> imported_packages; // resolved direct import packages
+    std::vector<std::string> imported_packages; // 解析后的直接导入包列表
     std::vector<StructDef>  structs;
     std::vector<TopicDef>   topics;
     std::vector<ServiceDef> services;
 
-    // Set by the parser so declaration-order policy remains in semantic validation.
+    // 由 Parser 设置，使声明顺序策略在语义验证阶段仍可检查
     bool imports_before_declarations;
     bool package_before_imports_and_declarations;
     size_t package_declaration_count;

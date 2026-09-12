@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 /* ============================================================
- * 日志级别 (C enum, C++ 也有对应的常量)
+ * 日志级别（C 枚举，C++ 也有对应的常量）
  * ============================================================ */
 typedef enum {
     OMNI_LOG_FATAL   = 0,  /* 致命错误 */
@@ -66,11 +66,11 @@ void omni_log_set_level(omni_log_level_t level);
 void omni_log_enable_timestamp(int enable);
 const char* omni_log_level_str(omni_log_level_t level);
 
-/* 格式化打印（变参版本，供上层封装） */
+/* @brief 格式化打印（变参版本，供上层封装） */
 void omni_log_vprint(omni_log_level_t level, const char* tag,
                      const char* fmt, va_list args);
 
-/* 格式化打印 */
+/* @brief 格式化打印 */
 void omni_log_print(omni_log_level_t level, const char* tag,
                     const char* fmt, ...);
 
@@ -84,7 +84,7 @@ void omni_log_print(omni_log_level_t level, const char* tag,
  * 性能关键：级别检查展开为直接全局变量比较，无函数调用开销。
  * 仅当日志级别足够低时才进入 omni_log_print() 进行格式化。
  * ============================================================ */
-/* ##__VA_ARGS__ (GNU extension): 当 __VA_ARGS__ 为空时移除前置逗号，
+/* ##__VA_ARGS__（GNU 扩展）: 当 __VA_ARGS__ 为空时移除前置逗号，
  * 允许 OMNI_LOG_INFO("tag", "fmt") 无额外变参的写法。 */
 #define OMNI_LOG_FATAL(tag, ...) \
     do { if (OMNI_LOG_FATAL <= g_omni_log_level) \
@@ -132,7 +132,7 @@ constexpr LogLevel LOG_DEBUG   = OMNI_LOG_DEBUG;
 constexpr LogLevel LOG_VERBOSE = OMNI_LOG_VERBOSE;
 constexpr LogLevel LOG_OFF     = OMNI_LOG_OFF;
 
-/* 与旧实现兼容的静态级别访问器 */
+/* @brief 与旧实现兼容的静态级别访问器 */
 inline LogLevel& globalLogLevel() {
     return g_omni_log_level;
 }
@@ -141,7 +141,7 @@ inline const char* logLevelStr(LogLevel level) {
     return omni_log_level_str(level);
 }
 
-/* 包装函数 — 编译后与直接调用 C API 无差异 */
+/* @brief 包装函数 — 编译后与直接调用 C API 无差异 */
 inline void setLogLevel(LogLevel level) {
     omni_log_set_level(level);
 }

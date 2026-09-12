@@ -52,7 +52,7 @@ private:
     void generateSource(const AstFile& ast, std::ostream& os, const std::string& filename);
     
     void genStruct(const StructDef& s, std::ostream& os);
-    void genTopic(const TopicDef& t, std::ostream& os);
+    void genTopic(const TopicDef& t, const AstFile& ast, std::ostream& os);
     void genStub(const ServiceDef& svc, std::ostream& os);
     void genProxy(const ServiceDef& svc, std::ostream& os);
     

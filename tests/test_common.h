@@ -7,6 +7,7 @@
 #include "omnibinder/message.h"
 #include "omnibinder/types.h"
 #include "platform/platform.h"
+#include "tcp_test_server.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,7 +41,7 @@ namespace omnibinder {
 namespace test {
 
 // ============================================================
-// Buffer helpers
+// Buffer 辅助函数
 // ============================================================
 template<typename T>
 inline T mustRead(Buffer& buf, bool (Buffer::*fn)(T&)) {
@@ -77,7 +78,7 @@ inline std::string mustReadStringFrom(const Buffer& source) {
 }
 
 // ============================================================
-// Process management (cross-platform)
+// 进程管理（跨平台）
 // ============================================================
 typedef intptr_t TestPid;
 
@@ -161,7 +162,7 @@ inline bool waitForProcess(TestPid pid, int timeout_sec = 10) {
 }
 
 // ============================================================
-// Socket helpers
+// socket 辅助函数
 // ============================================================
 inline bool waitPortReady(uint16_t port, int timeout_sec = 10) {
     for (int i = 0; i < timeout_sec * 10; ++i) {

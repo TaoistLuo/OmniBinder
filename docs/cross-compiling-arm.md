@@ -28,7 +28,6 @@
 
 这些产物会在 ARM 板上运行，应使用交叉工具链构建：
 
-- `libomnibinder.so`
 - `libomnibinder.a`
 - `service_manager`
 - 你的业务服务进程
@@ -192,7 +191,6 @@ cmake .. \
 
 构建完成后，ARM 目标产物通常位于：
 
-- `build-arm/target/lib/libomnibinder.so`
 - `build-arm/target/lib/libomnibinder.a`
 - `build-arm/target/bin/service_manager`
 - `build-arm/target/example/...`（仅当 `OMNIBINDER_BUILD_EXAMPLES=ON`）
@@ -305,7 +303,7 @@ cmake --build . -j$(nproc)
 部署这些文件：
 
 - `service_manager`
-- `libomnibinder.so` 或静态链接产物
+- `libomnibinder.a`（静态库）
 - 你的服务程序
 - 可选：`omni-cli`
 

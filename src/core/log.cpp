@@ -1,5 +1,5 @@
 /**
- * @file        log.c
+ * @file        log.cpp
  * @brief       日志实现 (C++ 编译, C 链接)
  * @details     omni_log_print / omni_log_vprint 的实现。
  *              通过 platform::getLocalTime 获取本地时间，平台无关。

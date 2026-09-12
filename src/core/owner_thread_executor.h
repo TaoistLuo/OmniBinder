@@ -46,143 +46,59 @@
 namespace omnibinder {
 
 template<typename T>
-class ExecutionResult {
-public:
-    ExecutionResult()
-        : ok_(false)
-        , value_(NULL) {
-    }
-
-    static ExecutionResult makeSuccess(const T& value) {
-        ExecutionResult result;
-        result.ok_ = true;
-        result.value_ = new T(value);
-        return result;
-    }
-
-    ExecutionResult(const ExecutionResult& other)
-        : ok_(other.ok_)
-        , value_(other.value_ ? new T(*other.value_) : NULL) {
-    }
-
-    ExecutionResult& operator=(const ExecutionResult& other) {
-        if (this != &other) {
-            delete value_;
-            ok_ = other.ok_;
-            value_ = other.value_ ? new T(*other.value_) : NULL;
-        }
-        return *this;
-    }
-
-    ~ExecutionResult() {
-        delete value_;
-    }
-
-    bool ok() const { return ok_; }
-    const T& value() const { return *value_; }
-
-private:
-    bool ok_;
-    T* value_;
-};
-
-template<>
-class ExecutionResult<void> {
-public:
-    ExecutionResult()
-        : ok_(false) {
-    }
-
-    static ExecutionResult makeSuccess() {
-        ExecutionResult result;
-        result.ok_ = true;
-        return result;
-    }
-
-    bool ok() const { return ok_; }
-
-private:
-    bool ok_;
-};
-
-template<typename T>
 class SyncCallState {
 public:
     SyncCallState()
         : done_(false)
-        , result_(NULL) {
-    }
-
-    ~SyncCallState() {
-        delete result_;
+        , value_() {
     }
 
     void completeSuccess(const T& value) {
-        complete(ExecutionResult<T>::makeSuccess(value));
-    }
-
-    ExecutionResult<T> wait() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cond_.wait(lock, [this]{ return done_; });
-        ExecutionResult<T> result = *result_;
-        return result;
-    }
-
-private:
-    void complete(const ExecutionResult<T>& result) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!done_) {
-            delete result_;
-            result_ = new ExecutionResult<T>(result);
+            value_ = value;
             done_ = true;
             cond_.notify_one();
         }
     }
 
+    T wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait(lock, [this]{ return done_; });
+        return value_;
+    }
+
+private:
     std::mutex mutex_;
     std::condition_variable cond_;
     bool done_;
-    ExecutionResult<T>* result_;
+    T value_;
 };
 
 template<>
 class SyncCallState<void> {
 public:
     SyncCallState()
-        : done_(false)
-        , result_(NULL) {
-    }
-
-    ~SyncCallState() {
-        delete result_;
+        : done_(false) {
     }
 
     void completeSuccess() {
-        complete(ExecutionResult<void>::makeSuccess());
-    }
-
-    ExecutionResult<void> wait() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cond_.wait(lock, [this]{ return done_; });
-        ExecutionResult<void> result = *result_;
-        return result;
-    }
-
-private:
-    void complete(const ExecutionResult<void>& result) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!done_) {
-            delete result_;
-            result_ = new ExecutionResult<void>(result);
             done_ = true;
             cond_.notify_one();
         }
     }
 
+    void wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait(lock, [this]{ return done_; });
+    }
+
+private:
     std::mutex mutex_;
     std::condition_variable cond_;
     bool done_;
-    ExecutionResult<void>* result_;
 };
 
 class OwnerThreadExecutor {
@@ -213,38 +129,66 @@ public:
                             typename std::result_of<F()>::type>::type
     invokeOnOwner(F func) {
         typedef typename std::result_of<F()>::type Result;
-        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
-            return func();
-        }
-
-        std::shared_ptr< SyncCallState<Result> > state(new SyncCallState<Result>());
-        loop_->post([func, state]() {
-            state->completeSuccess(func());
-        });
-
-        ExecutionResult<Result> result = state->wait();
-        if (!result.ok()) {
-            return Result();
-        }
-        return result.value();
+        Result out = Result();
+        tryInvokeOnOwner(func, out);
+        return out;
     }
 
     template<typename F>
     typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value,
                            void>::type
     invokeOnOwner(F func) {
+        tryInvokeOnOwner(func);
+    }
+
+    /*
+     * @brief  尝试把 func 投递到 owner 线程执行
+     * @return true  func 已在 owner 线程（或就地）执行完成；
+     *         false event-loop 已 stop（post 被拒绝），func 未执行，调用方应快速失败
+     * @note   与 EventLoop::stop 的关闭动作通过投递队列锁互斥，不存在
+     *         "post 成功后 loop 停止导致 functor 永不执行"的丢失唤醒窗口
+     */
+    template<typename F>
+    typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
+                            bool>::type
+    tryInvokeOnOwner(F func, typename std::result_of<F()>::type& out) {
+        typedef typename std::result_of<F()>::type Result;
         if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
-            func();
-            return;
+            out = func();
+            return true;
         }
 
-        std::shared_ptr< SyncCallState<void> > state(new SyncCallState<void>());
-        loop_->post([func, state]() {
+        std::shared_ptr< SyncCallState<Result> > state =
+            std::make_shared< SyncCallState<Result> >();
+        if (!loop_->post([func, state]() {
+                state->completeSuccess(func());
+            })) {
+            return false;
+        }
+        out = state->wait();
+        return true;
+    }
+
+    template<typename F>
+    typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value,
+                            bool>::type
+    tryInvokeOnOwner(F func) {
+        if (loop_ == NULL || !hasOwnerThread() || isOwnerThread()) {
             func();
-            state->completeSuccess();
-        });
+            return true;
+        }
+
+        std::shared_ptr< SyncCallState<void> > state =
+            std::make_shared< SyncCallState<void> >();
+        if (!loop_->post([func, state]() {
+                func();
+                state->completeSuccess();
+            })) {
+            return false;
+        }
 
         state->wait();
+        return true;
     }
 
     EventLoop* loop_;

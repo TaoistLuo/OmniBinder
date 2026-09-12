@@ -68,8 +68,6 @@ private:
     void genFieldSerialize(const FieldDef& f, const std::string& obj, std::ostream& os);
     void genFieldDeserialize(const FieldDef& f, const std::string& obj, std::ostream& os);
 
-    std::string toSnakeCase(const std::string& name);
-
     std::string pkg_;
     bool has_error_;
 };

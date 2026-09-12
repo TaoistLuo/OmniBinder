@@ -1,11 +1,11 @@
-// test_integration.cpp - End-to-end integration test
+// test_integration.cpp - 端到端集成测试
 //
-// This test starts a ServiceManager process, then uses OmniRuntime to:
-// 1. Register a service (in a background thread)
-// 2. Discover the service from another client
-// 3. Invoke methods on the service
-// 4. List services / query interfaces
-// 5. Unregister and verify cleanup
+// 本测试启动 ServiceManager 进程，然后使用 OmniRuntime 完成：
+// 1. 注册服务（在后台线程）
+// 2. 从另一个客户端发现服务
+// 3. 调用服务方法
+// 4. 列出服务 / 查询接口
+// 5. 注销并验证清理
 
 #include <gtest/gtest.h>
 #include "test_common.h"
@@ -22,7 +22,7 @@ static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
 static const uint32_t IFACE_ID = fnv1a_32("TestService");
 
 // ============================================================
-// A simple test service
+// 简单的测试服务
 // ============================================================
 class TestService : public Service {
 public:
@@ -62,7 +62,7 @@ private:
 };
 
 // ============================================================
-// Server thread context
+// 服务端线程上下文
 // ============================================================
 struct ServerContext {
     OmniRuntime runtime;
@@ -96,7 +96,7 @@ static void serverThread(void* arg) {
 
     ctx->registered = true;
 
-    // Event loop: process incoming requests
+    // event-loop：处理收到的请求
     while (!ctx->should_stop) {
         ctx->runtime.pollOnce(50);
     }
@@ -106,7 +106,7 @@ static void serverThread(void* arg) {
 }
 
 // ============================================================
-// Test fixture
+// 测试 fixture
 // ============================================================
 class IntegrationTest : public ::testing::Test {
 protected:
@@ -119,12 +119,12 @@ protected:
         ASSERT_GT(sm_pid_, 0);
         ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
-        // Start server in background thread
+        // 在后台线程启动服务端
         server_ctx_ = new ServerContext();
         server_ctx_->sm_port = SM_PORT;
         server_tid_ = std::thread(serverThread, server_ctx_);
 
-        // Wait for service to be registered
+        // 等待服务注册完成
         for (int i = 0; i < 50 && !server_ctx_->registered; i++) {
             std::this_thread::sleep_for(std::chrono::microseconds(100000));
         }
@@ -136,7 +136,7 @@ protected:
             server_ctx_->should_stop = true;
             server_tid_.join();
 
-            // Verify service is gone after unregister
+            // 验证注销后服务已消失
             std::this_thread::sleep_for(std::chrono::microseconds(200000));
             OmniRuntime runtime;
             if (runtime.init("127.0.0.1", SM_PORT) == 0) {
@@ -157,7 +157,7 @@ ServerContext* IntegrationTest::server_ctx_ = nullptr;
 std::thread IntegrationTest::server_tid_;
 
 // ============================================================
-// Tests
+// 测试用例
 // ============================================================
 
 TEST_F(IntegrationTest, ConnectToSm) {

@@ -43,12 +43,8 @@
 
 namespace omnibinder {
 
-/**
- * Buffer - 二进制序列化/反序列化缓冲区
- *
- * 支持自动扩容，小端字节序。
- * 提供所有基础类型的读写方法。
- */
+/* @brief Buffer — 二进制序列化/反序列化缓冲区
+ * @details 支持自动扩容，小端字节序；提供所有基础类型的读写方法。 */
 class Buffer {
 public:
     Buffer() noexcept;
@@ -107,6 +103,7 @@ public:
     void assign(const uint8_t* data, size_t length) noexcept;
     void reserve(size_t capacity) noexcept;
     void resize(size_t new_size) noexcept;
+    void compact() noexcept;
 
     // ---- 写入状态检查 ----
     bool writeOk() const noexcept;

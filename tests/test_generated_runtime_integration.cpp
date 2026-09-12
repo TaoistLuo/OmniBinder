@@ -91,7 +91,10 @@ static const std::string kCppHarnessTemplate = R"CPP(
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "tcp_test_server.h"
+
 using namespace omnibinder;
+using namespace omnibinder::test;
 
 static const uint16_t SM_PORT_REQ = __CPP_REQ_PORT__;
 static const uint16_t SM_PORT_REPLY = __CPP_REPLY_PORT__;
@@ -110,7 +113,7 @@ static void cleanupSM() {
     }
 }
 
-static bool connectTcp(TcpTransport& transport, const std::string& host, uint16_t port) {
+static bool connectTcp(TcpClientTransport& transport, const std::string& host, uint16_t port) {
     int ret = transport.connect(host, port);
     if (ret < 0) return false;
     if (ret == 1) {
@@ -124,13 +127,13 @@ static bool connectTcp(TcpTransport& transport, const std::string& host, uint16_
     return transport.state() == ConnectionState::CONNECTED;
 }
 
-static bool sendMessage(TcpTransport& transport, const Message& msg) {
+static bool sendMessage(TcpClientTransport& transport, const Message& msg) {
     Buffer out;
     msg.serialize(out);
     return transport.send(out.data(), out.size()) == static_cast<int>(out.size());
 }
 
-static bool recvFullMessage(TcpTransport& transport, Message& msg, int timeout_ms) {
+static bool recvFullMessage(TcpClientTransport& transport, Message& msg, int timeout_ms) {
     Buffer input;
     uint8_t buf[2048];
     int loops = timeout_ms / 20;
@@ -154,7 +157,7 @@ static bool recvFullMessage(TcpTransport& transport, Message& msg, int timeout_m
     return false;
 }
 
-static bool registerFakeService(TcpTransport& transport, uint32_t seq, const std::string& name, uint16_t port, const std::string& host_id) {
+static bool registerFakeService(TcpClientTransport& transport, uint32_t seq, const std::string& name, uint16_t port, const std::string& host_id) {
     Message msg(MessageType::MSG_REGISTER, seq);
     ServiceInfo info;
     info.name = name;
@@ -238,7 +241,7 @@ static void serverThread(void* arg) {
     ServerCtx* ctx = static_cast<ServerCtx*>(arg);
     if (ctx->runtime.init("127.0.0.1", SM_PORT_REQ) != 0) return;
     if (ctx->runtime.registerService(&ctx->service) != 0) { ctx->runtime.stop(); return; }
-    ctx->runtime.publishTopic("ItemTopic");
+    ctx->service.PublishItemTopic();
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(20);
     ctx->runtime.unregisterService(&ctx->service);
@@ -252,7 +255,7 @@ enum RawReplyMode {
 };
 
 struct RawReplyCtx {
-    TcpTransportServer server;
+    TcpTestServer server;
     uint16_t port;
     volatile bool ready;
     volatile bool done;
@@ -262,15 +265,10 @@ struct RawReplyCtx {
 
 static void rawReplyThread(void* arg) {
     RawReplyCtx* ctx = static_cast<RawReplyCtx*>(arg);
-    int port = ctx->server.listen("127.0.0.1", 0);
-    if (port <= 0) return;
-    ctx->port = static_cast<uint16_t>(port);
+    if (!ctx->server.start()) return;
+    ctx->port = ctx->server.port();
     ctx->ready = true;
-    ITransport* accepted = NULL;
-    for (int i = 0; i < 100 && !accepted; ++i) {
-        accepted = ctx->server.accept();
-        if (!accepted) std::this_thread::sleep_for(std::chrono::microseconds(50000));
-    }
+    IClientTransport* accepted = ctx->server.waitAccept();
     if (!accepted) { ctx->done = true; return; }
     uint8_t buf[4096];
     for (int i = 0; i < 100; ++i) {
@@ -296,7 +294,7 @@ static void rawReplyThread(void* arg) {
         }
         std::this_thread::sleep_for(std::chrono::microseconds(20000));
     }
-    delete accepted;
+    ctx->server.releaseAccepted();
     ctx->done = true;
 }
 
@@ -312,7 +310,7 @@ int main() {
     for (int i = 0; i < 50 && !server.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(server.registered);
 
-    TcpTransport rogue;
+    TcpClientTransport rogue;
     assert(connectTcp(rogue, "127.0.0.1", server.service.port()));
     Message bad_invoke(MessageType::MSG_INVOKE, 9001);
     bad_invoke.payload.writeUint32(IFACE_ID);
@@ -334,7 +332,7 @@ int main() {
     assert(proxy.connect() == 0);
     std::atomic<int> topic_hits(0);
     proxy.SubscribeItemTopic([&topic_hits](const demo::ItemTopic&) { topic_hits++; });
-    TcpTransport broadcast_rogue;
+    TcpClientTransport broadcast_rogue;
     assert(connectTcp(broadcast_rogue, "127.0.0.1", server.service.port()));
     Message bad_broadcast(MessageType::MSG_BROADCAST, 9002);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
@@ -361,7 +359,7 @@ int main() {
 
     OmniRuntime reg_runtime;
     assert(reg_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
-    TcpTransport sm_conn;
+    TcpClientTransport sm_conn;
     assert(connectTcp(sm_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_conn, 9101, "ItemService", raw_ctx.port, "remote-raw-node"));
 
@@ -395,7 +393,7 @@ int main() {
 
     OmniRuntime reg_status_runtime;
     assert(reg_status_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
-    TcpTransport sm_status_conn;
+    TcpClientTransport sm_status_conn;
     assert(connectTcp(sm_status_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_status_conn, 9102, "ItemService", raw_status_ctx.port, "remote-raw-node"));
 
@@ -428,7 +426,7 @@ int main() {
 
     OmniRuntime reg_length_runtime;
     assert(reg_length_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
-    TcpTransport sm_length_conn;
+    TcpClientTransport sm_length_conn;
     assert(connectTcp(sm_length_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_length_conn, 9103, "ItemService", raw_length_ctx.port, "remote-raw-node"));
 
@@ -467,6 +465,9 @@ static const std::string kCHarnessTemplate = R"CPP(
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "tcp_test_server.h"
+using namespace omnibinder::test;
+
 static const uint16_t SM_PORT_REQ = __C_REQ_PORT__;
 static const uint16_t SM_PORT_REPLY = __C_REPLY_PORT__;
 static const uint32_t METHOD_ECHO = omni_fnv1a_32("echoItem");
@@ -484,7 +485,7 @@ static void cleanupSM() {
     }
 }
 
-static bool connectTcp(omnibinder::TcpTransport& transport, const std::string& host, uint16_t port) {
+static bool connectTcp(omnibinder::TcpClientTransport& transport, const std::string& host, uint16_t port) {
     int ret = transport.connect(host, port);
     if (ret < 0) return false;
     if (ret == 1) {
@@ -498,13 +499,13 @@ static bool connectTcp(omnibinder::TcpTransport& transport, const std::string& h
     return transport.state() == omnibinder::ConnectionState::CONNECTED;
 }
 
-static bool sendMessage(omnibinder::TcpTransport& transport, const omnibinder::Message& msg) {
+static bool sendMessage(omnibinder::TcpClientTransport& transport, const omnibinder::Message& msg) {
     omnibinder::Buffer out;
     msg.serialize(out);
     return transport.send(out.data(), out.size()) == static_cast<int>(out.size());
 }
 
-static bool recvFullMessage(omnibinder::TcpTransport& transport, omnibinder::Message& msg, int timeout_ms) {
+static bool recvFullMessage(omnibinder::TcpClientTransport& transport, omnibinder::Message& msg, int timeout_ms) {
     omnibinder::Buffer input;
     uint8_t buf[2048];
     int loops = timeout_ms / 20;
@@ -528,7 +529,7 @@ static bool recvFullMessage(omnibinder::TcpTransport& transport, omnibinder::Mes
     return false;
 }
 
-static bool registerFakeService(omnibinder::TcpTransport& transport, uint32_t seq, const std::string& name, uint16_t port, const std::string& host_id) {
+static bool registerFakeService(omnibinder::TcpClientTransport& transport, uint32_t seq, const std::string& name, uint16_t port, const std::string& host_id) {
     omnibinder::Message msg(omnibinder::MessageType::MSG_REGISTER, seq);
     omnibinder::ServiceInfo info;
     info.name = name;
@@ -616,7 +617,7 @@ static void serverThread(void* arg) {
     ctx->service = demo_ItemService_stub_create_from_callbacks(&cbs);
     assert(ctx->service != NULL);
     assert(omni_runtime_register_service(ctx->runtime, ctx->service) == 0);
-    assert(omni_runtime_publish_topic(ctx->runtime, "ItemTopic") == 0);
+    assert(omni_runtime_publish_topic(ctx->runtime, "ItemTopic", demo_ItemTopic_TOPIC_IDL_HASH) == 0);
     ctx->registered = true;
     while (!ctx->should_stop) omni_runtime_poll_once(ctx->runtime, 20);
     omni_runtime_unregister_service(ctx->runtime, ctx->service);
@@ -632,7 +633,7 @@ enum RawReplyMode {
 };
 
 struct RawReplyCtx {
-    omnibinder::TcpTransportServer server;
+    TcpTestServer server;
     uint16_t port;
     volatile bool ready;
     volatile bool done;
@@ -642,15 +643,10 @@ struct RawReplyCtx {
 
 static void rawReplyThread(void* arg) {
     RawReplyCtx* ctx = static_cast<RawReplyCtx*>(arg);
-    int port = ctx->server.listen("127.0.0.1", 0);
-    if (port <= 0) return;
-    ctx->port = static_cast<uint16_t>(port);
+    if (!ctx->server.start()) return;
+    ctx->port = ctx->server.port();
     ctx->ready = true;
-    omnibinder::ITransport* accepted = NULL;
-    for (int i = 0; i < 100 && !accepted; ++i) {
-        accepted = ctx->server.accept();
-        if (!accepted) std::this_thread::sleep_for(std::chrono::microseconds(50000));
-    }
+    omnibinder::IClientTransport* accepted = ctx->server.waitAccept();
     if (!accepted) { ctx->done = true; return; }
     uint8_t buf[4096];
     for (int i = 0; i < 100; ++i) {
@@ -676,7 +672,7 @@ static void rawReplyThread(void* arg) {
         }
         std::this_thread::sleep_for(std::chrono::microseconds(20000));
     }
-    delete accepted;
+    ctx->server.releaseAccepted();
     ctx->done = true;
 }
 
@@ -698,7 +694,7 @@ int main() {
     for (int i = 0; i < 50 && !server.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(server.registered);
 
-    omnibinder::TcpTransport rogue;
+    omnibinder::TcpClientTransport rogue;
     assert(connectTcp(rogue, "127.0.0.1", omni_service_port(server.service)));
     omnibinder::Message bad_invoke(omnibinder::MessageType::MSG_INVOKE, 9201);
     bad_invoke.payload.writeUint32(IFACE_ID);
@@ -721,7 +717,7 @@ int main() {
     assert(demo_ItemService_proxy_connect(&proxy) == 0);
     std::atomic<int> topic_hits(0);
     demo_ItemService_proxy_subscribe_item_topic(&proxy, topicCallback, &topic_hits);
-    omnibinder::TcpTransport broadcast_rogue;
+    omnibinder::TcpClientTransport broadcast_rogue;
     assert(connectTcp(broadcast_rogue, "127.0.0.1", omni_service_port(server.service)));
     omnibinder::Message bad_broadcast(omnibinder::MessageType::MSG_BROADCAST, 9202);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
@@ -749,7 +745,7 @@ int main() {
 
     omni_runtime_t* reg_runtime = omni_runtime_create();
     assert(omni_runtime_init(reg_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
-    omnibinder::TcpTransport sm_conn;
+    omnibinder::TcpClientTransport sm_conn;
     assert(connectTcp(sm_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_conn, 9301, "ItemService", raw_ctx.port, std::string()));
 
@@ -789,7 +785,7 @@ int main() {
 
     omni_runtime_t* reg_status_runtime = omni_runtime_create();
     assert(omni_runtime_init(reg_status_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
-    omnibinder::TcpTransport sm_status_conn;
+    omnibinder::TcpClientTransport sm_status_conn;
     assert(connectTcp(sm_status_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_status_conn, 9302, "ItemService", raw_status_ctx.port, std::string()));
 
@@ -829,7 +825,7 @@ int main() {
 
     omni_runtime_t* reg_length_runtime = omni_runtime_create();
     assert(omni_runtime_init(reg_length_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
-    omnibinder::TcpTransport sm_length_conn;
+    omnibinder::TcpClientTransport sm_length_conn;
     assert(connectTcp(sm_length_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_length_conn, 9303, "ItemService", raw_length_ctx.port, std::string()));
 
@@ -874,6 +870,7 @@ protected:
                " -D'OMNIBINDER_VERSION_PATCH=" + std::string(OMNI_VERSION_PATCH) + "'" +
                " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/include") +
                " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/src") +
+               " -I" + shellQuote(std::string(OMNI_SOURCE_DIR) + "/tests") +
                " -I" + shellQuote(dir_);
     }
 
@@ -882,7 +879,9 @@ protected:
     }
 
     static void SetUpTestSuite() {
-        system("pkill -f 'service_manager --port 1996' 2>/dev/null || true");
+        // 只清理本测试使用的 19961-19964 端口：原模式 '--port 1996' 会误杀
+        // 并发的 test_heartbeat_reconnect 生命周期 SM（19966），导致 -j4 下必然失败
+        system("pkill -f 'service_manager --port 1996[1-4]' 2>/dev/null || true");
         std::this_thread::sleep_for(std::chrono::microseconds(200000));
 
         char dir_template[] = "/tmp/omnibinder_generated_runtime_XXXXXX";

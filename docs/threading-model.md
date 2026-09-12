@@ -161,7 +161,7 @@ std::thread loop_thread([&runtime]() {
     // 其他线程安全发起调用
     std::thread worker([&runtime]() {
     omnibinder::Buffer req, resp;
-    runtime.invoke("SensorService", 0x1234, 0x1, req, resp, 3000);
+    runtime.invoke("SensorService", 0x1234, 0x1, 0, req, resp, 3000);
 });
 ```
 
@@ -194,7 +194,7 @@ while (running) {
 
 - `connectService()` / `disconnectService()` 通过 `callSerialized` 在 owner event-loop 串行执行
 - 连接建立过程中同步等待 SM 回复（`sendSMRequestAndWaitReply`）
-- `isServiceConnected()` 可从任意线程调用（`ConnectionManager::getConnection` 是线程安全的）
+- `isServiceConnected()` 可从任意线程调用（内部经 `callSerialized` 串行到 owner event-loop；`ConnectionManager::getConnection` 本身无锁，只在 owner 线程访问）
 
 ### 7.2 自动重连
 
@@ -205,12 +205,12 @@ while (running) {
 ### 7.3 心跳
 
 - 心跳定时器在 event-loop 线程执行
-- 心跳消息通过 `conn_mgr_->sendMessage` 发送（线程安全）
+- 心跳消息在 owner event-loop 线程通过 `conn_mgr_->sendMessage` 发送（该方法不加锁，仅可在 owner 线程调用）
 - 心跳响应（`MSG_HEARTBEAT_ACK`）在 event-loop 线程处理
 - 心跳超时检测在 event-loop 线程执行
 
 ### 7.4 Proxy 基类
 
-- `ServiceProxyBase::connect()` 内部调用 `callSerialized`，线程安全
+- `ServiceProxyBase::connect()` 通过 runtime 公共 API 间接走 `callSerialized`，线程安全
 - `enableAutoReconnect()` / `startHeartbeat()` 通过 `callSerialized` 串行执行
 - 死亡通知回调（`onServiceDeath`）在 event-loop 线程执行

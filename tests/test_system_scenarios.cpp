@@ -47,9 +47,10 @@ static const uint16_t SCENARIO_SM_PORT = 19920;
 
 // ─── 场景 1: 纯客户端（无注册服务）SM 重启后自动重连 ───
 //
-// 这是之前缺失的测试：客户端未注册任何服务时，sendHeartbeat 的
-// for(local_services_) 循环为空，不会调用 sendToSM，因此重连永远不触发。
-// 修复后 sendHeartbeat 开头无条件检查 reconnectServiceManagerIfNeeded。
+// @brief 纯客户端在 SM 重启后自动重连
+// @details 这是之前缺失的测试：客户端未注册任何服务时，sendHeartbeat 的
+//          for(local_services_) 循环为空，不会调用 sendToSM，因此重连永远不触发。
+//          修复后 sendHeartbeat 开头无条件检查 reconnectServiceManagerIfNeeded。
 
 TEST(SmRestartPureClient, ClientReconnectsAfterSmRestart) {
     // 启动 SM

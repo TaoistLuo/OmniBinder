@@ -4,7 +4,7 @@
  * @details     管理服务死亡通知的订阅关系。客户端可订阅目标服务的死亡事件，
  *              当目标服务断开或心跳超时时，DeathNotifier 返回所有需要通知的
  *              订阅者 fd 列表。内部维护双向映射（服务→订阅者、订阅者→服务），
- *              支持按 fd 批量清理断开的订阅者。线程安全。
+ *              支持按 fd 批量清理断开的订阅者。仅 ServiceManager owner 线程访问。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -39,55 +39,76 @@
 #include <map>
 #include <set>
 #include <vector>
-#include <mutex>
 
 namespace omnibinder {
 
 // ============================================================
-// DeathNotifier - Manages death notification subscriptions
+// DeathNotifier - 管理死亡通知订阅关系
 //
-// Services can subscribe to be notified when a target service
-// dies (disconnects or times out). When a service dies, all
-// subscribers are notified via their control connection fd.
+// @brief  管理死亡通知订阅关系
+// @details 服务可订阅目标服务死亡（断开或超时）的通知。服务死亡时，
+//          通过其控制连接 fd 通知全部订阅者。
 // ============================================================
 class DeathNotifier {
 public:
     DeathNotifier();
     ~DeathNotifier();
 
-    // Disable copy
+    // 禁止拷贝
     DeathNotifier(const DeathNotifier&) = delete;
     DeathNotifier& operator=(const DeathNotifier&) = delete;
 
-    // Subscribe: subscriber_fd wants to be notified when target_service dies.
-    // Returns true if the subscription was added (false if already subscribed).
+    /*
+     * @brief  订阅目标服务的死亡通知
+     * @param[in]  subscriber_fd  订阅者控制连接 fd
+     * @param[in]  target_service 目标服务名称
+     * @return true 表示订阅成功；重复订阅返回 false
+     */
     bool subscribe(int subscriber_fd, const std::string& target_service);
 
-    // Unsubscribe: subscriber_fd no longer wants death notifications for target_service.
-    // Returns true if the subscription was found and removed.
+    /*
+     * @brief  取消订阅目标服务的死亡通知
+     * @param[in]  subscriber_fd  订阅者控制连接 fd
+     * @param[in]  target_service 目标服务名称
+     * @return true 表示订阅已找到并移除
+     */
     bool unsubscribe(int subscriber_fd, const std::string& target_service);
 
-    // Notify: a service has died. Returns the list of subscriber fds that
-    // should be notified. Also removes all subscriptions for the dead service.
+    /*
+     * @brief  通知服务死亡，返回需要通知的订阅者
+     * @param[in]  dead_service_name 死亡服务名称
+     * @return 需要通知的订阅者 fd 列表
+     * @note   同时移除该死亡服务的全部订阅关系
+     */
     std::vector<int> notify(const std::string& dead_service_name);
 
-    // Remove all subscriptions where subscriber_fd is the subscriber.
-    // Called when a subscriber disconnects.
+    /*
+     * @brief  移除该订阅者的全部订阅关系
+     * @param[in]  subscriber_fd 订阅者控制连接 fd
+     * @note   订阅者断开连接时调用
+     */
     void removeSubscriber(int subscriber_fd);
 
-    // Get the list of services that a subscriber is watching.
+    /*
+     * @brief  获取该订阅者关注的服务列表
+     * @param[in]  subscriber_fd 订阅者控制连接 fd
+     * @return 被关注的服务名列表
+     */
     std::vector<std::string> getWatchedServices(int subscriber_fd) const;
 
-    // Get the number of subscribers for a given service.
+    /*
+     * @brief  获取指定服务的订阅者数量
+     * @param[in]  service_name 服务名称
+     * @return 订阅者数量
+     */
     size_t subscriberCount(const std::string& service_name) const;
 
 private:
-    mutable std::mutex mutex_;
 
-    // target_service -> set of subscriber fds
+    // target_service -> 订阅者 fd 集合
     std::map<std::string, std::set<int>> service_to_subscribers_;
 
-    // subscriber_fd -> set of target services
+    // subscriber_fd -> 目标服务集合
     std::map<int, std::set<std::string>> subscriber_to_services_;
 };
 

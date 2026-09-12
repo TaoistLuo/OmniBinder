@@ -100,7 +100,7 @@ PID      ROLE     LOG   PROCESS              SERVICES
 
 查看服务的接口和方法定义。支持两种模式：
 
-#### 2.1 基础模式（不指定 IDL）
+#### 3.1 基础模式（不指定 IDL）
 
 显示方法签名的类型名称。
 
@@ -129,7 +129,7 @@ Service: SensorService
       - ResetSensor(int32) -> void  (id=0x7f2b95ee)
 ```
 
-#### 2.2 详细模式（指定 IDL）
+#### 3.2 详细模式（指定 IDL）
 
 展开结构体的完整字段定义。
 
@@ -182,7 +182,7 @@ Service: SensorService
 
 调用服务的指定方法。支持两种输入格式：
 
-#### 3.1 Hex 模式（不指定 IDL）
+#### 4.1 Hex 模式（不指定 IDL）
 
 使用十六进制字符串作为输入，输出也是十六进制。
 
@@ -210,7 +210,7 @@ Response (status=OK, 38 bytes, 0.75 ms):
   Hex: 01 00 00 00 00 00 00 00 80 39 40 ...
 ```
 
-#### 3.2 JSON 模式（指定 IDL）
+#### 4.2 JSON 模式（指定 IDL）
 
 使用 IDL 类型信息编码参数；可解码的非 `void` 响应显示为格式化 JSON，否则回退为 hex（解码失败时同时显示警告）。
 

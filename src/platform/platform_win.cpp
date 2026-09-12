@@ -142,7 +142,7 @@ int connectSocket(SocketFd fd, const std::string& host, uint16_t port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) <= 0) {
-        // Try DNS resolution
+        // 尝试 DNS 解析
         struct addrinfo hints, *result;
         memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
@@ -300,16 +300,16 @@ bool waitFdReadable(int fd, int timeout_ms) {
 }
 
 // ============================================================
-// Eventfd — Named Pipe implementation (replaces UDS exchange)
+// Eventfd — Named Pipe 实现（替代 UDS 交换）
 // ============================================================
 
-// Forward declarations from event_backend_win.cpp
+// 来自 event_backend_win.cpp 的前置声明
 bool iocpRegisterPipeFd(int fd, HANDLE hPipe, bool is_server);
 void iocpUnregisterPipeFd(int fd);
 int  iocpGetWakeupFd();
 bool iocpPostWakeup();
 
-// Eventfd entry with pipe name for handshake token serialization
+// Eventfd 表项：携带 pipe 名用于握手令牌序列化
 struct EventFdEntryV2 {
     HANDLE      pipe;
     bool        is_server;
@@ -317,10 +317,10 @@ struct EventFdEntryV2 {
 };
 
 thread_local std::map<int, EventFdEntryV2> g_efd_map2;
-static std::atomic<int>                     g_efd_next_2{1};  // process-wide: prevents pipe name collision across threads
-// Follow-up: thread-local eventfd/IOCP registry ownership across thread and
-// process teardown is not verified on Windows; keep this broader issue out of
-// the handshake change until it can be tested with a Windows toolchain.
+static std::atomic<int>                     g_efd_next_2{1};  // 进程级：避免跨线程的 pipe 名冲突
+// 待跟进：thread-local 的 eventfd/IOCP 注册表在线程与进程退出时的所有权问题
+// 在 Windows 上尚未验证；在能用 Windows 工具链测试之前，
+// 不把这更大范围的问题并入握手改动。
 
 static std::string makePipeName(const std::string& name) {
     std::string path = "\\\\.\\pipe\\omnibinder_evt_";
@@ -354,16 +354,16 @@ int openNamedEventFdByPipeName(const std::string& pipe_name) {
 thread_local bool g_efd_first_call = true;
 
 int createEventFd() {
-    // Legacy/risky first-call heuristic: the first call is assumed to be the
-    // EventLoop cross-thread wakeup; later calls are SHM notifications.
-    // Use the IOCP magic singleton — no pipe needed within a single process.
+    // 遗留且有风险的首调用启发式：假定首次调用是 EventLoop 跨线程唤醒；
+    // 后续调用是 SHM 通知。
+    // 使用 IOCP 魔法单例——单进程内无需 pipe。
     if (g_efd_first_call) {
         g_efd_first_call = false;
         OMNI_LOG_DEBUG(LOG_TAG, "createEventFd: first call, returning IOCP wakeup fd");
         return iocpGetWakeupFd();
     }
-    // Subsequent calls are from SHM transport for cross-process notification.
-    // Each gets a uniquely-named pipe whose name is serialized by handshakeSend.
+    // 后续调用来自 SHM 传输，用于跨进程通知。
+    // 每个调用获得唯一命名的 pipe，其名称由 handshakeSend 序列化。
     int id = g_efd_next_2.fetch_add(1);
     std::string name = "auto_" + std::to_string(GetCurrentProcessId())
                        + "_" + std::to_string(id);
@@ -397,10 +397,6 @@ int createNamedEventFd(const std::string& name) {
     return fd;
 }
 
-int openNamedEventFd(const std::string& name) {
-    return openNamedEventFdByPipeName(makePipeName(name));
-}
-
 bool eventFdNotify(int efd) {
     if (efd == iocpGetWakeupFd()) {
         return iocpPostWakeup();
@@ -428,10 +424,10 @@ bool eventFdNotify(int efd) {
 
 bool eventFdConsume(int efd) {
     if (efd == iocpGetWakeupFd()) return true;
-    // The async IOCP ReadFile posted by event_backend_win.cpp already
-    // consumed the notification byte when the completion fired.
-    // eventFdConsume is called for parity with Linux (eventfd read to
-    // clear the counter) but is a no-op on Windows.
+    // event_backend_win.cpp 投递的异步 IOCP ReadFile 已在完成事件触发时
+    // 消费了通知字节。
+    // eventFdConsume 为与 Linux 保持对等而保留（Linux 通过读 eventfd
+    // 清除计数），但在 Windows 上为空操作。
     return true;
 }
 
@@ -588,13 +584,12 @@ void getLocalTime(struct tm* out_tm, int* out_ms) {
 }
 
 // ============================================================
-// handshake channel — TCP loopback plus Named Pipe tokens on Windows
+// handshake channel — Windows 上基于 TCP loopback 加 Named Pipe 令牌
 //
-// Linux:  AF_UNIX + SCM_RIGHTS for fd transfer
-// Windows: TCP on 127.0.0.1.  fd values are sent as pipe NAME
-//          strings over the control connection; the receiver
-//          opens them via CreateFile.
-// Port:    derived from path hash (50000 + hash % 10000)
+// Linux:   AF_UNIX + SCM_RIGHTS 传递 fd
+// Windows: 基于 127.0.0.1 的 TCP。fd 值以 pipe 名称字符串的形式
+//          通过控制连接发送；接收方通过 CreateFile 打开它们。
+// 端口:    由路径哈希派生（50000 + hash % 10000）
 // ============================================================
 
 static uint16_t udsPathToPort(const std::string& path) {
@@ -820,17 +815,17 @@ bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
     int wire_fds[2] = {-1, -1};
     for (int i = 0; i < fd_count; ++i) wire_fds[i] = fds[i];
 
-    // A Windows Named Pipe endpoint is single-client. Replace the logical
-    // shared request notification with a server-owned per-client endpoint.
+    // Windows Named Pipe 端点仅支持单客户端。将逻辑上共享的请求通知
+    // 替换为服务端持有的 per-client 端点。
     if (fd_count == 2) {
         ch->local_notify_fd = createEventFd();
         if (ch->local_notify_fd < 0) return false;
         wire_fds[1] = ch->local_notify_fd;
     }
 
-    // Wire format:
+    // 线上格式：
     //   [uint32_t data_len][uint8_t data[data_len]][uint32_t fd_count]
-    //   [for each fd: uint32_t name_len][char name[name_len]]
+    //   [每个 fd: uint32_t name_len][char name[name_len]]
     uint32_t dlen = static_cast<uint32_t>(len);
     size_t total = sizeof(uint32_t) * 2 + len;
     for (int i = 0; i < fd_count; ++i) {
@@ -970,10 +965,6 @@ void setParentDeathSignal() {
 
 int handshakeGetFd(handshake_channel* ch) { return ch ? static_cast<int>(ch->fd) : -1; }
 int handshakeGetListenerFd(handshake_listener* l) { return l ? static_cast<int>(l->fd) : -1; }
-
-bool isShmHandshakeAvailable() {
-    return true;  // Emulated via Named Pipes
-}
 
 void memoryBarrier() {
     MemoryBarrier();

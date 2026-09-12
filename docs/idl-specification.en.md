@@ -117,7 +117,7 @@ Reserved keywords:
 package  import   struct  service  topic  publishes
 bool     int8     uint8   int16    uint16
 int32    uint32   int64   uint64
-float32  float64  string  bytes
+float32  float64  string  bytes   void
 array
 ```
 
@@ -157,7 +157,7 @@ struct Example {
 
 | IDL type | C type | C++ type |
 |---|---|---|
-| `array<T>` | `T*` + `uint32_t count` | `std::vector<T>` |
+| `array<T>` | generated array struct (`T* data` + `uint32_t count`; string/bytes elements additionally carry `uint32_t* lens`) | `std::vector<T>` |
 
 ### 4.3 User-defined struct types
 
@@ -207,7 +207,6 @@ struct SensorData {
     SensorData();
     bool serialize(omnibinder::Buffer& buf) const;
     bool deserialize(omnibinder::Buffer& buf);
-    size_t serializedSize() const;
 };
 
 }
@@ -267,7 +266,8 @@ Notes:
 
 - at the serialization layer, a `topic` is equivalent to a `struct`
 - the semantic difference is that a topic is declared through `publishes` inside a `service`
-- every topic gets a unique `topic_id` derived from package + topic name
+- every topic gets a unique `topic_id` = `fnv1a_32(topic_name)`; generated code also exposes `TOPIC_ID` / `TOPIC_IDL_HASH` constants (C++) and `<pkg>_<Topic>_TOPIC_ID` / `<pkg>_<Topic>_TOPIC_IDL_HASH` macros (C)
+- the generated C `<pkg>_<Topic>_init()` zero-initializes all fields via `memset`
 
 ---
 
@@ -312,7 +312,9 @@ public:
     virtual SensorData GetLatestData() = 0;
     virtual void ResetSensor(int32_t sensor_id) = 0;
 
+    void PublishSensorUpdate();
     void BroadcastSensorUpdate(const SensorUpdate& msg);
+    void PublishSystemAlert();
     void BroadcastSystemAlert(const SystemAlert& msg);
 };
 ```
@@ -320,19 +322,20 @@ public:
 Generated C++ Proxy shape:
 
 ```cpp
-class SensorServiceProxy {
+class SensorServiceProxy : public omnibinder::ServiceProxyBase {
 public:
-    explicit SensorServiceProxy(omnibinder::OmniRuntime& runtime);
-    int connect();
-    void disconnect();
-    bool isConnected() const;
+    explicit SensorServiceProxy(omnibinder::OmniRuntime& runtime)
+        : ServiceProxyBase(runtime, "SensorService") {}
+    ~SensorServiceProxy() {}
 
     int SetThreshold(const ControlCommand& cmd, StatusResponse& out);
     int GetLatestData(SensorData& out);
     void ResetSensor(int32_t sensor_id);
 
     void SubscribeSensorUpdate(const std::function<void(const SensorUpdate&)>& callback);
-    void OnServiceDied(const std::function<void()>& callback);
+
+    // connect(), disconnect(), isConnected(), OnServiceDied(), ... are inherited
+    // from ServiceProxyBase.
 };
 ```
 
@@ -341,19 +344,29 @@ Generated C API shape:
 ```c
 typedef struct demo_SensorService_proxy {
     omni_runtime_t* runtime;
-    uint8_t connected;
+    int connected;
+    int auto_reconnect_enabled;
+    uint32_t reconnect_interval_ms;
+    void (*death_callback)(void* user_data);
+    void* death_user_data;
+    void* _sub_ctxs[8];          /* at most 8 topic subscriptions */
+    const char* _sub_topics[8];
+    int _sub_ctx_count;
 } demo_SensorService_proxy;
 
 void demo_SensorService_proxy_init(demo_SensorService_proxy* p, omni_runtime_t* runtime);
 int  demo_SensorService_proxy_connect(demo_SensorService_proxy* p);
-int  demo_SensorService_proxy_SetThreshold(demo_SensorService_proxy* p,
-                                           const demo_ControlCommand* cmd,
-                                           common_StatusResponse* result);
+void demo_SensorService_proxy_disconnect(demo_SensorService_proxy* p);
+
+/* Method names are snake_case; IDL void methods also return void in the C proxy. */
+int  demo_SensorService_proxy_set_threshold(demo_SensorService_proxy* p,
+                                            const struct demo_ControlCommand* cmd,
+                                            common_StatusResponse* result);
 ```
 
 ---
 
-## 7. Runtime boundary contract
+### 7.1 Runtime boundary contract
 
 The generated Stub/Proxy code now follows an explicit-status runtime contract:
 
@@ -373,6 +386,8 @@ The generated C runtime callback contract is also explicit-status based:
 typedef int (*omni_invoke_callback_t)(uint32_t method_id,
     const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
 ```
+
+C handler typedefs are `void`-returning with out parameters (`<pkg>_<Service>_<snake_method>_handler_t`; `string`/`bytes` results use `char**`/`uint8_t**` plus `uint32_t*`), and `<pkg>_<Service>_stub_create_from_callbacks()` registers each method id together with its IDL hash through `omni_service_add_method_ex()`.
 
 ## 8. Strict semantic validation
 
@@ -409,7 +424,7 @@ method_id = fnv1a_32(method_name)
 Generated from topic name:
 
 ```text
-topic_id = fnv1a_32(package_name + "." + topic_name)
+topic_id = fnv1a_32(topic_name)
 ```
 
 ### 9.4 FNV-1a example
@@ -424,6 +439,13 @@ uint32_t fnv1a_32(const char* str) {
     return hash;
 }
 ```
+
+### 9.5 IDL compatibility hashes
+
+Besides the runtime IDs above, generated code computes an IDL hash for every method and topic (method name + parameter/return types, topic name + field types) and reports it on registration/subscription, so the runtime can verify that publisher and subscriber agree on the IDL:
+
+- C++: the `<Topic>::TOPIC_IDL_HASH` constant; method hashes are carried in `MethodInfo.idl_hash`
+- C: the `<pkg>_<Topic>_TOPIC_IDL_HASH` and `<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` macros; `<pkg>_<Service>_stub_create_from_callbacks()` registers method hashes through `omni_service_add_method_ex()`
 
 ---
 
@@ -538,7 +560,7 @@ omnic_generate(
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
-target_link_libraries(my_service omnibinder)
+target_link_libraries(my_service OmniBinder::omnibinder_static)
 ```
 
 The `omnic_generate` helper will:

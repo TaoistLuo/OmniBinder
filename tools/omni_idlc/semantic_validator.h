@@ -39,8 +39,13 @@
 
 namespace omnic {
 
-// Validates all packages reachable through the parse context and stably orders
-// local structs so by-value dependencies are declared before their users.
+/* @brief 验证解析上下文中所有可达包的语义
+ * @param[in,out] root 根 AST（本地 struct 会按依赖顺序重排）
+ * @param[in] context 解析上下文
+ * @param[out] error 失败时的错误信息
+ * @return 验证通过返回 true
+ * @note 对本地 struct 稳定排序，确保按值依赖先于其使用者声明
+ */
 bool validateSemantics(AstFile& root, ParseContext& context, std::string& error);
 
 } // namespace omnic

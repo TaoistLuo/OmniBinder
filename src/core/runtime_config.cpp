@@ -15,17 +15,22 @@ namespace omnibinder {
 void OmniRuntime::Impl::setHeartbeatInterval(uint32_t ms) {
     callSerialized([this, ms]() {
         heartbeat_interval_ms_ = ms;
+        if (loop_ && initialized_ && heartbeat_timer_id_ > 0) {
+            loop_->cancelTimer(heartbeat_timer_id_);
+            heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
+                [this]() { this->sendHeartbeat(); }, true);
+        }
     });
 }
 
 void OmniRuntime::Impl::setRegisterHost(const std::string& host) {
-    callSerialized([this, host]() {
-        register_host_ = host;
-    });
+    // register_host_ 统一由 api_mutex_ 保护：设置/读取/resolveRegisterHost 同一锁纪律。
+    // 不再经 callSerialized（owner 线程执行时不持锁），避免与带锁读取并发产生数据竞争
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    register_host_ = host;
 }
 
 std::string OmniRuntime::Impl::getRegisterHost() const {
-    // 直接加锁拷贝，避免返回内部引用导致跨线程数据竞争
     std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     return register_host_;
 }
@@ -36,18 +41,16 @@ void OmniRuntime::Impl::setDefaultTimeout(uint32_t ms) {
     });
 }
 
+void OmniRuntime::Impl::setReplySendTimeout(uint32_t ms) {
+    callSerialized([this, ms]() {
+        reply_send_timeout_ms_ = ms;
+    });
+}
+
 std::string OmniRuntime::Impl::hostId() const {
     // 直接加锁拷贝，避免返回内部引用导致跨线程数据竞争
     std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     return host_id_;
-}
-
-// ============================================================
-// 线程模型基础设施
-// ============================================================
-
-bool OmniRuntime::Impl::isOwnerThread() const {
-    return owner_executor_.isOwnerThread();
 }
 
 // ============================================================
@@ -61,9 +64,8 @@ void OmniRuntime::Impl::updateConnectionStats(RuntimeStats& stats) const {
         stats.shm_connections = 0;
         return;
     }
-    stats.active_connections = conn_mgr_->activeConnectionCount();
-    stats.tcp_connections = conn_mgr_->tcpConnectionCount();
-    stats.shm_connections = conn_mgr_->shmConnectionCount();
+    conn_mgr_->connectionCounts(stats.active_connections, stats.tcp_connections,
+                                stats.shm_connections);
 }
 
 int OmniRuntime::Impl::getStats(RuntimeStats& stats) {
@@ -92,7 +94,16 @@ int OmniRuntime::Impl::resetStatsInternal() {
 
 void OmniRuntime::Impl::clearServiceCache() {
     callSerialized([this]() {
-        service_cache_.clear();
+        for (std::map<std::string, ServiceState>::iterator it = services_.begin();
+             it != services_.end();) {
+            it->second.info = ServiceInfo();
+            it->second.has_info = false;
+            if (!it->second.has_reconnect && !it->second.has_death && !it->second.has_heartbeat) {
+                it = services_.erase(it);
+            } else {
+                ++it;
+            }
+        }
     });
 }
 

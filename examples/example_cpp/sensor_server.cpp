@@ -186,8 +186,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    runtime.publishTopic("SensorUpdate");
-    runtime.publishTopic("AsyncResultReady");
+    service.PublishSensorUpdate();
+    service.PublishAsyncResultReady();
 
     std::printf("SensorService registered on port %u\n", service.port());
     std::printf("Demo service is ready. Press Ctrl+C to stop.\n\n");

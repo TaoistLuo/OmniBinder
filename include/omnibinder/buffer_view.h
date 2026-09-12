@@ -40,13 +40,9 @@
 
 namespace omnibinder {
 
-/**
- * BufferView - 非拥有只读缓冲区视图
- *
- * 只持有外部指针 + 长度 + 游标，零分配。
- * 提供 Buffer 的全部 tryRead 方法，签名一致。
- * 不提供任何写入方法。
- */
+/* @brief BufferView — 非拥有只读缓冲区视图
+ * @details 只持有外部指针 + 长度 + 游标，零分配；提供 Buffer 的全部 tryRead 方法，
+ *          签名一致；不提供任何写入方法。 */
 class BufferView {
 public:
     BufferView(const uint8_t* data, size_t length) noexcept

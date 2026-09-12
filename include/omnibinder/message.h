@@ -153,39 +153,51 @@ struct Message {
     Message();
     Message(MessageType type, uint32_t seq);
 
-    // 设置消息类型
-    void setType(MessageType type);
     MessageType getType() const;
-
-    // 序列号
-    void setSequence(uint32_t seq);
     uint32_t getSequence() const;
 
-    // 将整个消息序列化为字节流（头 + 载荷）
+    /* @brief 将整个消息序列化为字节流（头 + 载荷） */
     bool serialize(Buffer& output) const;
 
-    // 从字节流解析消息头（不消费载荷数据）
-    // 返回: true 表示头部解析成功
+    /* @brief 原地序列化：把 header 写到 payload 前部（payload 右移），
+     *        使 payload 直接成为完整线上帧，省去再分配一个序列化 Buffer。
+     * @return true 成功；false 载荷过大或分配失败
+     * @note   成功后用 payload.data()/payload.size() 作为待发送字节；
+     *         本对象随后不能再当作消息体使用 */
+    bool serializeInPlace();
+
+    /* @brief 从字节流解析消息头（不消费载荷数据）
+     * @return true 表示头部解析成功 */
     static bool parseHeader(const uint8_t* data, size_t length, MessageHeader& header);
 
-    // 验证消息头
+    /* @brief 验证消息头 */
     static bool validateHeader(const MessageHeader& header);
 };
 
 // ============================================================
-// 消息类型转字符串（调试用）
+// 消息帧提取
 // ============================================================
-const char* messageTypeToString(MessageType type);
+enum class FrameStatus { NeedMore, Complete, Corrupt };
+
+/* @brief 从字节流中提取一个完整消息帧（不推进任何游标）
+ * @param[in]  data       缓冲区起始地址
+ * @param[in]  avail      当前可读字节数
+ * @param[out] header     解析出的消息头
+ * @param[out] frame_size 完整帧字节数（仅 Complete 时有效）
+ * @return NeedMore 数据不足 / Complete 帧完整 / Corrupt 头部非法 */
+FrameStatus tryExtractFrame(const uint8_t* data, size_t avail,
+                            MessageHeader& header, size_t& frame_size);
 
 // ============================================================
-// 序列号生成器
+// 消息类型转字符串（调试用）
 // ============================================================
-uint32_t nextSequenceNumber();
+/* @brief 消息类型转字符串（调试用） */
+const char* messageTypeToString(MessageType type);
 
 // ============================================================
 // 辅助函数：序列化/反序列化 ServiceInfo 到 Buffer
 // ============================================================
-void serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
+bool serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
 
 bool serializePublishedTopicsReply(bool found,
                                    const std::vector<std::string>& topics,
@@ -235,7 +247,7 @@ bool deserializePublishedTopicsReply(BufT& buf, bool& found,
     return true;
 }
 
-void serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf);
+bool serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf);
 
 template <typename BufT>
 bool deserializeRuntimeInfo(BufT& buf, RuntimeInfo& info) {
@@ -289,7 +301,7 @@ bool deserializeServiceInfo(BufT& buf, ServiceInfo& info) {
     return true;
 }
 
-void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf);
+bool serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf);
 
 template <typename BufT>
 bool deserializeInterfaceInfo(BufT& buf, InterfaceInfo& info) {

@@ -58,7 +58,7 @@ struct MessageHeader {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(MessageHeader) == 16, "MessageHeader size mismatch");
+const size_t MESSAGE_HEADER_SIZE = 16;
 
 } // namespace omnibinder
 ```
@@ -113,7 +113,7 @@ static_assert(sizeof(MessageHeader) == 16, "MessageHeader size mismatch");
 | 0x0101 | MSG_INVOKE_REPLY | Server -> Client | 接口调用响应 |
 | 0x0102 | MSG_INVOKE_ONEWAY | Client -> Server | 单向调用（服务端不发送回复） |
 | 0x0110 | MSG_BROADCAST | Publisher -> Subscriber | 广播消息 |
-| 0x0111 | MSG_SUBSCRIBE_BROADCAST | Subscriber -> Publisher | 订阅者直连发布者后发送，携带 topic_id |
+| 0x0111 | MSG_SUBSCRIBE_BROADCAST | Subscriber -> Publisher | 订阅者直连发布者后发送，携带 topic_id 与 topic_name |
 
 ### 3.3 C++ 枚举定义
 
@@ -240,17 +240,21 @@ service_handle:
 
 ### 4.3 心跳（MSG_HEARTBEAT）
 
-```
-（无 payload）
-```
-
-### 4.4 心跳响应（MSG_HEARTBEAT_ACK）
+控制通道心跳（服务 -> SM）携带服务名：
 
 ```
 +------------------+------------------+
 | service_name_len | service_name     |
 | (4 bytes)        | (N bytes)        |
 +------------------+------------------+
+```
+
+> 数据面服务间心跳复用同一消息类型，payload 为空。
+
+### 4.4 心跳响应（MSG_HEARTBEAT_ACK）
+
+```
+（无 payload）
 ```
 
 ### 4.5 服务查询（MSG_LOOKUP）
@@ -281,7 +285,7 @@ found:
 客户端判断逻辑：
   if (本机 host_id == 响应中的 host_id):
       创建 per-client SHM
-      通过服务端 UDS (/tmp/<server_shm_name_without_slash>.sock) 交换 SHM 名称和 eventfd
+      通过服务端 UDS 握手路径（/tmp/omni_<fnv1a_32(server_shm_name) 的十六进制>.sock）交换 SHM 名称和 eventfd
       若 SHM 握手失败，则 fallback TCP
   else:
       使用 TCP 连接（host:port）
@@ -327,13 +331,15 @@ host_id, shm_config, interfaces[]）。
 ### 4.11 声明发布话题（MSG_PUBLISH_TOPIC）
 
 ```
-+------------------+------------------+------------------------------+
-| topic_name_len   | topic_name       | serialized publisher ServiceInfo |
-| (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       |
-+------------------+------------------+------------------------------+
-
-当前实现会在 ServiceInfo 之后兼容性尝试读取可选 idl_hash；发送端当前不写该字段。
++------------------+------------------+------------------------------+------------------+
+| topic_name_len   | topic_name       | serialized publisher ServiceInfo | idl_hash     |
+| (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       | (4 bytes, 可选)  |
++------------------+------------------+------------------------------+------------------+
 ```
+
+idl_hash 为发布者声明的 topic IDL 哈希（0 表示未声明）；订阅者声明了期望哈希时，
+SM 会将该哈希经 MSG_SUBSCRIBE_TOPIC_REPLY / MSG_TOPIC_PUBLISHER_NOTIFY 转发给订阅者用于校验。
+发送端始终写该字段；为兼容旧客户端，SM 读取时允许其缺省（视为 0）。
 
 ### 4.12 订阅话题（MSG_SUBSCRIBE_TOPIC）
 
@@ -353,14 +359,22 @@ host_id, shm_config, interfaces[]）。
 +------------------+------------------+
 ```
 
+idl_hash 为该 topic 当前发布者声明的哈希；无发布者时为 0。订阅者期望哈希非 0 时：
+- 发布者已上线：订阅请求直接返回 `ERR_IDL_MISMATCH`，不建立数据面连接；
+- 发布者尚未上线：订阅成功，待 MSG_TOPIC_PUBLISHER_NOTIFY 到达时校验，
+  不匹配则通过 on_err 回调上报 `ERR_IDL_MISMATCH` 并摘除订阅。
+
 ### 4.13 话题发布者通知（MSG_TOPIC_PUBLISHER_NOTIFY）
 
 ```
-+------------------+------------------+------------------------------+
-| topic_name_len   | topic_name       | serialized publisher ServiceInfo |
-| (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       |
-+------------------+------------------+------------------------------+
++------------------+------------------+------------------------------+------------------+
+| topic_name_len   | topic_name       | serialized publisher ServiceInfo | idl_hash     |
+| (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       | (4 bytes, 可选)  |
++------------------+------------------+------------------------------+------------------+
 ```
+
+idl_hash 为发布者声明的 topic IDL 哈希（0 表示未声明）。订阅者持有非 0 期望哈希时，
+两者不一致则不上报数据、不建立连接，并经 on_err 上报 `ERR_IDL_MISMATCH`。
 
 ### 4.13.1 查询已发布话题（MSG_QUERY_PUBLISHED_TOPICS / _REPLY）
 
@@ -418,8 +432,16 @@ status:
 - `ERR_INTERFACE_NOT_FOUND`：接口不存在
 - `ERR_METHOD_NOT_FOUND`：方法不存在
 - `ERR_DESERIALIZE`：参数反序列化失败
-- `ERR_SERIALIZE`：响应序列化失败
+- `ERR_SERIALIZE`：请求/响应序列化失败
 - `ERR_INVOKE_FAILED`：调用失败或内部执行错误
+- `ERR_IDL_MISMATCH`：IDL 哈希不匹配
+
+RPC 侧严格 IDL 校验规则（MSG_INVOKE 的 `idl_hash` 字段）：
+
+- 客户端 `idl_hash != 0` 时，服务端注册的方法哈希必须存在且与之相等；
+  服务端未声明（0）、方法不存在或哈希不等，一律返回 `ERR_IDL_MISMATCH`（无论 TCP/SHM）。
+- 客户端 `idl_hash == 0`（如 omni-cli hex 模式等无法提供哈希的调用方）跳过校验，保持兼容，
+  作为受控的“未知哈希”逃生口。
 
 `MSG_INVOKE_REPLY` 的 `status` 字段是当前运行时显式错误传播的正式协议出口，不再依赖内部 side-channel。
 ```
@@ -523,6 +545,7 @@ enum class ErrorCode : int32_t {
     ERR_ALREADY_INITIALIZED = -6,     // 已初始化
     ERR_NOT_SUPPORTED       = -7,     // 不支持
     ERR_INTERNAL            = -8,     // 内部错误
+    ERR_NOT_RUNNING         = -9,     // event-loop 已停止，不能投递任务
     
     // 网络错误 (-100 ~ -199)
     ERR_CONNECT_FAILED      = -100,   // 连接失败
@@ -575,7 +598,7 @@ enum class ErrorCode : int32_t {
 > 不同平台的底层实现不同，但上层的协议时序一致：
 > - **Linux**：AF_UNIX + SCM_RIGHTS（传递 fd）
 > - **Windows**：TCP loopback + Named Pipe 名称序列化（fd 无法跨进程传递）
-> - **其他平台**：若 SHM 不可用（`isShmHandshakeAvailable() == false`），`transport_selector` 自动回退 TCP
+> - **其他平台**：平台层只需提供 `handshake_*` / shm 原语；若 SHM 握手不可用，`transport_selector` 在创建客户端传输时自动回退 TCP
 
 当客户端选择 SHM 通信时，需要通过握手通道（Linux: UDS, Windows: TCP loopback）与服务端完成握手，交换 SHM 名称和通知句柄。
 协议采用 per-client SHM 模型：每个客户端创建自己的 SHM，服务端动态映射。
@@ -588,7 +611,7 @@ Client                                     Server (UDS listener)
    |  [本地] 创建自己的 SHM, 生成唯一名            |
    |                                             |
    |-------- UDS Connect ----------------------->|
-   |         /tmp/<server_shm_name_without_slash>.sock |
+   |    /tmp/omni_<fnv1a_32(server_shm_name) 的十六进制>.sock |
    |                                             |
    |-------- 发送 SHM 名称 (变长字符串) --------->|
    |         不附带 fd                           |
@@ -597,7 +620,8 @@ Client                                     Server (UDS listener)
    |         resp_eventfd + master_eventfd       |
    |         (2 个 fd 通过 ancillary data 传递)   |
    |                                             |
-   |-------- UDS 断开 -------------------------->|
+   |-------- 保留通道 (不关闭) ------------------>|
+   |         握手通道作为 liveness channel 保留    |
    |                                             |
    |  [本地] 注册 resp_eventfd 到 EventLoop       |
    |                                             |
@@ -605,19 +629,25 @@ Client                                     Server (UDS listener)
 
 ### eventfd 使用约定
 
-- 服务端创建 1 个 `master_eventfd`（所有客户端共享）和每客户端 1 个 `resp_eventfd`
-- 客户端写入自己的 SHM Request 后，调用 `eventfd_write(master_eventfd, 1)` 唤醒服务端
-- 服务端写入客户端 SHM Response 后，调用 `eventfd_write(resp_eventfd, 1)` 唤醒对应客户端
+- Linux 下服务端创建 1 个 `master_eventfd`（所有客户端共享）和每客户端 1 个 `resp_eventfd`；
+  Windows 下客户端请求通知句柄由平台握手按客户端生成（`handshakeTakeLocalNotifyFd`）
+- 客户端写入自己的 SHM Request 且发生 空→非空 跃迁时，调用 `eventfd_write(master_eventfd, 1)` 唤醒服务端
+- 服务端写入客户端 SHM Response 且发生 空→非空 跃迁时，调用 `eventfd_write(resp_eventfd, 1)` 唤醒对应客户端
 - Topic 广播：服务端写入客户端 SHM 后，调用 `eventfd_write(resp_eventfd, 1)` 通知客户端
-- eventfd 使用 `EFD_NONBLOCK` 标志创建，注册到 epoll 的 `EPOLLIN` 事件
+- eventfd 使用 `EFD_NONBLOCK` 标志创建，注册到 event-loop（Linux `EpollBackend` 映射为 `EPOLLIN`）
 
 ### UDS 路径命名
 
 ```
-/tmp/<server_shm_name_without_slash>.sock
+握手路径 = /tmp/omni_<fnv1a_32(server_shm_name) 的十六进制>.sock
 
-示例: SHM 名称为 "/binder_ServiceA"
-      UDS 路径为 "/tmp/binder_ServiceA.sock"
+其中 server_shm_name = /binder_<服务名前 48 字节>_<fnv1a_32(服务名) 的十六进制>
+
+示例: 服务名 "ServiceA"
+      server_shm_name = "/binder_ServiceA_<fnv1a_32("ServiceA")>"
+      握手路径 = "/tmp/omni_<fnv1a_32(server_shm_name)>.sock"
+
+（路径经哈希二次压缩，保持在 Linux sun_path 长度限制内）
 ```
 
 ## 7. 通信时序
@@ -629,7 +659,7 @@ Service                                    ServiceManager
    |                                             |
    |  [本地] 创建 TCP 监听 (端口自动分配)           |
    |  [本地] 创建 1 个 master eventfd              |
-   |  [本地] 创建 UDS 监听 "/tmp/<server_shm_name_without_slash>.sock"|
+   |  [本地] 创建 UDS 监听 /tmp/omni_<hash(server_shm_name)>.sock |
    |                                             |
    |-------- TCP Connect -----------------------|
    |                                             |
@@ -638,7 +668,7 @@ Service                                    ServiceManager
    |          shm_config, interfaces[]}          |
    |                                             |
    |<------- MSG_REGISTER_REPLY ----------------|
-   |         {status=OK, handle=1}              |
+   |         {handle=1}                         |
    |                                             |
    |-------- MSG_HEARTBEAT -------------------->|  (每3秒)
    |<------- MSG_HEARTBEAT_ACK -----------------|
@@ -660,10 +690,10 @@ ServiceB                ServiceManager              ServiceA
    |                          |                          |
     |  [判断] host_id 相同？                               |
     |    是 -> 创建自己的 SHM, 生成唯一名                  |
-   |         UDS 连接 /tmp/<server_shm_name_without_slash>.sock |
+    |         连接握手路径 /tmp/omni_<hash(server_shm_name)>.sock |
     |         发送 SHM 名称 (变长字符串, 不附带 fd)        |
     |         接收 resp_eventfd + master_eventfd (SCM_RIGHTS)|
-    |         UDS 断开                                    |
+    |         保留通道作为 liveness channel                |
     |         注册 resp_eventfd 到 EventLoop              |
     |    否 -> TCP 连接 host:port                         |
    |                          |                          |
@@ -710,12 +740,16 @@ ServiceB              ServiceManager              ServiceA
 ### 8.2 超时判定
 
 ```
-if (当前时间 - 最后心跳时间 > HEARTBEAT_TIMEOUT):
-    missed_count++
-    if (missed_count >= MAX_MISSED_HEARTBEATS):
+elapsed = 当前时间 - 最后心跳时间
+if (elapsed >= HEARTBEAT_TIMEOUT):
+    missed = elapsed / HEARTBEAT_TIMEOUT
+    if (missed >= MAX_MISSED_HEARTBEATS):
         判定服务死亡
         触发死亡通知
 ```
+
+> 按默认参数（timeout=10s, max_missed=3），即超过 30s 未收到心跳判定死亡；
+> 检测由 SM 心跳定时器周期执行。
 
 ## 9. 版本兼容性
 

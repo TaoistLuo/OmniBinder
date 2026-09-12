@@ -6,66 +6,103 @@
 
 namespace omnibinder {
 
-void TopicRuntime::rememberSubscription(const std::string& topic_name,
-                                        const TopicCallback& callback) {
-    callbacks_[topic_name] = callback;
-    uint32_t topic_id = fnv1a_32(topic_name);
-    topic_name_to_id_[topic_name] = topic_id;
+TopicRuntime::TopicState& TopicRuntime::ensureTopic(uint32_t id, const std::string& name) {
+    TopicState& state = topics_[id];
+    state.id = id;
+    if (!name.empty()) {
+        state.name = name;
+        name_to_id_[name] = id;
+    }
+    return state;
+}
 
-    std::vector<TopicCallback>& list = callbacks_by_id_[topic_id];
-    list.clear();
-    list.push_back(callback);
+void TopicRuntime::dropNameIfUnused(const std::string& name, uint32_t id) {
+    std::map<uint32_t, TopicState>::iterator it = topics_.find(id);
+    if (it == topics_.end() || (!it->second.has_callback && !it->second.published)) {
+        name_to_id_.erase(name);
+    }
+}
+
+void TopicRuntime::rememberSubscription(const std::string& topic_name,
+                                        const TopicCallback& callback,
+                                        uint32_t expected_idl_hash) {
+    TopicState& state = ensureTopic(fnv1a_32(topic_name), topic_name);
+    state.callback = callback;
+    state.has_callback = true;
+    state.expected_subscription_hash = expected_idl_hash;
 }
 
 void TopicRuntime::forgetSubscription(const std::string& topic_name) {
-    std::map<std::string, uint32_t>::iterator id_it = topic_name_to_id_.find(topic_name);
-    if (id_it != topic_name_to_id_.end()) {
-        callbacks_by_id_.erase(id_it->second);
-        error_callbacks_.erase(id_it->second);
+    std::map<std::string, uint32_t>::iterator id_it = name_to_id_.find(topic_name);
+    if (id_it == name_to_id_.end()) {
+        return;
     }
-    callbacks_.erase(topic_name);
-    topic_name_to_id_.erase(topic_name);
+    uint32_t id = id_it->second;
+
+    std::map<uint32_t, TopicState>::iterator it = topics_.find(id);
+    if (it != topics_.end()) {
+        it->second.callback = TopicCallback();
+        it->second.has_callback = false;
+        it->second.error_callback = TopicErrorCallback();
+        it->second.has_error_callback = false;
+        it->second.expected_subscription_hash = 0;
+    }
+    dropNameIfUnused(topic_name, id);
 }
 
 void TopicRuntime::setErrorCallback(const std::string& topic_name, const TopicErrorCallback& cb) {
-    uint32_t topic_id = fnv1a_32(topic_name);
-    error_callbacks_[topic_id] = cb;
+    TopicState& state = ensureTopic(fnv1a_32(topic_name), topic_name);
+    state.error_callback = cb;
+    state.has_error_callback = true;
 }
 
 void TopicRuntime::notifyError(uint32_t topic_id, ErrorCode error) {
-    Buffer empty;
-    // 拷贝回调对象再调用：回调内可能 unsubscribeTopic → erase 本条目，
-    // 若持 map 迭代器调用则回调后迭代器已悬垂（约束 2）
-    std::map<uint32_t, TopicErrorCallback>::iterator it = error_callbacks_.find(topic_id);
-    if (it != error_callbacks_.end() && it->second) {
-        TopicErrorCallback cb = it->second;
-        cb(topic_id, error, empty);
+    std::map<uint32_t, TopicState>::iterator it = topics_.find(topic_id);
+    if (it == topics_.end() || !it->second.has_error_callback || !it->second.error_callback) {
+        return;
     }
+
+    // 拷贝回调对象再调用：回调内可能 unsubscribeTopic → forgetSubscription 清除本回调，
+    // 若持迭代器/引用调用则回调后已失效（约束 2）
+    TopicErrorCallback callback = it->second.error_callback;
+    Buffer empty;
+    callback(topic_id, error, empty);
 }
 
 void TopicRuntime::rememberPublishedTopic(const std::string& topic_name, uint32_t topic_id,
-                                          const std::string& owner_service) {
-    published_topics_[topic_name] = topic_id;
-    published_topic_owners_[topic_name] = owner_service;
+                                          const std::string& owner_service, uint32_t idl_hash) {
+    TopicState& state = ensureTopic(topic_id, topic_name);
+    state.published = true;
+    state.owner_service = owner_service;
+    state.published_hash = idl_hash;
 }
 
 void TopicRuntime::forgetPublishedTopic(const std::string& topic_name) {
-    std::map<std::string, uint32_t>::iterator it = published_topics_.find(topic_name);
-    if (it == published_topics_.end()) {
+    std::map<std::string, uint32_t>::iterator id_it = name_to_id_.find(topic_name);
+    if (id_it == name_to_id_.end()) {
         return;
     }
-    tcp_subscribers_.erase(it->second);
-    shm_subscribers_.erase(it->second);
-    published_topics_.erase(it);
-    published_topic_owners_.erase(topic_name);
+    uint32_t id = id_it->second;
+
+    std::map<uint32_t, TopicState>::iterator it = topics_.find(id);
+    if (it == topics_.end() || !it->second.published) {
+        return;
+    }
+    it->second.published = false;
+    it->second.owner_service.clear();
+    it->second.published_hash = 0;
+    it->second.tcp_subscribers.clear();
+    it->second.shm_subscribers.clear();
+    dropNameIfUnused(topic_name, id);
 }
 
 void TopicRuntime::forgetPublishedTopicsByOwner(const std::string& owner_service) {
     std::vector<std::string> topic_names;
-    for (std::map<std::string, std::string>::iterator it = published_topic_owners_.begin();
-         it != published_topic_owners_.end(); ++it) {
-        if (it->second == owner_service) {
-            topic_names.push_back(it->first);
+    for (std::map<uint32_t, TopicState>::iterator it = topics_.begin();
+         it != topics_.end(); ++it) {
+        if (it->second.published && it->second.owner_service == owner_service
+            && !it->second.name.empty()) {
+            topic_names.push_back(it->second.name);
         }
     }
     for (size_t i = 0; i < topic_names.size(); ++i) {
@@ -74,23 +111,23 @@ void TopicRuntime::forgetPublishedTopicsByOwner(const std::string& owner_service
 }
 
 void TopicRuntime::addTcpSubscriber(uint32_t topic_id, int client_fd) {
-    std::vector<int>& fds = tcp_subscribers_[topic_id];
+    std::vector<int>& fds = ensureTopic(topic_id, std::string()).tcp_subscribers;
     if (std::find(fds.begin(), fds.end(), client_fd) == fds.end()) {
         fds.push_back(client_fd);
     }
 }
 
 void TopicRuntime::removeTcpSubscriberFd(int client_fd) {
-    for (std::map<uint32_t, std::vector<int> >::iterator it = tcp_subscribers_.begin();
-         it != tcp_subscribers_.end(); ++it) {
-        std::vector<int>& fds = it->second;
+    for (std::map<uint32_t, TopicState>::iterator it = topics_.begin();
+         it != topics_.end(); ++it) {
+        std::vector<int>& fds = it->second.tcp_subscribers;
         fds.erase(std::remove(fds.begin(), fds.end(), client_fd), fds.end());
     }
 }
 
 void TopicRuntime::addShmSubscriberService(uint32_t topic_id, const std::string& service_name,
                                            uint32_t client_id) {
-    std::vector<ShmSubscriber>& subscribers = shm_subscribers_[topic_id];
+    std::vector<ShmSubscriber>& subscribers = ensureTopic(topic_id, std::string()).shm_subscribers;
     for (size_t i = 0; i < subscribers.size(); ++i) {
         if (subscribers[i].service_name == service_name && subscribers[i].client_id == client_id) {
             return;
@@ -104,79 +141,108 @@ void TopicRuntime::addShmSubscriberService(uint32_t topic_id, const std::string&
 
 void TopicRuntime::removeShmSubscriberService(const std::string& service_name,
                                                uint32_t client_id) {
-    for (std::map<uint32_t, std::vector<ShmSubscriber> >::iterator it = shm_subscribers_.begin();
-         it != shm_subscribers_.end();) {
-        std::vector<ShmSubscriber>& subscribers = it->second;
-        for (std::vector<ShmSubscriber>::iterator subscriber = subscribers.begin();
-             subscriber != subscribers.end();) {
-            if (subscriber->service_name == service_name && subscriber->client_id == client_id) {
-                subscriber = subscribers.erase(subscriber);
-            } else {
-                ++subscriber;
-            }
-        }
-        if (subscribers.empty()) {
-            it = shm_subscribers_.erase(it);
-        } else {
-            ++it;
-        }
+    for (std::map<uint32_t, TopicState>::iterator it = topics_.begin();
+         it != topics_.end(); ++it) {
+        std::vector<ShmSubscriber>& subscribers = it->second.shm_subscribers;
+        subscribers.erase(
+            std::remove_if(subscribers.begin(), subscribers.end(),
+                           [&service_name, client_id](const ShmSubscriber& subscriber) {
+                               return subscriber.service_name == service_name
+                                   && subscriber.client_id == client_id;
+                           }),
+            subscribers.end());
     }
 }
 
 const std::vector<int>& TopicRuntime::tcpSubscribers(uint32_t topic_id) const {
     static const std::vector<int> empty;
-    std::map<uint32_t, std::vector<int> >::const_iterator it = tcp_subscribers_.find(topic_id);
-    return it == tcp_subscribers_.end() ? empty : it->second;
+    std::map<uint32_t, TopicState>::const_iterator it = topics_.find(topic_id);
+    return it == topics_.end() ? empty : it->second.tcp_subscribers;
 }
 
 const std::vector<TopicRuntime::ShmSubscriber>& TopicRuntime::shmSubscribers(uint32_t topic_id) const {
     static const std::vector<ShmSubscriber> empty;
-    std::map<uint32_t, std::vector<ShmSubscriber> >::const_iterator it = shm_subscribers_.find(topic_id);
-    return it == shm_subscribers_.end() ? empty : it->second;
+    std::map<uint32_t, TopicState>::const_iterator it = topics_.find(topic_id);
+    return it == topics_.end() ? empty : it->second.shm_subscribers;
 }
 
 void TopicRuntime::removeTcpSubscriber(uint32_t topic_id, int client_fd) {
-    std::map<uint32_t, std::vector<int> >::iterator it = tcp_subscribers_.find(topic_id);
-    if (it == tcp_subscribers_.end()) return;
-    std::vector<int>& fds = it->second;
-    for (std::vector<int>::iterator fd_it = fds.begin(); fd_it != fds.end(); ++fd_it) {
-        if (*fd_it == client_fd) {
-            fds.erase(fd_it);
-            return;
-        }
+    std::map<uint32_t, TopicState>::iterator it = topics_.find(topic_id);
+    if (it == topics_.end()) {
+        return;
     }
+    std::vector<int>& fds = it->second.tcp_subscribers;
+    fds.erase(std::remove(fds.begin(), fds.end(), client_fd), fds.end());
 }
 
 uint32_t TopicRuntime::getTopicId(const std::string& name) const {
-    std::map<std::string, uint32_t>::const_iterator it = published_topics_.find(name);
-    return it == published_topics_.end() ? 0 : it->second;
+    std::map<std::string, uint32_t>::const_iterator id_it = name_to_id_.find(name);
+    if (id_it == name_to_id_.end()) {
+        return 0;
+    }
+    std::map<uint32_t, TopicState>::const_iterator it = topics_.find(id_it->second);
+    if (it == topics_.end() || !it->second.published) {
+        return 0;
+    }
+    return it->second.id;
 }
 
 bool TopicRuntime::dispatch(uint32_t topic_id, const Buffer& data) const {
-    std::map<uint32_t, std::vector<TopicCallback> >::const_iterator it = callbacks_by_id_.find(topic_id);
-    if (it == callbacks_by_id_.end()) {
+    std::map<uint32_t, TopicState>::const_iterator it = topics_.find(topic_id);
+    if (it == topics_.end() || !it->second.has_callback || !it->second.callback) {
         return false;
     }
 
-    // 先拷贝到局部副本再遍历：用户回调内可能 unsubscribeTopic → forgetSubscription
-    // erase callbacks_by_id_，若直接持容器迭代器遍历将悬垂（use-after-free）
-    std::vector<TopicCallback> callbacks = it->second;
-    bool dispatched = false;
-    for (size_t i = 0; i < callbacks.size(); ++i) {
-        if (callbacks[i]) {
-            callbacks[i](topic_id, data);
-            dispatched = true;
-        }
-    }
-    return dispatched;
+    // 先拷贝回调再调用：回调内可能 unsubscribeTopic → forgetSubscription 清除本回调（约束 2）
+    TopicCallback callback = it->second.callback;
+    callback(topic_id, data);
+    return true;
 }
 
 std::map<std::string, TopicCallback> TopicRuntime::subscriptions() const {
-    return callbacks_;
+    std::map<std::string, TopicCallback> result;
+    for (std::map<uint32_t, TopicState>::const_iterator it = topics_.begin();
+         it != topics_.end(); ++it) {
+        if (it->second.has_callback && it->second.callback && !it->second.name.empty()) {
+            result[it->second.name] = it->second.callback;
+        }
+    }
+    return result;
 }
 
 std::map<std::string, std::string> TopicRuntime::publishedTopicOwners() const {
-    return published_topic_owners_;
+    std::map<std::string, std::string> result;
+    for (std::map<uint32_t, TopicState>::const_iterator it = topics_.begin();
+         it != topics_.end(); ++it) {
+        if (it->second.published && !it->second.name.empty()) {
+            result[it->second.name] = it->second.owner_service;
+        }
+    }
+    return result;
+}
+
+std::map<std::string, uint32_t> TopicRuntime::publishedTopicHashes() const {
+    std::map<std::string, uint32_t> result;
+    for (std::map<uint32_t, TopicState>::const_iterator it = topics_.begin();
+         it != topics_.end(); ++it) {
+        if (it->second.published && !it->second.name.empty()) {
+            result[it->second.name] = it->second.published_hash;
+        }
+    }
+    return result;
+}
+
+uint32_t TopicRuntime::expectedSubscriptionHash(const std::string& topic_name) const {
+    std::map<std::string, uint32_t>::const_iterator id_it = name_to_id_.find(topic_name);
+    if (id_it == name_to_id_.end()) {
+        return 0;
+    }
+    std::map<uint32_t, TopicState>::const_iterator it = topics_.find(id_it->second);
+    return it == topics_.end() ? 0 : it->second.expected_subscription_hash;
+}
+
+void TopicRuntime::setExpectedSubscriptionHash(const std::string& topic_name, uint32_t idl_hash) {
+    ensureTopic(fnv1a_32(topic_name), topic_name).expected_subscription_hash = idl_hash;
 }
 
 } // namespace omnibinder

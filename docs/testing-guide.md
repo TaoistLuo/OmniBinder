@@ -153,7 +153,7 @@ ctest --test-dir build --output-on-failure -R test_event_loop
 
 - 验证 TCP transport 基本行为
 - 验证 transport policy 基础选择
-- 验证 `TcpTransport::send()` 在背压下可返回 partial write
+- 验证 `TcpClientTransport::send()` 在背压下可返回 partial write
 
 推荐运行：
 
@@ -205,7 +205,7 @@ ctest --test-dir build --output-on-failure -R test_topic_manager
 
 - 验证 SHM 基本收发
 - 验证客户端连接/断开管理
-- 验证 arena 使用统计
+- 验证 per-client SHM 握手、ring 收发与多客户端并发
 
 推荐运行：
 
@@ -460,7 +460,7 @@ cd build
 - `data_connect_failed`
 - `data_connect_timeout`
 - `data_connect_fallback`
-- `data_send_failed`
+- `message_serialize_failed`
 - `data_connection_lost`
 
 ## 7. 性能测试与稳定性长测
@@ -713,7 +713,7 @@ mkdir -p /tmp/omni-idlc_out
 
 然后检查输出目录中是否生成 `.h / .cpp` 文件。
 
-## 8. 推荐测试顺序
+## 9. 推荐测试顺序
 
 如果需要做一轮较完整的本地验证，下面是推荐子集；完整集合以及平台/配置门禁请以 `ctest --test-dir build -N` 为准：
 
@@ -749,33 +749,33 @@ mkdir -p /tmp/omni-idlc_out
    - `omni-cli`
    - `omni-idlc`
 
-## 9. 推荐命令集
+## 10. 推荐命令集
 
-### 9.1 关键回归
+### 10.1 关键回归
 
 ```bash
 ctest --test-dir build --output-on-failure -R "test_transport|test_topic_manager|test_shm_transport|test_integration|test_full_integration|test_control_plane_and_fallback|test_diagnostics_watch|test_threadsafe_client_and_reconnect|test_runtime_stats|test_error_logging"
 ```
 
-### 9.2 性能测试
+### 10.2 性能测试
 
 ```bash
 ctest --test-dir build --output-on-failure -R test_performance
 ```
 
-### 9.3 稳定性与断连恢复
+### 10.3 稳定性与断连恢复
 
 ```bash
 ctest --test-dir build --output-on-failure -R "test_soak_runner|test_transient_disconnect_recovery"
 ```
 
-### 9.4 全量测试
+### 10.4 全量测试
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-## 10. 结论
+## 11. 结论
 
 当前最稳妥的测试运行方式是：
 

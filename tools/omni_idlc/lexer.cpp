@@ -85,7 +85,7 @@ Token Lexer::readNumber() {
 
 Token Lexer::readString() {
     int l = line_, c = column_;
-    advance(); // skip opening quote
+    advance(); // 跳过起始引号
     std::string val;
     while (!isAtEnd() && peek() != '"') {
         const unsigned char ch = static_cast<unsigned char>(peek());
@@ -101,7 +101,7 @@ Token Lexer::readString() {
         error_msg_ = "Unterminated string literal";
         return Token(TOK_ERROR, val, l, c);
     }
-    advance(); // skip closing quote
+    advance(); // 跳过结束引号
     return Token(TOK_STRING, val, l, c);
 }
 

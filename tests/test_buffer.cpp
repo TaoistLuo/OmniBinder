@@ -74,3 +74,15 @@ TEST(BufferTest, RejectsOversizedByteLength) {
         static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1u));
     EXPECT_FALSE(buf.writeOk());
 }
+
+TEST(BufferTest, SetWritePositionBelowReadPositionIsRejected) {
+    Buffer buf;
+    buf.writeUint32(0x11223344u);
+    ASSERT_TRUE(buf.trySetReadPosition(2));
+
+    buf.setWritePosition(1);
+
+    EXPECT_EQ(buf.readPosition(), 2u);
+    EXPECT_EQ(buf.writePosition(), 4u);
+    EXPECT_EQ(buf.remaining(), 2u);
+}

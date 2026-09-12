@@ -54,10 +54,14 @@ const ServiceHandle INVALID_HANDLE = 0;
 // 默认配置常量
 // ============================================================
 const uint16_t DEFAULT_SM_PORT              = 9900;
+const char     DIAG_SERVICE_NAME_PREFIX[]   = "__diag_pid_";
 const uint32_t DEFAULT_HEARTBEAT_INTERVAL   = 3000;   // ms
 const uint32_t DEFAULT_HEARTBEAT_TIMEOUT    = 10000;  // ms
 const uint32_t DEFAULT_MAX_MISSED_HEARTBEATS = 3;
 const uint32_t DEFAULT_INVOKE_TIMEOUT       = 5000;   // ms
+// 服务端 RPC 回复发送的专用超时预算：独立于 DEFAULT_INVOKE_TIMEOUT，避免慢客户端
+// 长时间占住 owner event-loop；可经 OmniRuntime::setReplySendTimeout 调整
+const uint32_t DEFAULT_REPLY_SEND_TIMEOUT   = 1000;   // ms
 const size_t   DEFAULT_BUFFER_SIZE          = 4096;
 const size_t   MAX_SERVICE_NAME_LENGTH      = 256;
 const size_t   MAX_TOPIC_NAME_LENGTH        = 256;
@@ -168,6 +172,7 @@ struct RuntimeStats {
 // ============================================================
 // FNV-1a 32位哈希（用于生成 interface_id, method_id, topic_id）
 // ============================================================
+/* @brief FNV-1a 32 位哈希（C 字符串版本，用于生成 interface_id/method_id/topic_id） */
 inline uint32_t fnv1a_32(const char* str) {
     uint32_t hash = 0x811c9dc5u;
     while (*str) {
@@ -177,6 +182,7 @@ inline uint32_t fnv1a_32(const char* str) {
     return hash;
 }
 
+/* @brief FNV-1a 32 位哈希（std::string 版本，用于生成 interface_id/method_id/topic_id） */
 inline uint32_t fnv1a_32(const std::string& str) {
     return fnv1a_32(str.c_str());
 }

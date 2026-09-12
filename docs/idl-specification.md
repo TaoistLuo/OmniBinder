@@ -130,7 +130,7 @@ service MapService {
 package  import   struct  service  topic  publishes
 bool     int8     uint8   int16    uint16
 int32    uint32   int64   uint64
-float32  float64  string  bytes
+float32  float64  string  bytes   void
 array
 ```
 
@@ -168,7 +168,7 @@ struct Example {
 
 | IDL 类型 | C 类型 | C++ 类型 |
 |----------|--------|----------|
-| `array<T>` | `T*` + `uint32_t count` | `std::vector<T>` |
+| `array<T>` | 数组结构体（`T* data` + `uint32_t count`；`string`/`bytes` 元素额外带 `uint32_t* lens`） | `std::vector<T>` |
 
 ### 4.3 自定义结构体类型
 
@@ -240,9 +240,6 @@ struct SensorData {
 
     // 从 Buffer 反序列化
     bool deserialize(omnibinder::Buffer& buf);
-
-    // 计算序列化后的大小
-    size_t serializedSize() const;
 };
 
 } // namespace demo
@@ -268,8 +265,8 @@ void demo_SensorData_init(demo_SensorData* self);
 /* 释放动态分配的内存 */
 void demo_SensorData_destroy(demo_SensorData* self);
 
-/* 序列化 */
-int demo_SensorData_serialize(const demo_SensorData* self,
+/* 序列化（返回值通过 out 参数/缓冲区传递） */
+void demo_SensorData_serialize(const demo_SensorData* self,
     omni_buffer_t* buf);
 
 /* 反序列化 */
@@ -309,7 +306,8 @@ topic SystemAlert {
 
 - topic 在序列化层面与 struct 完全相同
 - topic 的特殊之处在于它会在 service 中通过 `publishes` 声明
-- 每个 topic 会生成一个唯一的 topic_id（基于包名+话题名的哈希值）
+- 每个 topic 会生成唯一的 topic_id（`fnv1a_32(topic_name)`）；C++ 端同时生成 `TOPIC_ID` / `TOPIC_IDL_HASH` 静态常量，C 端生成 `<pkg>_<Topic>_TOPIC_ID` / `<pkg>_<Topic>_TOPIC_IDL_HASH` 宏
+- C 端生成的 `<pkg>_<Topic>_init()` 通过 `memset` 将全部字段零初始化
 
 ## 7. 服务定义（service）
 
@@ -371,7 +369,9 @@ public:
     virtual void ResetSensor(int32_t sensor_id) = 0;
 
     // ---- 广播方法（框架提供） ----
+    void PublishSensorUpdate();
     void BroadcastSensorUpdate(const SensorUpdate& msg);
+    void PublishSystemAlert();
     void BroadcastSystemAlert(const SystemAlert& msg);
 
     // ---- 服务名和接口信息（框架使用） ----
@@ -394,19 +394,11 @@ protected:
 ```cpp
 namespace demo {
 
-class SensorServiceProxy {
+class SensorServiceProxy : public omnibinder::ServiceProxyBase {
 public:
-    explicit SensorServiceProxy(omnibinder::OmniRuntime& runtime);
-    ~SensorServiceProxy();
-
-    // 连接到远程服务（通过 ServiceManager 查询地址后直连）
-    int connect();
-
-    // 断开连接
-    void disconnect();
-
-    // 检查连接状态
-    bool isConnected() const;
+    explicit SensorServiceProxy(omnibinder::OmniRuntime& runtime)
+        : ServiceProxyBase(runtime, "SensorService") {}
+    ~SensorServiceProxy() {}
 
     // ---- 远程调用方法 ----
     int SetThreshold(const ControlCommand& cmd, StatusResponse& out);
@@ -419,13 +411,7 @@ public:
     void SubscribeSystemAlert(
         const std::function<void(const SystemAlert&)>& callback);
 
-    // ---- 订阅死亡通知 ----
-    void OnServiceDied(const std::function<void()>& callback);
-
-private:
-    omnibinder::OmniRuntime& runtime_;
-    omnibinder::ServiceConnection* connection_;
-    // ...
+    // connect()/disconnect()/isConnected()/OnServiceDied() 等由 ServiceProxyBase 提供
 };
 
 } // namespace demo
@@ -442,41 +428,70 @@ private:
 ### 7.6 生成的 C 代码
 
 ```c
-/* ---- Stub 回调函数类型 ---- */
-typedef demo_StatusResponse (*demo_SensorService_SetThreshold_fn)(
-    void* user_data, const demo_ControlCommand* cmd);
-typedef demo_SensorData (*demo_SensorService_GetLatestData_fn)(
-    void* user_data);
-typedef void (*demo_SensorService_ResetSensor_fn)(
-    void* user_data, int32_t sensor_id);
+/* ---- Stub 回调函数类型（方法名 snake_case，返回值通过 out 指针回传） ---- */
+typedef void (*demo_SensorService_set_threshold_handler_t)(
+    const struct demo_ControlCommand* cmd,
+    common_StatusResponse* result, void* user_data);
+typedef void (*demo_SensorService_get_latest_data_handler_t)(
+    struct demo_SensorData* result, void* user_data);
+typedef void (*demo_SensorService_reset_sensor_handler_t)(
+    int32_t sensor_id, void* user_data);
 
-/* runtime boundary callback */
+/* runtime boundary callback（定义于 omnibinder_c.h） */
 typedef int (*omni_invoke_callback_t)(uint32_t method_id,
     const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
+
+typedef struct demo_SensorService_callbacks {
+    demo_SensorService_set_threshold_handler_t SetThreshold;
+    demo_SensorService_get_latest_data_handler_t GetLatestData;
+    demo_SensorService_reset_sensor_handler_t ResetSensor;
+    void* user_data;
+} demo_SensorService_callbacks;
+
+omni_service_t* demo_SensorService_stub_create_from_callbacks(
+    const demo_SensorService_callbacks* cbs);
+void demo_SensorService_stub_destroy(omni_service_t* svc);
+
+/* 广播 */
+void demo_SensorService_broadcast_sensor_update(
+    omni_runtime_t* runtime, const demo_SensorUpdate* msg);
 
 /* ---- Proxy 结构与函数 ---- */
 typedef struct demo_SensorService_proxy {
     omni_runtime_t* runtime;
-    uint8_t connected;
+    int connected;
+    int auto_reconnect_enabled;
+    uint32_t reconnect_interval_ms;
+    void (*death_callback)(void* user_data);
+    void* death_user_data;
+    void* _sub_ctxs[8];
+    const char* _sub_topics[8];
+    int _sub_ctx_count;
 } demo_SensorService_proxy;
 
 void demo_SensorService_proxy_init(
-    demo_SensorService_proxy* proxy,
-    omni_runtime_t* runtime);
+    demo_SensorService_proxy* p, omni_runtime_t* runtime);
 
-int demo_SensorService_proxy_connect(
-    demo_SensorService_proxy* proxy);
+int  demo_SensorService_proxy_connect(demo_SensorService_proxy* p);
+void demo_SensorService_proxy_disconnect(demo_SensorService_proxy* p);
 
-/* 远程调用 */
-int demo_SensorService_proxy_SetThreshold(
-    demo_SensorService_proxy* proxy,
-    const demo_ControlCommand* cmd,
+/* 远程调用：方法名 snake_case；IDL void 方法在 C Proxy 中也返回 void */
+int demo_SensorService_proxy_set_threshold(
+    demo_SensorService_proxy* p,
+    const struct demo_ControlCommand* cmd,
     common_StatusResponse* result);
 
-int demo_SensorService_proxy_GetLatestData(
-    demo_SensorService_proxy* proxy,
-    demo_SensorData* result);
+int demo_SensorService_proxy_get_latest_data(
+    demo_SensorService_proxy* p,
+    struct demo_SensorData* result);
+
+int demo_SensorService_proxy_subscribe_sensor_update(
+    demo_SensorService_proxy* p,
+    void (*callback)(const demo_SensorUpdate* msg, void* user_data),
+    void* user_data);
 ```
+
+补充：C Proxy 最多同时订阅 8 个话题（`_sub_ctxs[8]`），超出返回 -1；`string`/`bytes` 类型的返回值通过 `char** result, uint32_t* result_len`（或 `uint8_t**`）回传。
 
 ## 8. 严格语义校验
 
@@ -513,7 +528,7 @@ method_id = fnv1a_32(method_name)
 基于话题名生成：
 
 ```
-topic_id = fnv1a_32(package_name + "." + topic_name)
+topic_id = fnv1a_32(topic_name)
 ```
 
 ### 9.4 FNV-1a 哈希算法
@@ -528,6 +543,13 @@ uint32_t fnv1a_32(const char* str) {
     return hash;
 }
 ```
+
+### 9.5 IDL 兼容性哈希
+
+除上述运行时 ID 外，生成代码还会为每个方法和话题计算 IDL 哈希（方法名 + 参数/返回类型、话题名 + 字段类型），随注册/订阅上报，用于运行时校验发布者与订阅者的 IDL 是否一致：
+
+- C++：话题常量 `<Topic>::TOPIC_IDL_HASH`；方法哈希由 `MethodInfo.idl_hash` 携带
+- C：`<pkg>_<Topic>_TOPIC_IDL_HASH`、`<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` 宏；`<pkg>_<Service>_stub_create_from_callbacks()` 会通过 `omni_service_add_method_ex()` 把方法哈希一并注册到运行时
 
 ## 10. 完整 IDL 示例
 
@@ -672,7 +694,7 @@ omnic_generate(
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
-target_link_libraries(my_service omnibinder)
+target_link_libraries(my_service OmniBinder::omnibinder_static)
 ```
 
 `omnic_generate` CMake 函数会：

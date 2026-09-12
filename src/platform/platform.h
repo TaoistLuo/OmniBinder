@@ -77,7 +77,6 @@ bool checkSocketConnected(SocketFd fd, int* out_error);
 
 int  createEventFd();
 int  createNamedEventFd(const std::string& name);
-int  openNamedEventFd(const std::string& name);
 bool eventFdNotify(int efd);
 bool eventFdConsume(int efd);
 void closeEventFd(int efd);
@@ -102,19 +101,19 @@ void  shmUnlink(const std::string& name);
 //   检测对端退出。
 //
 //   流程：
-//     Server: Listen → Accept → Recv(SHM name) → Send(eventfds) → Retain/Close
-//     Client: Connect → Send(SHM name) → Recv(eventfds) → Retain/Close
+//     服务端: Listen → Accept → Recv(SHM name) → Send(eventfds) → Retain/Close
+//     客户端: Connect → Send(SHM name) → Recv(eventfds) → Retain/Close
 //
 //   平台参考：
 //     Linux:   AF_UNIX + SCM_RIGHTS，name = 文件系统路径
 //     Windows: TCP loopback + Named Pipe 名称序列化，name 映射为本地端口
 //
 //   注意：
-//     listener owns its named endpoint; handshakeCloseListener closes it and
-//     removes the endpoint. Accepted/connected channels are independently owned.
-//     Each send transfers one bounded payload and 0..2 notification handles.
-//     Recv publishes payload/handles only after the complete frame is valid.
-//     handshakeGetFd() returns the channel readiness descriptor.
+//     listener 拥有其命名端点；handshakeCloseListener 关闭并移除该端点。
+//     已 accept/connect 的 channel 各自独立拥有。
+//     每次 send 传输一个有界 payload 以及 0..2 个通知句柄。
+//     Recv 仅在完整帧校验通过后才发布 payload/句柄。
+//     handshakeGetFd() 返回 channel 的就绪描述符。
 // ============================================================
 
 struct handshake_listener;
@@ -131,8 +130,11 @@ bool handshakeSend(handshake_channel* ch, const void* data, size_t len,
                    const int* fds, int fd_count);
 bool handshakeRecv(handshake_channel* ch, void* buf, size_t bufsz, size_t* out_len,
                    int* fds, int max_fds, int* out_fd_count);
-// Returns an optional server-owned notification fd created while sending.
-// Ownership transfers to the caller; Linux always returns -1.
+/*
+ * @brief  返回发送过程中创建的可选服务端本地通知 fd
+ * @param[in]  ch 握手通道
+ * @return 通知 fd（所有权转移给调用方；Linux 始终返回 -1）
+ */
 int  handshakeTakeLocalNotifyFd(handshake_channel* ch);
 void handshakeClose(handshake_channel* ch);
 
@@ -166,18 +168,14 @@ void setupSignalHandlers(SignalHandler handler);
 void memoryBarrier();
 
 // ============================================================
-// 平台能力查询
-// ============================================================
-
-bool isShmHandshakeAvailable();
-
-// ============================================================
-// Test helpers — 仅测试代码引用
+// 测试辅助 — 仅测试代码引用
 // ============================================================
 
 bool waitFdReadable(int fd, int timeout_ms);
-// 设置"父进程死亡时本进程自动收 SIGTERM"（Linux prctl；Windows 无对应机制，空实现）。
-// 用于测试框架：父测试进程被 ctest 超时杀掉后，子 service_manager 不再残留为孤儿。
+/*
+ * @brief  设置"父进程死亡时本进程自动收 SIGTERM"（Linux prctl；Windows 无对应机制，空实现）
+ * @note   用于测试框架：父测试进程被 ctest 超时杀掉后，子 service_manager 不再残留为孤儿
+ */
 void setParentDeathSignal();
 
 } // namespace platform

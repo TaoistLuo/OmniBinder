@@ -10,6 +10,7 @@ using namespace omnibinder::test;
 
 static const uint16_t SM_PORT = 19916;
 static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
+static const uint32_t METHOD_SLOW_ECHO = fnv1a_32("SlowEcho");
 static const uint32_t IFACE_ID = fnv1a_32("ReconnectService");
 
 class ReconnectService : public Service {
@@ -18,12 +19,17 @@ public:
         iface_.interface_id = IFACE_ID;
         iface_.name = "ReconnectService";
         iface_.methods.push_back(MethodInfo(METHOD_ECHO, "Echo"));
+        iface_.methods.push_back(MethodInfo(METHOD_SLOW_ECHO, "SlowEcho"));
     }
     const char* serviceName() const override { return "ReconnectService"; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
 protected:
     int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
-        if (method_id == METHOD_ECHO && request.size() > 0) {
+        if (method_id == METHOD_SLOW_ECHO) {
+            // 阻塞服务端 owner loop，制造"请求已到达、回复晚于 SM 重连尝试"的时序
+            platform::sleepMs(4000);
+        }
+        if ((method_id == METHOD_ECHO || method_id == METHOD_SLOW_ECHO) && request.size() > 0) {
             if (!response.writeRaw(request.data(), request.size())) return static_cast<int>(ErrorCode::ERR_SERIALIZE);
         }
         return 0;
@@ -134,5 +140,39 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
         std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(recovered);
+    runtime.stop();
+}
+
+/* @brief 数据面在途 RPC 不得被 SM 重连误伤
+ * @details SM 在等待回复期间死亡，客户端心跳触发的重连尝试会失败并清理控制面等待槽；
+ *          数据面槽独立，RPC 必须继续等待服务端回复。 */
+TEST_F(SmReconnectTest, DataPlaneRpcSurvivesFailedSmReconnect) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    ASSERT_EQ(runtime.connectService("ReconnectService"), 0);
+
+    Buffer req, resp;
+    const char* payload = "slow-rpc-after-sm-dead";
+    req.writeRaw(payload, strlen(payload));
+
+    // 请求发出后立即杀掉 SM：服务端回复要 4s，客户端心跳在 ~3s 触发失败重连
+    std::thread sm_killer([this]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        stopProcess(sm_pid_);
+    });
+    int ret = runtime.invoke("ReconnectService", IFACE_ID, METHOD_SLOW_ECHO, 0, req, resp, 8000);
+    sm_killer.join();
+
+    EXPECT_EQ(ret, 0);
+    if (ret == 0) {
+        EXPECT_EQ(std::string(reinterpret_cast<const char*>(resp.data()), resp.size()),
+                  std::string(payload));
+    }
+
+    // 后续用例依赖 SM 存活：恢复 SM 后再结束
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19916", "--log-level", "3");
+    ASSERT_GT(sm_pid_, 0);
+    ASSERT_TRUE(waitPortReady(SM_PORT, 30));
     runtime.stop();
 }

@@ -18,7 +18,10 @@ static void printUsage(const char* prog) {
     fprintf(stderr, "  --help               Show this help\n");
 }
 
-// 从路径中提取文件名（不含目录）
+/* @brief 从路径中提取文件名
+ * @param[in] path 路径
+ * @return 不含目录的文件名
+ */
 static std::string extractBasename(const std::string& path) {
     std::string basename = path;
     size_t slash = basename.find_last_of("/\\");
@@ -26,7 +29,12 @@ static std::string extractBasename(const std::string& path) {
     return basename;
 }
 
-// 为单个 AST 生成代码
+/* @brief 为单个 AST 生成代码
+ * @param[in] ast 待生成代码的 AST
+ * @param[in] lang 目标语言（cpp/c/all）
+ * @param[in] output_dir 输出目录
+ * @return 成功返回 true
+ */
 static bool generateForAst(const omnic::AstFile& ast, const std::string& lang,
                            const std::string& output_dir) {
     std::string basename = extractBasename(ast.file_path);
@@ -58,7 +66,15 @@ static bool generateForAst(const omnic::AstFile& ast, const std::string& lang,
     return ok;
 }
 
-// 生成 Makefile 格式依赖文件
+/* @brief 生成 Makefile 格式依赖文件
+ * @param[in] dep_file_path 依赖文件路径
+ * @param[in] output_dir 输出目录
+ * @param[in] main_basename 主文件 basename
+ * @param[in] lang 目标语言（cpp/c/all）
+ * @param[in] ctx 解析上下文
+ * @param[in] main_file 主文件路径
+ * @return 成功返回 true
+ */
 static bool generateDepFile(const std::string& dep_file_path,
                             const std::string& output_dir,
                             const std::string& main_basename,

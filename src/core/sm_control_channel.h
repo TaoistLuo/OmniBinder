@@ -33,46 +33,72 @@
 #ifndef OMNIBINDER_CORE_SM_CONTROL_CHANNEL_H
 #define OMNIBINDER_CORE_SM_CONTROL_CHANNEL_H
 
-#include "transport/tcp_transport.h"
+#include "omnibinder/transport.h"
 #include "omnibinder/message.h"
 #include "omnibinder/buffer.h"
-#include <map>
+#include "core/pending_reply_table.h"
 
 namespace omnibinder {
 
+class EventLoop;
+
 class SmControlChannel {
 public:
-    struct PendingReplySlot {
-        bool ready;
-        bool failed;   // 连接重建后旧连接的回复不可能到达，标记失败让等待方快速退出
-        Message message;
-
-        PendingReplySlot() : ready(false), failed(false), message() {}
-    };
-
     SmControlChannel();
     ~SmControlChannel();
 
     bool isConnected() const;
     bool sendMessage(const Message& msg);
     bool sendMessageWithinTimeout(const Message& msg, uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
-    int recvSome(uint8_t* data, size_t capacity);
-    void appendReceived(const uint8_t* data, size_t length);
-    bool tryPopMessage(Message& msg);
-    void clearReplies();
-    void beginWait(uint32_t seq);
-    bool isWaiting(uint32_t seq) const;
-    const Message* pendingReply(uint32_t seq) const;
-    bool isFailed(uint32_t seq) const;
-    bool takeReply(uint32_t seq, Message& out);
-    void eraseWait(uint32_t seq);
-    void storeReply(uint32_t seq, const Message& msg);
+    /*
+     * @brief  读取下一条完整 SM 消息
+     * @param[out] msg 返回的消息
+     * @return 1 成功；0 数据不足；-1 流损坏/传输错误
+     */
+    int recvMessage(Message& msg);
 
-    TcpTransport* transport_;
-    Buffer recv_buffer_;
+    /*
+     * @brief  控制面 pending reply 槽表
+     * @return 槽表引用；SM 重连时只清理该表，不影响数据面等待槽
+     */
+    PendingReplyTable& pendingReplies() { return pending_replies_; }
+
+    /*
+     * @brief  连接重建时清理控制面等待槽
+     * @note   仅标记/清除控制面槽；数据面槽由 RpcRuntime 独立持有，不受 SM 重连影响
+     */
+    void clearReplies();
+
+    /*
+     * @brief  获取当前控制通道传输对象
+     * @return 传输对象指针；未连接时为 NULL
+     */
+    IClientTransport* transport() const;
+
+    /*
+     * @brief  设置控制通道传输对象（接管所有权，不释放旧对象）
+     * @param[in] t 新传输对象，可为 NULL
+     */
+    void resetTransport(IClientTransport* t);
+
+    /*
+     * @brief  从 event-loop 摘除 fd 后关闭并释放当前传输对象，最后置空
+     * @param[in] loop 传输 fd 注册所在的 event-loop
+     * @note   必须先 removeFd 再 close/delete（约束 3），否则 fd 号复用后
+     *         event-loop 中的残留条目会让新注册静默失败
+     */
+    void closeTransport(EventLoop& loop);
+
+    /*
+     * @brief  清空接收缓冲
+     * @note   连接重建时调用，避免旧连接上的半帧字节混入新连接数据流
+     */
+    void clearReceiveBuffer();
 
 private:
-    std::map<uint32_t, PendingReplySlot> pending_replies_;
+    PendingReplyTable pending_replies_;
+    IClientTransport* transport_;
+    Buffer recv_buffer_;
 };
 
 } // namespace omnibinder

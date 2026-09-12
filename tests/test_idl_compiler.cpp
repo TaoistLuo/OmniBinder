@@ -66,7 +66,7 @@ static bool parseAndValidate(const std::string& source, AstFile& ast,
 }
 
 // ============================================================
-// Lexer Tests
+// Lexer 测试
 // ============================================================
 
 TEST(IdlCompilerTest, LexerSimpleStruct) {
@@ -263,7 +263,7 @@ TEST(IdlCompilerTest, LexerErrorOnInvalidChar) {
 }
 
 // ============================================================
-// Parser Tests
+// Parser 测试
 // ============================================================
 
 TEST(IdlCompilerTest, ParserSimpleStruct) {
@@ -545,7 +545,7 @@ TEST(IdlCompilerTest, ParserServiceCustomParamAndReturn) {
 }
 
 // ============================================================
-// Import Feature Tests
+// import 特性测试
 // ============================================================
 
 TEST(IdlCompilerTest, LexerImportKeyword) {
@@ -836,7 +836,7 @@ TEST(IdlCompilerTest, ParserTransitiveImport) {
 }
 
 // ============================================================
-// Semantic Validation Tests
+// 语义校验测试
 // ============================================================
 
 TEST(IdlCompilerTest, SemanticRejectsLateImport) {
@@ -1235,7 +1235,7 @@ TEST(IdlCompilerTest, ParserNoImportBackwardCompat) {
 }
 
 // ============================================================
-// Code Generation Regression Tests
+// 代码生成回归测试
 // ============================================================
 
 TEST(IdlCompilerTest, CodegenCppArrayUsesBufferSuffixMethods) {
@@ -1462,9 +1462,9 @@ TEST(IdlCompilerTest, CodegenCStringBytesSignaturesAndMetadata) {
     ASSERT_TRUE(header.find("int  demo_BlobService_proxy_echo_name(demo_BlobService_proxy* p, const char* name, uint32_t name_len, char** result, uint32_t* result_len);") != std::string::npos);
     ASSERT_TRUE(header.find("int  demo_BlobService_proxy_echo_data(demo_BlobService_proxy* p, const uint8_t* data, uint32_t data_len, uint8_t** result, uint32_t* result_len);") != std::string::npos);
 
-    ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_NAME, \"echoName\", \"std::string\", \"std::string\");") != std::string::npos);
-    ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_DATA, \"echoData\", \"std::vector<uint8_t>\", \"std::vector<uint8_t>\");") != std::string::npos);
-    ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ROUND_TRIP, \"roundTrip\", \"Payload\", \"Payload\");") != std::string::npos);
+    ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_NAME, \"echoName\", \"std::string\", \"std::string\", 0x") != std::string::npos);
+    ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_DATA, \"echoData\", \"std::vector<uint8_t>\", \"std::vector<uint8_t>\", 0x") != std::string::npos);
+    ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ROUND_TRIP, \"roundTrip\", \"Payload\", \"Payload\", 0x") != std::string::npos);
 
     ASSERT_TRUE(source.find("name = omni_buffer_read_string(req, &name_len);") != std::string::npos);
     ASSERT_TRUE(source.find("data = omni_buffer_read_bytes(req, &data_len);") != std::string::npos);
@@ -1540,11 +1540,11 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
     ASSERT_TRUE(c_header.find("int demo_Inner_deserialize(demo_Inner* self, omni_buffer_t* buf);") != std::string::npos);
     ASSERT_TRUE(c_header.find("int demo_AllTypes_deserialize(demo_AllTypes* self, omni_buffer_t* buf);") != std::string::npos);
     ASSERT_TRUE(c_header.find("int demo_AllTopic_deserialize(demo_AllTopic* self, omni_buffer_t* buf);") != std::string::npos);
-    ASSERT_TRUE(c_source.find("if (!demo_AllTypes_deserialize(&input, req)) { demo_AllTypes_destroy(&input); omni_buffer_destroy(req); return -501; }") != std::string::npos);
-    ASSERT_TRUE(c_source.find("if (!demo_AllTypes_deserialize(result, resp)) { demo_AllTypes_destroy(result); ret = -501; }") != std::string::npos);
+    ASSERT_TRUE(c_source.find("if (!demo_AllTypes_deserialize(&input, req)) { demo_AllTypes_destroy(&input); omni_buffer_destroy(req); return OMNI_ERR_DESERIALIZE; }") != std::string::npos);
+    ASSERT_TRUE(c_source.find("if (!demo_AllTypes_deserialize(result, resp)) { demo_AllTypes_destroy(result); ret = OMNI_ERR_DESERIALIZE; }") != std::string::npos);
     ASSERT_TRUE(c_source.find("if (!demo_AllTopic_deserialize(&msg, buf)) {") != std::string::npos);
     ASSERT_TRUE(c_source.find("if (!omni_buffer_read_ok(buf)) { goto fail; }") != std::string::npos);
-    ASSERT_TRUE(c_source.find("if (self->count > OMNI_MAX_ARRAY_ELEMENTS) { omni_buffer_mark_error(buf, -501); goto fail; }") != std::string::npos);
+    ASSERT_TRUE(c_source.find("if (self->count > OMNI_MAX_ARRAY_ELEMENTS) { omni_buffer_mark_error(buf, OMNI_ERR_DESERIALIZE); goto fail; }") != std::string::npos);
     ASSERT_TRUE(c_source.find("omni_buffer_remaining(buf) / 4u") != std::string::npos);
     ASSERT_TRUE(c_source.find("OMNI_MAX_MESSAGE_SIZE / sizeof(int32_t)") != std::string::npos);
     ASSERT_TRUE(c_source.find("return 1;") != std::string::npos);

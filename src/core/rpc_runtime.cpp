@@ -13,7 +13,8 @@ RpcRuntime::RpcRuntime()
     : default_timeout_ms_(DEFAULT_INVOKE_TIMEOUT)
     , sequence_counter_(0)
     , in_wait_for_reply_(false)
-    , wait_deadline_ms_(0) {}
+    , wait_deadline_ms_(0)
+    , data_replies_() {}
 
 uint32_t RpcRuntime::nextSequence() {
     uint32_t seq = ++sequence_counter_;
@@ -47,7 +48,7 @@ bool RpcRuntime::isTimedOut() const {
 }
 
 int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
-                             SmControlChannel& channel,
+                             PendingReplyTable& table,
                              const std::function<void(int)>& poll_once,
                              Message& reply,
                              const std::function<bool()>& is_alive) {
@@ -58,19 +59,19 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
         OMNI_LOG_WARN(LOG_TAG_RPC, "Re-entrant waitForReply detected, this may cause issues");
     }
 
-    channel.beginWait(seq);
-    while (channel.pendingReply(seq) == NULL) {
+    table.beginWait(seq);
+    while (table.pendingReply(seq) == NULL) {
         if (isTimedOut()) {
-            channel.eraseWait(seq);
+            table.eraseWait(seq);
             in_wait_for_reply_ = prev_in_wait;
             wait_deadline_ms_ = prev_deadline;
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
 
-        // 连接重建（clearReplies 标记失败）后旧连接的回复不可能到达，快速失败，
+        // 所属平面连接重建（clear 标记失败）后旧连接的回复不可能到达，快速失败，
         // 避免空转至超时
-        if (channel.isFailed(seq)) {
-            channel.eraseWait(seq);
+        if (table.isFailed(seq)) {
+            table.eraseWait(seq);
             in_wait_for_reply_ = prev_in_wait;
             wait_deadline_ms_ = prev_deadline;
             return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
@@ -79,15 +80,15 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
         int64_t remaining = remainingWaitMs();
         poll_once(static_cast<int>(remaining));
 
-        if (channel.pendingReply(seq) == NULL && is_alive && !is_alive()) {
-            channel.eraseWait(seq);
+        if (table.pendingReply(seq) == NULL && is_alive && !is_alive()) {
+            table.eraseWait(seq);
             in_wait_for_reply_ = prev_in_wait;
             wait_deadline_ms_ = prev_deadline;
             return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
         }
     }
 
-    if (!channel.takeReply(seq, reply)) {
+    if (!table.takeReply(seq, reply)) {
         in_wait_for_reply_ = prev_in_wait;
         wait_deadline_ms_ = prev_deadline;
         return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);

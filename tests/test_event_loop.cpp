@@ -2,6 +2,9 @@
 #include "core/event_loop.h"
 #include "platform/platform.h"
 
+#include <atomic>
+#include <thread>
+
 using namespace omnibinder;
 
 TEST(EventLoopTest, Timer) {
@@ -42,4 +45,43 @@ TEST(EventLoopTest, CallbackCanRemoveItsOwnFd) {
     loop.pollOnce(100);
     EXPECT_TRUE(continued_after_remove);
     platform::closeEventFd(event_fd);
+}
+
+TEST(EventLoopTest, StopBeforeRunIsNotSwallowed) {
+    EventLoop loop;
+    loop.stop();
+    // 修复前：run() 无条件 running_=true，stop 被吞掉，run 永不退出
+    loop.run();
+    EXPECT_TRUE(loop.stopRequested());
+}
+
+TEST(EventLoopTest, StopDuringRunExits) {
+    EventLoop loop;
+    std::atomic<bool> returned(false);
+    std::thread t([&loop, &returned]() {
+        loop.run();
+        returned.store(true);
+    });
+    loop.stop();
+    t.join();
+    EXPECT_TRUE(returned.load());
+}
+
+TEST(EventLoopTest, PostAfterStopIsRejected) {
+    EventLoop loop;
+    loop.stop();
+    bool called = false;
+    EXPECT_FALSE(loop.post([&called]() { called = true; }));
+    loop.pollOnce(0);
+    EXPECT_FALSE(called);
+}
+
+TEST(EventLoopTest, PostBeforeStopIsDrainedByRun) {
+    EventLoop loop;
+    std::atomic<bool> called(false);
+    ASSERT_TRUE(loop.post([&called]() { called.store(true); }));
+    loop.stop();
+    // 关闭前成功入队的 functor 必须在 run() 返回前被排空，否则投递线程永久挂起
+    loop.run();
+    EXPECT_TRUE(called.load());
 }

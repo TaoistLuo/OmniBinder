@@ -126,7 +126,12 @@ static int cmdPs(omnibinder::OmniRuntime& runtime) {
     return 0;
 }
 
-// 辅助函数：打印字段定义（用于详细模式）
+/* @brief 打印字段定义
+ * @param[in] type 字段类型
+ * @param[in] package 类型所属包
+ * @param[in] indent 缩进层级
+ * @note 用于详细模式
+ */
 static void printFieldSchema(const omnic::TypeRef& type, const std::string& package, int indent) {
     std::string indentStr(indent * 2, ' ');
 
@@ -257,7 +262,11 @@ static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
     return 0;
 }
 
-// Helper: convert hex string to bytes
+/* @brief 将 hex 字符串转换为字节流
+ * @param[in] hex hex 字符串
+ * @param[out] buf 输出 Buffer
+ * @return 成功返回 true
+ */
 static bool hexToBytes(const char* hex, omnibinder::Buffer& buf) {
     size_t len = strlen(hex);
     if (len % 2 != 0) return false;
@@ -271,7 +280,10 @@ static bool hexToBytes(const char* hex, omnibinder::Buffer& buf) {
     return true;
 }
 
-// Helper: print bytes as hex dump
+/* @brief 以 hex dump 形式打印字节流
+ * @param[in] data 字节数据
+ * @param[in] len 数据长度
+ */
 static void printHexDump(const uint8_t* data, size_t len) {
     for (size_t i = 0; i < len; ++i) {
         if (i > 0 && i % 16 == 0) printf("\n  ");
@@ -369,9 +381,20 @@ static void buildIdlMethodMap(std::map<uint64_t, const omnibinder::MethodInfo*>&
     }
 }
 
-static int cmdLogSet(omnibinder::OmniRuntime& runtime, uint32_t pid, const char* level_code) {
+/* @brief 解析并校验 log set 的 <pid> + <level> 参数，然后调用运行时接口
+ * @param[in,out] runtime OmniRuntime 实例
+ * @param[in] pid_text pid 文本
+ * @param[in] level_text 日志级别文本
+ * @return 成功返回 0，失败返回 1
+ */
+static int cmdLogSet(omnibinder::OmniRuntime& runtime, const char* pid_text, const char* level_text) {
+    uint32_t pid = 0;
+    if (!parseUint32Arg(pid_text, pid) || pid == 0) {
+        fprintf(stderr, "Error: invalid --pid value: %s\n", pid_text);
+        return 1;
+    }
     bool ok = false;
-    uint32_t level = parseLogLevelCode(level_code, ok);
+    uint32_t level = parseLogLevelCode(level_text, ok);
     if (!ok) {
         fprintf(stderr, "Error: level must be one of F,E,W,I,D,V,O\n");
         return 1;
@@ -381,13 +404,13 @@ static int cmdLogSet(omnibinder::OmniRuntime& runtime, uint32_t pid, const char*
         fprintf(stderr, "Error: failed to set log level for pid=%u (status=%d)\n", pid, ret);
         return 1;
     }
-    printf("Set pid=%u log level to %s\n", pid, level_code);
+    printf("Set pid=%u log level to %s\n", pid, level_text);
     return 0;
 }
 
 static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
                    const char* method_name, const char* params) {
-    // Look up the service
+    // 查找服务
     omnibinder::ServiceInfo info;
     int ret = runtime.lookupService(service_name, info);
     if (ret != 0) {
@@ -402,7 +425,7 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
         return 1;
     }
 
-    // Find the method
+    // 查找方法
     uint32_t iface_id = 0;
     uint32_t method_id = 0;
     std::string param_type_name;
@@ -428,7 +451,7 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
         return 1;
     }
 
-    // Build request payload
+    // 构造请求 payload
     omnibinder::Buffer request;
     
     if (params && strlen(params) > 0) {
@@ -487,7 +510,7 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     // 记录开始时间
     auto start_time = std::chrono::steady_clock::now();
 
-    // Invoke the method
+    // 调用方法
     omnibinder::Buffer response;
     ret = runtime.invoke(info.name.c_str(), iface_id, method_id, 0, request, response);
     
@@ -538,230 +561,350 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
 static volatile bool g_watch_running = true;
 static void watch_sigint_handler(int) { g_watch_running = false; }
 
-static int cmdWatch(omnibinder::OmniRuntime& runtime, uint32_t pid, const char* filter) {
+/**
+ * @brief watch 诊断事件头
+ * @details 对应 DIAG_EVENT_WIRE_HEADER_SIZE 布局
+ */
+struct DiagEventHeader {
+    uint8_t  direction;
+    uint64_t ts_us;
+    uint16_t orig_type;
+    uint32_t orig_seq;
+    uint32_t orig_len;
+};
+
+/**
+ * @brief watch 期间跨事件累积的状态
+ * @details 包含 IDL 方法表、请求时间戳和待回复方法
+ */
+struct WatchState {
+    WatchState() : pid(0), filter(NULL) {}
+    uint32_t pid;
+    const char* filter;
     std::map<uint64_t, const omnibinder::MethodInfo*> method_map;
     std::deque<omnibinder::MethodInfo> method_storage;
-    buildIdlMethodMap(method_map, method_storage);
+    std::map<uint32_t, uint64_t> req_timestamps;
+    std::map<uint32_t, const omnibinder::MethodInfo*> pending_methods;
+};
 
-    int ret = runtime.watchPid(pid,
-        [&method_map, pid, filter](const omnibinder::Buffer& data) {
+/**
+ * @brief 单个诊断事件解析出的语义信息
+ */
+struct WatchEventInfo {
+    WatchEventInfo()
+        : method(NULL), param_len(0), resp_len(0), resp_status(0), name("?") {}
+    const omnibinder::MethodInfo* method;
+    uint32_t param_len;
+    uint32_t resp_len;
+    int32_t  resp_status;
+    std::string name;
+};
 
-        char source_buf[32];
-        snprintf(source_buf, sizeof(source_buf), "pid%u", pid);
-        std::string source_name = source_buf;
-        static std::map<uint32_t, uint64_t> req_timestamps;
-        static std::map<uint32_t, const omnibinder::MethodInfo*> pending_methods;
+static bool parseDiagEventHeader(const omnibinder::Buffer& data, DiagEventHeader& hdr) {
+    const size_t diag_hdr = omnibinder::DIAG_EVENT_WIRE_HEADER_SIZE;
+    if (data.size() < diag_hdr) {
+        return false;
+    }
+    const uint8_t* p = data.data();
+    hdr.direction = p[0];
+    hdr.ts_us = 0;
+    for (int i = 0; i < 8; ++i) {
+        hdr.ts_us |= static_cast<uint64_t>(p[1 + i]) << (8 * i);
+    }
+    hdr.orig_type = readLe16(p + 9);
+    hdr.orig_seq  = readLe32(p + 11);
+    hdr.orig_len  = readLe32(p + 15);
+    return true;
+}
 
-        const size_t DIAG_HDR = omnibinder::DIAG_EVENT_WIRE_HEADER_SIZE;
-        if (data.size() < DIAG_HDR) {
-            return;
+static std::string watchedSourceName(uint32_t pid) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "pid%u", pid);
+    return std::string(buf);
+}
+
+static const char* diagDirectionLabel(uint8_t direction) {
+    switch (direction) {
+    case omnibinder::DIAG_EVENT_REQUEST:   return "REQUEST  ";
+    case omnibinder::DIAG_EVENT_RESPONSE:  return "RESPONSE ";
+    case omnibinder::DIAG_EVENT_ONE_WAY:   return "ONE_WAY  ";
+    case omnibinder::DIAG_EVENT_SUBSCRIBE: return "SUBSCRIBE";
+    case omnibinder::DIAG_EVENT_BROADCAST: return "BROADCAST";
+    default: return "?";
+    }
+}
+
+/* @brief 记录 REQUEST 时间戳并匹配 RESPONSE 耗时
+ * @param[in,out] state watch 状态
+ * @param[in] ev 诊断事件头
+ * @return 本次事件耗时（us，0 表示无配对）
+ */
+static uint64_t trackWatchLatency(WatchState& state, const DiagEventHeader& ev) {
+    if (ev.direction == omnibinder::DIAG_EVENT_REQUEST) {
+        state.req_timestamps[ev.orig_seq] = ev.ts_us;
+        return 0;
+    }
+    if (ev.direction == omnibinder::DIAG_EVENT_RESPONSE) {
+        std::map<uint32_t, uint64_t>::iterator it = state.req_timestamps.find(ev.orig_seq);
+        if (it != state.req_timestamps.end()) {
+            uint64_t latency_us = ev.ts_us - it->second;
+            state.req_timestamps.erase(it);
+            return latency_us;
         }
+    }
+    return 0;
+}
 
-        const uint8_t* p = data.data();
-        uint8_t direction = p[0];
-        uint64_t ts_us = 0;
-        for (int i = 0; i < 8; ++i) {
-            ts_us |= static_cast<uint64_t>(p[1 + i]) << (8 * i);
-        }
-        uint16_t orig_type = readLe16(p + 9);
-        uint32_t orig_seq  = readLe32(p + 11);
-        uint32_t orig_len  = readLe32(p + 15);
-
-        const char* dir_str = "?";
-        switch (direction) {
-        case omnibinder::DIAG_EVENT_REQUEST: dir_str = "REQUEST  "; break;
-        case omnibinder::DIAG_EVENT_RESPONSE: dir_str = "RESPONSE "; break;
-        case omnibinder::DIAG_EVENT_ONE_WAY: dir_str = "ONE_WAY  "; break;
-        case omnibinder::DIAG_EVENT_SUBSCRIBE: dir_str = "SUBSCRIBE"; break;
-        case omnibinder::DIAG_EVENT_BROADCAST: dir_str = "BROADCAST"; break;
-        }
-
-        uint64_t latency_us = 0;
-        if (direction == omnibinder::DIAG_EVENT_REQUEST) {
-            req_timestamps[orig_seq] = ts_us;
-        } else if (direction == omnibinder::DIAG_EVENT_RESPONSE) {
-            auto it = req_timestamps.find(orig_seq);
-            if (it != req_timestamps.end()) {
-                latency_us = ts_us - it->second;
-                req_timestamps.erase(it);
+/* @brief 从 IDL 方法表解析方法名、请求参数长度、回复状态码
+ * @param[in,out] state watch 状态
+ * @param[in] ev 诊断事件头
+ * @param[in] data 事件数据
+ * @return 解析出的语义信息
+ */
+static WatchEventInfo resolveWatchEvent(WatchState& state, const DiagEventHeader& ev,
+                                        const omnibinder::Buffer& data) {
+    WatchEventInfo info;
+    const size_t diag_hdr = omnibinder::DIAG_EVENT_WIRE_HEADER_SIZE;
+    if (g_parse_ctx && ev.orig_len > 0 && data.size() >= diag_hdr + ev.orig_len) {
+        const uint8_t* payload = data.data() + diag_hdr;
+        if (isInvokeRequestType(ev.orig_type) && ev.orig_len >= 16) {
+            uint32_t iface_id = readLe32(payload);
+            uint32_t meth_id  = readLe32(payload + 8);
+            info.param_len = readLe32(payload + 12);
+            if (info.param_len > ev.orig_len - 16) {
+                info.param_len = 0;
+            }
+            std::map<uint64_t, const omnibinder::MethodInfo*>::iterator mit =
+                state.method_map.find((static_cast<uint64_t>(iface_id) << 32) | meth_id);
+            if (mit != state.method_map.end()) {
+                info.method = mit->second;
+                info.name = mit->second->name;
+                state.pending_methods[ev.orig_seq] = mit->second;
+            }
+        } else if (ev.orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_REPLY)
+                   && ev.direction == omnibinder::DIAG_EVENT_RESPONSE && ev.orig_len >= 8) {
+            info.resp_status = static_cast<int32_t>(readLe32(payload));
+            info.resp_len = readLe32(payload + 4);
+            if (info.resp_len > ev.orig_len - 8) {
+                info.resp_len = 0;
+            }
+            std::map<uint32_t, const omnibinder::MethodInfo*>::iterator pm_it =
+                state.pending_methods.find(ev.orig_seq);
+            if (pm_it != state.pending_methods.end()) {
+                info.method = pm_it->second;
+                info.name = info.method->name;
+                state.pending_methods.erase(pm_it);
             }
         }
+    }
+    if (ev.direction == omnibinder::DIAG_EVENT_BROADCAST) {
+        info.name = "broadcast";
+    } else if (ev.direction == omnibinder::DIAG_EVENT_SUBSCRIBE) {
+        info.name = "subscribe";
+    }
+    return info;
+}
 
-        std::string method_name = "?";
-        uint32_t param_len = 0, resp_len = 0;
-        int32_t resp_status = 0;
-        const omnibinder::MethodInfo* pm = nullptr;
+/* @brief 按 IDL 类型解码 payload
+ * @param[in,out] buf 数据 Buffer
+ * @param[in] type 目标类型
+ * @param[in] package 类型所属包
+ * @param[in] type_name 类型名
+ * @param[out] out 解码输出
+ * @return 成功返回 true
+ * @note 结构体输出 JSON，标量输出 "type: value"
+ */
+static bool decodeWatchValue(omnibinder::Buffer& buf, const omnic::TypeRef& type,
+                             const std::string& package, const std::string& type_name,
+                             std::string& out) {
+    type_codec::TypeCodec codec(*g_parse_ctx);
+    simple_json::Value json_out;
+    if (!codec.decodeFromBuffer(buf, type, package, json_out)) {
+        return false;
+    }
+    if (type.primitive == omnic::TYPE_CUSTOM) {
+        out = json_out.toString(true, 1);
+    } else {
+        out = type_name + ": " + json_out.toString(false, 0);
+    }
+    return true;
+}
 
-        if (g_parse_ctx && orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
-            const uint8_t* payload = p + DIAG_HDR;
-            if (isInvokeRequestType(orig_type) && orig_len >= 16) {
-                uint32_t iface_id = readLe32(payload);
-                uint32_t meth_id  = readLe32(payload + 8);
-                param_len = readLe32(payload + 12);
-                if (param_len > orig_len - 16) {
-                    param_len = 0;
-                }
-                auto mit = method_map.find((static_cast<uint64_t>(iface_id) << 32) | meth_id);
-                if (mit != method_map.end()) {
-                    method_name = mit->second->name;
-                    pm = mit->second;
-                    pending_methods[orig_seq] = mit->second;
-                }
-            } else if (orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_REPLY)
-                       && direction == omnibinder::DIAG_EVENT_RESPONSE && orig_len >= 8) {
-                resp_status = static_cast<int32_t>(readLe32(payload));
-                resp_len = readLe32(payload + 4);
-                if (resp_len > orig_len - 8) {
-                    resp_len = 0;
-                }
-                auto pm_it = pending_methods.find(orig_seq);
-                if (pm_it != pending_methods.end()) {
-                    pm = pm_it->second;
-                    method_name = pm->name;
-                    pending_methods.erase(pm_it);
-                }
-            }
-        }
-        if (direction == omnibinder::DIAG_EVENT_BROADCAST) {
-            method_name = "broadcast";
-        } else if (direction == omnibinder::DIAG_EVENT_SUBSCRIBE) {
-            method_name = "subscribe";
-        }
-        if (filter && filter[0] && method_name != "?" && strcmp(method_name.c_str(), filter) != 0) {
-            return;
-        }
-        char line[512];
-        int off = snprintf(line, sizeof(line), "%s %s.%s() seq=%u len=%u",
-                           dir_str, source_name.c_str(), method_name.c_str(), orig_seq, orig_len);
-        if (direction == omnibinder::DIAG_EVENT_RESPONSE && latency_us > 0) {
-            if (latency_us >= 1000) {
-                appendFormat(line, sizeof(line), off, " (%.2f ms)", latency_us / 1000.0);
+/* @brief 输出 hex 预览
+ * @param[in] line 日志行前缀
+ * @param[in] payload 字节数据
+ * @param[in] len 数据长度
+ * @param[in] max_bytes 最大打印字节数
+ * @param[in] show_ellipsis 是否在截断时追加 "..."
+ */
+static void logWatchHex(const char* line, const uint8_t* payload, uint32_t len,
+                        uint32_t max_bytes, bool show_ellipsis) {
+    char hex[256];
+    int off = 0;
+    uint32_t shown = len > max_bytes ? max_bytes : len;
+    for (uint32_t i = 0; i < shown; ++i) {
+        appendFormat(hex, sizeof(hex), off, "%02x ", payload[i]);
+    }
+    if (show_ellipsis && len > max_bytes) {
+        appendFormat(hex, sizeof(hex), off, "...");
+    }
+    OMNI_LOG_INFO("Watch", "%s \n  HEX: %s", line, hex);
+}
+
+/* @brief 输出 REQUEST 事件的参数解码明细
+ * @param[in] info 事件语义信息
+ * @param[in] payload 事件 payload
+ * @param[in] source_name 来源名称
+ * @param[in] line 日志行前缀
+ */
+static void logWatchRequestDetail(const WatchEventInfo& info, const uint8_t* payload,
+                                  const std::string& source_name, const char* line) {
+    char detail[512];
+    int off = snprintf(detail, sizeof(detail), "  %s.%s(", source_name.c_str(),
+                       info.method->name.c_str());
+    if (!info.method->param_types.empty() && info.param_len > 0) {
+        omnic::TypeRef param_type;
+        if (omni_cli::findTypeRef(g_parse_ctx, info.method->param_types, g_idl_package, param_type)) {
+            omnibinder::Buffer param_buf;
+            param_buf.assign(payload + 16, info.param_len);
+            std::string text;
+            if (decodeWatchValue(param_buf, param_type, g_idl_package,
+                                 info.method->param_types, text)) {
+                appendFormat(detail, sizeof(detail), off, "%s", text.c_str());
             } else {
-                appendFormat(line, sizeof(line), off, " (%llu us)", (unsigned long long)latency_us);
+                appendFormat(detail, sizeof(detail), off, "...");
+            }
+        } else {
+            appendFormat(detail, sizeof(detail), off, "...");
+        }
+    }
+    appendFormat(detail, sizeof(detail), off, ")");
+    OMNI_LOG_INFO("Watch", "%s  \n%s", line, detail);
+}
+
+/* @brief 输出 RESPONSE 事件的状态码与返回值解码明细
+ * @param[in] ev 诊断事件头
+ * @param[in] info 事件语义信息
+ * @param[in] payload 事件 payload
+ * @param[in] line 日志行前缀
+ */
+static void logWatchReplyDetail(const DiagEventHeader& ev, const WatchEventInfo& info,
+                                const uint8_t* payload, const char* line) {
+    char detail[512];
+    int off = snprintf(detail, sizeof(detail), "  -> status=%d", info.resp_status);
+    if (info.resp_len > 0 && info.resp_len <= ev.orig_len - 8 && info.method &&
+        !info.method->return_type.empty() && info.method->return_type != "void") {
+        omnic::TypeRef ret_type;
+        if (omni_cli::findTypeRef(g_parse_ctx, info.method->return_type, g_idl_package, ret_type)) {
+            omnibinder::Buffer resp_buf;
+            resp_buf.assign(payload + 8, info.resp_len);
+            std::string text;
+            if (decodeWatchValue(resp_buf, ret_type, g_idl_package,
+                                 info.method->return_type, text)) {
+                appendFormat(detail, sizeof(detail), off, " %s", text.c_str());
             }
         }
-        // OMNI_LOG_INFO("Watch", "%s", line);
+    }
+    OMNI_LOG_INFO("Watch", "%s  \n%s", line, detail);
+}
 
-        if (g_parse_ctx && orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
-            const uint8_t* payload = p + DIAG_HDR;
-
-            if (isInvokeRequestType(orig_type) && orig_len >= 16 && pm) {
-                char detail[512];
-                off = snprintf(detail, sizeof(detail), "  %s.%s(", source_name.c_str(), pm->name.c_str());
-                if (!pm->param_types.empty() && param_len > 0) {
-                    omnic::TypeRef paramType;
-                    if (omni_cli::findTypeRef(g_parse_ctx, pm->param_types, g_idl_package, paramType)) {
-                        omnibinder::Buffer param_buf;
-                        param_buf.assign(payload + 16, param_len);
-                        type_codec::TypeCodec codec(*g_parse_ctx);
-                        simple_json::Value jsonOut;
-                        if (codec.decodeFromBuffer(param_buf, paramType, g_idl_package, jsonOut)) {
-                            if (paramType.primitive == omnic::TYPE_CUSTOM) {
-                                appendFormat(detail, sizeof(detail), off, "%s",
-                                             jsonOut.toString(true, 1).c_str());
-                            } else {
-                                appendFormat(detail, sizeof(detail), off, "%s: %s",
-                                             pm->param_types.c_str(), jsonOut.toString(false, 0).c_str());
-                            }
-                        } else {
-                            appendFormat(detail, sizeof(detail), off, "...");
-                        }
-                    } else {
-                        appendFormat(detail, sizeof(detail), off, "...");
-                    }
-                }
-                appendFormat(detail, sizeof(detail), off, ")");
-                OMNI_LOG_INFO("Watch", "%s  \n%s",line, detail);
-
-            } else if (orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_REPLY)
-                       && direction == omnibinder::DIAG_EVENT_RESPONSE && orig_len >= 8) {
-                char detail[512];
-                off = snprintf(detail, sizeof(detail), "  -> status=%d", resp_status);
-                if (resp_len > 0 && resp_len <= orig_len - 8 && pm && !pm->return_type.empty() && pm->return_type != "void") {
-                    omnic::TypeRef retType;
-                    if (omni_cli::findTypeRef(g_parse_ctx, pm->return_type, g_idl_package, retType)) {
-                        omnibinder::Buffer resp_buf;
-                        resp_buf.assign(payload + 8, resp_len);
-                        type_codec::TypeCodec codec(*g_parse_ctx);
-                        simple_json::Value jsonOut;
-                        if (codec.decodeFromBuffer(resp_buf, retType, g_idl_package, jsonOut)) {
-                            if (retType.primitive == omnic::TYPE_CUSTOM) {
-                                appendFormat(detail, sizeof(detail), off, " %s",
-                                             jsonOut.toString(true, 1).c_str());
-                            } else {
-                                appendFormat(detail, sizeof(detail), off, " %s: %s",
-                                             pm->return_type.c_str(), jsonOut.toString(false, 0).c_str());
-                            }
-                        }
-                    }
-                }
-                OMNI_LOG_INFO("Watch", "%s  \n%s",line, detail);
-
-            } else if (orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_BROADCAST)
-                       && orig_len >= 8) {
-                uint32_t data_len = readLe32(payload + 4);
-                if (data_len > 0 && data_len <= orig_len - 8) {
-                    omnibinder::Buffer data_buf;
-                    data_buf.assign(payload + 8, data_len);
-                    bool decoded = false;
-                    for (const auto& pkg : g_parse_ctx->loaded_packages) {
-                        for (size_t k = 0; k < pkg.second.topics.size(); ++k) {
-                            const omnic::TopicDef& tdef = pkg.second.topics[k];
-                            omnic::StructDef synth;
-                            synth.name = tdef.name;
-                            synth.fields = tdef.fields;
-                            g_parse_ctx->loaded_packages[pkg.first].structs.push_back(synth);
-                            omnic::TypeRef msgType;
-                            msgType.primitive = omnic::TYPE_CUSTOM;
-                            msgType.custom_name = tdef.name;
-                            type_codec::TypeCodec codec(*g_parse_ctx);
-                            simple_json::Value jsonOut;
-                            if (codec.decodeFromBuffer(data_buf, msgType, pkg.first, jsonOut)) {
-                                OMNI_LOG_INFO("Watch", "%s\n  %s %s",line,
-                                              tdef.name.c_str(), jsonOut.toString(true, 1).c_str());
-                                decoded = true;
-                            }
-                            g_parse_ctx->loaded_packages[pkg.first].structs.pop_back();
-                            if (decoded) {
-                                break;
-                            }
-                        }
-                        if (decoded) {
-                            break;
-                        }
-                    }
-                    if (!decoded) {
-                        char hex[256];
-                        int hoff = 0;
-                        uint32_t d = data_len > 64 ? 64 : data_len;
-                        for (uint32_t i = 0; i < d; ++i) {
-                            appendFormat(hex, sizeof(hex), hoff, "%02x ", payload[8 + i]);
-                        }
-                        OMNI_LOG_INFO("Watch", "%s \n  HEX: %s", line, hex);
-                    }
-                }
-            } else {
-                char hex[256];
-                int hoff = 0;
-                uint32_t d = orig_len > 64 ? 64 : orig_len;
-                for (uint32_t i = 0; i < d; ++i) {
-                    appendFormat(hex, sizeof(hex), hoff, "%02x ", payload[i]);
-                }
-                OMNI_LOG_INFO("Watch", "%s \n  HEX: %s",line, hex);
+/* @brief 输出 BROADCAST 事件的 topic 解码明细
+ * @param[in] ev 诊断事件头
+ * @param[in] payload 事件 payload
+ * @param[in] line 日志行前缀
+ * @note 无法解码时回退 hex
+ */
+static void logWatchBroadcastDetail(const DiagEventHeader& ev, const uint8_t* payload,
+                                    const char* line) {
+    uint32_t data_len = readLe32(payload + 4);
+    if (data_len == 0 || data_len > ev.orig_len - 8) {
+        return;
+    }
+    omnibinder::Buffer data_buf;
+    data_buf.assign(payload + 8, data_len);
+    for (std::map<std::string, omnic::AstFile>::const_iterator pit =
+             g_parse_ctx->loaded_packages.begin();
+         pit != g_parse_ctx->loaded_packages.end(); ++pit) {
+        const omnic::AstFile& ast = pit->second;
+        for (size_t k = 0; k < ast.topics.size(); ++k) {
+            const omnic::TopicDef& tdef = ast.topics[k];
+            omnic::StructDef synth;
+            synth.name = tdef.name;
+            synth.fields = tdef.fields;
+            g_parse_ctx->loaded_packages[pit->first].structs.push_back(synth);
+            omnic::TypeRef msg_type;
+            msg_type.primitive = omnic::TYPE_CUSTOM;
+            msg_type.custom_name = tdef.name;
+            std::string text;
+            bool decoded = decodeWatchValue(data_buf, msg_type, pit->first, tdef.name, text);
+            g_parse_ctx->loaded_packages[pit->first].structs.pop_back();
+            if (decoded) {
+                OMNI_LOG_INFO("Watch", "%s\n  %s %s", line, tdef.name.c_str(), text.c_str());
+                return;
             }
-        } else if (orig_len > 0 && data.size() >= DIAG_HDR + orig_len) {
-            const uint8_t* payload = p + DIAG_HDR;
-            char hex[256];
-            int hoff = 0;
-            uint32_t d = orig_len > 128 ? 128 : orig_len;
-            for (uint32_t i = 0; i < d; ++i) {
-                appendFormat(hex, sizeof(hex), hoff, "%02x ", payload[i]);
-            }
-            if (orig_len > 128) {
-                appendFormat(hex, sizeof(hex), hoff, "...");
-            }
-            OMNI_LOG_INFO("Watch", "%s \n  HEX: %s",line, hex);
         }
+    }
+    logWatchHex(line, payload + 8, data_len, 64, false);
+}
+
+/* @brief 处理单条诊断事件
+ * @param[in,out] state watch 状态
+ * @param[in] data 事件数据
+ * @note 流程：解析头部 -> 过滤 -> 格式化输出
+ */
+static void handleWatchEvent(WatchState& state, const omnibinder::Buffer& data) {
+    DiagEventHeader ev;
+    if (!parseDiagEventHeader(data, ev)) {
+        return;
+    }
+    std::string source_name = watchedSourceName(state.pid);
+    uint64_t latency_us = trackWatchLatency(state, ev);
+    WatchEventInfo info = resolveWatchEvent(state, ev, data);
+    if (state.filter && state.filter[0] && info.name != "?" &&
+        strcmp(info.name.c_str(), state.filter) != 0) {
+        return;
+    }
+
+    char line[512];
+    int off = snprintf(line, sizeof(line), "%s %s.%s() seq=%u len=%u",
+                       diagDirectionLabel(ev.direction), source_name.c_str(),
+                       info.name.c_str(), ev.orig_seq, ev.orig_len);
+    if (ev.direction == omnibinder::DIAG_EVENT_RESPONSE && latency_us > 0) {
+        if (latency_us >= 1000) {
+            appendFormat(line, sizeof(line), off, " (%.2f ms)", latency_us / 1000.0);
+        } else {
+            appendFormat(line, sizeof(line), off, " (%llu us)", (unsigned long long)latency_us);
+        }
+    }
+
+    const size_t diag_hdr = omnibinder::DIAG_EVENT_WIRE_HEADER_SIZE;
+    const bool has_payload = ev.orig_len > 0 && data.size() >= diag_hdr + ev.orig_len;
+    if (g_parse_ctx && has_payload) {
+        const uint8_t* payload = data.data() + diag_hdr;
+        if (isInvokeRequestType(ev.orig_type) && ev.orig_len >= 16 && info.method) {
+            logWatchRequestDetail(info, payload, source_name, line);
+        } else if (ev.orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_REPLY)
+                   && ev.direction == omnibinder::DIAG_EVENT_RESPONSE && ev.orig_len >= 8) {
+            logWatchReplyDetail(ev, info, payload, line);
+        } else if (ev.orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_BROADCAST)
+                   && ev.orig_len >= 8) {
+            logWatchBroadcastDetail(ev, payload, line);
+        } else {
+            logWatchHex(line, payload, ev.orig_len, 64, false);
+        }
+    } else if (has_payload) {
+        logWatchHex(line, data.data() + diag_hdr, ev.orig_len, 128, true);
+    }
+}
+
+static int cmdWatch(omnibinder::OmniRuntime& runtime, uint32_t pid, const char* filter) {
+    WatchState state;
+    state.pid = pid;
+    state.filter = filter;
+    buildIdlMethodMap(state.method_map, state.method_storage);
+
+    int ret = runtime.watchPid(pid, [&state](const omnibinder::Buffer& data) {
+        handleWatchEvent(state, data);
     });
     if (ret != 0) {
         fprintf(stderr, "Error: Failed to start watch for pid=%u (status=%d)\n", pid, ret);
@@ -789,7 +932,7 @@ int main(int argc, char* argv[]) {
     const char* positional[5] = {NULL, NULL, NULL, NULL, NULL};
     int pos_count = 0;
     
-    // Parse arguments
+    // 解析命令行参数
     for (int i = 1; i < argc; ++i) {
         if ((strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
             host = argv[++i];
@@ -816,7 +959,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // Parse IDL file if provided
+    // 如提供则解析 IDL 文件
     if (idl_file) {
         std::ifstream ifs(idl_file);
         if (!ifs.is_open()) {
@@ -908,13 +1051,7 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Error: usage: log set --pid <pid> --level <F|E|W|I|D|V|O>\n");
             result = 1;
         } else {
-            uint32_t pid = 0;
-            if (!parseUint32Arg(pid_arg, pid) || pid == 0) {
-                fprintf(stderr, "Error: invalid --pid value: %s\n", pid_arg);
-                result = 1;
-            } else {
-                result = cmdLogSet(runtime, pid, level_arg);
-            }
+            result = cmdLogSet(runtime, pid_arg, level_arg);
         }
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);

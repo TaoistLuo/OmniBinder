@@ -2,7 +2,7 @@
 #include <cstdlib>
 #include <string>
 #ifdef _WIN32
-// Windows: system() returns exit code directly
+// Windows：system() 直接返回退出码
 #define WIFEXITED(x) 1
 #define WEXITSTATUS(x) (x)
 #else

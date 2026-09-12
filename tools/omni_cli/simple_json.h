@@ -70,14 +70,14 @@ public:
     int64_t asInt64() const { return static_cast<int64_t>(num_val_); }
     const std::string& asString() const { return str_val_; }
     
-    // Array operations
+    // 数组操作
     void setArray() { type_ = TYPE_ARRAY; }
     void push(const Value& v) { array_val_.push_back(v); }
     size_t size() const { return array_val_.size(); }
     const Value& operator[](size_t idx) const { return array_val_[idx]; }
     Value& operator[](size_t idx) { return array_val_[idx]; }
     
-    // Object operations
+    // 对象操作
     void setObject() { type_ = TYPE_OBJECT; }
     void set(const std::string& key, const Value& v) { obj_val_[key] = v; }
     bool has(const std::string& key) const { return obj_val_.find(key) != obj_val_.end(); }
@@ -91,7 +91,7 @@ public:
     }
     const std::map<std::string, Value>& getObject() const { return obj_val_; }
     
-    // Serialization
+    // 序列化
     std::string toString(bool pretty = false, int indent = 0) const;
     
 private:
@@ -103,7 +103,10 @@ private:
     std::map<std::string, Value> obj_val_;
 };
 
-// Parse JSON string to Value
+/* @brief 解析 JSON 字符串
+ * @param[in] json JSON 文本
+ * @return 解析后的 JSON Value
+ */
 Value parse(const std::string& json);
 
 } // namespace simple_json

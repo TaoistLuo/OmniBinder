@@ -31,123 +31,62 @@
  *************************************************************************************************/
 
 #include "omnibinder/buffer_view.h"
-#include <cstring>
+#include "buffer_read_utils.h"
 
 namespace omnibinder {
 
+// 读取方法统一委托给共享原语，上限为 length_（public 行为与 Buffer 完全一致）
+
 bool BufferView::tryReadBool(bool& value) noexcept {
-    uint8_t byte = 0;
-    if (!tryReadUint8(byte)) return false;
-    value = (byte != 0);
-    return true;
+    return buffer_read::readBool(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadInt8(int8_t& value) noexcept {
-    uint8_t byte = 0;
-    if (!tryReadUint8(byte)) return false;
-    value = static_cast<int8_t>(byte);
-    return true;
+    return buffer_read::readInt8(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadUint8(uint8_t& value) noexcept {
-    if (read_pos_ + 1 > length_) return false;
-    value = data_[read_pos_++];
-    return true;
+    return buffer_read::readUint8(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadInt16(int16_t& value) noexcept {
-    uint16_t temp = 0;
-    if (!tryReadUint16(temp)) return false;
-    value = static_cast<int16_t>(temp);
-    return true;
+    return buffer_read::readInt16(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadUint16(uint16_t& value) noexcept {
-    if (read_pos_ + 2 > length_) return false;
-    value = static_cast<uint16_t>(data_[read_pos_])
-          | (static_cast<uint16_t>(data_[read_pos_ + 1]) << 8);
-    read_pos_ += 2;
-    return true;
+    return buffer_read::readUint16(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadInt32(int32_t& value) noexcept {
-    uint32_t temp = 0;
-    if (!tryReadUint32(temp)) return false;
-    value = static_cast<int32_t>(temp);
-    return true;
+    return buffer_read::readInt32(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadUint32(uint32_t& value) noexcept {
-    if (read_pos_ + 4 > length_) return false;
-    value = static_cast<uint32_t>(data_[read_pos_])
-          | (static_cast<uint32_t>(data_[read_pos_ + 1]) << 8)
-          | (static_cast<uint32_t>(data_[read_pos_ + 2]) << 16)
-          | (static_cast<uint32_t>(data_[read_pos_ + 3]) << 24);
-    read_pos_ += 4;
-    return true;
+    return buffer_read::readUint32(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadInt64(int64_t& value) noexcept {
-    uint64_t temp = 0;
-    if (!tryReadUint64(temp)) return false;
-    value = static_cast<int64_t>(temp);
-    return true;
+    return buffer_read::readInt64(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadUint64(uint64_t& value) noexcept {
-    if (read_pos_ + 8 > length_) return false;
-    value = static_cast<uint64_t>(data_[read_pos_])
-          | (static_cast<uint64_t>(data_[read_pos_ + 1]) << 8)
-          | (static_cast<uint64_t>(data_[read_pos_ + 2]) << 16)
-          | (static_cast<uint64_t>(data_[read_pos_ + 3]) << 24)
-          | (static_cast<uint64_t>(data_[read_pos_ + 4]) << 32)
-          | (static_cast<uint64_t>(data_[read_pos_ + 5]) << 40)
-          | (static_cast<uint64_t>(data_[read_pos_ + 6]) << 48)
-          | (static_cast<uint64_t>(data_[read_pos_ + 7]) << 56);
-    read_pos_ += 8;
-    return true;
+    return buffer_read::readUint64(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadFloat32(float& value) noexcept {
-    uint32_t bits = 0;
-    if (!tryReadUint32(bits)) return false;
-    std::memcpy(&value, &bits, sizeof(value));
-    return true;
+    return buffer_read::readFloat32(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadFloat64(double& value) noexcept {
-    uint64_t bits = 0;
-    if (!tryReadUint64(bits)) return false;
-    std::memcpy(&value, &bits, sizeof(value));
-    return true;
+    return buffer_read::readFloat64(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadString(std::string& value) noexcept {
-    uint32_t len = 0;
-    if (!tryReadUint32(len)) return false;
-    if (len == 0) { value.clear(); return true; }
-    if (len > length_ - read_pos_) return false;
-    try {
-        value.assign(reinterpret_cast<const char*>(data_ + read_pos_), len);
-    } catch (...) {
-        return false;
-    }
-    read_pos_ += len;
-    return true;
+    return buffer_read::readString(data_, length_, read_pos_, value);
 }
 
 bool BufferView::tryReadBytes(std::vector<uint8_t>& value) noexcept {
-    uint32_t len = 0;
-    if (!tryReadUint32(len)) return false;
-    if (len == 0) { value.clear(); return true; }
-    if (len > length_ - read_pos_) return false;
-    try {
-        value.assign(data_ + read_pos_, data_ + read_pos_ + len);
-    } catch (...) {
-        return false;
-    }
-    read_pos_ += len;
-    return true;
+    return buffer_read::readBytes(data_, length_, read_pos_, value);
 }
 
 } // namespace omnibinder

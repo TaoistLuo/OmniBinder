@@ -4,18 +4,18 @@
 
 OmniBinder 设计为跨平台 IPC/RPC 框架。当前支持 Linux 和 Windows，未来计划支持 Android、鸿蒙、FreeRTOS、ESP32 等。
 
-适配新平台的核心工作是**实现平台抽象层**（`platform.h` 声明的 53 个函数）和**事件驱动后端**（`EventBackend` 接口）。传输层（TCP/SHM）、序列化、协议栈、运行时逻辑均为平台无关的 C++11 代码，不需要修改。
+适配新平台的核心工作是**实现平台抽象层**（`platform.h` 声明的 52 个函数）和**事件驱动后端**（`EventBackend` 接口）。传输层（TCP/SHM）、序列化、协议栈、运行时逻辑均为平台无关的 C++11 代码，不需要修改。
 
 ## 适配级别
 
 | 级别 | 支持功能 | 需实现的平台函数 | 工作量 |
 |------|---------|----------------|--------|
-| **TCP 客户端** | 连接服务、RPC 调用、订阅 topic、死亡通知 | ~20 个网络 + ~5 个系统 | 2-3 天 |
+| **TCP 客户端** | 连接服务、RPC 调用、订阅 topic、死亡通知 | ~20 个网络 + ~10 个系统 | 2-3 天 |
 | **TCP 服务端** | + 注册服务、接受连接、TCP 数据通道 | + bind/listen/accept | +1 天 |
-| **完整支持（含 SHM）** | + 同机 SHM 高速通信 | + ~15 个 SHM/eventfd/handshake | +3-5 天 |
+| **完整支持（含 SHM）** | + 同机 SHM 高速通信 | + ~18 个 SHM/eventfd/handshake | +3-5 天 |
 
 > **注意**：绝大多数 RTOS/MCU 平台只需要适配到"TCP 客户端"或"TCP 服务端"级别。
-> SHM 需要内核级共享内存支持（如 `/dev/shm`），仅在 Linux/类 Unix 上可用。
+> SHM 需要内核级共享内存支持（如 Linux 的 `/dev/shm`、Windows 的 named file mapping），纯 RTOS/MCU 平台通常不具备该能力。
 
 ## 平台 API 清单
 
@@ -39,7 +39,7 @@ OmniBinder 设计为跨平台 IPC/RPC 框架。当前支持 Linux 和 Windows，
 | `socketRecv(fd, buf, size)` | 接收数据 | `lwip_recv(fd, buf, size, 0)` |
 | `closeSocket(fd)` | 关闭 socket | `lwip_close(fd)` |
 | `getSocketPort(fd)` | 获取本地端口 | `getsockname(fd, ...)` |
-| `getSocketAddress(fd)` | 获取本地地址 | `getsockname(fd, ...)` |
+| `getSocketAddress(fd)` | 获取本地地址（当前核心生产代码未调用，可留空实现） | `getsockname(fd, ...)` |
 | `getSocketError()` | 获取最后一次 socket 错误 | `errno` 或 `lwip_errno` |
 | `isWouldBlock(err)` | 判断是否为 EAGAIN/EWOULDBLOCK | `err == EAGAIN \|\| err == EWOULDBLOCK` |
 | `isConnectionReset(err)` | 判断是否为连接重置 | `err == ECONNRESET` |
@@ -52,7 +52,6 @@ OmniBinder 设计为跨平台 IPC/RPC 框架。当前支持 Linux 和 Windows，
 |------|---------|------|
 | `createEventFd()` | `-1` | 仅 SHM 使用 |
 | `createNamedEventFd(name)` | `-1` | 仅 SHM 使用 |
-| `openNamedEventFd(name)` | `-1` | 仅 SHM 使用 |
 | `eventFdNotify(efd)` | `false` | 仅 SHM 使用 |
 | `eventFdConsume(efd)` | `true` | 仅 SHM 使用 |
 | `closeEventFd(efd)` | — | 空函数 |
@@ -79,7 +78,9 @@ OmniBinder 设计为跨平台 IPC/RPC 框架。当前支持 Linux 和 Windows，
 | `handshakeClose(ch)` | — |
 | `handshakeGetFd(ch)` | `-1` |
 | `handshakeGetListenerFd(listener)` | `-1` |
-| `isShmHandshakeAvailable()` | `false` |
+
+> SHM 可用性不再由平台层单独声明：`transport_selector` 在创建客户端传输时尝试 SHM，
+> 若平台未实现握手/shm 原语或 SHM 建立失败，自动回退 TCP。
 
 ### 第五组：系统/时间（必须实现）
 
@@ -101,10 +102,11 @@ OmniBinder 设计为跨平台 IPC/RPC 框架。当前支持 Linux 和 Windows，
 | 函数 | MCU 实现 |
 |------|---------|
 | `waitFdReadable(fd, timeout)` | `select` 读检查 |
+| `setParentDeathSignal()` | 空函数（MCU 无父进程信号；Linux 为 prctl，测试框架用于避免子进程残留） |
 
 ## EventBackend 实现
 
-`EventLoop` 依赖 `EventBackend` 抽象接口处理 I/O 多路复用。当前有 `EpollBackend`（Linux）和 `IocpBackend`（Windows）。
+`EventLoop` 依赖 `EventBackend` 抽象接口处理 I/O 多路复用。当前有 `EpollBackend`（Linux）和 `IocpBackend`（Windows），由 `platform::createEventBackend()` 工厂创建。
 
 RTOS/MCU 平台需要实现一个轻量替代：
 
@@ -113,18 +115,22 @@ class SelectBackend : public EventBackend {
     fd_set read_fds_, write_fds_;
     int    max_fd_;
     
-    void addFd(int fd, int events) override;   // FD_SET
-    void removeFd(int fd) override;            // FD_CLR
-    int  poll(int timeout_ms) override;        // select + 检查可读/可写
-    void wakeup() override;                    // xSemaphoreGive
+    bool init() override;                             // 初始化
+    void destroy() override;                          // 销毁
+    bool addFd(int fd, uint32_t events) override;     // FD_SET
+    bool modifyFd(int fd, uint32_t events) override;  // 更新监听事件
+    bool removeFd(int fd) override;                   // FD_CLR
+    int  poll(ReadyEvent* events, int max_events, int timeout_ms) override;
     // ...
 };
 ```
 
 **核心逻辑**：
-- `addFd`/`removeFd`：维护 `fd_set`
-- `poll(timeout_ms)`：调用 `select(max_fd+1, &read_fds_, &write_fds_, NULL, &tv)`，返回就绪 fd 数量
-- `wakeup()`：通过一个内部 socket pair 或 FreeRTOS 信号量唤醒阻塞的 `poll()`
+- `addFd`/`modifyFd`/`removeFd`：维护 `fd_set`（事件位为 `EVENT_READ` / `EVENT_WRITE` / `EVENT_ERROR`）
+- `poll(events, max_events, timeout_ms)`：调用 `select(max_fd+1, &read_fds_, &write_fds_, NULL, &tv)`，
+  把就绪 fd 填入 `ReadyEvent` 数组并返回数量（`-1` 表示错误）
+- 唤醒：`EventLoop` 自带 wakeup fd（`platform::createEventFd()`），作为普通 fd 注册到后端；
+  跨线程投递时 `EventLoop::wakeup()` 通过 `platform::eventFdNotify()` 写该 fd 唤醒 `poll()`
 
 ## 完整示例：FreeRTOS + lwIP
 
@@ -172,7 +178,6 @@ std::string getMachineId() {
 // ─── SHM / eventfd / handshake（全部空返回）───
 void* shmCreate(...) { return NULL; }
 int createEventFd() { return -1; }
-bool isShmHandshakeAvailable() { return false; }
 // ... 其他空函数 ...
 ```
 

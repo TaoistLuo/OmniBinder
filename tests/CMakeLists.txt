@@ -77,7 +77,9 @@ add_executable(test_idl_compiler
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_common.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_header.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_source.cpp
 )
 target_include_directories(test_idl_compiler PRIVATE
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc
@@ -112,6 +114,11 @@ target_include_directories(test_omni_cli_type_codec PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static gtest gtest_main)
+if(MSVC)
+    target_compile_options(test_omni_cli_type_codec PRIVATE /UNDEBUG)
+else()
+    target_compile_options(test_omni_cli_type_codec PRIVATE -UNDEBUG)
+endif()
 add_test(NAME test_omni_cli_type_codec COMMAND test_omni_cli_type_codec)
 
 add_executable(test_omni_cli_info_formatter
@@ -221,7 +228,9 @@ add_executable(test_generated_runtime_integration
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_common.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_header.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_source.cpp
 )
 target_include_directories(test_generated_runtime_integration PRIVATE
     ${CMAKE_SOURCE_DIR}/tools/omni_idlc

@@ -46,7 +46,7 @@ enum class ErrorCode : int32_t {
     // 成功
     OK                      = 0,
 
-    // 通用错误 (1-99)
+    // 通用错误 (-1..-9)
     ERR_UNKNOWN             = -1,
     ERR_INVALID_PARAM       = -2,
     ERR_OUT_OF_MEMORY       = -3,
@@ -57,7 +57,7 @@ enum class ErrorCode : int32_t {
     ERR_INTERNAL            = -8,
     ERR_NOT_RUNNING         = -9,  // event-loop 已停止，不能投递任务
 
-    // 网络错误 (100-199)
+    // 网络错误 (-100..-108)
     ERR_CONNECT_FAILED      = -100,
     ERR_CONNECTION_CLOSED   = -101,
     ERR_SEND_FAILED         = -102,
@@ -68,7 +68,7 @@ enum class ErrorCode : int32_t {
     ERR_LISTEN_FAILED       = -107,
     ERR_ACCEPT_FAILED       = -108,
 
-    // 服务错误 (200-299)
+    // 服务错误 (-200..-208)
     ERR_SERVICE_NOT_FOUND   = -200,
     ERR_SERVICE_EXISTS      = -201,
     ERR_SERVICE_OFFLINE     = -202,
@@ -79,30 +79,30 @@ enum class ErrorCode : int32_t {
     ERR_UNREGISTER_FAILED   = -207,
     ERR_IDL_MISMATCH        = -208,
 
-    // 话题错误 (300-399)
+    // 话题错误 (-300..-303)
     ERR_TOPIC_NOT_FOUND     = -300,
     ERR_TOPIC_EXISTS        = -301,
     ERR_NOT_SUBSCRIBED      = -302,
     ERR_NOT_PUBLISHER       = -303,
 
-    // 传输层错误 (400-499)
+    // 传输层错误 (-400..-404)
     ERR_TRANSPORT_INIT      = -400,
     ERR_SHM_CREATE          = -401,
     ERR_SHM_ATTACH          = -402,
     ERR_SHM_FULL            = -403,
     ERR_SHM_TIMEOUT         = -404,
 
-    // 序列化错误 (500-599)
+    // 序列化错误 (-500..-503)
     ERR_SERIALIZE           = -500,
     ERR_DESERIALIZE         = -501,
     ERR_BUFFER_OVERFLOW     = -502,
     ERR_BUFFER_UNDERFLOW    = -503,
 };
 
-// 错误码转字符串
+/* @brief 错误码转字符串 */
 const char* errorCodeToString(ErrorCode code);
 
-// 判断是否成功
+/* @brief 判断是否成功 */
 inline bool isSuccess(ErrorCode code) {
     return code == ErrorCode::OK;
 }

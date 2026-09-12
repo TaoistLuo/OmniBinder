@@ -26,7 +26,9 @@ struct omni_buffer_t {
     omni_buffer_t(const uint8_t* data, size_t len) : buf(data, len), read_ok(true), error_code(0) {}
 };
 
-/* C 服务桥接：将 C++ Service 的 onInvoke 转发到 C 回调 */
+/*
+ * @brief  C 服务桥接：将 C++ Service 的 onInvoke 转发到 C 回调
+ */
 class CServiceBridge : public omnibinder::Service {
 public:
     CServiceBridge(const char* name, uint32_t interface_id,
@@ -43,13 +45,18 @@ public:
     const omnibinder::InterfaceInfo& interfaceInfo() const override { return iface_; }
 
     void addMethod(uint32_t method_id, const char* method_name,
-                   const char* param_types, const char* return_type) {
-        iface_.methods.push_back(omnibinder::MethodInfo(
+                   const char* param_types, const char* return_type,
+                   uint32_t idl_hash) {
+        omnibinder::MethodInfo mi(
             method_id,
             method_name ? method_name : "",
             param_types ? param_types : "",
-            return_type ? return_type : "void"));
+            return_type ? return_type : "void");
+        mi.idl_hash = idl_hash;
+        iface_.methods.push_back(mi);
     }
+
+    void* userData() const { return user_data_; }
 
     omnibinder::InterfaceInfo iface_;
 
@@ -98,7 +105,7 @@ namespace {
 
 inline void markReadError(omni_buffer_t* buf) {
     buf->read_ok = false;
-    buf->error_code = -501;
+    buf->error_code = static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);
 }
 
 }
@@ -381,6 +388,7 @@ uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len) {
 omni_service_t* omni_service_create(const char* name, uint32_t interface_id,
     omni_invoke_callback_t callback, void* user_data)
 {
+    if (!name) return NULL;
     omni_service_t* svc = new omni_service_t();
     svc->bridge = new CServiceBridge(name, interface_id, callback, user_data);
     return svc;
@@ -393,15 +401,19 @@ void omni_service_destroy(omni_service_t* svc) {
     }
 }
 
+void* omni_service_get_user_data(omni_service_t* svc) {
+    return svc ? svc->bridge->userData() : NULL;
+}
+
 void omni_service_add_method(omni_service_t* svc, uint32_t method_id, const char* method_name) {
-    omni_service_add_method_ex(svc, method_id, method_name, "", "void");
+    omni_service_add_method_ex(svc, method_id, method_name, "", "void", 0);
 }
 
 void omni_service_add_method_ex(omni_service_t* svc, uint32_t method_id, const char* method_name,
-    const char* param_types, const char* return_type)
+    const char* param_types, const char* return_type, uint32_t idl_hash)
 {
     if (svc && svc->bridge) {
-        svc->bridge->addMethod(method_id, method_name, param_types, return_type);
+        svc->bridge->addMethod(method_id, method_name, param_types, return_type, idl_hash);
     }
 }
 
@@ -435,7 +447,7 @@ void omni_runtime_destroy(omni_runtime_t* runtime) {
 }
 
 int omni_runtime_init(omni_runtime_t* runtime, const char* sm_host, uint16_t sm_port) {
-    if (!runtime) return -1;
+    if (!runtime || !sm_host) return -1;
     return runtime->runtime.init(sm_host, sm_port);
 }
 
@@ -503,7 +515,7 @@ int omni_runtime_invoke(omni_runtime_t* runtime, const char* service_name,
     const omni_buffer_t* request, omni_buffer_t* response,
     uint32_t timeout_ms)
 {
-    if (!runtime || !request || !response) return -1;
+    if (!runtime || !service_name || !request || !response) return -1;
     return runtime->runtime.invoke(service_name, interface_id, method_id, idl_hash,
                                  request->buf, response->buf, timeout_ms);
 }
@@ -512,7 +524,7 @@ int omni_runtime_invoke_oneway(omni_runtime_t* runtime, const char* service_name
     uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
     const omni_buffer_t* request)
 {
-    if (!runtime || !request) return -1;
+    if (!runtime || !service_name || !request) return -1;
     return runtime->runtime.invokeOneWay(service_name, interface_id, method_id, idl_hash, request->buf);
 }
 
@@ -551,9 +563,11 @@ void omni_runtime_stop_heartbeat(omni_runtime_t* runtime, const char* service_na
     runtime->runtime.stopHeartbeat(service_name);
 }
 
-int omni_runtime_publish_topic(omni_runtime_t* runtime, const char* topic_name) {
-    if (!runtime) return -1;
-    return runtime->runtime.publishTopic(topic_name);
+int omni_runtime_publish_topic(omni_runtime_t* runtime, const char* topic_name,
+    uint32_t idl_hash)
+{
+    if (!runtime || !topic_name) return -1;
+    return runtime->runtime.publishTopic(topic_name, idl_hash);
 }
 
 int omni_runtime_broadcast(omni_runtime_t* runtime, uint32_t topic_id,
@@ -564,10 +578,10 @@ int omni_runtime_broadcast(omni_runtime_t* runtime, uint32_t topic_id,
 }
 
 int omni_runtime_subscribe_topic(omni_runtime_t* runtime, const char* topic_name,
-    omni_topic_callback_t callback, void* user_data)
+    uint32_t expected_idl_hash, omni_topic_callback_t callback, void* user_data)
 {
-    if (!runtime || !callback) return -1;
-    return runtime->runtime.subscribeTopic(topic_name,
+    if (!runtime || !topic_name || !callback) return -1;
+    return runtime->runtime.subscribeTopic(topic_name, expected_idl_hash,
         [callback, user_data](uint32_t topic_id, const omnibinder::Buffer& data) {
             omni_buffer_t wrap;
             wrap.buf = omnibinder::Buffer(data.data(), data.size());
@@ -576,14 +590,14 @@ int omni_runtime_subscribe_topic(omni_runtime_t* runtime, const char* topic_name
 }
 
 int omni_runtime_unsubscribe_topic(omni_runtime_t* runtime, const char* topic_name) {
-    if (!runtime) return -1;
+    if (!runtime || !topic_name) return -1;
     return runtime->runtime.unsubscribeTopic(topic_name);
 }
 
 int omni_runtime_subscribe_death(omni_runtime_t* runtime, const char* service_name,
     omni_death_callback_t callback, void* user_data)
 {
-    if (!runtime || !callback) return -1;
+    if (!runtime || !service_name || !callback) return -1;
     return runtime->runtime.subscribeServiceDeath(service_name,
         [callback, user_data](const std::string& name) {
             callback(name.c_str(), user_data);
@@ -591,7 +605,7 @@ int omni_runtime_subscribe_death(omni_runtime_t* runtime, const char* service_na
 }
 
 int omni_runtime_unsubscribe_death(omni_runtime_t* runtime, const char* service_name) {
-    if (!runtime) return -1;
+    if (!runtime || !service_name) return -1;
     return runtime->runtime.unsubscribeServiceDeath(service_name);
 }
 
@@ -625,6 +639,7 @@ int omni_runtime_reset_stats(omni_runtime_t* runtime) {
  * ============================================================ */
 
 uint32_t omni_fnv1a_32(const char* str) {
+    if (!str) return 0;
     uint32_t hash = 0x811c9dc5u;
     while (*str) {
         hash ^= (uint8_t)*str++;

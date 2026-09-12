@@ -2,8 +2,10 @@
 #include "test_common.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
+#include <atomic>
 #include <thread>
 #include <chrono>
+#include <string>
 #include <vector>
 
 using namespace omnibinder;
@@ -105,6 +107,102 @@ protected:
 TestPid ThreadsafeClientAndReconnectTest::sm_pid_ = 0;
 TsClientServerCtx* ThreadsafeClientAndReconnectTest::server_ctx_ = nullptr;
 std::thread ThreadsafeClientAndReconnectTest::server_tid_;
+
+TEST_F(ThreadsafeClientAndReconnectTest, StopBeforeRunReturns) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    // stop 在 run 之前调用（文档允许）：run 必须立即返回，不得重新武装 loop
+    runtime.stop();
+    std::atomic<bool> returned(false);
+    std::thread t([&runtime, &returned]() {
+        runtime.run();
+        returned.store(true);
+    });
+    for (int i = 0; i < 300 && !returned.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::microseconds(10000));
+    }
+    EXPECT_TRUE(returned.load());
+    // 幂等 stop：即使上一步失败也保证 join 不挂起
+    runtime.stop();
+    t.join();
+    EXPECT_FALSE(runtime.isRunning());
+}
+
+TEST_F(ThreadsafeClientAndReconnectTest, StopDuringRunExits) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    std::atomic<bool> returned(false);
+    std::thread t([&runtime, &returned]() {
+        runtime.run();
+        returned.store(true);
+    });
+    for (int i = 0; i < 300 && !runtime.isRunning(); ++i) {
+        std::this_thread::sleep_for(std::chrono::microseconds(10000));
+    }
+    runtime.stop();
+    t.join();
+    EXPECT_TRUE(returned.load());
+    EXPECT_FALSE(runtime.isRunning());
+}
+
+TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentApiDuringStartDoesNotHang) {
+    // 反复制造 init→run 的 owner 认领窗口与 API 调用交叠：
+    // 修复前可能内联执行与 loop 驱动并发/挂起
+    for (int iter = 0; iter < 5; ++iter) {
+        OmniRuntime runtime;
+        ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+        std::atomic<bool> run_returned(false);
+        std::atomic<bool> api_done(false);
+        std::thread driver([&runtime, &run_returned]() {
+            runtime.run();
+            run_returned.store(true);
+        });
+        std::thread api([&runtime, &api_done]() {
+            RuntimeStats stats;
+            runtime.getStats(stats);
+            runtime.setRegisterHost("race-host");
+            (void)runtime.getRegisterHost();
+            api_done.store(true);
+        });
+
+        api.join();
+        runtime.stop();
+        driver.join();
+        EXPECT_TRUE(api_done.load());
+        EXPECT_TRUE(run_returned.load());
+    }
+}
+
+TEST_F(ThreadsafeClientAndReconnectTest, RegisterHostConcurrentGetSet) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    std::thread driver([&runtime]() { runtime.run(); });
+    std::this_thread::sleep_for(std::chrono::microseconds(100000));
+
+    std::atomic<bool> stop_flag(false);
+    std::thread setter([&runtime, &stop_flag]() {
+        int i = 0;
+        while (!stop_flag.load()) {
+            runtime.setRegisterHost("host-" + std::to_string(i++));
+        }
+    });
+    std::thread getter([&runtime, &stop_flag]() {
+        while (!stop_flag.load()) {
+            (void)runtime.getRegisterHost();
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::microseconds(300000));
+    stop_flag.store(true);
+    setter.join();
+    getter.join();
+    runtime.stop();
+    driver.join();
+    EXPECT_FALSE(runtime.getRegisterHost().empty());
+}
 
 TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentInvokeSameClient) {
     OmniRuntime runtime;

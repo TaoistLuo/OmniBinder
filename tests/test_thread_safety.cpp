@@ -6,7 +6,6 @@
 #include <thread>
 #include <vector>
 #include <chrono>
-#include <unistd.h>
 
 using namespace omnibinder;
 using namespace omnibinder::test;

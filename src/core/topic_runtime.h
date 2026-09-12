@@ -48,12 +48,13 @@ public:
         uint32_t client_id;
     };
 
-    void rememberSubscription(const std::string& topic_name, const TopicCallback& callback);
+    void rememberSubscription(const std::string& topic_name, const TopicCallback& callback,
+                              uint32_t expected_idl_hash);
     void forgetSubscription(const std::string& topic_name);
     void setErrorCallback(const std::string& topic_name, const TopicErrorCallback& cb);
     void notifyError(uint32_t topic_id, ErrorCode error);
     void rememberPublishedTopic(const std::string& topic_name, uint32_t topic_id,
-                                const std::string& owner_service);
+                                const std::string& owner_service, uint32_t idl_hash);
     void forgetPublishedTopic(const std::string& topic_name);
     void forgetPublishedTopicsByOwner(const std::string& owner_service);
     void addTcpSubscriber(uint32_t topic_id, int client_fd);
@@ -69,18 +70,40 @@ public:
     bool dispatch(uint32_t topic_id, const Buffer& data) const;
     std::map<std::string, TopicCallback> subscriptions() const;
     std::map<std::string, std::string> publishedTopicOwners() const;
+    std::map<std::string, uint32_t> publishedTopicHashes() const;
+    uint32_t expectedSubscriptionHash(const std::string& topic_name) const;
+    void setExpectedSubscriptionHash(const std::string& topic_name, uint32_t idl_hash);
 
     uint32_t getTopicId(const std::string& name) const;
 
 private:
-    std::map<std::string, TopicCallback> callbacks_;
-    std::map<std::string, uint32_t> topic_name_to_id_;
-    std::map<uint32_t, std::vector<TopicCallback> > callbacks_by_id_;
-    std::map<uint32_t, std::vector<int> > tcp_subscribers_;
-    std::map<uint32_t, std::vector<ShmSubscriber> > shm_subscribers_;
-    std::map<std::string, std::string> published_topic_owners_;
-    std::map<uint32_t, TopicErrorCallback> error_callbacks_;
-    std::map<std::string, uint32_t> published_topics_;
+    /*
+     * @brief  单个话题的全部状态（订阅/发布/订阅者/哈希），取代此前散落的 9 张 map
+     */
+    struct TopicState {
+        uint32_t             id;
+        std::string          name;
+        TopicCallback        callback;
+        bool                 has_callback;
+        TopicErrorCallback   error_callback;
+        bool                 has_error_callback;
+        std::vector<int>     tcp_subscribers;
+        std::vector<ShmSubscriber> shm_subscribers;
+        bool                 published;
+        std::string          owner_service;
+        uint32_t             published_hash;
+        uint32_t             expected_subscription_hash;
+
+        TopicState()
+            : id(0), has_callback(false), has_error_callback(false),
+              published(false), published_hash(0), expected_subscription_hash(0) {}
+    };
+
+    TopicState& ensureTopic(uint32_t id, const std::string& name);
+    void dropNameIfUnused(const std::string& name, uint32_t id);
+
+    std::map<uint32_t, TopicState> topics_;
+    std::map<std::string, uint32_t> name_to_id_;
 };
 
 } // namespace omnibinder

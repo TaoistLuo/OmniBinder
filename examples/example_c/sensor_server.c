@@ -255,8 +255,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    omni_runtime_publish_topic(runtime, "SensorUpdate");
-    omni_runtime_publish_topic(runtime, "AsyncResultReady");
+    omni_runtime_publish_topic(runtime, "SensorUpdate", demo_SensorUpdate_TOPIC_IDL_HASH);
+    omni_runtime_publish_topic(runtime, "AsyncResultReady", demo_AsyncResultReady_TOPIC_IDL_HASH);
 
     printf("SensorService registered on port %u\n\n", omni_service_port(svc));
 

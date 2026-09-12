@@ -219,7 +219,7 @@ std::string Value::toString(bool pretty, int indent) const {
         os << (bool_val_ ? "true" : "false");
         break;
     case TYPE_NUMBER:
-        // Check if it's an integer
+        // 判断是否为整数
         if (num_val_ == static_cast<int64_t>(num_val_)) {
             os << static_cast<int64_t>(num_val_);
         } else {

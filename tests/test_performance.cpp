@@ -13,6 +13,7 @@
 #include <random>
 #include <fstream>
 #include <chrono>
+#include <ctime>
 #include <sstream>
 #include <iomanip>
 
@@ -164,7 +165,8 @@ struct LatencyStats {
     double avg() const {
         return samples_us.empty() ? 0 : std::accumulate(samples_us.begin(), samples_us.end(), 0.0) / samples_us.size();
     }
-    // 去头尾各 1% 后的均值，消除 WSL2 调度抖动对平均值的污染
+    /* @brief 去头尾各 1% 后的均值
+     * @note 消除 WSL2 调度抖动对平均值的污染 */
     double trimmedMean() const {
         ensureSorted();
         if (sorted.empty()) return 0;
@@ -270,7 +272,7 @@ int main(int argc, char* argv[]) {
     std::vector<LatencyStats> all;
 
     // ============================================================
-    // RPC via IDL Proxy
+    // 通过 IDL Proxy 的 RPC
     // ============================================================
     printf("--- RPC Round-Trip Latency ---\n\n");
     {
@@ -279,7 +281,7 @@ int main(int argc, char* argv[]) {
         perf::PerfServiceProxy proxy(rt);
         proxy.connect();
 
-        // EchoBytes with various payload sizes — 随机化顺序消除系统性偏差
+        // 不同 payload 大小的 EchoBytes — 随机化顺序消除系统性偏差
         const int sizes[] = {0, 64, 256, 1024, 4096, 8192};
         const int n_sizes = sizeof(sizes) / sizeof(sizes[0]);
         LatencyStats echo_stats[n_sizes];
@@ -392,7 +394,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ============================================================
-    // Topic via IDL Proxy
+    // 通过 IDL Proxy 的 topic
     // ============================================================
     printf("--- Topic Pub/Sub Latency ---\n\n");
     {
@@ -460,16 +462,19 @@ int main(int argc, char* argv[]) {
     }
 
     // ============================================================
-    // Report
+    // 报告
     // ============================================================
     {
         std::ofstream ofs(report_path);
         if (ofs.is_open()) {
             auto now = std::chrono::system_clock::now();
-            auto time_t = std::chrono::system_clock::to_time_t(now);
+            std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+            char now_str[32] = {0};
+            std::strftime(now_str, sizeof(now_str), "%Y-%m-%d %H:%M:%S",
+                          std::localtime(&now_time));
 
             ofs << "# OmniBinder 性能测试报告\n\n"
-                << "**生成时间:** " << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "\n\n"
+                << "**生成时间:** " << now_str << "\n\n"
                 << "**测试环境:**\n"
                 << "- 传输方式: TCP + SHM（自动选择，同机通信使用 SHM）\n"
                 << "- RPC 预热轮数: " << RPC_WARMUP << "\n"

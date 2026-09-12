@@ -1,18 +1,24 @@
 #include "omnibinder/message.h"
 #include <cstring>
-#include <atomic>
 #include <limits>
 
 namespace omnibinder {
 
-// ============================================================
-// 序列号生成器（原子递增）
-// ============================================================
-static std::atomic<uint32_t> s_sequence_counter(0);
+namespace {
 
-uint32_t nextSequenceNumber() {
-    return s_sequence_counter.fetch_add(1, std::memory_order_relaxed) + 1;
+void putUint16LE(uint8_t* p, uint16_t v) {
+    p[0] = static_cast<uint8_t>(v);
+    p[1] = static_cast<uint8_t>(v >> 8);
 }
+
+void putUint32LE(uint8_t* p, uint32_t v) {
+    p[0] = static_cast<uint8_t>(v);
+    p[1] = static_cast<uint8_t>(v >> 8);
+    p[2] = static_cast<uint8_t>(v >> 16);
+    p[3] = static_cast<uint8_t>(v >> 24);
+}
+
+} // namespace
 
 // ============================================================
 // Message 实现
@@ -32,16 +38,8 @@ Message::Message(MessageType type, uint32_t seq) {
     header.sequence = seq;
 }
 
-void Message::setType(MessageType type) {
-    header.type = static_cast<uint16_t>(type);
-}
-
 MessageType Message::getType() const {
     return static_cast<MessageType>(header.type);
-}
-
-void Message::setSequence(uint32_t seq) {
-    header.sequence = seq;
 }
 
 uint32_t Message::getSequence() const {
@@ -75,21 +73,47 @@ bool Message::serialize(Buffer& output) const {
     return true;
 }
 
+bool Message::serializeInPlace() {
+    const size_t len = payload.size();
+    if (len > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    payload.reserve(MESSAGE_HEADER_SIZE + len);
+    if (payload.capacity() < MESSAGE_HEADER_SIZE + len) {
+        return false;
+    }
+
+    uint8_t* base = payload.mutableData();
+    std::memmove(base + MESSAGE_HEADER_SIZE, base, len);
+    putUint32LE(base, header.magic);
+    putUint16LE(base + 4, header.version);
+    putUint16LE(base + 6, header.type);
+    putUint32LE(base + 8, header.sequence);
+    putUint32LE(base + 12, static_cast<uint32_t>(len));
+    payload.setWritePosition(MESSAGE_HEADER_SIZE + len);
+    return true;
+}
+
 bool Message::parseHeader(const uint8_t* data, size_t length, MessageHeader& hdr) {
     if (!data || length < MESSAGE_HEADER_SIZE) {
         return false;
     }
 
-    // 小端序读取
-    Buffer buf(data, MESSAGE_HEADER_SIZE);
-    if (!buf.tryReadUint32(hdr.magic)
-        || !buf.tryReadUint16(hdr.version)
-        || !buf.tryReadUint16(hdr.type)
-        || !buf.tryReadUint32(hdr.sequence)
-        || !buf.tryReadUint32(hdr.length)) {
-        return false;
-    }
-
+    // 小端序直接按偏移读取，避开每帧构造 Buffer 的堆分配
+    hdr.magic    = static_cast<uint32_t>(data[0])
+                 | (static_cast<uint32_t>(data[1]) << 8)
+                 | (static_cast<uint32_t>(data[2]) << 16)
+                 | (static_cast<uint32_t>(data[3]) << 24);
+    hdr.version  = static_cast<uint16_t>(data[4] | (data[5] << 8));
+    hdr.type     = static_cast<uint16_t>(data[6] | (data[7] << 8));
+    hdr.sequence = static_cast<uint32_t>(data[8])
+                 | (static_cast<uint32_t>(data[9]) << 8)
+                 | (static_cast<uint32_t>(data[10]) << 16)
+                 | (static_cast<uint32_t>(data[11]) << 24);
+    hdr.length   = static_cast<uint32_t>(data[12])
+                 | (static_cast<uint32_t>(data[13]) << 8)
+                 | (static_cast<uint32_t>(data[14]) << 16)
+                 | (static_cast<uint32_t>(data[15]) << 24);
     return true;
 }
 
@@ -101,6 +125,25 @@ bool Message::validateHeader(const MessageHeader& hdr) {
         return false;
     }
     return true;
+}
+
+FrameStatus tryExtractFrame(const uint8_t* data, size_t avail,
+                            MessageHeader& header, size_t& frame_size) {
+    if (!data || avail < MESSAGE_HEADER_SIZE) {
+        return FrameStatus::NeedMore;
+    }
+    if (!Message::parseHeader(data, avail, header)) {
+        return FrameStatus::NeedMore;
+    }
+    if (!Message::validateHeader(header)) {
+        return FrameStatus::Corrupt;
+    }
+    size_t total = MESSAGE_HEADER_SIZE + header.length;
+    if (avail < total) {
+        return FrameStatus::NeedMore;
+    }
+    frame_size = total;
+    return FrameStatus::Complete;
 }
 
 // ============================================================
@@ -150,44 +193,51 @@ const char* messageTypeToString(MessageType type) {
     }
 }
 
-void serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf) {
-    buf.writeUint32(info.pid);
-    buf.writeString(info.process_name);
-    buf.writeString(info.role);
-    buf.writeUint32(info.log_level);
-    buf.writeUint32(info.diag_capabilities);
-    uint16_t service_count = static_cast<uint16_t>(info.services.size());
-    buf.writeUint16(service_count);
-    for (uint16_t i = 0; i < service_count; ++i) {
-        buf.writeString(info.services[i]);
+bool serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf) {
+    if (!buf.writeUint32(info.pid)
+        || !buf.writeString(info.process_name)
+        || !buf.writeString(info.role)
+        || !buf.writeUint32(info.log_level)
+        || !buf.writeUint32(info.diag_capabilities)) {
+        return false;
     }
+    uint16_t service_count = static_cast<uint16_t>(info.services.size());
+    if (!buf.writeUint16(service_count)) {
+        return false;
+    }
+    for (uint16_t i = 0; i < service_count; ++i) {
+        if (!buf.writeString(info.services[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ============================================================
 // ServiceInfo 序列化（deserialize 已移至 message.h 模板）
 // ============================================================
 
-void serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
+bool serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
     if (!buf.writeString(info.name)
         || !buf.writeString(info.host)
         || !buf.writeUint16(info.port)
         || !buf.writeString(info.host_id)
         || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.req_ring_capacity))
         || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.resp_ring_capacity))) {
-        return;
+        return false;
     }
 
     // 接口列表
     uint16_t iface_count = static_cast<uint16_t>(info.interfaces.size());
     if (!buf.writeUint16(iface_count)) {
-        return;
+        return false;
     }
     for (uint16_t i = 0; i < iface_count; ++i) {
-        serializeInterfaceInfo(info.interfaces[i], buf);
-        if (!buf.writeOk()) {
-            return;
+        if (!serializeInterfaceInfo(info.interfaces[i], buf)) {
+            return false;
         }
     }
+    return true;
 }
 
 bool serializePublishedTopicsReply(bool found,
@@ -224,15 +274,15 @@ bool serializePublishedTopicsReply(bool found,
     return buf.writeRaw(encoded.data(), encoded.size());
 }
 
-void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
+bool serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
     if (!buf.writeUint32(info.interface_id)
         || !buf.writeString(info.name)) {
-        return;
+        return false;
     }
 
     uint16_t method_count = static_cast<uint16_t>(info.methods.size());
     if (!buf.writeUint16(method_count)) {
-        return;
+        return false;
     }
     for (uint16_t i = 0; i < method_count; ++i) {
         if (!buf.writeUint32(info.methods[i].method_id)
@@ -240,9 +290,10 @@ void serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
             || !buf.writeString(info.methods[i].param_types)
             || !buf.writeString(info.methods[i].return_type)
             || !buf.writeUint32(info.methods[i].idl_hash)) {
-            return;
+            return false;
         }
     }
+    return true;
 }
 
 } // namespace omnibinder

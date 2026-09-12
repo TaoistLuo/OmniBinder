@@ -4,7 +4,6 @@
 #define TAG "TopicManager"
 
 namespace omnibinder {
-
 TopicManager::TopicManager()
     : total_subscriptions_(0)
 {
@@ -19,8 +18,6 @@ bool TopicManager::registerPublisher(const std::string& topic,
                                      int publisher_fd,
                                      uint32_t idl_hash)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     if (topic.empty()) {
         OMNI_LOG_ERROR(TAG, "Cannot register publisher with empty topic name");
         return false;
@@ -88,8 +85,6 @@ bool TopicManager::registerPublisher(const std::string& topic,
 
 bool TopicManager::removePublisher(const std::string& topic)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
         return false;
     }
@@ -98,40 +93,20 @@ bool TopicManager::removePublisher(const std::string& topic)
     if (it == topics_.end()) {
         return false;
     }
-
-    int pub_fd = it->second.publisher_fd;
-    if (pub_fd < 0) {
-        return false;
-    }
-
-    // Remove from fd_publications_ reverse index
-    auto fp_it = fd_publications_.find(pub_fd);
-    if (fp_it != fd_publications_.end()) {
-        fp_it->second.erase(topic);
-        if (fp_it->second.empty()) {
-            fd_publications_.erase(fp_it);
-        }
-    }
-
-    // If there are no subscribers either, remove the entire topic entry
-    if (it->second.subscriber_fds.empty()) {
-        topics_.erase(it);
-    } else {
-        // Keep the entry but clear the publisher
-        it->second.publisher_fd = -1;
-        it->second.publisher_info = ServiceInfo();
-        it->second.idl_hash = 0;
-    }
-
-    OMNI_LOG_INFO(TAG, "Publisher removed for topic: %s", topic.c_str());
-    return true;
+    return removePublisherLocked(topic, it->second.publisher_fd);
 }
 
 bool TopicManager::removePublisher(const std::string& topic, int publisher_fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
+        return false;
+    }
+    return removePublisherLocked(topic, publisher_fd);
+}
+
+bool TopicManager::removePublisherLocked(const std::string& topic, int publisher_fd)
+{
+    if (publisher_fd < 0) {
         return false;
     }
 
@@ -140,8 +115,8 @@ bool TopicManager::removePublisher(const std::string& topic, int publisher_fd)
         return false;
     }
 
-    int pub_fd = it->second.publisher_fd;
-    auto fp_it = fd_publications_.find(pub_fd);
+    // 从 fd_publications_ 反向索引中移除
+    auto fp_it = fd_publications_.find(publisher_fd);
     if (fp_it != fd_publications_.end()) {
         fp_it->second.erase(topic);
         if (fp_it->second.empty()) {
@@ -149,9 +124,11 @@ bool TopicManager::removePublisher(const std::string& topic, int publisher_fd)
         }
     }
 
+    // 若也没有订阅者，删除整个话题条目
     if (it->second.subscriber_fds.empty()) {
         topics_.erase(it);
     } else {
+        // 保留条目，仅清空发布者
         it->second.publisher_fd = -1;
         it->second.publisher_info = ServiceInfo();
         it->second.idl_hash = 0;
@@ -163,16 +140,12 @@ bool TopicManager::removePublisher(const std::string& topic, int publisher_fd)
 
 bool TopicManager::isPublisherOwner(const std::string& topic, int publisher_fd) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = topics_.find(topic);
     return it != topics_.end() && it->second.publisher_fd == publisher_fd;
 }
 
 bool TopicManager::addSubscriber(const std::string& topic, int subscriber_fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
         return false;
     }
@@ -199,7 +172,7 @@ bool TopicManager::addSubscriber(const std::string& topic, int subscriber_fd)
         return false;
     }
 
-    // Create topic entry if it doesn't exist
+    // 话题条目不存在时创建
     TopicEntry& entry = topics_[topic];
     if (entry.topic_name.empty()) {
         entry.topic_name = topic;
@@ -216,8 +189,6 @@ bool TopicManager::addSubscriber(const std::string& topic, int subscriber_fd)
 
 bool TopicManager::removeSubscriber(const std::string& topic, int subscriber_fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     if (topic.empty() || topic.length() > MAX_TOPIC_NAME_LENGTH) {
         return false;
     }
@@ -235,7 +206,7 @@ bool TopicManager::removeSubscriber(const std::string& topic, int subscriber_fd)
     it->second.subscriber_fds.erase(fd_it);
     --total_subscriptions_;
 
-    // Remove from reverse index
+    // 从反向索引中移除
     auto fs_it = fd_subscriptions_.find(subscriber_fd);
     if (fs_it != fd_subscriptions_.end()) {
         fs_it->second.erase(topic);
@@ -244,7 +215,7 @@ bool TopicManager::removeSubscriber(const std::string& topic, int subscriber_fd)
         }
     }
 
-    // If no publisher and no subscribers, remove the topic entirely
+    // 若既无发布者也无订阅者，彻底删除该话题
     if (it->second.publisher_fd < 0 && it->second.subscriber_fds.empty()) {
         topics_.erase(it);
     }
@@ -255,14 +226,12 @@ bool TopicManager::removeSubscriber(const std::string& topic, int subscriber_fd)
 
 std::vector<std::string> TopicManager::removeByFd(int fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<std::string> removed_publications;
 
-    // Remove as publisher
+    // 按发布者角色移除
     auto fp_it = fd_publications_.find(fd);
     if (fp_it != fd_publications_.end()) {
-        // Copy the set since we'll modify topics_ during iteration
+        // 先拷贝集合，遍历期间会修改 topics_
         std::set<std::string> pub_topics = fp_it->second;
         fd_publications_.erase(fp_it);
 
@@ -286,7 +255,7 @@ std::vector<std::string> TopicManager::removeByFd(int fd)
         }
     }
 
-    // Remove as subscriber
+    // 按订阅者角色移除
     auto fs_it = fd_subscriptions_.find(fd);
     if (fs_it != fd_subscriptions_.end()) {
         std::set<std::string> sub_topics = fs_it->second;
@@ -299,7 +268,7 @@ std::vector<std::string> TopicManager::removeByFd(int fd)
                 tit->second.subscriber_fds.erase(fd);
                 --total_subscriptions_;
 
-                // Clean up empty topic entries
+                // 清理空的话题条目
                 if (tit->second.publisher_fd < 0 && tit->second.subscriber_fds.empty()) {
                     topics_.erase(tit);
                 }
@@ -316,8 +285,6 @@ std::vector<std::string> TopicManager::removeByFd(int fd)
 std::vector<std::string> TopicManager::removePublishersByService(
     const std::string& service_name, int publisher_fd)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<std::string> removed_publications;
     for (auto it = topics_.begin(); it != topics_.end();) {
         TopicEntry& entry = it->second;
@@ -351,8 +318,6 @@ std::vector<std::string> TopicManager::removePublishersByService(
 
 std::vector<int> TopicManager::getSubscribers(const std::string& topic) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<int> result;
 
     auto it = topics_.find(topic);
@@ -368,8 +333,6 @@ std::vector<int> TopicManager::getSubscribers(const std::string& topic) const
 
 bool TopicManager::getPublisher(const std::string& topic, ServiceInfo& publisher_info) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = topics_.find(topic);
     if (it == topics_.end() || it->second.publisher_fd < 0) {
         return false;
@@ -382,8 +345,6 @@ bool TopicManager::getPublisher(const std::string& topic, ServiceInfo& publisher
 std::vector<std::string> TopicManager::getPublishedTopics(
     const std::string& service_name) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<std::string> result;
     for (auto it = topics_.begin(); it != topics_.end(); ++it) {
         if (it->second.publisher_fd >= 0
@@ -396,16 +357,12 @@ std::vector<std::string> TopicManager::getPublishedTopics(
 
 bool TopicManager::hasPublisher(const std::string& topic) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = topics_.find(topic);
     return it != topics_.end() && it->second.publisher_fd >= 0;
 }
 
 bool TopicManager::getIdlHash(const std::string& topic, uint32_t& idl_hash) const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = topics_.find(topic);
     if (it == topics_.end() || it->second.publisher_fd < 0) {
         return false;
@@ -416,8 +373,6 @@ bool TopicManager::getIdlHash(const std::string& topic, uint32_t& idl_hash) cons
 
 bool TopicManager::setIdlHash(const std::string& topic, uint32_t idl_hash)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = topics_.find(topic);
     if (it == topics_.end() || it->second.publisher_fd < 0) {
         return false;
@@ -428,8 +383,6 @@ bool TopicManager::setIdlHash(const std::string& topic, uint32_t idl_hash)
 
 std::vector<std::string> TopicManager::listTopics() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<std::string> result;
     result.reserve(topics_.size());
 

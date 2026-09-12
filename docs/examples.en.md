@@ -50,6 +50,11 @@ struct StatusResponse {
     int32   code;
     string  message;
 }
+
+struct NameValue {
+    string name;
+    int32  value;
+}
 ```
 
 ### 2.2 `sensor_service.bidl`
@@ -218,22 +223,22 @@ runtime.init("127.0.0.1", 9900);
 demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
-uint8_t bool_out = 0;
+bool bool_out = false;
 proxy.EchoBool(false, bool_out);
 
 int32_t int_out = 0;
 proxy.EchoInt32(32, int_out);
 
-StatusResponse status_out;
+common::StatusResponse status_out;
 proxy.EchoStatus(status, status_out);
 
-SensorEnvelope envelope_out;
+demo::SensorEnvelope envelope_out;
 proxy.EchoEnvelope(envelope, envelope_out);
 
 std::vector<int32_t> ids_out;
 proxy.EchoIdArray(ids, ids_out);
 
-SensorArrayBundle bundle_out;
+demo::SensorArrayBundle bundle_out;
 proxy.EchoBundle(bundle, bundle_out);
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
@@ -569,7 +574,7 @@ OmniBinder will detect that the two endpoints have different `host_id` values an
 
 If both run on the same machine, each client creates its own independent SHM region and exchanges eventfds with the server through UDS.
 
-The per-client SHM model uses a unique name format: `/binder_<ServiceName>_cli_<PID>_<N>`. The client sends its SHM name to the server via UDS, and the server replies with `resp_eventfd` (to notify the client when a response is ready) and `master_eventfd` (for the client to signal a new request to the server).
+The per-client SHM model uses a unique name format: `/binder_<ServiceName>_<hash>_cli_<PID>_<N>`. The client sends its SHM name to the server via UDS, and the server replies with `resp_eventfd` (to notify the client when a response is ready) and `master_eventfd` (for the client to signal a new request to the server).
 
 There is no slot allocation or 32-client hard limit. Each client has its own independent SHM ring with no shared resources, eliminating contention on a single shared memory segment. This is already covered in `test_full_integration`.
 

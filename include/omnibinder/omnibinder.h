@@ -46,10 +46,15 @@
 
 namespace omnibinder {
 
-// 版本号由 CMakeLists.txt 的 project(VERSION ...) 注入，编译时通过 add_compile_definitions 传递
-// 升级版本：只改 CMakeLists.txt 一处即可
+/* @brief 返回版本字符串
+ * @note 版本号由 CMakeLists.txt 的 project(VERSION ...) 注入，编译时通过 add_compile_definitions 传递；
+ *       升级版本只需改 CMakeLists.txt 一处 */
 inline const char* version() { return OMNIBINDER_VERSION; }
 
+/* @brief 返回主版本号、次版本号和修订号
+ * @param[out] major 主版本号
+ * @param[out] minor 次版本号
+ * @param[out] patch 修订号 */
 inline void versionNumbers(int& major, int& minor, int& patch) {
     major = OMNIBINDER_VERSION_MAJOR;
     minor = OMNIBINDER_VERSION_MINOR;
@@ -65,32 +70,35 @@ inline void versionNumbers(int& major, int& minor, int& patch) {
 typedef void* (*OmniMallocFn)(size_t size);
 typedef void  (*OmniFreeFn)(void* ptr);
 
-/// 注册自定义内存分配器。一次性锁定：一旦设置非 NULL 钩子，后续调用被忽略。
-/// 必须在任何 OmniRuntime API 调用之前设置（包括 init/registerService）。
-///
-/// 不调用 → 透明回退到系统 malloc/free（开发机零配置）。
-/// 设置后永不重置 → 从根本上杜绝分配/释放走不同堆导致的堆损坏。
-///
-/// @param malloc_fn  自定义 malloc（如 pvPortMalloc / tlsf_malloc）
-/// @param free_fn    自定义 free（如 vPortFree / tlsf_free）
-///
-/// 用法:
-///   int main() {
-///       omniSetAllocator(pvPortMalloc, vPortFree);  // 必须最先调用
-///       OmniRuntime runtime;
-///       runtime.init(...);
-///       ...
-///   }
+/* @brief 注册自定义内存分配器
+ * @param[in] malloc_fn 自定义 malloc（如 pvPortMalloc / tlsf_malloc）
+ * @param[in] free_fn   自定义 free（如 vPortFree / tlsf_free）
+ * @note 一次性锁定：一旦设置非 NULL 钩子，后续调用被忽略。
+ *       必须在任何 OmniRuntime API 调用之前设置（包括 init/registerService）。
+ *       不调用 → 透明回退到系统 malloc/free（开发机零配置）。
+ *       设置后永不重置 → 从根本上杜绝分配/释放走不同堆导致的堆损坏。
+ *       用法:
+ *       int main() {
+ *           omniSetAllocator(pvPortMalloc, vPortFree);  // 必须最先调用
+ *           OmniRuntime runtime;
+ *           runtime.init(...);
+ *           ...
+ *       } */
 extern "C" void omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
 
 extern "C" void* omni_malloc(size_t size);
 extern "C" void  omni_free(void* ptr);
-/// 安全 realloc 变体。使用自定义 allocator 时，调用方必须提供旧分配大小，
-/// 这样实现才能只复制 min(old_size, new_size) 字节，避免越界读取旧块。
+/* @brief 安全 realloc 变体
+ * @param[in] old_size 旧分配大小
+ * @param[in] new_size 新分配大小
+ * @note 使用自定义 allocator 时，调用方必须提供旧分配大小，这样实现才能只复制
+ *       min(old_size, new_size) 字节，避免越界读取旧块。 */
 extern "C" void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size);
-/// 兼容系统 realloc 的包装。未注册自定义 allocator 时直接走 std::realloc；
-/// 注册自定义 allocator 后，无法得知旧块大小，因此仅支持 ptr == NULL 或
-/// new_size == 0。需要扩容并保留内容时请使用 omni_realloc_sized()。
+/* @brief 兼容系统 realloc 的包装
+ * @param[in] new_size 新分配大小
+ * @note 未注册自定义 allocator 时直接走 std::realloc；注册自定义 allocator 后，
+ *       无法得知旧块大小，因此仅支持 ptr == NULL 或 new_size == 0。
+ *       需要扩容并保留内容时请使用 omni_realloc_sized()。 */
 extern "C" void* omni_realloc(void* ptr, size_t new_size);
 
 #endif // OMNIBINDER_H

@@ -296,8 +296,24 @@ TEST(ServiceRegistryTest, OwnsServiceFalseForMissingService) {
     EXPECT_FALSE(reg.ownsService(88, "missing"));
 }
 
+TEST(ServiceRegistryTest, ListServiceNamesByFd) {
+    ServiceRegistry reg;
+    reg.addService(makeInfo("svc.l1"), 70);
+    reg.addService(makeInfo("svc.l2"), 70);
+    reg.addService(makeInfo("svc.l3"), 71);
+    reg.removeService("svc.l2");
+
+    std::vector<std::string> names = reg.listServiceNamesByFd(70);
+    ASSERT_EQ(names.size(), 1u);
+    EXPECT_EQ(names[0], "svc.l1");
+    names = reg.listServiceNamesByFd(71);
+    ASSERT_EQ(names.size(), 1u);
+    EXPECT_EQ(names[0], "svc.l3");
+    EXPECT_TRUE(reg.listServiceNamesByFd(999).empty());
+}
+
 // ============================================================
-// Handle generation
+// handle 生成
 // ============================================================
 
 TEST(ServiceRegistryTest, HandlesAreUnique) {
@@ -331,7 +347,7 @@ TEST(ServiceRegistryTest, HandleSurvivesRemovalAndReuse) {
 }
 
 // ============================================================
-// Re-registration after removal
+// 移除后重新注册
 // ============================================================
 
 TEST(ServiceRegistryTest, ReRegisterAfterRemove) {
@@ -358,8 +374,28 @@ TEST(ServiceRegistryTest, ReRegisterAfterRemoveByFd) {
     EXPECT_TRUE(reg.exists("svc.rfr"));
 }
 
+TEST(ServiceRegistryTest, IdempotentReRegisterMovesFdOwnership) {
+    ServiceRegistry reg;
+    ServiceInfo first = makeInfo("svc.move");
+    first.host_id = "runtime-1";
+    ASSERT_NE(reg.addService(first, 80), INVALID_HANDLE);
+
+    ServiceInfo second = makeInfo("svc.move");
+    second.host_id = "runtime-1";
+    EXPECT_NE(reg.addService(second, 81), INVALID_HANDLE);
+
+    EXPECT_TRUE(reg.ownsService(81, "svc.move"));
+    EXPECT_FALSE(reg.ownsService(80, "svc.move"));
+    EXPECT_TRUE(reg.listServiceNamesByFd(80).empty());
+    ASSERT_EQ(reg.listServiceNamesByFd(81).size(), 1u);
+    EXPECT_EQ(reg.listServiceNamesByFd(81)[0], "svc.move");
+
+    EXPECT_TRUE(reg.removeByFd(80).empty());
+    EXPECT_TRUE(reg.exists("svc.move"));
+}
+
 // ============================================================
-// Edge cases
+// 边界用例
 // ============================================================
 
 TEST(ServiceRegistryTest, RemoveByNameCleansFdMap) {

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
 #include <omnibinder/omnibinder.h>
-#include "transport/shm_transport.h"
+#include "transport/shm_ring.h"
 #include "transport/tcp_transport.h"
 #include <cstdio>
 #include <cstring>
@@ -68,7 +68,7 @@ static bool waitSM(uint16_t port, int retries) {
     return false;
 }
 
-static bool connectTcp(TcpTransport& transport, const std::string& host, uint16_t port) {
+static bool connectTcp(TcpClientTransport& transport, const std::string& host, uint16_t port) {
     int ret = transport.connect(host, port);
     if (ret < 0) {
         return false;
@@ -86,13 +86,13 @@ static bool connectTcp(TcpTransport& transport, const std::string& host, uint16_
     return transport.state() == ConnectionState::CONNECTED;
 }
 
-static bool sendMessage(TcpTransport& transport, const Message& msg) {
+static bool sendMessage(TcpClientTransport& transport, const Message& msg) {
     Buffer out;
     msg.serialize(out);
     return transport.send(out.data(), out.size()) == static_cast<int>(out.size());
 }
 
-static bool recvMessage(TcpTransport& transport, Message& msg, int timeout_ms) {
+static bool recvMessage(TcpClientTransport& transport, Message& msg, int timeout_ms) {
     uint8_t buf[4096];
     int loops = timeout_ms / 20;
     for (int i = 0; i < loops; ++i) {
@@ -114,7 +114,7 @@ static bool recvMessage(TcpTransport& transport, Message& msg, int timeout_ms) {
     return false;
 }
 
-static bool recvFullMessage(TcpTransport& transport, Message& msg, int timeout_ms) {
+static bool recvFullMessage(IClientTransport& transport, Message& msg, int timeout_ms) {
     Buffer input;
     std::vector<uint8_t> buf(65536);
     int loops = timeout_ms / 5;
@@ -142,7 +142,7 @@ static bool recvFullMessage(TcpTransport& transport, Message& msg, int timeout_m
     return false;
 }
 
-static bool sendFullMessage(TcpTransport& transport, const Message& msg, int timeout_ms) {
+static bool sendFullMessage(IClientTransport& transport, const Message& msg, int timeout_ms) {
     Buffer out;
     msg.serialize(out);
     size_t sent = 0;
@@ -165,7 +165,7 @@ static bool decodeInvokeReplyForTest(const Message& msg, int32_t& status, Buffer
     return tryDecodeInvokeReplyForTest(msg, status, response);
 }
 
-static bool registerFakeService(TcpTransport& transport, uint32_t seq,
+static bool registerFakeService(TcpClientTransport& transport, uint32_t seq,
                                 const std::string& name, uint16_t port,
                                 const std::string& host_id) {
     Message msg(MessageType::MSG_REGISTER, seq);
@@ -196,7 +196,7 @@ static bool registerFakeService(TcpTransport& transport, uint32_t seq,
     return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
-static bool publishFakeTopic(TcpTransport& transport, uint32_t seq,
+static bool publishFakeTopic(TcpClientTransport& transport, uint32_t seq,
                              const std::string& service_name,
                              const std::string& topic) {
     Message msg(MessageType::MSG_PUBLISH_TOPIC, seq);
@@ -219,7 +219,7 @@ static bool publishFakeTopic(TcpTransport& transport, uint32_t seq,
     return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
-static bool queryRawPublishedTopics(TcpTransport& transport, uint32_t seq,
+static bool queryRawPublishedTopics(TcpClientTransport& transport, uint32_t seq,
                                     const std::string& service_name, bool& found,
                                     std::vector<std::string>& topics) {
     Message msg(MessageType::MSG_QUERY_PUBLISHED_TOPICS, seq);
@@ -236,7 +236,7 @@ static bool queryRawPublishedTopics(TcpTransport& transport, uint32_t seq,
     return deserializePublishedTopicsReply(payload, found, topics);
 }
 
-static bool sendHeartbeat(TcpTransport& transport, uint32_t seq,
+static bool sendHeartbeat(TcpClientTransport& transport, uint32_t seq,
                           const std::string& service_name) {
     Message heartbeat(MessageType::MSG_HEARTBEAT, seq);
     heartbeat.payload.writeString(service_name);
@@ -244,6 +244,60 @@ static bool sendHeartbeat(TcpTransport& transport, uint32_t seq,
     Message reply;
     return recvMessage(transport, reply, 2000)
         && reply.getType() == MessageType::MSG_HEARTBEAT_ACK;
+}
+
+static bool lookupRaw(TcpClientTransport& transport, uint32_t seq,
+                      const std::string& service_name, bool& found) {
+    Message msg(MessageType::MSG_LOOKUP, seq);
+    msg.payload.writeString(service_name);
+    if (!sendMessage(transport, msg)) return false;
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_LOOKUP_REPLY) {
+        return false;
+    }
+    Buffer payload(reply.payload.data(), reply.payload.size());
+    found = mustRead<bool>(payload, &Buffer::tryReadBool);
+    return true;
+}
+
+static bool sendRuntimeHello(TcpClientTransport& transport, uint32_t seq,
+                             uint32_t pid, const std::string& process_name) {
+    Message msg(MessageType::MSG_RUNTIME_HELLO, seq);
+    RuntimeInfo info;
+    info.pid = pid;
+    info.process_name = process_name;
+    serializeRuntimeInfo(info, msg.payload);
+    if (!sendMessage(transport, msg)) return false;
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_RUNTIME_HELLO_REPLY) {
+        return false;
+    }
+    Buffer payload(reply.payload.data(), reply.payload.size());
+    return mustRead<bool>(payload, &Buffer::tryReadBool);
+}
+
+static bool sendWatchStart(TcpClientTransport& transport, uint32_t seq, uint32_t pid) {
+    Message msg(MessageType::MSG_DIAG_WATCH_START, seq);
+    msg.payload.writeUint32(pid);
+    if (!sendMessage(transport, msg)) return false;
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_DIAG_WATCH_START_REPLY) {
+        return false;
+    }
+    Buffer payload(reply.payload.data(), reply.payload.size());
+    return mustRead<bool>(payload, &Buffer::tryReadBool);
+}
+
+static bool sendWatchStop(TcpClientTransport& transport, uint32_t seq, uint32_t pid) {
+    Message msg(MessageType::MSG_DIAG_WATCH_STOP, seq);
+    msg.payload.writeUint32(pid);
+    if (!sendMessage(transport, msg)) return false;
+    Message reply;
+    return recvMessage(transport, reply, 2000)
+        && reply.getType() == MessageType::MSG_DIAG_WATCH_STOP_REPLY;
 }
 
 static bool invokeOwnedService(OmniRuntime& runtime, int32_t a, int32_t b, int32_t& sum) {
@@ -375,7 +429,7 @@ static void fallbackServerThread(void* arg) {
 }
 
 struct DelayedReadServiceCtx {
-    TcpTransportServer server;
+    TcpTestServer server;
     uint16_t port;
     volatile bool ready;
     volatile bool done;
@@ -384,20 +438,13 @@ struct DelayedReadServiceCtx {
 
 static void delayedReadServiceThread(void* arg) {
     DelayedReadServiceCtx* ctx = static_cast<DelayedReadServiceCtx*>(arg);
-    int port = ctx->server.listen("127.0.0.1", 0);
-    if (port <= 0) {
+    if (!ctx->server.start()) {
         return;
     }
-    ctx->port = static_cast<uint16_t>(port);
+    ctx->port = ctx->server.port();
     ctx->ready = true;
 
-    ITransport* accepted = NULL;
-    for (int i = 0; i < 100 && !accepted; ++i) {
-        accepted = ctx->server.accept();
-        if (!accepted) {
-            std::this_thread::sleep_for(std::chrono::microseconds(50000));
-        }
-    }
+    IClientTransport* accepted = ctx->server.waitAccept();
     if (!accepted) {
         ctx->done = true;
         return;
@@ -431,8 +478,6 @@ static void delayedReadServiceThread(void* arg) {
                         while (sent < out.size()) {
                             int n = accepted->send(out.data() + sent, out.size() - sent);
                             if (n < 0) {
-                                accepted->close();
-                                delete accepted;
                                 ctx->server.close();
                                 ctx->done = true;
                                 return;
@@ -453,8 +498,6 @@ static void delayedReadServiceThread(void* arg) {
         }
     }
 
-    accepted->close();
-    delete accepted;
     ctx->server.close();
     ctx->done = true;
 }
@@ -487,7 +530,7 @@ OwnedServerCtx ControlPlaneTest::owned_ctx_;
 std::thread ControlPlaneTest::owned_tid_;
 
 TEST_F(ControlPlaneTest, IllegalUnregisterRejected) {
-    TcpTransport rogue;
+    TcpClientTransport rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", SM_PORT));
     Message msg(MessageType::MSG_UNREGISTER, 1001);
     msg.payload.writeString("OwnedService");
@@ -507,7 +550,7 @@ TEST_F(ControlPlaneTest, IllegalUnregisterRejected) {
 }
 
 TEST_F(ControlPlaneTest, MalformedLookupAndSubscribeTopicDoNotCrashSM) {
-    TcpTransport rogue;
+    TcpClientTransport rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", SM_PORT));
 
     Message bad_lookup(MessageType::MSG_LOOKUP, 1004);
@@ -538,7 +581,7 @@ TEST_F(ControlPlaneTest, MalformedLookupAndSubscribeTopicDoNotCrashSM) {
 }
 
 TEST_F(ControlPlaneTest, IllegalPublishTopicRejected) {
-    TcpTransport rogue;
+    TcpClientTransport rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", SM_PORT));
     Message msg(MessageType::MSG_PUBLISH_TOPIC, 1002);
     msg.payload.writeString("owned/topic");
@@ -558,8 +601,8 @@ TEST_F(ControlPlaneTest, IllegalPublishTopicRejected) {
 }
 
 TEST_F(ControlPlaneTest, InvalidTopicControlRequestsDoNotMutateState) {
-    TcpTransport owner;
-    TcpTransport query;
+    TcpClientTransport owner;
+    TcpClientTransport query;
     ASSERT_TRUE(connectTcp(owner, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(owner, 1050, "RawValidatedService", 12340,
@@ -622,8 +665,8 @@ TEST_F(ControlPlaneTest, InvalidTopicControlRequestsDoNotMutateState) {
 }
 
 TEST_F(ControlPlaneTest, PublishedTopicsQueryAndServiceScopedUnregister) {
-    TcpTransport registrant;
-    TcpTransport query;
+    TcpClientTransport registrant;
+    TcpClientTransport query;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(registrant, 1100, "RawServiceA", 12345, "raw-owner"));
@@ -703,9 +746,9 @@ TEST_F(ControlPlaneTest, PublishedTopicsQueryAndServiceScopedUnregister) {
 }
 
 TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
-    TcpTransport registrant;
-    TcpTransport observer;
-    TcpTransport query;
+    TcpClientTransport registrant;
+    TcpClientTransport observer;
+    TcpClientTransport query;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(observer, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
@@ -764,7 +807,7 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_TRUE(sendHeartbeat(registrant, 1264, "RawHealthyB"));
 
-    TcpTransport future_publisher;
+    TcpClientTransport future_publisher;
     ASSERT_TRUE(connectTcp(future_publisher, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(future_publisher, 1265, "RawFuturePublisher",
                                     12402, "raw-heartbeat"));
@@ -775,8 +818,9 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
     Buffer notify_payload(notify.payload.data(), notify.payload.size());
     EXPECT_EQ(mustReadString(notify_payload), "raw/future");
 
-    // Let the last service on registrant time out. The fd must remain alive as
-    // a pure client because it still owns topic subscriptions.
+    // C2：RawHealthyB 是 registrant 上最后一个存活注册服务。它超时后该控制
+    // 连接已无任何存活注册，SM 必须按连接失联关闭它；真实 runtime 会通过
+    // reconnect + restoreControlPlaneState 重建订阅，裸客户端在此只能观察到 EOF。
     bool healthy_removed = false;
     for (int i = 0; i < 45 && !healthy_removed; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
@@ -786,22 +830,19 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
     }
     ASSERT_TRUE(healthy_removed);
 
-    TcpTransport post_timeout_publisher;
-    ASSERT_TRUE(connectTcp(post_timeout_publisher, "127.0.0.1", SM_PORT));
-    ASSERT_TRUE(registerFakeService(post_timeout_publisher, 1320,
-                                    "RawPostTimeoutPublisher", 12403,
-                                    "raw-heartbeat"));
-    ASSERT_TRUE(publishFakeTopic(post_timeout_publisher, 1321,
-                                 "RawPostTimeoutPublisher",
-                                 "raw/post-timeout"));
-    Message post_timeout_notify;
-    ASSERT_TRUE(recvMessage(registrant, post_timeout_notify, 2000));
-    ASSERT_EQ(post_timeout_notify.getType(), MessageType::MSG_TOPIC_PUBLISHER_NOTIFY);
-    Buffer post_timeout_payload(post_timeout_notify.payload.data(),
-                                post_timeout_notify.payload.size());
-    EXPECT_EQ(mustReadString(post_timeout_payload), "raw/post-timeout");
+    bool connection_closed = false;
+    uint8_t drain_buf[4096];
+    for (int i = 0; i < 100 && !connection_closed; ++i) {
+        int ret = registrant.recv(drain_buf, sizeof(drain_buf));
+        if (ret < 0) {
+            connection_closed = (registrant.state() != ConnectionState::CONNECTED);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_TRUE(connection_closed)
+        << "Connection must be closed once no live service remains";
 
-    post_timeout_publisher.close();
     future_publisher.close();
     query.close();
     observer.close();
@@ -810,14 +851,10 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
 
 TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeout) {
     const uint16_t port = 19919;
-    TcpTransportServer server;
-    ASSERT_GT(server.listen("127.0.0.1", port), 0);
+    TcpTestServer server;
+    ASSERT_TRUE(server.start("127.0.0.1", port));
     std::thread fake_sm([&server]() {
-        TcpTransport* client = NULL;
-        for (int i = 0; i < 100 && !client; ++i) {
-            client = dynamic_cast<TcpTransport*>(server.accept());
-            if (!client) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+        IClientTransport* client = server.waitAccept();
         if (!client) return;
         Message hello;
         if (recvFullMessage(*client, hello, 2000)) {
@@ -828,7 +865,7 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
         Message ignored;
         recvFullMessage(*client, ignored, 2000);
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        delete client;
+        server.releaseAccepted();
     });
 
     OmniRuntime runtime;
@@ -863,7 +900,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     ASSERT_EQ(info.port, fallback_ctx.service.port());
     ASSERT_EQ(info.host_id, probe.hostId());
 
-    const std::string handshake_path = ShmTransport::getHandshakePath(
+    const std::string handshake_path = shmHandshakePath(
         generateShmName("FallbackService"));
     ASSERT_EQ(unlink(handshake_path.c_str()), 0);
 
@@ -890,7 +927,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
 }
 
 TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
-    TcpTransport rogue;
+    TcpClientTransport rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     const int before_count = owned_ctx_.service.invokeCount();
@@ -934,7 +971,7 @@ TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
 }
 
 TEST_F(ControlPlaneTest, MalformedSubscribeBroadcastDoesNotCrashService) {
-    TcpTransport rogue;
+    TcpClientTransport rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     Message bad_subscribe(MessageType::MSG_SUBSCRIBE_BROADCAST, 2003);
@@ -959,7 +996,7 @@ TEST_F(ControlPlaneTest, MalformedSubscribeBroadcastDoesNotCrashService) {
 }
 
 TEST_F(ControlPlaneTest, ListServicesLargeReplyHandlesPartialSend) {
-    TcpTransport registrant;
+    TcpClientTransport registrant;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
 
     OmniRuntime host_probe;
@@ -988,7 +1025,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     for (int i = 0; i < 50 && !delayed_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     ASSERT_TRUE(delayed_ctx.ready);
 
-    TcpTransport registrant;
+    TcpClientTransport registrant;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(registrant, 3001, "SlowReadService", delayed_ctx.port, "remote-delayed-node"));
 
@@ -1008,7 +1045,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
 }
 
 TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
-    TcpTransport rogue;
+    TcpClientTransport rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     int rcvbuf = 4096;
@@ -1020,7 +1057,7 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     std::vector<uint8_t> payload(512 * 1024, 0x6B);
     Message invoke(MessageType::MSG_INVOKE, 3002);
     invoke.payload.writeUint32(IFACE_ID);
-    invoke.payload.writeUint32(0x5EC00001u);  // idl_hash matching OwnedService::METHOD_ECHO
+    invoke.payload.writeUint32(0x5EC00001u);  // 与 OwnedService::METHOD_ECHO 匹配的 idl_hash
     invoke.payload.writeUint32(METHOD_ECHO);
     invoke.payload.writeUint32(static_cast<uint32_t>(payload.size()));
     invoke.payload.writeRaw(payload.data(), payload.size());
@@ -1039,4 +1076,94 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     EXPECT_EQ(memcmp(response.data(), payload.data(), payload.size()), 0);
 
     rogue.close();
+}
+
+/*
+ * @brief C1 回归：旧控制 fd 关闭不得删除已幂等迁移到新控制 fd 的服务
+ * @details 旧 fd 上最后注册的服务特意选为重新注册过的那个，
+ *          因为已移除的无保护 closeClient 路径删除的正是该名称。
+ */
+TEST_F(ControlPlaneTest, StaleFdCloseKeepsReRegisteredService) {
+    TcpClientTransport old_conn;
+    TcpClientTransport new_conn;
+    TcpClientTransport query;
+    ASSERT_TRUE(connectTcp(old_conn, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(new_conn, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
+
+    ASSERT_TRUE(registerFakeService(old_conn, 4001, "RawReconnectGone", 12451,
+                                    "raw-reconnect"));
+    ASSERT_TRUE(registerFakeService(old_conn, 4002, "RawReconnectKeep", 12450,
+                                    "raw-reconnect"));
+    ASSERT_TRUE(registerFakeService(new_conn, 4003, "RawReconnectKeep", 12450,
+                                    "raw-reconnect"));
+
+    old_conn.close();
+
+    // 等待 SM 处理完 closeClient(old_conn)：仅由 old_conn 持有的服务消失即为证据
+    bool found = true;
+    bool gone = false;
+    for (int i = 0; i < 40 && !gone; ++i) {
+        ASSERT_TRUE(lookupRaw(query, 4004 + static_cast<uint32_t>(i),
+                              "RawReconnectGone", found));
+        if (!found) {
+            gone = true;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+    ASSERT_TRUE(gone);
+
+    ASSERT_TRUE(lookupRaw(query, 4100, "RawReconnectKeep", found));
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(sendHeartbeat(new_conn, 4101, "RawReconnectKeep"));
+
+    query.close();
+    new_conn.close();
+}
+
+/*
+ * @brief C5 回归：一个 watcher 连接监控两个 pid 时必须独立跟踪每个 (fd, pid) 对
+ * @details 停止 pid A 只停止目标 A；关闭 watcher 才停止剩余的目标 B。
+ */
+TEST_F(ControlPlaneTest, DiagWatchTracksEachPidPairIndependently) {
+    const uint32_t PID_A = 0x7F000001u;
+    const uint32_t PID_B = 0x7F000002u;
+
+    TcpClientTransport target_a;
+    TcpClientTransport target_b;
+    TcpClientTransport watcher;
+    ASSERT_TRUE(connectTcp(target_a, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(target_b, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(watcher, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(sendRuntimeHello(target_a, 4200, PID_A, "raw-watch-a"));
+    ASSERT_TRUE(sendRuntimeHello(target_b, 4201, PID_B, "raw-watch-b"));
+
+    ASSERT_TRUE(sendWatchStart(watcher, 4202, PID_A));
+    ASSERT_TRUE(sendWatchStart(watcher, 4203, PID_B));
+
+    Message start_a;
+    ASSERT_TRUE(recvMessage(target_a, start_a, 2000));
+    ASSERT_EQ(start_a.getType(), MessageType::MSG_DIAG_WATCH_START);
+    Message start_b;
+    ASSERT_TRUE(recvMessage(target_b, start_b, 2000));
+    ASSERT_EQ(start_b.getType(), MessageType::MSG_DIAG_WATCH_START);
+
+    ASSERT_TRUE(sendWatchStop(watcher, 4204, PID_A));
+
+    Message stop_a;
+    ASSERT_TRUE(recvMessage(target_a, stop_a, 2000));
+    ASSERT_EQ(stop_a.getType(), MessageType::MSG_DIAG_WATCH_STOP);
+
+    Message unexpected_b;
+    EXPECT_FALSE(recvMessage(target_b, unexpected_b, 300));
+
+    watcher.close();
+
+    Message stop_b;
+    ASSERT_TRUE(recvMessage(target_b, stop_b, 3000));
+    ASSERT_EQ(stop_b.getType(), MessageType::MSG_DIAG_WATCH_STOP);
+
+    target_a.close();
+    target_b.close();
 }

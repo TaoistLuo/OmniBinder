@@ -6,6 +6,26 @@
 
 namespace omnibinder {
 
+namespace {
+
+/*
+ * @brief  若 seq 已有 ready 的回复则直接消费；否则若正处于等待则存储并消费
+ * @return false 表示消息不属于任何等待槽，交由调用方按原类型处理
+ * @note   控制面/数据面共用该判定逻辑，但作用于各自独立的槽表
+ */
+bool consumeReplyIfWaiting(PendingReplyTable& table, uint32_t seq, Message& msg) {
+    if (table.pendingReply(seq) != NULL) {
+        return true;
+    }
+    if (table.isWaiting(seq)) {
+        table.storeReply(seq, msg);
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
 // ============================================================
 // 同步等待
 // ============================================================
@@ -16,30 +36,34 @@ uint32_t OmniRuntime::Impl::allocSequence() {
 
 int OmniRuntime::Impl::waitForReply(uint32_t seq, uint32_t timeout_ms, Message& reply,
                                     const std::function<bool()>& is_alive) {
+    // 控制面等待：槽表由 SmControlChannel 持有，SM 重连时只清该表
     return rpc_runtime_.waitForReply(
         seq,
         timeout_ms,
-        sm_channel_,
+        sm_channel_.pendingReplies(),
         [this](int wait_ms) { this->pollOnceWithoutFunctors(wait_ms); },
         reply,
         is_alive);
 }
 
-void OmniRuntime::Impl::storePendingReply(uint32_t seq, const Message& msg) {
-    sm_channel_.storeReply(seq, msg);
+int OmniRuntime::Impl::waitForDataReply(uint32_t seq, uint32_t timeout_ms, Message& reply,
+                                        const std::function<bool()>& is_alive) {
+    // 数据面等待：槽表由 RpcRuntime 独立持有，SM 重连不影响在途直连 RPC
+    return rpc_runtime_.waitForReply(
+        seq,
+        timeout_ms,
+        rpc_runtime_.dataReplies(),
+        [this](int wait_ms) { this->pollOnceWithoutFunctors(wait_ms); },
+        reply,
+        is_alive);
 }
 
-bool OmniRuntime::Impl::storeAndConsumeReply(uint32_t seq, const Message& msg) {
-    // 若 seq 已有 ready 的回复则直接消费；否则若正处于等待则存储并消费；
-    // 两者都不是则返回 false（消息交由调用方按原类型处理）
-    if (sm_channel_.pendingReply(seq) != NULL) {
-        return true;
-    }
-    if (sm_channel_.isWaiting(seq)) {
-        storePendingReply(seq, msg);
-        return true;
-    }
-    return false;
+bool OmniRuntime::Impl::storeAndConsumeControlReply(uint32_t seq, Message& msg) {
+    return consumeReplyIfWaiting(sm_channel_.pendingReplies(), seq, msg);
+}
+
+bool OmniRuntime::Impl::storeAndConsumeDataReply(uint32_t seq, Message& msg) {
+    return consumeReplyIfWaiting(rpc_runtime_.dataReplies(), seq, msg);
 }
 
 uint32_t OmniRuntime::Impl::effectiveTimeout(uint32_t timeout_ms) const {
@@ -104,7 +128,8 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
         : 0;
 
     Message reply;
-    int ret = waitForReply(seq, reply_timeout_ms, reply,
+    // 数据面等待必须使用独立槽表：SM 重连（控制面 clearReplies）不得使在途直连 RPC 误失败
+    int ret = waitForDataReply(seq, reply_timeout_ms, reply,
         [this, &service_name]() -> bool {
             return conn_mgr_ && conn_mgr_->getConnection(service_name) != NULL;
         });

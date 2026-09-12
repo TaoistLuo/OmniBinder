@@ -5,7 +5,6 @@
 #define TAG "HeartbeatMonitor"
 
 namespace omnibinder {
-
 HeartbeatMonitor::HeartbeatMonitor(uint32_t timeout_ms, uint32_t max_missed)
     : timeout_ms_(timeout_ms)
     , max_missed_(max_missed)
@@ -18,8 +17,6 @@ HeartbeatMonitor::~HeartbeatMonitor()
 
 void HeartbeatMonitor::updateHeartbeat(const std::string& service_name)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = entries_.find(service_name);
     if (it == entries_.end()) {
         HeartbeatEntry entry;
@@ -34,8 +31,6 @@ void HeartbeatMonitor::updateHeartbeat(const std::string& service_name)
 
 void HeartbeatMonitor::startTracking(const std::string& service_name)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     HeartbeatEntry entry;
     entry.last_heartbeat_ms = platform::currentTimeMs();
     entries_[service_name] = entry;
@@ -45,8 +40,6 @@ void HeartbeatMonitor::startTracking(const std::string& service_name)
 
 void HeartbeatMonitor::stopTracking(const std::string& service_name)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     auto it = entries_.find(service_name);
     if (it != entries_.end()) {
         entries_.erase(it);
@@ -56,8 +49,6 @@ void HeartbeatMonitor::stopTracking(const std::string& service_name)
 
 std::vector<std::string> HeartbeatMonitor::checkTimeouts()
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-
     std::vector<std::string> timed_out;
     int64_t now = platform::currentTimeMs();
 
@@ -88,7 +79,6 @@ std::vector<std::string> HeartbeatMonitor::checkTimeouts()
 
 size_t HeartbeatMonitor::trackedCount() const
 {
-    std::lock_guard<std::mutex> lock(mutex_);
     return entries_.size();
 }
 

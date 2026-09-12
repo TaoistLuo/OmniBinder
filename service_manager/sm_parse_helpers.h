@@ -34,6 +34,7 @@
 
 #include "omnibinder/message.h"
 #include "omnibinder/types.h"
+#include "omnibinder/buffer_view.h"
 
 #include <string>
 
@@ -41,13 +42,13 @@ namespace omnibinder {
 namespace sm_internal {
 
 inline bool tryReadStringArg(const Message& msg, std::string& value) {
-    Buffer payload(msg.payload.data(), msg.payload.size());
+    BufferView payload(msg.payload.data(), msg.payload.size());
     return payload.tryReadString(value);
 }
 
 inline bool tryReadExactStringArg(const Message& msg, std::string& value,
                                   size_t max_length) {
-    Buffer payload(msg.payload.data(), msg.payload.size());
+    BufferView payload(msg.payload.data(), msg.payload.size());
     return payload.tryReadString(value)
         && !value.empty()
         && value.size() <= max_length

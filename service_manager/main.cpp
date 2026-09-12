@@ -10,7 +10,7 @@
 #define TAG "ServiceManager"
 
 // ============================================================
-// Global shutdown eventfd for signal handling
+// 信号处理用的全局 shutdown eventfd
 // ============================================================
 namespace omnibinder {
 
@@ -26,7 +26,7 @@ static void signalHandler(int) {
 } // namespace omnibinder
 
 // ============================================================
-// Command line argument parsing
+// 命令行参数解析
 // ============================================================
 static void printUsage(const char* prog) {
     fprintf(stderr, "Usage: %s [options]\n", prog);
@@ -34,6 +34,8 @@ static void printUsage(const char* prog) {
     fprintf(stderr, "  --host <addr>     Listen address (default: 0.0.0.0)\n");
     fprintf(stderr, "  --port <port>     Listen port (default: 9900)\n");
     fprintf(stderr, "  --log-level <n>   Log level: 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR (default: 1)\n");
+    fprintf(stderr, "  --heartbeat-timeout <ms>  Per-heartbeat timeout (default: %u)\n",
+            (unsigned)omnibinder::DEFAULT_HEARTBEAT_TIMEOUT);
     fprintf(stderr, "  --help            Show this help\n");
 }
 
@@ -41,8 +43,9 @@ int main(int argc, char* argv[]) {
     std::string host = "0.0.0.0";
     uint16_t port = omnibinder::DEFAULT_SM_PORT;
     int log_level = OMNI_LOG_INFO;
+    uint32_t heartbeat_timeout_ms = omnibinder::DEFAULT_HEARTBEAT_TIMEOUT;
 
-    // Parse command line arguments
+    // 解析命令行参数
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
             host = argv[++i];
@@ -50,6 +53,11 @@ int main(int argc, char* argv[]) {
             port = static_cast<uint16_t>(atoi(argv[++i]));
         } else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
             log_level = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--heartbeat-timeout") == 0 && i + 1 < argc) {
+            int value = atoi(argv[++i]);
+            if (value > 0) {
+                heartbeat_timeout_ms = static_cast<uint32_t>(value);
+            }
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printUsage(argv[0]);
             return 0;
@@ -60,7 +68,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Set log level（上限对齐 LogLevel 枚举最大值 OMNI_LOG_OFF=6）
+    // 设置日志级别（上限对齐 LogLevel 枚举最大值 OMNI_LOG_OFF=6）
     if (log_level >= 0 && log_level <= static_cast<int>(OMNI_LOG_OFF)) {
         omnibinder::setLogLevel(static_cast<omnibinder::LogLevel>(log_level));
     }
@@ -68,8 +76,8 @@ int main(int argc, char* argv[]) {
     OMNI_LOG_INFO(TAG, "OmniBinder ServiceManager starting...");
     OMNI_LOG_INFO(TAG, "Host: %s, Port: %u, LogLevel: %d", host.c_str(), port, log_level);
 
-    // Create and initialize the application
-    omnibinder::ServiceManagerApp app;
+    // 创建并初始化应用
+    omnibinder::ServiceManagerApp app(heartbeat_timeout_ms);
 
     if (!app.init(host, port)) {
         OMNI_LOG_ERROR(TAG, "Failed to initialize ServiceManager");
@@ -79,7 +87,7 @@ int main(int argc, char* argv[]) {
     omnibinder::g_shutdown_fd = app.shutdownFd();
     omnibinder::platform::setupSignalHandlers(omnibinder::signalHandler);
 
-    // Run the event loop
+    // 运行 event-loop
     app.run();
 
     omnibinder::g_shutdown_fd = -1;

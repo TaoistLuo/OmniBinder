@@ -1,5 +1,6 @@
 #include "core/omni_runtime.h"
 #include "core/runtime_helpers.h"
+#include "transport/transport_selector.h"
 #include "omnibinder/buffer_view.h"
 #include "omnibinder/log.h"
 #include <memory>
@@ -41,12 +42,12 @@ int OmniRuntime::Impl::registerServiceInternal(Service* service) {
 
     ShmConfig shm_config = service->shmConfig();
     initializeServiceShm(name, entry,
-        shm_config.req_ring_capacity > 0 ? shm_config.req_ring_capacity : SHM_DEFAULT_REQ_RING_CAPACITY,
-        shm_config.resp_ring_capacity > 0 ? shm_config.resp_ring_capacity : SHM_DEFAULT_RESP_RING_CAPACITY);
+        shm_config.req_ring_capacity,
+        shm_config.resp_ring_capacity);
 
     ret = registerServiceWithManager(name, service, entry, advertise_host);
     if (ret != 0) {
-        cleanupPendingServiceRegistration(entry);
+        cleanupPendingServiceRegistration(name, entry);
         delete entry;
         return ret;
     }
@@ -60,18 +61,30 @@ int OmniRuntime::Impl::registerServiceInternal(Service* service) {
 
 int OmniRuntime::Impl::initializeServiceListener(LocalServiceEntry* entry, Service* service,
                                                  std::string& advertise_host) {
-    entry->server = new TcpTransportServer();
-    int port = entry->server->listen("0.0.0.0", 0);
+    IServerTransport* tcp = createServerTransport(service->name(), TransportType::TCP,
+                                                  TransportConfig());
+    if (!tcp) {
+        return static_cast<int>(ErrorCode::ERR_LISTEN_FAILED);
+    }
+    int port = tcp->start("0.0.0.0", 0, TransportConfig());
     if (port < 0) {
+        delete tcp;
         return static_cast<int>(ErrorCode::ERR_LISTEN_FAILED);
     }
 
+    entry->endpoints.push_back(tcp);
     entry->port = static_cast<uint16_t>(port);
     service->setPort(entry->port);
     service->runtime_ = owner_;
-    advertise_host = resolveRegisterHost(service,
-                                         platform::getSocketAddress(entry->server->fd()));
+    advertise_host = resolveRegisterHost(service, listenerAdvertiseHost());
+    wireServiceEndpoint(service->name(), entry, tcp);
     return 0;
+}
+
+std::string OmniRuntime::Impl::listenerAdvertiseHost() const {
+    // core 固定以 0.0.0.0 绑定 TCP 监听；历史实现经
+    // platform::getSocketAddress(listen_fd) 得到的也是通配地址。
+    return normalizeAdvertiseHost("0.0.0.0");
 }
 
 std::string OmniRuntime::Impl::resolveRegisterHost(Service* service,
@@ -79,6 +92,9 @@ std::string OmniRuntime::Impl::resolveRegisterHost(Service* service,
     if (service && !service->getRegisterHost().empty()) {
         return service->getRegisterHost();
     }
+    // register_host_ 由 api_mutex_ 统一保护（setRegisterHost/getRegisterHost 同锁），
+    // 本函数可能在 owner 线程执行，也可能在无 driver 的内联路径执行
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     if (!register_host_.empty()) {
         return register_host_;
     }
@@ -87,138 +103,89 @@ std::string OmniRuntime::Impl::resolveRegisterHost(Service* service,
 
 void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
                                               size_t req_ring_capacity, size_t resp_ring_capacity) {
-    // Create server-side ShmTransport for UDS listening + per-client context management.
-    // Each connecting client creates its own SHM; the server opens it via handshake.
-    entry->shm_transport = new ShmTransport(generateShmName(name), true,
-                                             req_ring_capacity, resp_ring_capacity);
-    if (entry->shm_transport->state() != ConnectionState::CONNECTED) {
-        OMNI_LOG_WARN(LOG_TAG, "Failed to create SHM UDS listener for service %s", name.c_str());
-        delete entry->shm_transport;
-        entry->shm_transport = NULL;
+    // SHM 端点：每个客户端创建自己的 SHM，服务端通过握手打开；
+    // 容量为 0 时由 SHM 传输使用默认值。
+    TransportConfig config(req_ring_capacity, resp_ring_capacity);
+    IServerTransport* shm = createServerTransport(name, TransportType::SHM, config);
+    if (!shm) {
+        OMNI_LOG_WARN(LOG_TAG, "createServerTransport(SHM) failed for service %s", name.c_str());
+        return;
+    }
+    if (shm->start("", 0, config) != 0) {
+        OMNI_LOG_WARN(LOG_TAG, "Failed to start SHM endpoint for service %s", name.c_str());
+        delete shm;
         return;
     }
 
-    // Register UDS listen fd with EventLoop for client handshake
-    if (entry->shm_transport->eventfdEnabled()) {
-        loop_->addFd(entry->shm_transport->reqEventFd(), EventLoop::EVENT_READ,
-            [this, entry, name](int fd, uint32_t) {
-                platform::eventFdConsume(fd);
-                ShmTransport* transport = entry->shm_transport;
-                if (!transport) return;
-                drainServiceShm(name, entry);
-            });
-    }
-
-    loop_->addFd(entry->shm_transport->handshakeListenFd(), EventLoop::EVENT_READ,
-        [this, entry](int, uint32_t) {
-            if (entry->shm_transport) {
-                entry->shm_transport->onHandshakeClientConnect();
-            }
-        });
-
-    entry->shm_transport->setOnClientConnected(
-        [this, entry, name](uint32_t client_id, int liveness_fd, int notify_fd) {
-            entry->shm_client_liveness_fds[client_id] =
-                std::make_pair(liveness_fd, notify_fd);
-            loop_->addFd(liveness_fd, EventLoop::EVENT_READ | EventLoop::EVENT_ERROR,
-                [this, entry, name, client_id](int, uint32_t) {
-                    std::map<uint32_t, std::pair<int, int> >::iterator registration =
-                        entry->shm_client_liveness_fds.find(client_id);
-                    if (registration == entry->shm_client_liveness_fds.end()) return;
-                    int live_fd = registration->second.first;
-                    int request_fd = registration->second.second;
-                    cleanupServiceShmClient(name, entry, client_id, live_fd, request_fd);
-                });
-
-            if (notify_fd >= 0) {
-                entry->shm_client_notify_fds.insert(notify_fd);
-                loop_->addFd(notify_fd, EventLoop::EVENT_READ,
-                [this, entry, name](int efd, uint32_t) {
-                    platform::eventFdConsume(efd);
-                    ShmTransport* transport = entry->shm_transport;
-                    if (!transport) return;
-                    drainServiceShm(name, entry);
-                });
-            }
-        });
-
-    entry->shm_transport->setOnClientDisconnected(
-        [this, entry, name](uint32_t client_id, int liveness_fd, int notify_fd) {
-            cleanupServiceShmClient(name, entry, client_id, liveness_fd, notify_fd);
-        });
+    entry->endpoints.push_back(shm);
+    wireServiceEndpoint(name, entry, shm);
 }
 
-void OmniRuntime::Impl::cleanupServiceShmClient(const std::string& name,
-                                                LocalServiceEntry* entry,
-                                                uint32_t client_id,
-                                                int liveness_fd,
-                                                int notify_fd) {
+void OmniRuntime::Impl::wireServiceEndpoint(const std::string& name, LocalServiceEntry* entry,
+                                            IServerTransport* endpoint) {
+    // 回调只捕获 name：entry 可能被用户回调注销释放，回调内必须按名重查（约束 1）
+    endpoint->setAcceptCallback([this, name](int client_id, IClientTransport* client) {
+        onServiceClientAccepted(name, client_id, client);
+    });
+    endpoint->setReadableCallback([this, name](int client_id) {
+        onServiceClientReadable(name, client_id);
+    });
+    endpoint->setDisconnectCallback([this, name](int client_id) {
+        onServiceClientDisconnected(name, client_id);
+    });
+    syncEndpointFds(name, entry);
+}
+
+void OmniRuntime::Impl::syncEndpointFds(const std::string& name, LocalServiceEntry* entry) {
     if (!entry) return;
-    std::map<uint32_t, std::pair<int, int> >::iterator registration =
-        entry->shm_client_liveness_fds.find(client_id);
-    if (registration == entry->shm_client_liveness_fds.end()) return;
 
-    (void)liveness_fd;
-    (void)notify_fd;
-    int registered_liveness_fd = registration->second.first;
-    int registered_notify_fd = registration->second.second;
-    if (registered_liveness_fd >= 0) loop_->removeFd(registered_liveness_fd);
-    if (registered_notify_fd >= 0) {
-        loop_->removeFd(registered_notify_fd);
-        entry->shm_client_notify_fds.erase(registered_notify_fd);
+    std::vector<int> fds;
+    for (size_t i = 0; i < entry->endpoints.size(); ++i) {
+        entry->endpoints[i]->pollFds(fds);
     }
-    entry->shm_client_liveness_fds.erase(registration);
-    topic_runtime_.removeShmSubscriberService(name, client_id);
-    if (entry->shm_transport) entry->shm_transport->removeClient(client_id);
-}
+    std::set<int> wanted(fds.begin(), fds.end());
 
-void OmniRuntime::Impl::drainServiceShm(const std::string& name, LocalServiceEntry* entry) {
-    ShmTransport* transport = entry ? entry->shm_transport : NULL;
-    if (!transport) return;
-    while (true) {
-        // 每轮循环前重新确认 entry 未被回调链中的 unregisterService 释放
-        std::map<std::string, LocalServiceEntry*>::iterator svc_it = local_services_.find(name);
-        if (svc_it == local_services_.end() || svc_it->second != entry) break;
-
-        size_t frame_size = 0;
-        uint32_t from_id = 0;
-        int ready = transport->nextServerRecvSize(frame_size, from_id);
-        if (ready <= 0) break;
-        std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[frame_size]);
-        if (!buf) {
-            OMNI_LOG_ERROR(LOG_TAG, "SHM request allocation failed for %s client[%u] (%zu bytes)",
-                           name.c_str(), from_id, frame_size);
-            std::map<uint32_t, std::pair<int, int> >::iterator registration =
-                entry->shm_client_liveness_fds.find(from_id);
-            if (registration != entry->shm_client_liveness_fds.end()) {
-                cleanupServiceShmClient(name, entry, from_id,
-                                        registration->second.first,
-                                        registration->second.second);
-            }
-            break;
+    // 摘除已失效的 fd（正常断开路径已先摘除；此处兜底防残留，约束 3）
+    std::set<int>::iterator reg = entry->endpoint_fds.begin();
+    while (reg != entry->endpoint_fds.end()) {
+        if (wanted.find(*reg) == wanted.end()) {
+            loop_->removeFd(*reg);
+            entry->endpoint_fds.erase(reg++);
+        } else {
+            ++reg;
         }
-        int ret = transport->serverRecv(buf.get(), frame_size, from_id);
-        if (ret <= 0) break;
-        onShmRequest(name, entry, from_id, buf.get(), static_cast<size_t>(ret));
+    }
+
+    for (size_t i = 0; i < fds.size(); ++i) {
+        int fd = fds[i];
+        if (entry->endpoint_fds.find(fd) != entry->endpoint_fds.end()) continue;
+        loop_->addFd(fd, EventLoop::EVENT_READ | EventLoop::EVENT_ERROR,
+            [this, name](int efd, uint32_t ev) { this->onServiceEndpointEvent(name, efd, ev); });
+        entry->endpoint_fds.insert(fd);
     }
 }
 
 int OmniRuntime::Impl::registerServiceWithManager(const std::string& name, Service* service,
                                                   LocalServiceEntry* entry,
                                                   const std::string& advertise_host) {
-    loop_->addFd(entry->server->fd(), EventLoop::EVENT_READ,
-        [this, name](int fd, uint32_t events) { this->onServiceAccept(name, fd, events); });
-    listen_fd_to_service_[entry->server->fd()] = name;
+    return sendRegisterToManager(name, service, entry->port, advertise_host, NULL);
+}
 
+int OmniRuntime::Impl::sendRegisterToManager(const std::string& name, Service* service,
+                                             uint16_t port, const std::string& advertise_host,
+                                             ServiceHandle* out_handle) {
     Message msg(MessageType::MSG_REGISTER, allocSequence());
     ServiceInfo svc_info;
     svc_info.name = name;
     svc_info.host = advertise_host;
-    svc_info.port = entry->port;
+    svc_info.port = port;
     svc_info.host_id = host_id_;
     svc_info.shm_config = service->shmConfig();
     svc_info.interfaces.push_back(service->interfaceInfo());
-    serializeServiceInfo(svc_info, msg.payload);
+    if (!serializeServiceInfo(svc_info, msg.payload)) {
+        OMNI_LOG_ERROR(LOG_TAG, "serialize_register_payload_failed service=%s", name.c_str());
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
 
     if (!sendToSM(msg)) {
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
@@ -230,70 +197,59 @@ int OmniRuntime::Impl::registerServiceWithManager(const std::string& name, Servi
         return ret;
     }
 
-    uint32_t handle = INVALID_HANDLE;
+    ServiceHandle handle = INVALID_HANDLE;
     if (!decodeUint32ReplyPayload(reply, handle)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (handle == INVALID_HANDLE) {
         return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
     }
-
+    if (out_handle) {
+        *out_handle = handle;
+    }
     return 0;
 }
 
-void OmniRuntime::Impl::cleanupPendingServiceRegistration(LocalServiceEntry* entry) {
-    if (!entry || !entry->server) {
+void OmniRuntime::Impl::detachClientsFromEntry(const std::string& name,
+                                               LocalServiceEntry* entry) {
+    if (!entry) {
         return;
     }
-
-    removeServiceListenerFromLoop(entry);
-    removeServiceShmFromLoop(entry);
+    for (std::map<int, IClientTransport*>::iterator it = entry->clients.begin();
+         it != entry->clients.end(); ++it) {
+        client_id_to_service_.erase(it->first);
+        topic_runtime_.removeTcpSubscriberFd(it->first);
+        topic_runtime_.removeShmSubscriberService(name, it->first);
+    }
+    entry->clients.clear();
 }
 
-void OmniRuntime::Impl::removeServiceListenerFromLoop(LocalServiceEntry* entry) {
-    if (!entry || !entry->server) {
+void OmniRuntime::Impl::cleanupPendingServiceRegistration(const std::string& name,
+                                                          LocalServiceEntry* entry) {
+    if (!entry) {
         return;
     }
 
-    loop_->removeFd(entry->server->fd());
-    listen_fd_to_service_.erase(entry->server->fd());
+    removeServiceEndpointsFromLoop(entry);
+
+    // 注册等待 SM reply 期间，端点 fd 已注册，可能有客户端接入。entry 随后会被
+    // delete，若不先摘除这些客户端 fd，fd 号被复用时 EventLoop::addFd 会因表内
+    // 残留而静默失败（约束 3）。
+    detachClientsFromEntry(name, entry);
 }
 
-void OmniRuntime::Impl::removeServiceShmFromLoop(LocalServiceEntry* entry) {
-    if (!entry || !entry->shm_transport) {
+void OmniRuntime::Impl::removeServiceEndpointsFromLoop(LocalServiceEntry* entry) {
+    if (!entry) {
         return;
     }
 
-    // Set shm_transport to NULL first so any in-flight callback on the
-    // owner thread sees the cleared pointer and returns early, avoiding
-    // use-after-free when unregisterService is called re-entrantly from
-    // a service callback.
-    ShmTransport* transport = entry->shm_transport;
-    entry->shm_transport = NULL;
-
-    if (transport->reqEventFd() >= 0) {
-        loop_->removeFd(transport->reqEventFd());
-    }
-    if (transport->handshakeListenFd() >= 0) {
-        loop_->removeFd(transport->handshakeListenFd());
-    }
-
-    for (std::map<uint32_t, std::pair<int, int> >::iterator it =
-             entry->shm_client_liveness_fds.begin();
-         it != entry->shm_client_liveness_fds.end(); ++it) {
-        loop_->removeFd(it->second.first);
-        if (it->second.second >= 0) loop_->removeFd(it->second.second);
-    }
-    for (std::set<int>::iterator it = entry->shm_client_notify_fds.begin();
-         it != entry->shm_client_notify_fds.end(); ++it) {
+    // 端点 fd（监听/主控/握手）与 per-client fd（TCP client fd、SHM liveness fd）
+    // 都必须在 entry/endpoint 销毁前从 event-loop 摘除（约束 3）
+    for (std::set<int>::iterator it = entry->endpoint_fds.begin();
+         it != entry->endpoint_fds.end(); ++it) {
         loop_->removeFd(*it);
     }
-    entry->shm_client_notify_fds.clear();
-    entry->shm_client_liveness_fds.clear();
-
-    // Restore so the caller (which may wrap this in its own cleanup) can
-    // still close and delete the transport through the entry.
-    entry->shm_transport = transport;
+    entry->endpoint_fds.clear();
 }
 
 int OmniRuntime::Impl::unregisterService(Service* service) {
@@ -320,15 +276,9 @@ int OmniRuntime::Impl::unregisterServiceInternal(Service* service) {
     // 重入 unregisterService/registerService，不会 double-free 或操作已释放的
     // entry（各判活路径发现 map 中已无该服务会立即返回）
     local_services_.erase(it);
-    removeServiceListenerFromLoop(entry);
-    removeServiceShmFromLoop(entry);
+    removeServiceEndpointsFromLoop(entry);
     
-    for (std::map<int, ITransport*>::iterator cit = entry->client_transports.begin();
-         cit != entry->client_transports.end(); ++cit) {
-        loop_->removeFd(cit->first);
-        client_fd_to_service_.erase(cit->first);
-        topic_runtime_.removeTcpSubscriberFd(cit->first);
-    }
+    detachClientsFromEntry(name, entry);
     
     topic_runtime_.forgetPublishedTopicsByOwner(name);
     
@@ -351,9 +301,9 @@ int OmniRuntime::Impl::lookupService(const std::string& service_name, ServiceInf
 }
 
 int OmniRuntime::Impl::lookupServiceInfo(const std::string& service_name, ServiceInfo& info) {
-    std::map<std::string, ServiceInfo>::iterator cit = service_cache_.find(service_name);
-    if (cit != service_cache_.end()) {
-        info = cit->second;
+    ServiceState* cached = findServiceState(service_name);
+    if (cached && cached->has_info) {
+        info = cached->info;
         return 0;
     }
 
@@ -381,7 +331,9 @@ int OmniRuntime::Impl::lookupServiceInfo(const std::string& service_name, Servic
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
 
-    service_cache_[service_name] = info;
+    ServiceState& svc_state = ensureServiceState(service_name);
+    svc_state.info = info;
+    svc_state.has_info = true;
     return 0;
 }
 

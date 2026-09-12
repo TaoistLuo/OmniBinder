@@ -351,13 +351,8 @@ int createEventFd() {
 }
 
 int createNamedEventFd(const std::string& /*name*/) {
-    // Linux: eventfd is anonymous; cross-process sharing via UDS SCM_RIGHTS.
+    // Linux：eventfd 为匿名对象；跨进程共享通过 UDS SCM_RIGHTS 传递。
     return createEventFd();
-}
-
-int openNamedEventFd(const std::string& /*name*/) {
-    // Linux: fd exchange happens via handshake, not by name.
-    return -1;
 }
 
 bool eventFdNotify(int efd) {
@@ -941,10 +936,6 @@ int handshakeGetFd(handshake_channel* ch) {
 
 int handshakeGetListenerFd(handshake_listener* listener) {
     return listener ? listener->fd : -1;
-}
-
-bool isShmHandshakeAvailable() {
-    return true;
 }
 
 void memoryBarrier() {

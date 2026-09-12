@@ -1,4 +1,5 @@
 #include "core/omni_runtime.h"
+#include "transport/transport_selector.h"
 #include "omnibinder/log.h"
 
 #define LOG_TAG "OmniRuntime"
@@ -97,14 +98,21 @@ int OmniRuntime::unsubscribeServiceDeath(const std::string& name) {
 }
 
 int OmniRuntime::publishTopic(const std::string& topic) {
-    return impl_->publishTopic(topic);
+    return impl_->publishTopic(topic, 0);
+}
+int OmniRuntime::publishTopic(const std::string& topic, uint32_t idl_hash) {
+    return impl_->publishTopic(topic, idl_hash);
 }
 int OmniRuntime::broadcast(uint32_t topic_id, const Buffer& data) {
     return impl_->broadcast(topic_id, data);
 }
 int OmniRuntime::subscribeTopic(const std::string& topic, const TopicCallback& on_msg,
                                  const TopicErrorCallback& on_err) {
-    return impl_->subscribeTopic(topic, on_msg, on_err);
+    return impl_->subscribeTopic(topic, 0, on_msg, on_err);
+}
+int OmniRuntime::subscribeTopic(const std::string& topic, uint32_t expected_idl_hash,
+                                 const TopicCallback& on_msg, const TopicErrorCallback& on_err) {
+    return impl_->subscribeTopic(topic, expected_idl_hash, on_msg, on_err);
 }
 int OmniRuntime::unsubscribeTopic(const std::string& topic) {
     return impl_->unsubscribeTopic(topic);
@@ -114,6 +122,7 @@ void OmniRuntime::setRegisterHost(const std::string& host) { impl_->setRegisterH
 std::string OmniRuntime::getRegisterHost() const { return impl_->getRegisterHost(); }
 void OmniRuntime::setHeartbeatInterval(uint32_t ms) { impl_->setHeartbeatInterval(ms); }
 void OmniRuntime::setDefaultTimeout(uint32_t ms) { impl_->setDefaultTimeout(ms); }
+void OmniRuntime::setReplySendTimeout(uint32_t ms) { impl_->setReplySendTimeout(ms); }
 std::string OmniRuntime::hostId() const { return impl_->hostId(); }
 int OmniRuntime::getStats(RuntimeStats& stats) { return impl_->getStats(stats); }
 int OmniRuntime::resetStats() { return impl_->resetStats(); }
@@ -145,6 +154,7 @@ OmniRuntime::Impl::Impl()
     , heartbeat_timer_id_(0)
     , conn_mgr_(NULL)
     , register_host_()
+    , reply_send_timeout_ms_(DEFAULT_REPLY_SEND_TIMEOUT)
     , diag_active_count_(0)
     , pid_(0)
     , process_name_()
@@ -163,35 +173,33 @@ OmniRuntime::Impl::~Impl() {
         loop_->pollOnce(0);
     }
     
-    // Cancel heartbeat timer before cleanup
+    // 清理前先取消心跳定时器
     if (loop_ && heartbeat_timer_id_ > 0) {
         loop_->cancelTimer(heartbeat_timer_id_);
         heartbeat_timer_id_ = 0;
     }
 
-    // Cancel all per-service heartbeat timers
-    for (std::map<std::string, HeartbeatState>::iterator it = heartbeat_states_.begin();
-         it != heartbeat_states_.end(); ++it) {
-        if (loop_ && it->second.timer_id > 0) {
-            loop_->cancelTimer(it->second.timer_id);
+    // 取消所有每服务心跳 / 重连定时器
+    for (std::map<std::string, ServiceState>::iterator it = services_.begin();
+         it != services_.end(); ++it) {
+        if (loop_ && it->second.has_heartbeat && it->second.heartbeat.timer_id > 0) {
+            loop_->cancelTimer(it->second.heartbeat.timer_id);
+        }
+        if (loop_ && it->second.has_reconnect && it->second.reconnect.timer_id > 0) {
+            loop_->cancelTimer(it->second.reconnect.timer_id);
         }
     }
-    heartbeat_states_.clear();
-
-    // Cancel all per-service reconnect timers
-    for (std::map<std::string, ReconnectConfig>::iterator it = reconnect_configs_.begin();
-         it != reconnect_configs_.end(); ++it) {
-        if (loop_ && it->second.timer_id > 0) {
-            loop_->cancelTimer(it->second.timer_id);
-        }
-    }
-    reconnect_configs_.clear();
+    services_.clear();
     
     for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
          it != local_services_.end(); ++it) {
+        // 先摘除端点/客户端 fd 再销毁 endpoint（约束 3），并清理路由与话题订阅
+        removeServiceEndpointsFromLoop(it->second);
+        detachClientsFromEntry(it->first, it->second);
         delete it->second;
     }
     local_services_.clear();
+    client_id_to_service_.clear();
     if (diag_data_service_) {
         delete diag_data_service_;
         diag_data_service_ = NULL;
@@ -203,10 +211,8 @@ OmniRuntime::Impl::~Impl() {
     delete conn_mgr_;
     conn_mgr_ = NULL;
     
-    if (sm_channel_.transport_) {
-        sm_channel_.transport_->close();
-        delete sm_channel_.transport_;
-        sm_channel_.transport_ = NULL;
+    if (loop_) {
+        sm_channel_.closeTransport(*loop_);
     }
     
     delete loop_;
@@ -235,43 +241,26 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     loop_ = new EventLoop();
     owner_executor_.bindLoop(loop_);
     
-    sm_channel_.transport_ = new TcpTransport();
-    int ret = sm_channel_.transport_->connect(sm_host, sm_port);
-    if (ret < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "sm_connect_failed host=%s port=%u err=%d",
-                       sm_host.c_str(), sm_port, static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE));
-        delete sm_channel_.transport_;
-        sm_channel_.transport_ = NULL;
+    int connect_err = 0;
+    IClientTransport* control_transport = createControlTransport(sm_host, sm_port, connect_err);
+    if (!control_transport) {
         delete loop_;
         loop_ = NULL;
-        return static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE);
+        return connect_err;
     }
+    sm_channel_.resetTransport(control_transport);
     
-    if (ret == 1) {
-        platform::waitSocketWritable(sm_channel_.transport_->fd(), 1000);
-        sm_channel_.transport_->checkConnectComplete();
-        if (sm_channel_.transport_->state() != ConnectionState::CONNECTED) {
-            OMNI_LOG_ERROR(LOG_TAG, "sm_connect_timeout host=%s port=%u timeout_ms=%u err=%d",
-                           sm_host.c_str(), sm_port, 1000u, static_cast<int>(ErrorCode::ERR_TIMEOUT));
-            delete sm_channel_.transport_;
-            sm_channel_.transport_ = NULL;
-            delete loop_;
-            loop_ = NULL;
-            return static_cast<int>(ErrorCode::ERR_TIMEOUT);
-        }
-    }
-    
-    loop_->addFd(sm_channel_.transport_->fd(), EventLoop::EVENT_READ,
+    loop_->addFd(sm_channel_.transport()->fd(), EventLoop::EVENT_READ,
         [this](int fd, uint32_t events) { this->onSMData(fd, events); });
     
     conn_mgr_ = new ConnectionManager(*loop_, host_id_);
     conn_mgr_->setMessageCallback(
-        [this](const std::string& svc, const Message& msg) { this->onDirectMessage(svc, msg); });
+        [this](const std::string& svc, Message& msg) { this->onDirectMessage(svc, msg); });
     conn_mgr_->setDisconnectCallback(
         // 参数按值：onDirectDisconnect 内部会 removeConnection 删除 conn，
         // 若传 conn 成员的引用，删除后引用悬垂（重构 failConnection 后暴露的 UAF）
-        [this](std::string svc, bool is_topic_publisher, std::string topic_name) {
-            this->onDirectDisconnect(svc, is_topic_publisher, topic_name);
+        [this](std::string svc) {
+            this->onDirectDisconnect(svc);
         });
     
     heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
@@ -297,25 +286,38 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
 }
 
 void OmniRuntime::Impl::run() {
-    if (!initialized_) return;
+    {
+        // owner 认领与 callSerialized 的无 owner 内联判定共用 api_mutex_：
+        // 消除 "init 后 run 认领前 API 内联执行" 与 "driver 线程驱动 loop" 并发（TOCTOU）
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+        if (!initialized_) return;
 
-    // 双驱动守卫：先尝试成为 driver（原子 CAS），成功者才捕获 owner 线程；
-    // 已有 driver 且非本线程时拒绝，保持单驱动
-    bool expected = false;
-    if (loop_driver_active_.compare_exchange_strong(expected, true)) {
-        owner_executor_.setOwnerThread(std::this_thread::get_id());
-    } else if (!owner_executor_.isOwnerThread()) {
-        OMNI_LOG_WARN(LOG_TAG, "run rejected: event-loop already driven by another thread");
-        return;
+        // 双驱动守卫：先尝试成为 driver（原子 CAS），成功者才捕获 owner 线程；
+        // 已有 driver 且非本线程时拒绝，保持单驱动
+        bool expected = false;
+        if (loop_driver_active_.compare_exchange_strong(expected, true)) {
+            owner_executor_.setOwnerThread(std::this_thread::get_id());
+        } else if (!owner_executor_.isOwnerThread()) {
+            OMNI_LOG_WARN(LOG_TAG, "run rejected: event-loop already driven by another thread");
+            return;
+        }
+
+        // stop 是终态：不重新武装 running_/loop_alive_（isRunning 保持 false，
+        // 停止后的 API 快速失败）。loop_->run() 仍会调用，用于立即返回并排空
+        // 关闭前已入队的 functor。
+        if (!loop_->stopRequested()) {
+            loop_alive_ = true;
+            running_ = true;
+        }
     }
 
-    loop_alive_ = true;
-    running_ = true;
     loop_->run();
+
     // stop() 可能在 reply-wait 期间被调用：waitForReply 的 pollOnceWithoutFunctors
     // 会把 loop_alive_ 重新置 true。run() 退出后必须强制复位，否则后续非 owner
     // 线程的 API 调用会被投递到已停止的 event-loop，永久阻塞（违反停止后快速失败）。
     loop_alive_ = false;
+    running_ = false;
     loop_driver_active_ = false;
 }
 
@@ -330,13 +332,17 @@ bool OmniRuntime::Impl::isRunning() const { return running_; }
 void OmniRuntime::Impl::pollOnce(int timeout_ms) {
     if (!initialized_) return;
 
-    // 双驱动守卫：与 run() 一致，防止第二个线程驱动 event-loop
-    bool expected = false;
-    if (loop_driver_active_.compare_exchange_strong(expected, true)) {
-        owner_executor_.setOwnerThread(std::this_thread::get_id());
-    } else if (!owner_executor_.isOwnerThread()) {
-        OMNI_LOG_WARN(LOG_TAG, "pollOnce rejected: event-loop already driven by another thread");
-        return;
+    {
+        // 与 run() 一致：owner 认领与 callSerialized 的无 owner 判定共用 api_mutex_，
+        // 防止第二个线程驱动 event-loop，同时闭合 TOCTOU
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+        bool expected = false;
+        if (loop_driver_active_.compare_exchange_strong(expected, true)) {
+            owner_executor_.setOwnerThread(std::this_thread::get_id());
+        } else if (!owner_executor_.isOwnerThread()) {
+            OMNI_LOG_WARN(LOG_TAG, "pollOnce rejected: event-loop already driven by another thread");
+            return;
+        }
     }
 
     loop_alive_ = true;

@@ -31,7 +31,7 @@
 |     `-- ConnectionManager                                          |
 |                                                                   |
 |   EventLoop / OwnerThreadExecutor                                  |
-|   Transport Layer: TcpTransport / ShmTransport                     |
+|   Transport Layer: TcpClientTransport / ShmClientTransport         |
 +-------------------------------------------------------------------+
 |                     ServiceManager（独立进程）                      |
 |   ServiceRegistry / HeartbeatMonitor / DeathNotifier / TopicManager |
@@ -61,6 +61,9 @@ OmniBinder 的内部实现分成两个平面：
 - `src/core/runtime_dispatch.cpp` — 服务端请求分派
 - `src/core/runtime_diag.cpp` — 诊断 watch 数据面
 - `src/core/runtime_config.cpp` — 配置 / 统计 / 线程模型基础设施
+- `src/core/runtime_helpers.h` / `src/core/runtime_helpers.cpp` — 协议 payload 解码与诊断事件序列化辅助
+- `src/core/message_reader.h` / `src/core/message_reader.cpp` — 统一消息读取器（成帧/流式组帧）
+- `src/core/pending_reply_table.h` / `src/core/pending_reply_table.cpp` — 控制面/数据面独立的 pending reply 槽表
 - `src/core/sm_control_channel.h`
 - `src/core/sm_control_channel.cpp`
 - `src/core/rpc_runtime.h`
@@ -78,8 +81,12 @@ OmniBinder 的内部实现分成两个平面：
 
 - `src/transport/tcp_transport.h`
 - `src/transport/tcp_transport.cpp`
-- `src/transport/shm_transport.h`
-- `src/transport/shm_transport.cpp`
+- `src/transport/shm_ring.h`
+- `src/transport/shm_ring.cpp`
+- `src/transport/shm_client_transport.h`
+- `src/transport/shm_client_transport.cpp`
+- `src/transport/shm_server_transport.h`
+- `src/transport/shm_server_transport.cpp`
 - `src/transport/transport_selector.h`
 - `src/transport/transport_selector.cpp`
 
@@ -121,21 +128,20 @@ OmniBinder 的内部实现分成两个平面：
 - `TopicRuntime topic_runtime_`
 - `ConnectionManager* conn_mgr_`
 - `std::map<std::string, LocalServiceEntry*> local_services_`
-- `std::map<int, std::string> client_fd_to_service_`
-- `std::map<std::string, ServiceInfo> service_cache_`
-- `std::map<std::string, DeathCallback> death_callbacks_`
+- `std::map<int, std::string> client_id_to_service_`
+- `std::map<std::string, ServiceState> services_`（服务缓存 / 死亡回调 / 重连配置 / 心跳状态统一归并）
 
 ### 4.3 LocalServiceEntry
 
 每个本地注册服务对应一个 `LocalServiceEntry`，包含：
 
 - `Service* service`
-- `TcpTransportServer* server` — TCP listener
-- `ShmTransport* shm_transport` — SHM 服务端（UDS listener + per-client context）
-- `std::map<int, ITransport*> client_transports` — accept 的 TCP 客户端
 - `uint16_t port`
-- `std::string advertise_host`
-- `std::map<int, Buffer*> client_recv_buffers`
+- `std::vector<IServerTransport*> endpoints` — 各传输端点（TCP listener / SHM UDS listener）
+- `std::map<int, IClientTransport*> clients` — 端点接入的客户端（非拥有）
+- `std::map<int, Buffer*> client_recv_buffers` — 客户端拆包缓冲
+- `std::set<int> endpoint_fds` — 已注册到 EventLoop 的端点级 fd
+- `bool diag_enabled` / `uint32_t diag_topic_id`
 
 这个结构代表“一个本地服务完整的对外暴露状态”。
 
@@ -147,9 +153,9 @@ OmniBinder 的内部实现分成两个平面：
 
 ### 5.2 关键状态
 
-- `TcpTransport* transport`
-- `Buffer recv_buffer`
-- `std::map<uint32_t, PendingReplySlot> pending_replies_`
+- `IClientTransport* transport_`
+- `Buffer recv_buffer_`
+- `PendingReplyTable pending_replies_`（控制面独立等待槽表；数据面由 `RpcRuntime` 单独持有）
 
 ### 5.3 核心职责
 
@@ -162,14 +168,13 @@ OmniBinder 的内部实现分成两个平面：
 
 - `isConnected()`
 - `sendMessage(const Message&)`
-- `recvSome(uint8_t*, size_t)`
-- `appendReceived(const uint8_t*, size_t)`
-- `tryPopMessage(Message&)`
-- `beginWait(seq)`
-- `isWaiting(seq)`
-- `pendingReply(seq)`
-- `storeReply(seq, msg)`
-- `eraseWait(seq)`
+- `sendMessageWithinTimeout(const Message&, uint32_t, uint32_t*)`
+- `recvMessage(Message&)`
+- `pendingReplies()` / `clearReplies()`
+- `transport()` / `resetTransport()` / `closeTransport(EventLoop&)`
+- `clearReceiveBuffer()`
+
+等待槽的 `beginWait` / `isWaiting` / `pendingReply` / `isFailed` / `takeReply` / `storeReply` / `eraseWait` 由 `PendingReplyTable` 提供。
 
 ### 5.5 设计约束
 
@@ -206,13 +211,13 @@ OmniBinder 的内部实现分成两个平面：
 - `beginWait()`
 - `remainingWaitMs()`
 - `isTimedOut()`
-- `endWait()`
 - `waitForReply(...)`
+- `dataReplies()`
 
 ### 6.5 与其他模块的关系
 
 - 它不直接持有 transport
-- 它通过 `SmControlChannel` 读取 pending reply
+- 它不拥有控制面槽表：`waitForReply()` 接受调用方传入的 `PendingReplyTable&`；控制面表由 `SmControlChannel` 持有，数据面表由自身 `dataReplies()` 持有
 - 它通过外部传入的 reply-wait pump 驱动事件循环
 
 ### 6.6 当前等待语义
@@ -245,13 +250,8 @@ reply wait 期间只处理：
 
 ### 7.2 当前持有的数据
 
-- `callbacks_`
-- `topic_name_to_id_`
-- `callbacks_by_id_`
-- `tcp_subscribers_`
-- `shm_subscribers_`
-- `published_topics_`（private，通过 `isTopicPublished()` / `getTopicId()` 访问）
-- `published_topic_owners_`
+- `topics_`（`std::map<uint32_t, TopicState>`：callback / error callback / `tcp_subscribers` / `shm_subscribers` / `published` / `owner_service` / `published_hash` / `expected_subscription_hash`）
+- `name_to_id_`（topic name → id 映射，topic id 经 `getTopicId()` 查询）
 
 ### 7.3 当前职责
 
@@ -288,14 +288,14 @@ reply wait 期间只处理：
 
 ```cpp
 struct LocalServiceEntry {
-    Service*            service;              // 业务服务指针
-    TcpTransportServer* server;               // TCP listener
-    ShmTransport*       shm_transport;        // SHM 服务端（UDS listener + per-client context）
-    uint16_t            port;                 // 监听端口
-    std::map<int, ITransport*>  client_transports;   // accept 的 TCP 客户端
-    std::map<int, Buffer*>      client_recv_buffers; // 客户端拆包缓冲
-    bool                diag_enabled;
-    uint32_t            diag_topic_id;
+    Service*                        service;              // 业务服务指针
+    uint16_t                        port;                 // 监听端口
+    std::vector<IServerTransport*>  endpoints;            // 各传输端点（TCP listener / SHM UDS listener）
+    std::map<int, IClientTransport*> clients;             // 端点接入的客户端（非拥有）
+    std::map<int, Buffer*>          client_recv_buffers;  // 客户端拆包缓冲
+    std::set<int>                   endpoint_fds;         // 已注册到 EventLoop 的端点级 fd
+    bool                            diag_enabled;
+    uint32_t                        diag_topic_id;
 };
 ```
 
@@ -303,9 +303,9 @@ struct LocalServiceEntry {
 
 以下原属于 `ServiceHostRuntime` 的功能，现已作为 `OmniRuntime::Impl` 的私有方法实现：
 
-- `onServiceAccept()` — TCP accept 回调
-- `onServiceClientData()` — TCP 客户端数据回调（拆包 + 分派）
-- `onShmRequest()` — SHM 请求回调（拆帧 + 分派）
+- `onServiceEndpointEvent()` — 端点级 fd 事件（accept / 握手 / 可读映射）
+- `onServiceClientReadable()` — 客户端可读回调（拆帧 + 分派）
+- `onServiceClientAccepted()` — 端点接入新客户端回调
 - `onInvokeRequest()` — 处理 `MSG_INVOKE`
 - `onInvokeOneWayRequest()` — 处理 `MSG_INVOKE_ONEWAY`
 - `dispatchLocalInvoke()` — interface/IDL hash 校验、调用 `Service::onInvoke()`、构造 reply
@@ -326,7 +326,7 @@ struct LocalServiceEntry {
 ### 9.2 当前职责
 
 - 服务连接池
-- 调用 `selectTransport()` 自由函数执行同机 / 跨机 transport 选择
+- 调用 `createClientTransport()` 执行同机 / 跨机 transport 选择
 - SHM -> TCP fallback
 - 直连消息接收
 - 直连断开通知
@@ -334,22 +334,22 @@ struct LocalServiceEntry {
 ### 9.3 选择逻辑
 
 1. 拿到目标服务 `ServiceInfo`
-2. 调用 `selectTransport(service_name, host, port, local_host_id, remote_host_id, shm_config)`
+2. 调用 `createClientTransport(service_name, host, port, local_host_id, remote_host_id, shm_config)`
 3. 函数内部判断：同机先尝试 SHM，失败或跨机回退到 TCP
-4. 成功返回 `ITransport*`（`CONNECTED` 状态），移入 `ServiceConnection` 由连接生命周期管理
+4. 成功返回 `IClientTransport*`（`CONNECTED` 状态），移入 `ServiceConnection` 由连接生命周期管理
 5. 失败返回 `NULL`，上层返回 `ERR_CONNECT_FAILED`
 
-`selectTransport()` 位于 `src/transport/transport_selector.cpp`，是源码级扩展点。
+`createClientTransport()` 位于 `src/transport/transport_selector.{h,cpp}`，是源码级扩展点。
 如需添加新传输类型，在此函数中扩展。这不是动态插件 ABI。
-`ConnectionManager` 出站连接使用 `selectTransport()`；本地服务 hosting 在 `OmniRuntime::Impl` 中
-直接创建 `TcpTransportServer` 和 `ShmTransport`（不经过 `selectTransport()`）。
+`ConnectionManager` 出站连接使用 `createClientTransport()`；本地服务 hosting 在 `OmniRuntime::Impl` 中
+直接创建 `TcpServerTransport` 和 `ShmServerTransport`（不经过 `createClientTransport()`）。
 ServiceManager 控制面仍固定使用 TCP。
 
-## 10. ShmTransport
+## 10. ShmClientTransport / ShmServerTransport
 
 ### 10.1 作用
 
-`ShmTransport` 提供同机低延迟数据面传输。
+`ShmClientTransport`（客户端）与 `ShmServerTransport`（服务端端点）提供同机低延迟数据面传输，底层共用 `shm_ring.h` 的 per-client ring 布局与读写函数。
 
 ### 10.2 架构变更：从全局 SHM 到 per-client SHM
 
@@ -379,17 +379,17 @@ ServiceManager 控制面仍固定使用 TCP。
 
 ### 10.5 服务端数据结构
 
-服务端持有 `client_contexts_` 映射表，按 `client_id` 索引：
+服务端持有 `clients_` 映射表，按 `client_id` 索引，值为实现 `IClientTransport` 的 `ShmServerClientConnection`：
 
 ```text
-client_contexts_ : map<client_id, ClientShmContext>
+clients_ : map<client_id, ShmServerClientConnection*>
 
-ClientShmContext:
-  - shm_fd
-  - mapped_address
-  - shm_size
-  - client_eventfd   — 客户端用于通知 server 的 eventfd
-  - resp_eventfd     — server 写入 response 后通知客户端
+ShmServerClientConnection:
+  - shm_name / shm_addr / shm_size
+  - ctrl_ / req_ring_capacity_ / resp_ring_capacity_
+  - resp_eventfd_      — 服务端写入 response 后通知客户端
+  - request_notify_fd_ — 客户端请求通知（Windows 平台）
+  - liveness_channel_  — 检测客户端退出的握手通道
 ```
 
 客户端无固定上限，仅受系统 SHM 资源限制。
@@ -407,9 +407,9 @@ ClientShmContext:
 - request：
   - 客户端写入自己的 request ring
   - 通知服务端 `master_eventfd`
-  - 服务端 `serverRecv()` 遍历所有 `client_contexts_`，依次 drain
+  - 服务端 `ShmServerTransport::onPollEvent()` 扫描所有客户端连接，依次 drain request ring
 - response：
-  - 服务端 `serverSend(client_id)` 写入对应客户端的 response ring
+  - 服务端经客户端连接 `IClientTransport::send()` 写入对应客户端的 response ring
   - 通知 `resp_eventfd`
   - 客户端从自己的 response ring 读取
 - 通知：
@@ -471,7 +471,7 @@ Service Process
   -> OmniRuntime::registerService()
   -> 创建 TCP 监听 / SHM / ServiceInfo
   -> SmControlChannel::sendMessage(MSG_REGISTER)
-  -> ServiceManager::handleRegister()
+  -> ServiceManagerApp::handleRegister()
   -> ServiceRegistry::addService()
   -> 返回 MSG_REGISTER_REPLY
   -> OmniRuntime 更新本地 service 状态
@@ -483,7 +483,7 @@ Service Process
 Client
   -> OmniRuntime::lookupService()
   -> SmControlChannel::sendMessage(MSG_LOOKUP)
-  -> ServiceManager::handleLookup()
+  -> ServiceManagerApp::handleLookup()
   -> ServiceRegistry::findService()
   -> 返回 ServiceInfo
   -> OmniRuntime / ConnectionManager 使用返回的 host_id / shm_config
@@ -495,7 +495,7 @@ Client
 Client
   -> OmniRuntime::subscribeServiceDeath()
   -> SmControlChannel::sendMessage(MSG_SUBSCRIBE_SERVICE)
-  -> ServiceManager::handleSubscribeService()
+  -> ServiceManagerApp::handleSubscribeService()
   -> DeathNotifier 记录订阅关系
   -> 返回 MSG_SUBSCRIBE_SERVICE_REPLY
   -> OmniRuntime 仅在 reply 成功后更新本地 death callback
@@ -525,8 +525,8 @@ Caller
   -> 发送 MSG_INVOKE
 
 Service Side
-  -> TcpTransportServer 拆 Message frame
-  -> OmniRuntime::onHostedMessage()
+  -> TcpServerTransport 拆 Message frame
+  -> OmniRuntime::handleServiceClientMessage()
   -> OmniRuntime::onInvokeRequest()
   -> Service::onInvoke()
   -> 构造 MSG_INVOKE_REPLY
@@ -552,15 +552,15 @@ Caller
 
 Service Side
   -> EventLoop 被 master_eventfd 唤醒
-  -> ShmTransport::serverRecv() drain request ring
-  -> OmniRuntime::onHostedMessage()
+  -> ShmServerTransport::onPollEvent() 扫描各 client 的 request ring
+  -> OmniRuntime::handleServiceClientMessage()
   -> OmniRuntime 执行 invoke 细节与 reply 构造
-  -> ShmTransport::serverSend(client_id) 写入对应 client 的 response ring
+  -> 服务端客户端连接（IClientTransport::send）写入对应 client 的 response ring
   -> notify resp_eventfd
 
 Caller
   -> EventLoop 被 resp_eventfd 唤醒
-  -> ShmTransport::recv() 从自己的 response ring 读取
+  -> ShmClientTransport::recv() 从自己的 response ring 读取
   -> RpcRuntime::waitForReply() 完成
   -> invoke() 返回 response
 ```
@@ -604,7 +604,7 @@ Publisher
   -> OmniRuntime::publishTopic()
   -> 组装 publisher ServiceInfo
   -> SmControlChannel::sendMessage(MSG_PUBLISH_TOPIC)
-  -> ServiceManager::handlePublishTopic()
+  -> ServiceManagerApp::handlePublishTopic()
   -> TopicManager::registerPublisher()
   -> 返回 MSG_PUBLISH_TOPIC_REPLY
   -> 仅 reply 成功后，本地 TopicRuntime 记录 published topic
@@ -616,7 +616,7 @@ Publisher
 Subscriber
   -> OmniRuntime::subscribeTopic()
   -> SmControlChannel::sendMessage(MSG_SUBSCRIBE_TOPIC)
-  -> ServiceManager::handleSubscribeTopic()
+  -> ServiceManagerApp::handleSubscribeTopic()
   -> TopicManager::addSubscriber()
   -> 返回 MSG_SUBSCRIBE_TOPIC_REPLY
   -> 仅 reply 成功后，本地 TopicRuntime 记录 callback 和 topic id
@@ -735,6 +735,7 @@ public:
     void setReconnectInterval(uint32_t interval_ms);
     void startHeartbeat(uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
     void stopHeartbeat();
+    void OnServiceDied(const std::function<void()>& callback);
 };
 ```
 
@@ -750,7 +751,7 @@ public:
 ```
 触发重连
     │
-    ├── 清除缓存（service_cache_）
+    ├── 清除服务缓存（ServiceState.info）
     ├── 移除连接（conn_mgr_->removeConnection）
     │
     └── scheduleReconnect(interval_ms)
@@ -771,14 +772,17 @@ public:
 #### 指数退避策略
 
 ```cpp
-uint32_t delay_ms = interval_ms * (1u << (current_retry < 5 ? current_retry : 5));
+uint32_t shift = current_retry < 5 ? current_retry : 5;
+int64_t  delay64 = interval_ms * (static_cast<int64_t>(1) << shift);
+uint32_t delay_ms = delay64 > 30000 ? 30000 : static_cast<uint32_t>(delay64);  // 上限 30s
 ```
 
 - 第 1 次重试：interval_ms * 1
 - 第 2 次重试：interval_ms * 2
 - 第 3 次重试：interval_ms * 4
 - 第 4 次重试：interval_ms * 8
-- 第 5 次及以后：interval_ms * 32（最大延迟）
+- 第 5 次及以后：interval_ms * 32，并 clamp 到 30s（如 interval_ms=1000 时为 30s）
+- `scheduleReconnect()` 定时前再叠加 ±25% jitter（`addReconnectJitter`），避免多客户端同时重连
 
 ### 17.5 心跳机制
 

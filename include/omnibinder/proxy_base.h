@@ -41,68 +41,52 @@ namespace omnibinder {
 
 class ServiceProxyBase {
 public:
-    /*
-     * @brief  创建 Proxy 基类实例
+    /* @brief 创建 Proxy 基类实例
      * @param[in]  runtime      OmniRuntime 引用
-     * @param[in]  service_name 目标服务名称
-     */
+     * @param[in]  service_name 目标服务名称 */
     ServiceProxyBase(OmniRuntime& runtime, const std::string& service_name);
 
     virtual ~ServiceProxyBase();
     
-    /*
-     * @brief  建立到目标服务的数据面连接
+    /* @brief 建立到目标服务的数据面连接
      * @return 0 成功，<0 失败
-     * @note   成功后会启用自动重连和心跳
-     */
+     * @note   成功后会启用自动重连和心跳 */
     int connect();
     
-    /*
-     * @brief  断开到目标服务的连接
-     */
+    /* @brief 断开到目标服务的连接 */
     void disconnect();
     
-    /*
-     * @brief  查询连接状态
-     * @return true 已连接，false 未连接
-     */
+    /* @brief 查询连接状态
+     * @return true 已连接，false 未连接 */
     bool isConnected() const;
 
-    /*
-     * @brief  启用/禁用自动重连
-     * @param[in]  enable true 启用（默认）
-     */
+    /* @brief 启用/禁用自动重连
+     * @param[in]  enable true 启用（默认） */
     void enableAutoReconnect(bool enable = true);
 
-    /*
-     * @brief  设置重连间隔
-     * @param[in]  interval_ms 重连间隔（毫秒）
-     */
+    /* @brief 设置重连间隔
+     * @param[in]  interval_ms 重连间隔（毫秒） */
     void setReconnectInterval(uint32_t interval_ms);
 
-    /*
-     * @brief  启动心跳检测
+    /* @brief 启动到目标服务的数据面连接心跳检测
      * @param[in]  interval_ms 心跳间隔（毫秒，默认 5000）
      * @param[in]  timeout_ms  超时阈值（毫秒，默认 10000）
-     */
+     * @note   检测的是客户端到目标服务的直连保活，不涉及目标服务在
+     *         ServiceManager 的注册心跳 */
     void startHeartbeat(uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
 
-    /*
-     * @brief  停止心跳检测
-     */
+    /* @brief 停止到目标服务的数据面连接心跳检测
+     * @note   只停止本代理的检测；不注销目标服务、不影响其 SM 注册心跳。
+     *         disconnect() 内部会调用本函数 */
     void stopHeartbeat();
 
-    /*
-     * @brief  注册服务死亡回调
-     * @param[in]  callback 死亡时调用的回调函数
-     */
+    /* @brief 注册服务死亡回调
+     * @param[in]  callback 死亡时调用的回调函数 */
     void OnServiceDied(const std::function<void()>& callback);
     
 protected:
-    /*
-     * @brief  服务死亡回调（子类可重写）
-     * @note   默认行为：标记已断开 + 调用 OnServiceDied 注册的回调
-     */
+    /* @brief 服务死亡回调（子类可重写）
+     * @note   默认行为：标记已断开 + 调用 OnServiceDied 注册的回调 */
     virtual void onServiceDeath();
     
     OmniRuntime& runtime_;

@@ -11,9 +11,11 @@ namespace omnibinder {
 
 EventLoop::EventLoop()
     : running_(false)
+    , stop_requested_(false)
     , backend_(NULL)
     , wakeup_fd_(-1)
     , next_timer_id_(1)
+    , closed_(false)
     , functor_wakeup_pending_(false)
 {
     backend_ = platform::createEventBackend();
@@ -62,10 +64,19 @@ EventLoop::~EventLoop()
 
 void EventLoop::run()
 {
+    // stop 是持久状态：若 stop 已在 run 之前/启动窗口内被请求，直接返回，
+    // 不得把 running_ 重新置 true（否则 stop 被吞掉，run 永不退出）。
+    // 已入队的 functor 在此排空，保证关闭前成功 post 的调用方不会被永久挂起。
+    if (stop_requested_.load()) {
+        OMNI_LOG_INFO(LOG_TAG, "EventLoop run skipped: stop already requested");
+        processPendingFunctors();
+        return;
+    }
+
     running_ = true;
     OMNI_LOG_INFO(LOG_TAG, "EventLoop started");
 
-    while (running_) {
+    while (running_ && !stop_requested_.load()) {
         pollOnce(-1);
     }
 
@@ -76,13 +87,16 @@ void EventLoop::run()
 
 void EventLoop::stop()
 {
+    // 先关闭投递队列（pending_mutex_ 保护），再置 running_=false：
+    // run() 退出后的最终 processPendingFunctors 一定观察到 closed_，
+    // 从而"关闭前入队必被排空、关闭后 post 必被拒绝"，消除投递丢失窗口。
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        closed_ = true;
+    }
+    stop_requested_ = true;
     running_ = false;
     wakeup();
-}
-
-bool EventLoop::isRunning() const
-{
-    return running_;
 }
 
 void EventLoop::wakeup()
@@ -338,13 +352,17 @@ int EventLoop::calculateTimeout(int requested_timeout_ms)
     return (requested_timeout_ms < min_timer_timeout) ? requested_timeout_ms : min_timer_timeout;
 }
 
-void EventLoop::post(const Functor& func)
+bool EventLoop::post(const Functor& func)
 {
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
+        if (closed_) {
+            return false;
+        }
         pending_functors_.push_back(func);
     }
     wakeup();
+    return true;
 }
 
 void EventLoop::onWakeup(int fd, uint32_t events)

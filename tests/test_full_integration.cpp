@@ -1,12 +1,12 @@
-// test_full_integration.cpp - Comprehensive integration tests (GTest)
+// test_full_integration.cpp - 综合集成测试（GTest）
 //
-// Tests:
-// 1. Service init creates both TCP + SHM simultaneously
-// 2. SM lookup returns shm_name, client auto-selects SHM for same machine
-// 3. Multiple clients share the same SHM (multi-client)
-// 4. Broadcast / subscribe (pub/sub)
-// 5. Death notification
-// 6. Service unregister cleanup
+// 测试内容：
+// 1. 服务初始化同时创建 TCP + SHM
+// 2. SM lookup 返回 shm_name，客户端对同机服务自动选择 SHM
+// 3. 多客户端共享同一个 SHM
+// 4. 广播 / 订阅（pub/sub）
+// 5. 死亡通知
+// 6. 服务注销清理
 
 #include <gtest/gtest.h>
 #include "test_common.h"
@@ -31,7 +31,7 @@ static const uint16_t SM_PORT = 19902;
 static const char* g_program_path = nullptr;
 
 // ============================================================
-// Test service: CalcService
+// 测试服务：CalcService
 // ============================================================
 class CalcService : public Service {
 public:
@@ -66,7 +66,7 @@ private:
 };
 
 // ============================================================
-// Server thread
+// 服务端线程
 // ============================================================
 struct ServerContext {
     OmniRuntime runtime;
@@ -92,7 +92,7 @@ static void serverThread(void* arg) {
 }
 
 // ============================================================
-// Test fixture
+// 测试 fixture
 // ============================================================
 class FullIntegrationTest : public ::testing::Test {
 protected:
@@ -118,7 +118,7 @@ protected:
         srv_.should_stop = true;
         srv_tid_.join();
 
-        // Verify service is gone after unregister
+        // 验证注销后服务已消失
         std::this_thread::sleep_for(std::chrono::microseconds(200000));
         OmniRuntime c;
         if (c.init("127.0.0.1", SM_PORT) == 0) {
@@ -136,7 +136,7 @@ ServerContext FullIntegrationTest::srv_;
 std::thread FullIntegrationTest::srv_tid_;
 
 // ============================================================
-// Test Group 1: Dual-channel initialization
+// 测试组 1：双通道初始化
 // ============================================================
 
 TEST_F(FullIntegrationTest, ServiceHasTcpPort) {
@@ -172,7 +172,7 @@ TEST_F(FullIntegrationTest, SmReturnsHostId) {
 }
 
 // ============================================================
-// Test Group 2: SHM auto-selection (same machine)
+// 测试组 2：SHM 自动选择（同机）
 // ============================================================
 
 TEST_F(FullIntegrationTest, InvokeViaShmAdd) {
@@ -253,7 +253,7 @@ TEST_F(FullIntegrationTest, InterfaceMismatchOnewayIsRejected) {
 }
 
 // ============================================================
-// Test Group 3: Multi-client SHM sharing
+// 测试组 3：多客户端共享 SHM
 // ============================================================
 
 TEST_F(FullIntegrationTest, ThreeClientsConcurrentInvoke) {
@@ -332,18 +332,18 @@ TEST_F(FullIntegrationTest, SequentialMultiClientInvoke) {
 }
 
 // ============================================================
-// Test Group 4: Broadcast / Subscribe
+// 测试组 4：广播 / 订阅
 // ============================================================
 
 TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
     static const char* TOPIC_NAME = "calc_result";
     uint32_t topic_id = fnv1a_32(TOPIC_NAME);
 
-    // Server publishes topic
+    // 服务端发布 topic
     int ret = srv_.runtime.publishTopic(TOPIC_NAME);
     ASSERT_EQ(ret, 0) << "publishTopic failed";
 
-    // Subscriber
+    // 订阅者
     OmniRuntime sub;
     ret = sub.init("127.0.0.1", SM_PORT);
     ASSERT_EQ(ret, 0) << "subscriber init failed";
@@ -360,19 +360,19 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
         }, nullptr);
     ASSERT_EQ(ret, 0) << "subscribeTopic failed";
 
-    // Wait for subscription to propagate
+    // 等待订阅关系传播
     for (int i = 0; i < 20; i++) {
         sub.pollOnce(50);
         srv_.runtime.pollOnce(10);
     }
 
-    // Broadcast data
+    // 广播数据
     Buffer bdata;
     bdata.writeInt32(42);
     ret = srv_.runtime.broadcast(topic_id, bdata);
     ASSERT_EQ(ret, 0) << "broadcast failed";
 
-    // Wait for subscriber to receive
+    // 等待订阅者收到数据
     for (int i = 0; i < 50 && !received; i++) {
         sub.pollOnce(50);
         srv_.runtime.pollOnce(10);
@@ -401,7 +401,7 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
 }
 
 // ============================================================
-// Test Group 5: Death notification
+// 测试组 5：死亡通知
 // ============================================================
 
 TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
@@ -410,7 +410,7 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
     TestPid child = startProcess(g_program_path, "--child-death", port_str, "EphemeralService");
     ASSERT_GT(child, 0) << "Failed to start ephemeral service child";
 
-    // Parent: wait for EphemeralService to appear
+    // 父进程：等待 EphemeralService 出现
     OmniRuntime watcher;
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0) << "watcher init failed";
 
@@ -425,7 +425,7 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
     }
     ASSERT_TRUE(found) << "EphemeralService not found";
 
-    // Subscribe to death
+    // 订阅死亡通知
     volatile bool death_received = false;
     int ret = watcher.subscribeServiceDeath("EphemeralService",
         [&death_received](const std::string& name) {
@@ -436,7 +436,7 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
 
     stopProcess(child);
 
-    // Wait for death notification (SM heartbeat timeout ~10s, wait up to 15s)
+    // 等待死亡通知（SM 心跳超时约 10s，最多等 15s）
     for (int i = 0; i < 150 && !death_received; i++) {
         watcher.pollOnce(100);
     }
@@ -487,7 +487,7 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
 }
 
 // ============================================================
-// Test Group 6: Lifecycle
+// 测试组 6：生命周期
 // ============================================================
 
 TEST_F(FullIntegrationTest, InvokeCountAccumulated) {

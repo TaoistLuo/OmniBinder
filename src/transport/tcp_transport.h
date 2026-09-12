@@ -1,9 +1,9 @@
 /**************************************************************************************************
  * @file        tcp_transport.h
  * @brief       TCP 传输层实现
- * @details     ITransport 和 ITransportServer 的 TCP 实现。TcpTransport 封装非阻塞
- *              TCP Socket，支持主动连接和从 accept 创建两种方式；TcpTransportServer
- *              封装监听 Socket，接受入站连接并返回 TcpTransport 实例。
+ * @details     IClientTransport 的 TCP 实现（客户端 TcpClientTransport、服务端 TcpServerTransport）。TcpClientTransport 封装非阻塞
+ *              TCP Socket，支持主动连接和从 accept 创建两种方式；TcpServerTransport
+ *              封装监听 Socket，接受入站连接并返回 TcpClientTransport 实例。
  *              配合 EventLoop 实现完全非阻塞的网络 I/O。
  *
  * @author      taoist.luo
@@ -39,40 +39,47 @@
 #include "platform/platform.h"
 
 #include <string>
+#include <map>
+#include <vector>
 
 namespace omnibinder {
 
 // ============================================================
-// TcpTransport — TCP 客户端传输实现
+// TcpClientTransport — TCP 客户端传输实现
 //
 // 封装非阻塞 TCP socket。两种构造方式：
 //   1. 默认构造 + connect() 发起主动连接
 //   2. 传入已连接的 fd（来自 accept）
 // ============================================================
 
-class TcpTransport : public ITransport {
+class TcpClientTransport : public IClientTransport {
 public:
     /*
      * @brief  创建未连接状态的传输，后续调用 connect() 建立连接
      */
-    TcpTransport();
+    TcpClientTransport();
 
     /*
      * @brief  从已建立的 socket 创建传输（来自 accept）
      * @param[in]  connected_fd 已连接的 socket 描述符
      */
-    explicit TcpTransport(platform::SocketFd connected_fd);
+    explicit TcpClientTransport(platform::SocketFd connected_fd);
 
-    virtual ~TcpTransport();
+    virtual ~TcpClientTransport();
 
     // 禁止拷贝
-    TcpTransport(const TcpTransport&) = delete;
-    TcpTransport& operator=(const TcpTransport&) = delete;
+    TcpClientTransport(const TcpClientTransport&) = delete;
+    TcpClientTransport& operator=(const TcpClientTransport&) = delete;
 
-    // ITransport 接口
+    // IClientTransport 接口
     virtual int connect(const std::string& host, uint16_t port);
     virtual int send(const uint8_t* data, size_t length);
+    virtual int sendAll(const uint8_t* data, size_t length,
+                        uint32_t timeout_ms, uint32_t* elapsed_ms);
     virtual int recv(uint8_t* buf, size_t buf_size);
+    int peekFrameSize(size_t& out_length) override;
+    virtual void consumeReadiness();
+    virtual bool isFramed() const;
     virtual void close();
     virtual ConnectionState state() const;
     virtual int fd() const;
@@ -93,32 +100,45 @@ private:
 };
 
 // ============================================================
-// TcpTransportServer — TCP 服务端传输实现
+// TcpServerTransport — TCP 服务端端点（IServerTransport 实现）
 //
-// 创建监听 socket，接受入站连接。
-// 每个接受的连接返回一个新的 TcpTransport 实例。
+// 创建监听 socket 并托管所有入站连接。端点自身不读取业务数据：
+//   - start()      绑定/监听，返回实际端口
+//   - pollFds()    返回需注册到 EventLoop 的 fd（监听 fd + 已接入客户端 fd）
+//   - onPollEvent() 按 fd 语义分派：监听 fd 接入新连接，
+//                  客户端 fd 的读事件触发 readable 回调、断开事件触发 disconnect 回调
+//   - 客户端 IClientTransport 由端点持有，调用方通过 removeClient() 释放
 // ============================================================
 
-class TcpTransportServer : public ITransportServer {
+class TcpServerTransport : public IServerTransport {
 public:
-    TcpTransportServer();
-    virtual ~TcpTransportServer();
+    TcpServerTransport();
+    virtual ~TcpServerTransport();
 
     // 禁止拷贝
-    TcpTransportServer(const TcpTransportServer&) = delete;
-    TcpTransportServer& operator=(const TcpTransportServer&) = delete;
+    TcpServerTransport(const TcpServerTransport&) = delete;
+    TcpServerTransport& operator=(const TcpServerTransport&) = delete;
 
-    // ITransportServer 接口
-    virtual int listen(const std::string& host, uint16_t port);
-    virtual void close();
-    virtual uint16_t port() const;
-    virtual int fd() const;
-    virtual ITransport* accept();
+    // IServerTransport
+    TransportType type() const override;
+    int  start(const std::string& host, uint16_t port, const TransportConfig& config) override;
+    void close() override;
+    void pollFds(std::vector<int>& fds) const override;
+    void onPollEvent(int fd, uint32_t events) override;
+    void setAcceptCallback(const AcceptCallback& cb) override;
+    void setReadableCallback(const ReadableCallback& cb) override;
+    void setDisconnectCallback(const DisconnectCallback& cb) override;
+    void removeClient(int client_id) override;
 
 private:
     platform::SocketFd listen_fd_;
     uint16_t    listen_port_;
     std::string listen_host_;
+
+    AcceptCallback     accept_cb_;
+    ReadableCallback   readable_cb_;
+    DisconnectCallback disconnect_cb_;
+    std::map<int, IClientTransport*> clients_;
 };
 
 } // namespace omnibinder

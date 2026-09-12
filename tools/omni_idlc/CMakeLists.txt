@@ -15,7 +15,9 @@ if(OMNIBINDER_BUILD_HOST_IDLC)
     add_executable(omni-idlc
         main.cpp
         codegen_cpp.cpp
-        codegen_c.cpp
+        codegen_c_common.cpp
+        codegen_c_header.cpp
+        codegen_c_source.cpp
     )
 
     target_link_libraries(omni-idlc PRIVATE omni_idlc_parser)

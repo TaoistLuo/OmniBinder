@@ -1,14 +1,11 @@
 #include "core/connection_manager.h"
 #include "core/event_loop.h"
+#include "core/message_reader.h"
 #include "core/runtime_helpers.h"
 #include "transport/transport_selector.h"
-#include "transport/shm_transport.h"
 #include "platform/platform.h"
 #include "omnibinder/error.h"
 #include "omnibinder/log.h"
-#include <cstring>
-#include <memory>
-#include <new>
 
 #define LOG_TAG "ConnMgr"
 
@@ -29,9 +26,7 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
     const std::string& host,
     uint16_t port,
     const std::string& host_id,
-    const ShmConfig& shm_config,
-    bool is_topic_publisher,
-    const std::string& topic_name)
+    const ShmConfig& shm_config)
 {
     // 检查是否已有连接
     std::map<std::string, ServiceConnection*>::iterator it = connections_.find(service_name);
@@ -50,10 +45,8 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
 
     ServiceConnection* conn = new ServiceConnection();
     conn->service_name = service_name;
-    conn->is_topic_publisher = is_topic_publisher;
-    conn->topic_name = topic_name;
 
-    conn->transport = selectTransport(service_name, host, port,
+    conn->transport = createClientTransport(service_name, host, port,
                                       local_host_id_, host_id, shm_config);
     if (!conn->transport) {
         delete conn;
@@ -111,20 +104,23 @@ void ConnectionManager::removeConnection(const std::string& service_name) {
     }
 }
 
-bool ConnectionManager::sendMessage(const std::string& service_name, const Message& msg) {
+bool ConnectionManager::sendMessage(const std::string& service_name, Message& msg) {
     ServiceConnection* conn = getConnection(service_name);
     if (!conn) {
         OMNI_LOG_ERROR(LOG_TAG, "No connection to %s", service_name.c_str());
         return false;
     }
 
-    Buffer buf;
-    msg.serialize(buf);
-    return sendRaw(conn, buf.data(), buf.size());
+    if (!msg.serializeInPlace()) {
+        OMNI_LOG_ERROR(LOG_TAG, "message_serialize_failed service=%s type=%s",
+                       service_name.c_str(), messageTypeToString(msg.getType()));
+        return false;
+    }
+    return sendRaw(conn, msg.payload.data(), msg.payload.size());
 }
 
 bool ConnectionManager::sendMessageWithinTimeout(const std::string& service_name,
-                                                const Message& msg,
+                                                Message& msg,
                                                 uint32_t timeout_ms,
                                                 uint32_t* elapsed_ms) {
     ServiceConnection* conn = getConnection(service_name);
@@ -133,9 +129,12 @@ bool ConnectionManager::sendMessageWithinTimeout(const std::string& service_name
         return false;
     }
 
-    Buffer buf;
-    msg.serialize(buf);
-    return sendRawWithinTimeout(conn, buf.data(), buf.size(), timeout_ms, elapsed_ms);
+    if (!msg.serializeInPlace()) {
+        OMNI_LOG_ERROR(LOG_TAG, "message_serialize_failed service=%s type=%s timeout_ms=%u",
+                       service_name.c_str(), messageTypeToString(msg.getType()), timeout_ms);
+        return false;
+    }
+    return sendRawWithinTimeout(conn, msg.payload.data(), msg.payload.size(), timeout_ms, elapsed_ms);
 }
 
 bool ConnectionManager::sendRaw(ServiceConnection* conn, const uint8_t* data, size_t length) {
@@ -148,47 +147,27 @@ bool ConnectionManager::sendRawWithDeadline(ServiceConnection* conn, const uint8
         return false;
     }
 
-    size_t sent = 0;
-    while (sent < length) {
-        int ret = conn->transport->send(data + sent, length - sent);
-        if (ret < 0) {
-            OMNI_LOG_ERROR(LOG_TAG,
-                           "data_send_failed service=%s transport=%s err=%d",
-                           conn->service_name.c_str(),
-                           dataChannelKindName(conn->transport->type()),
-                           static_cast<int>(ErrorCode::ERR_SEND_FAILED));
-            conn->connected = false;
+    uint32_t timeout_ms = 0;
+    if (deadline_ms > 0) {
+        int64_t now = platform::currentTimeMs();
+        if (now >= static_cast<int64_t>(deadline_ms)) {
+            OMNI_LOG_WARN(LOG_TAG,
+                          "data_send_deadline_expired service=%s bytes=%zu",
+                          conn->service_name.c_str(), length);
             return false;
         }
-        if (ret == 0) {
-            // SHM ring full: busy-wait with deadline to avoid starving the
-            // owner event loop indefinitely.
-            if (conn->transport->type() == TransportType::SHM && deadline_ms > 0) {
-                uint64_t now = platform::currentTimeMs();
-                if (now >= deadline_ms) {
-                    OMNI_LOG_WARN(LOG_TAG,
-                                  "data_send_shm_ring_full service=%s sent=%zu/%zu timeout",
-                                  conn->service_name.c_str(), sent, length);
-                    // 超时视为连接不可用：与 L2 发送失败路径语义一致，
-                    // 置 connected=false 使上层感知并触发重连
-                    conn->connected = false;
-                    return false;
-                }
-                // Spin briefly (up to 1 ms) then recheck deadline to avoid
-                // blocking the event loop for too long.
-                platform::sleepMs(1);
-                continue;
-            } else if (conn->transport->type() == TransportType::SHM) {
-                // No deadline provided: fall through to break to avoid
-                // unbounded blocking.
-                break;
-            }
-            // TCP EAGAIN without deadline: break
-            break;
-        }
-        sent += static_cast<size_t>(ret);
+        timeout_ms = static_cast<uint32_t>(deadline_ms - now);
     }
-    return sent == length;
+
+    if (conn->transport->sendAll(data, length, timeout_ms, NULL) != 0) {
+        OMNI_LOG_WARN(LOG_TAG,
+                      "data_send_incomplete service=%s transport=%s bytes=%zu timeout_ms=%u",
+                      conn->service_name.c_str(),
+                      dataChannelKindName(conn->transport->type()),
+                      length, timeout_ms);
+        return false;
+    }
+    return true;
 }
 
 bool ConnectionManager::sendRawWithinTimeout(ServiceConnection* conn,
@@ -204,34 +183,20 @@ bool ConnectionManager::sendRawWithinTimeout(ServiceConnection* conn,
         return false;
     }
 
-    if (conn->transport->type() != TransportType::TCP) {
-        uint64_t deadline_ms = platform::currentTimeMs() + timeout_ms;
-        bool ok = sendRawWithDeadline(conn, data, length,
-                                      static_cast<uint32_t>(deadline_ms));
-        if (elapsed_ms) {
-            *elapsed_ms = 0;
-        }
-        return ok;
+    uint32_t elapsed = 0;
+    int ret = conn->transport->sendAll(data, length, timeout_ms, &elapsed);
+    if (elapsed_ms) {
+        *elapsed_ms = elapsed;
     }
-
-    bool ok = platform::socketSendAll(conn->transport->fd(), data, length, timeout_ms, elapsed_ms);
-    if (!ok) {
-        int err = platform::getSocketError();
-        uint32_t spent_ms = elapsed_ms ? *elapsed_ms : 0;
+    if (ret != 0) {
         OMNI_LOG_WARN(LOG_TAG,
-                      "data_send_incomplete service=%s fd=%d bytes=%zu timeout_ms=%u elapsed_ms=%u sock_err=%d",
-                      conn->service_name.c_str(), conn->transport->fd(), length, timeout_ms,
-                      spent_ms, err);
-        if (!platform::isWouldBlock(err)) {
-            OMNI_LOG_ERROR(LOG_TAG,
-                           "data_send_failed service=%s transport=%s err=%d",
-                           conn->service_name.c_str(),
-                           dataChannelKindName(conn->transport->type()),
-                           static_cast<int>(ErrorCode::ERR_SEND_FAILED));
-            conn->connected = false;
-        }
+                      "data_send_incomplete service=%s transport=%s bytes=%zu timeout_ms=%u elapsed_ms=%u",
+                      conn->service_name.c_str(),
+                      dataChannelKindName(conn->transport->type()),
+                      length, timeout_ms, elapsed);
+        return false;
     }
-    return ok;
+    return true;
 }
 
 void ConnectionManager::setMessageCallback(const MessageCallback& cb) {
@@ -254,39 +219,26 @@ void ConnectionManager::closeAll() {
     connections_.clear();
 }
 
-uint32_t ConnectionManager::activeConnectionCount() const {
-    uint32_t count = 0;
+void ConnectionManager::connectionCounts(uint32_t& active, uint32_t& tcp, uint32_t& shm) const {
+    active = 0;
+    tcp = 0;
+    shm = 0;
     for (std::map<std::string, ServiceConnection*>::const_iterator it = connections_.begin();
          it != connections_.end(); ++it) {
-        if (it->second->connected) {
-            ++count;
+        ServiceConnection* conn = it->second;
+        if (!conn->connected) {
+            continue;
+        }
+        ++active;
+        if (!conn->transport) {
+            continue;
+        }
+        if (conn->transport->type() == TransportType::TCP) {
+            ++tcp;
+        } else if (conn->transport->type() == TransportType::SHM) {
+            ++shm;
         }
     }
-    return count;
-}
-
-uint32_t ConnectionManager::tcpConnectionCount() const {
-    uint32_t count = 0;
-    for (std::map<std::string, ServiceConnection*>::const_iterator it = connections_.begin();
-         it != connections_.end(); ++it) {
-        if (it->second->connected && it->second->transport &&
-            it->second->transport->type() == TransportType::TCP) {
-            ++count;
-        }
-    }
-    return count;
-}
-
-uint32_t ConnectionManager::shmConnectionCount() const {
-    uint32_t count = 0;
-    for (std::map<std::string, ServiceConnection*>::const_iterator it = connections_.begin();
-         it != connections_.end(); ++it) {
-        if (it->second->connected && it->second->transport &&
-            it->second->transport->type() == TransportType::SHM) {
-            ++count;
-        }
-    }
-    return count;
 }
 
 bool ConnectionManager::failConnection(ServiceConnection* conn) {
@@ -298,7 +250,7 @@ bool ConnectionManager::failConnection(ServiceConnection* conn) {
     // 删除 conn，回调后 conn 已释放，不能再解引用其成员（约束 1）
     std::string svc = conn->service_name;
     if (disconnect_cb_) {
-        disconnect_cb_(svc, conn->is_topic_publisher, conn->topic_name);
+        disconnect_cb_(svc);
     }
     // 回调链可能 removeConnection 删除该连接：重新判活（约束 1）
     std::map<std::string, ServiceConnection*>::iterator current =
@@ -306,7 +258,8 @@ bool ConnectionManager::failConnection(ServiceConnection* conn) {
     return current != connections_.end() && current->second == conn;
 }
 
-void ConnectionManager::onConnectionData(const std::string& service_name, int fd) {    (void)fd;
+void ConnectionManager::onConnectionData(const std::string& service_name, int fd) {
+    (void)fd;
     std::map<std::string, ServiceConnection*>::iterator it = connections_.find(service_name);
     if (it == connections_.end()) {
         return;
@@ -317,160 +270,31 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
         return;
     }
 
-    // SHM 连接: eventfd 触发，先消费 eventfd 再读取数据
-    if (conn->transport->type() == TransportType::SHM) {
-        platform::eventFdConsume(conn->transport->fd());
-
-        // 循环读取所有可用数据（可能有多条消息）
-        while (true) {
-            ShmTransport* shm = static_cast<ShmTransport*>(conn->transport);
-            size_t frame_size = 0;
-            int ready = shm->nextRecvSize(frame_size);
-            if (ready <= 0) {
-                if (ready < 0) {
-                    OMNI_LOG_WARN(LOG_TAG, "SHM connection to %s has invalid frame metadata",
-                                  service_name.c_str());
-                    if (!failConnection(conn)) return;
-                }
-                break;
-            }
-            std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[frame_size]);
-            if (!buf) {
-                OMNI_LOG_ERROR(LOG_TAG, "SHM receive allocation failed for %s (%zu bytes)",
-                               service_name.c_str(), frame_size);
-                if (!failConnection(conn)) return;
-                break;
-            }
-            int ret = conn->transport->recv(buf.get(), frame_size);
-            if (ret <= 0) {
-                if (ret < 0) {
-                    OMNI_LOG_WARN(LOG_TAG, "SHM connection to %s error",
-                                     service_name.c_str());
-                    if (!failConnection(conn)) return;
-                }
-                break;
-            }
-
-            static const size_t MAX_RECV_BUFFER = MAX_MESSAGE_SIZE;
-            if (conn->recv_buffer.size() + static_cast<size_t>(ret) > MAX_RECV_BUFFER) {
-                OMNI_LOG_ERROR(LOG_TAG, "SHM recv_buffer overflow for %s (>%zuMB)",
-                                 service_name.c_str(), MAX_RECV_BUFFER / (1024*1024));
-                if (!failConnection(conn)) return;
-                break;
-            }
-            if (!conn->recv_buffer.writeRaw(buf.get(), static_cast<size_t>(ret))) {
-                OMNI_LOG_ERROR(LOG_TAG, "SHM recv_buffer allocation failed for %s",
-                               service_name.c_str());
-                if (!failConnection(conn)) return;
-                break;
-            }
-        }
-
-        processMessages(conn);
-        return;
-    }
-
-    // TCP 连接: 原有逻辑
-    uint8_t buf[4096];
-    int ret = conn->transport->recv(buf, sizeof(buf));
-
-    if (ret < 0) {
-        // 连接断开
-        OMNI_LOG_WARN(LOG_TAG,
-                      "data_connection_lost service=%s transport=TCP err=%d",
-                      service_name.c_str(), static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED));
-        if (!failConnection(conn)) return;
-        return;
-    }
-
-    if (ret == 0) {
-        // EAGAIN，无数据
-        return;
-    }
-
-    // 追加到接收缓冲区 (with size limit to prevent OOM - fix #17)
-    static const size_t MAX_RECV_BUFFER = MAX_MESSAGE_SIZE;
-    if (conn->recv_buffer.size() + static_cast<size_t>(ret) > MAX_RECV_BUFFER) {
-        OMNI_LOG_ERROR(LOG_TAG, "recv_buffer overflow for %s (>%zuMB), disconnecting",
-                         service_name.c_str(), MAX_RECV_BUFFER / (1024*1024));
-        if (!failConnection(conn)) return;
-        return;
-    }
-    conn->recv_buffer.writeRaw(buf, static_cast<size_t>(ret));
-
-    // 处理完整消息
-    processMessages(conn);
-}
-
-void ConnectionManager::processMessages(ServiceConnection* conn) {
-    const std::string service_name = conn->service_name;
+    Message msg;
     while (true) {
-        // 检查是否有完整的消息头
-        if (conn->recv_buffer.size() - conn->recv_buffer.readPosition() < MESSAGE_HEADER_SIZE) {
-            break;
+        int ret = readNextMessage(*conn->transport, conn->recv_buffer, msg);
+        if (ret == 0) {
+            return;
         }
-
-        // 解析消息头
-        size_t saved_pos = conn->recv_buffer.readPosition();
-        MessageHeader header;
-        if (!Message::parseHeader(
-                conn->recv_buffer.data() + saved_pos,
-                conn->recv_buffer.size() - saved_pos,
-                header)) {
-            break;
-        }
-
-        // 验证消息头
-        if (!Message::validateHeader(header)) {
-            OMNI_LOG_ERROR(LOG_TAG, "Invalid message header from %s, disconnecting",
-                             conn->service_name.c_str());
-            // 统一走 failConnection：解除 fd 注册并回调断开（约束 3），
-            // 避免校验失败后连接僵死（只置 connected=false 不清理）
-            failConnection(conn);
+        if (ret < 0) {
+            // 传输错误/流损坏：统一走 failConnection（摘 fd + 断开回调，约束 3）
+            OMNI_LOG_WARN(LOG_TAG, "data_connection_lost service=%s transport=%s err=%d",
+                          service_name.c_str(),
+                          dataChannelKindName(conn->transport->type()),
+                          static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED));
+            if (!failConnection(conn)) return;
             return;
         }
 
-        // 检查是否有完整的载荷
-        size_t total_size = MESSAGE_HEADER_SIZE + header.length;
-        if (conn->recv_buffer.size() - saved_pos < total_size) {
-            break;
-        }
-
-        // 构造完整消息
-        Message msg;
-        msg.header = header;
-        if (header.length > 0) {
-            msg.payload.assign(
-                conn->recv_buffer.data() + saved_pos + MESSAGE_HEADER_SIZE,
-                header.length);
-        }
-
-        // 移动读取位置
-        if (!conn->recv_buffer.trySetReadPosition(saved_pos + total_size)) {
-            conn->connected = false;
-            return;
-        }
-
-        // 回调处理消息
         if (message_cb_) {
             message_cb_(conn->service_name, msg);
-            std::map<std::string, ServiceConnection*>::iterator it = connections_.find(service_name);
-            if (it == connections_.end() || it->second != conn) {
+            // 回调可能 removeConnection 删除该连接：重新判活（约束 1）
+            std::map<std::string, ServiceConnection*>::iterator current =
+                connections_.find(service_name);
+            if (current == connections_.end() || current->second != conn) {
                 return;
             }
         }
-    }
-
-    // 压缩缓冲区（移除已处理的数据）
-    size_t remaining = conn->recv_buffer.size() - conn->recv_buffer.readPosition();
-    if (remaining > 0 && conn->recv_buffer.readPosition() > 0) {
-        memmove(conn->recv_buffer.mutableData(),
-                conn->recv_buffer.data() + conn->recv_buffer.readPosition(),
-                remaining);
-    }
-    conn->recv_buffer.setWritePosition(remaining);
-    if (!conn->recv_buffer.trySetReadPosition(0)) {
-        conn->connected = false;
     }
 }
 

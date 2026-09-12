@@ -46,42 +46,91 @@ class TypeCodec {
 public:
     TypeCodec(const omnic::ParseContext& ctx) : ctx_(ctx) {}
     
-    // 将 JSON 编码为 Buffer（用于 call 命令的输入）
+    /* @brief 将 JSON 编码为 Buffer
+     * @param[in] json JSON 输入
+     * @param[in] type 目标类型
+     * @param[in] package 类型所属包
+     * @param[out] buf 编码输出
+     * @return 成功返回 true
+     * @note 用于 call 命令的输入
+     */
     bool encodeToBuffer(const simple_json::Value& json, const omnic::TypeRef& type, 
                         const std::string& package, omnibinder::Buffer& buf);
     
-    // 将 Buffer 解码为 JSON（用于 call 命令的输出）
+    /* @brief 将 Buffer 解码为 JSON
+     * @param[in,out] buf 待解码 Buffer
+     * @param[in] type 目标类型
+     * @param[in] package 类型所属包
+     * @param[out] json 解码输出
+     * @return 成功返回 true
+     * @note 用于 call 命令的输出
+     */
     bool decodeFromBuffer(omnibinder::Buffer& buf, const omnic::TypeRef& type,
                           const std::string& package, simple_json::Value& json);
-    
-    // 生成类型的 JSON schema 描述（用于 info 命令）
-    simple_json::Value generateSchema(const omnic::TypeRef& type, const std::string& package);
     
 private:
     const omnic::ParseContext& ctx_;
     
-    // 查找结构体定义
+    /* @brief 查找结构体定义
+     * @param[in] name 结构体名
+     * @param[in] package 包名
+     * @return 结构体定义指针，未找到返回 NULL
+     */
     const omnic::StructDef* findStruct(const std::string& name, const std::string& package);
     
-    // 编码基础类型
+    /* @brief 编码基础类型
+     * @param[in] json JSON 输入
+     * @param[in] type 基础类型
+     * @param[out] buf 编码输出
+     * @return 成功返回 true
+     */
     bool encodePrimitive(const simple_json::Value& json, const omnic::TypeRef& type, omnibinder::Buffer& buf);
     
-    // 解码基础类型
+    /* @brief 解码基础类型
+     * @param[in,out] buf 待解码 Buffer
+     * @param[in] type 基础类型
+     * @param[out] json 解码输出
+     * @return 成功返回 true
+     */
     bool decodePrimitive(omnibinder::Buffer& buf, const omnic::TypeRef& type, simple_json::Value& json);
     
-    // 编码自定义结构体
+    /* @brief 编码自定义结构体
+     * @param[in] json JSON 输入
+     * @param[in] structDef 结构体定义
+     * @param[in] package 类型所属包
+     * @param[out] buf 编码输出
+     * @return 成功返回 true
+     */
     bool encodeStruct(const simple_json::Value& json, const omnic::StructDef& structDef,
                       const std::string& package, omnibinder::Buffer& buf);
     
-    // 解码自定义结构体
+    /* @brief 解码自定义结构体
+     * @param[in,out] buf 待解码 Buffer
+     * @param[in] structDef 结构体定义
+     * @param[in] package 类型所属包
+     * @param[out] json 解码输出
+     * @return 成功返回 true
+     */
     bool decodeStruct(omnibinder::Buffer& buf, const omnic::StructDef& structDef,
                       const std::string& package, simple_json::Value& json);
     
-    // 编码数组
+    /* @brief 编码数组
+     * @param[in] json JSON 输入
+     * @param[in] elementType 数组元素类型
+     * @param[in] package 类型所属包
+     * @param[out] buf 编码输出
+     * @return 成功返回 true
+     */
     bool encodeArray(const simple_json::Value& json, const omnic::TypeRef& elementType, 
                      const std::string& package, omnibinder::Buffer& buf);
     
-    // 解码数组
+    /* @brief 解码数组
+     * @param[in,out] buf 待解码 Buffer
+     * @param[in] elementType 数组元素类型
+     * @param[in] package 类型所属包
+     * @param[out] json 解码输出
+     * @return 成功返回 true
+     */
     bool decodeArray(omnibinder::Buffer& buf, const omnic::TypeRef& elementType,
                      const std::string& package, simple_json::Value& json);
 };

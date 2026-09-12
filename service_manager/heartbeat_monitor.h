@@ -4,7 +4,7 @@
  * @details     跟踪每个已注册服务的心跳时间戳，检测心跳超时的服务。
  *              ServiceManager 周期性调用 checkTimeouts() 获取超时服务列表，
  *              并触发相应的死亡通知和清理流程。支持可配置的超时时间和
- *              最大允许丢失心跳次数。线程安全。
+ *              最大允许丢失心跳次数。仅 ServiceManager owner 线程访问。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -39,7 +39,6 @@
 #include <string>
 #include <map>
 #include <vector>
-#include <mutex>
 #include <stdint.h>
 
 namespace omnibinder {
@@ -47,8 +46,9 @@ namespace omnibinder {
 // ============================================================
 // HeartbeatMonitor — 跟踪每个服务的心跳时间戳
 //
-// 已注册服务定期发送心跳，监控器跟踪最近心跳时间，
-// 检测超过超时阈值的服务（连续丢失过多心跳）。
+// @brief  跟踪每个已注册服务的心跳时间戳
+// @details 已注册服务定期发送心跳，监控器跟踪最近心跳时间，
+//          检测超过超时阈值的服务（连续丢失过多心跳）。
 // ============================================================
 class HeartbeatMonitor {
 public:
@@ -105,7 +105,6 @@ private:
         HeartbeatEntry() : last_heartbeat_ms(0) {}
     };
 
-    mutable std::mutex mutex_;
     std::map<std::string, HeartbeatEntry> entries_;
     uint32_t timeout_ms_;
     uint32_t max_missed_;

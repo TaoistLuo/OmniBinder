@@ -24,11 +24,11 @@ static std::string getDirectory(const std::string& path) {
 static bool isAbsolutePath(const std::string& path) {
     if (path.empty()) return false;
 #ifdef _WIN32
-    // X:\ or X:/
+    // X:\ 或 X:/
     if (path.size() >= 3 && isalpha(path[0]) && path[1] == ':' &&
         (path[2] == '/' || path[2] == '\\'))
         return true;
-    // UNC path
+    // UNC 路径
     if (path.size() >= 2 && path[0] == '\\' && path[1] == '\\')
         return true;
 #endif
@@ -54,7 +54,7 @@ std::string Parser::normalizePath(const std::string& path) {
         return std::string(resolved);
     }
 #endif
-    // fallback: 返回原始路径
+    // 回退：返回原始路径
     return path;
 }
 
@@ -219,7 +219,7 @@ bool Parser::parse(AstFile& ast) {
 }
 
 // ---------------------------------------------------------------------------
-// package / import
+// package / import 解析
 // ---------------------------------------------------------------------------
 
 bool Parser::parsePackage(AstFile& ast) {
@@ -315,7 +315,7 @@ bool Parser::parseImport(AstFile& ast) {
 }
 
 // ---------------------------------------------------------------------------
-// struct / topic / service
+// struct / topic / service 解析
 // ---------------------------------------------------------------------------
 
 bool Parser::parseStruct(AstFile& ast) {
@@ -383,7 +383,7 @@ bool Parser::parseService(AstFile& ast) {
 }
 
 // ---------------------------------------------------------------------------
-// field / method / type
+// field / method / type 解析
 // ---------------------------------------------------------------------------
 
 bool Parser::parseField(FieldDef& field) {

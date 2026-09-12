@@ -1,7 +1,6 @@
 #include "core/sm_control_channel.h"
-#include "platform/platform.h"
-#include <chrono>
-#include <string.h>
+#include "core/message_reader.h"
+#include "core/event_loop.h"
 
 namespace omnibinder {
 
@@ -17,172 +16,62 @@ bool SmControlChannel::isConnected() const {
     return transport_ && transport_->state() == ConnectionState::CONNECTED;
 }
 
+IClientTransport* SmControlChannel::transport() const {
+    return transport_;
+}
+
+void SmControlChannel::resetTransport(IClientTransport* t) {
+    transport_ = t;
+}
+
+void SmControlChannel::closeTransport(EventLoop& loop) {
+    if (!transport_) {
+        return;
+    }
+    // 对象销毁前先从 event-loop 摘除其 fd，避免 fd 号复用后表内残留导致
+    // 新注册静默失败（约束 3）
+    if (transport_->fd() >= 0) {
+        loop.removeFd(transport_->fd());
+    }
+    transport_->close();
+    delete transport_;
+    transport_ = NULL;
+}
+
+void SmControlChannel::clearReceiveBuffer() {
+    recv_buffer_.clear();
+}
+
 bool SmControlChannel::sendMessage(const Message& msg) {
     return sendMessageWithinTimeout(msg, DEFAULT_INVOKE_TIMEOUT, NULL);
 }
 
 bool SmControlChannel::sendMessageWithinTimeout(const Message& msg, uint32_t timeout_ms, uint32_t* elapsed_ms) {
+    if (elapsed_ms) {
+        *elapsed_ms = 0;
+    }
     if (!isConnected()) {
-        if (elapsed_ms) {
-            *elapsed_ms = 0;
-        }
         return false;
     }
 
     Buffer buf;
-    msg.serialize(buf);
-    return platform::socketSendAll(transport_->fd(), buf.data(), buf.size(), timeout_ms, elapsed_ms);
+    if (!msg.serialize(buf)) {
+        return false;
+    }
+    return transport_->sendAll(buf.data(), buf.size(), timeout_ms, elapsed_ms) == 0;
 }
 
-int SmControlChannel::recvSome(uint8_t* data, size_t capacity) {
+int SmControlChannel::recvMessage(Message& msg) {
     if (!transport_) {
         return -1;
     }
-    return transport_->recv(data, capacity);
-}
-
-void SmControlChannel::appendReceived(const uint8_t* data, size_t length) {
-    recv_buffer_.writeRaw(data, length);
-}
-
-bool SmControlChannel::tryPopMessage(Message& msg) {
-    size_t avail = recv_buffer_.size() - recv_buffer_.readPosition();
-    if (avail < MESSAGE_HEADER_SIZE) {
-        return false;
-    }
-
-    size_t pos = recv_buffer_.readPosition();
-    MessageHeader hdr;
-    if (!Message::parseHeader(recv_buffer_.data() + pos, avail, hdr)) {
-        return false;
-    }
-    if (!Message::validateHeader(hdr)) {
-        // Corrupted header at current position. Skip one byte forward
-        // and retry, rather than discarding the entire buffer.
-        if (!recv_buffer_.trySetReadPosition(pos + 1)) {
-            recv_buffer_.setWritePosition(0);
-            recv_buffer_.trySetReadPosition(0);
-        } else {
-            size_t remaining = recv_buffer_.size() - recv_buffer_.readPosition();
-            if (remaining > 0 && recv_buffer_.readPosition() > 0) {
-                memmove(recv_buffer_.mutableData(),
-                        recv_buffer_.data() + recv_buffer_.readPosition(), remaining);
-            }
-            recv_buffer_.setWritePosition(remaining);
-            recv_buffer_.trySetReadPosition(0);
-        }
-        return false;
-    }
-
-    size_t total = MESSAGE_HEADER_SIZE + hdr.length;
-    if (avail < total) {
-        return false;
-    }
-
-    msg.header = hdr;
-    msg.payload.clear();
-    if (hdr.length > 0) {
-        msg.payload.assign(recv_buffer_.data() + pos + MESSAGE_HEADER_SIZE, hdr.length);
-    }
-    if (!recv_buffer_.trySetReadPosition(pos + total)) {
-        recv_buffer_.setWritePosition(0);
-        recv_buffer_.trySetReadPosition(0);
-        return false;
-    }
-
-    size_t remaining = recv_buffer_.size() - recv_buffer_.readPosition();
-    if (remaining > 0 && recv_buffer_.readPosition() > 0) {
-        memmove(recv_buffer_.mutableData(), recv_buffer_.data() + recv_buffer_.readPosition(), remaining);
-    }
-    recv_buffer_.setWritePosition(remaining);
-    recv_buffer_.trySetReadPosition(0);
-    return true;
+    return readNextMessage(*transport_, recv_buffer_, msg);
 }
 
 void SmControlChannel::clearReplies() {
-    // 连接重建后，旧连接上尚未返回的回复不可能再到达。
-    // 正在等待的槽保留并标记 failed，让外层 waitForReply 快速失败而非空转至超时；
-    // 已就绪（ready）的槽直接清除。
-    for (std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.begin();
-         it != pending_replies_.end();) {
-        if (it->second.ready) {
-            pending_replies_.erase(it++);
-        } else {
-            it->second.failed = true;
-            ++it;
-        }
-    }
-}
-
-void SmControlChannel::beginWait(uint32_t seq) {
-    std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
-    if (it == pending_replies_.end()) {
-        pending_replies_.emplace(std::piecewise_construct,
-                                 std::forward_as_tuple(seq),
-                                 std::forward_as_tuple());
-        return;
-    }
-    if (it->second.ready) {
-        return;
-    }
-    it->second.ready = false;
-    it->second.failed = false;
-    it->second.message.payload.clear();
-}
-
-bool SmControlChannel::isWaiting(uint32_t seq) const {
-    std::map<uint32_t, PendingReplySlot>::const_iterator it = pending_replies_.find(seq);
-    return it != pending_replies_.end() && !it->second.ready && !it->second.failed;
-}
-
-const Message* SmControlChannel::pendingReply(uint32_t seq) const {
-    std::map<uint32_t, PendingReplySlot>::const_iterator it = pending_replies_.find(seq);
-    if (it == pending_replies_.end()) {
-        return NULL;
-    }
-    if (!it->second.ready) {
-        return NULL;
-    }
-    return &it->second.message;
-}
-
-bool SmControlChannel::isFailed(uint32_t seq) const {
-    std::map<uint32_t, PendingReplySlot>::const_iterator it = pending_replies_.find(seq);
-    return it != pending_replies_.end() && it->second.failed;
-}
-
-bool SmControlChannel::takeReply(uint32_t seq, Message& out) {
-    std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
-    if (it == pending_replies_.end()) {
-        return false;
-    }
-    if (!it->second.ready) {
-        return false;
-    }
-    out.header = it->second.message.header;
-    out.payload = std::move(it->second.message.payload);
-    pending_replies_.erase(it);
-    return true;
-}
-
-void SmControlChannel::eraseWait(uint32_t seq) {
-    pending_replies_.erase(seq);
-}
-
-void SmControlChannel::storeReply(uint32_t seq, const Message& msg) {
-    std::map<uint32_t, PendingReplySlot>::iterator it = pending_replies_.find(seq);
-    if (it == pending_replies_.end()) {
-        // Drop replies nobody is waiting for; only beginWait() creates slots,
-        // so an unsolicited reply cannot grow the map without bound.
-        return;
-    }
-    if (it->second.ready) {
-        return;
-    }
-
-    it->second.message.header = msg.header;
-    it->second.message.payload.assign(msg.payload.data(), msg.payload.size());
-    it->second.ready = true;
+    // 连接重建后，旧连接上尚未返回的回复不可能再到达，清理控制面等待槽。
+    // 数据面槽表独立于本通道（RpcRuntime 持有），SM 重连不得误伤在途数据面 RPC。
+    pending_replies_.clear();
 }
 
 } // namespace omnibinder

@@ -7,154 +7,162 @@
 namespace omnibinder {
 
 void ServiceManagerApp::handleQueryPublishedTopics(ClientConnection* conn,
-                                                   const Message& msg) {
-        std::string name;
-        if (!sm_internal::tryReadExactStringArg(msg, name, MAX_SERVICE_NAME_LENGTH)) {
-            OMNI_LOG_WARN(TAG, "Reject malformed query published topics request from fd=%d",
-                          conn->fd);
-            sendQueryPublishedTopicsReply(conn, msg.header.sequence, false,
-                                          std::vector<std::string>());
-            return;
-        }
+                                               const Message& msg) {
+    std::string name;
+    if (!sm_internal::tryReadExactStringArg(msg, name, MAX_SERVICE_NAME_LENGTH)) {
+        OMNI_LOG_WARN(TAG, "Reject malformed query published topics request from fd=%d",
+                      conn->fd);
+        sendQueryPublishedTopicsReply(conn, msg.header.sequence, false,
+                                      std::vector<std::string>());
+        return;
+    }
 
-        ServiceEntry entry;
-        const bool found = registry_.findService(name, entry);
-        const std::vector<std::string> topics = found
-            ? topic_manager_.getPublishedTopics(name)
-            : std::vector<std::string>();
-        sendQueryPublishedTopicsReply(conn, msg.header.sequence, found, topics);
+    ServiceEntry entry;
+    const bool found = registry_.findService(name, entry);
+    const std::vector<std::string> topics = found
+        ? topic_manager_.getPublishedTopics(name)
+        : std::vector<std::string>();
+    sendQueryPublishedTopicsReply(conn, msg.header.sequence, found, topics);
 }
 
 void ServiceManagerApp::sendQueryPublishedTopicsReply(
-        ClientConnection* conn, uint32_t seq, bool found,
-        const std::vector<std::string>& topics) {
-        Message reply(MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY, seq);
-        if (!serializePublishedTopicsReply(found, topics, reply.payload)) {
-            OMNI_LOG_ERROR(TAG, "Failed to serialize published topics reply for seq=%u", seq);
-            return;
-        }
-        sendMessage(conn, reply);
+    ClientConnection* conn, uint32_t seq, bool found,
+    const std::vector<std::string>& topics) {
+    Message reply(MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY, seq);
+    if (!serializePublishedTopicsReply(found, topics, reply.payload)) {
+        OMNI_LOG_ERROR(TAG, "Failed to serialize published topics reply for seq=%u", seq);
+        return;
+    }
+    sendMessage(conn, reply);
 }
 
 void ServiceManagerApp::handlePublishTopic(ClientConnection* conn, const Message& msg) {
-        Buffer payload(msg.payload.data(), msg.payload.size());
-        std::string topic;
-        if (!payload.tryReadString(topic)
-            || topic.empty() || topic.size() > MAX_TOPIC_NAME_LENGTH) {
-            OMNI_LOG_WARN(TAG, "Reject malformed publish topic request from fd=%d", conn->fd);
-            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
-            return;
-        }
-        ServiceInfo pub_info;
-        if (!deserializeServiceInfo(payload, pub_info)) {
-            OMNI_LOG_ERROR(TAG, "Failed to deserialize publisher info for topic %s", topic.c_str());
-            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
-            return;
-        }
-        uint32_t idl_hash = 0;
-        if (payload.remaining() != 0
-            && (!payload.tryReadUint32(idl_hash) || payload.remaining() != 0)) {
-            OMNI_LOG_WARN(TAG, "Reject publish topic request with malformed tail from fd=%d",
-                          conn->fd);
-            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
-            return;
-        }
+    Buffer payload(msg.payload.data(), msg.payload.size());
+    std::string topic;
+    if (!payload.tryReadString(topic)
+        || topic.empty() || topic.size() > MAX_TOPIC_NAME_LENGTH) {
+        OMNI_LOG_WARN(TAG, "Reject malformed publish topic request from fd=%d", conn->fd);
+        sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
+        return;
+    }
+    ServiceInfo pub_info;
+    if (!deserializeServiceInfo(payload, pub_info)) {
+        OMNI_LOG_ERROR(TAG, "Failed to deserialize publisher info for topic %s", topic.c_str());
+        sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
+        return;
+    }
+    uint32_t idl_hash = 0;
+    if (payload.remaining() != 0
+        && (!payload.tryReadUint32(idl_hash) || payload.remaining() != 0)) {
+        OMNI_LOG_WARN(TAG, "Reject publish topic request with malformed tail from fd=%d",
+                      conn->fd);
+        sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
+        return;
+    }
 
-        if (pub_info.name.empty() || pub_info.name.size() > MAX_SERVICE_NAME_LENGTH) {
-            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
-            return;
-        }
+    if (pub_info.name.empty() || pub_info.name.size() > MAX_SERVICE_NAME_LENGTH) {
+        sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
+        return;
+    }
 
-        if (!registry_.ownsService(conn->fd, pub_info.name)) {
-            OMNI_LOG_WARN(TAG, "Reject publish topic %s from fd=%d for non-owned service %s",
-                           topic.c_str(), conn->fd, pub_info.name.c_str());
-            sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
-            return;
-        }
+    if (!registry_.ownsService(conn->fd, pub_info.name)) {
+        OMNI_LOG_WARN(TAG, "Reject publish topic %s from fd=%d for non-owned service %s",
+                       topic.c_str(), conn->fd, pub_info.name.c_str());
+        sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
+        return;
+    }
 
-        bool success = topic_manager_.registerPublisher(topic, pub_info, conn->fd,
-                                                        idl_hash);
-        sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, success);
+    bool success = topic_manager_.registerPublisher(topic, pub_info, conn->fd,
+                                                    idl_hash);
+    sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, success);
 
-        if (success) {
-            // Notify existing subscribers about the new publisher
-            std::vector<int> subscribers = topic_manager_.getSubscribers(topic);
-            for (size_t i = 0; i < subscribers.size(); ++i) {
-                sendTopicPublisherNotify(subscribers[i], topic, pub_info);
-            }
+    if (success) {
+        // 通知已有订阅者新发布者上线
+        std::vector<int> subscribers = topic_manager_.getSubscribers(topic);
+        for (size_t i = 0; i < subscribers.size(); ++i) {
+            sendTopicPublisherNotify(subscribers[i], topic, pub_info);
         }
+    }
 }
 
 void ServiceManagerApp::handleUnpublishTopic(ClientConnection* conn, const Message& msg) {
-        std::string topic;
-        if (!sm_internal::tryReadExactTopicArg(msg, topic)) {
-            OMNI_LOG_WARN(TAG, "Drop malformed unpublish topic request from fd=%d", conn->fd);
-            return;
-        }
+    std::string topic;
+    if (!sm_internal::tryReadExactTopicArg(msg, topic)) {
+        OMNI_LOG_WARN(TAG, "Drop malformed unpublish topic request from fd=%d", conn->fd);
+        return;
+    }
 
-        if (!topic_manager_.removePublisher(topic, conn->fd)) {
-            OMNI_LOG_WARN(TAG, "Reject unpublish topic %s from non-owner fd=%d",
-                           topic.c_str(), conn->fd);
-        }
-        // No reply needed
+    if (!topic_manager_.removePublisher(topic, conn->fd)) {
+        OMNI_LOG_WARN(TAG, "Reject unpublish topic %s from non-owner fd=%d",
+                       topic.c_str(), conn->fd);
+    }
+    // 无需回复
 }
 
 void ServiceManagerApp::handleSubscribeTopic(ClientConnection* conn, const Message& msg) {
-        std::string topic;
-        if (!sm_internal::tryReadExactTopicArg(msg, topic)) {
-            OMNI_LOG_WARN(TAG, "Reject malformed subscribe topic request from fd=%d", conn->fd);
-            sendSubscribeTopicReply(conn, msg.header.sequence, false);
-            return;
-        }
+    std::string topic;
+    if (!sm_internal::tryReadExactTopicArg(msg, topic)) {
+        OMNI_LOG_WARN(TAG, "Reject malformed subscribe topic request from fd=%d", conn->fd);
+        sendSubscribeTopicReply(conn, msg.header.sequence, false);
+        return;
+    }
 
-        bool added = topic_manager_.addSubscriber(topic, conn->fd);
-        uint32_t idl_hash = 0;
-        topic_manager_.getIdlHash(topic, idl_hash);
-        // sendSubscribeTopicReply 发送失败时可能 closeClient 删除 conn，
-        // 先保存 fd 副本，后续只用 fd 值，避免对已释放 conn 解引用。
-        int fd = conn->fd;
-        sendSubscribeTopicReply(conn, msg.header.sequence, added, idl_hash);
+    bool added = topic_manager_.addSubscriber(topic, conn->fd);
+    uint32_t idl_hash = 0;
+    topic_manager_.getIdlHash(topic, idl_hash);
+    // sendSubscribeTopicReply 发送失败时可能 closeClient 删除 conn，
+    // 先保存 fd 副本，后续只用 fd 值，避免对已释放 conn 解引用。
+    int fd = conn->fd;
+    sendSubscribeTopicReply(conn, msg.header.sequence, added, idl_hash);
 
-        // If there's already a publisher, notify the subscriber
-        ServiceInfo pub_info;
-        if (topic_manager_.getPublisher(topic, pub_info)) {
-            sendTopicPublisherNotify(fd, topic, pub_info);
-        }
+    // 若已有发布者，立即通知该订阅者
+    ServiceInfo pub_info;
+    if (topic_manager_.getPublisher(topic, pub_info)) {
+        sendTopicPublisherNotify(fd, topic, pub_info);
+    }
 }
 
 void ServiceManagerApp::sendSubscribeTopicReply(ClientConnection* conn, uint32_t seq,
-                                                bool success, uint32_t idl_hash) {
-        Message reply(MessageType::MSG_SUBSCRIBE_TOPIC_REPLY, seq);
-        reply.payload.writeBool(success);
-        if (success) {
-            reply.payload.writeUint32(idl_hash);
-        }
-        sendMessage(conn, reply);
+                                            bool success, uint32_t idl_hash) {
+    Message reply(MessageType::MSG_SUBSCRIBE_TOPIC_REPLY, seq);
+    reply.payload.writeBool(success);
+    if (success) {
+        reply.payload.writeUint32(idl_hash);
+    }
+    sendMessage(conn, reply);
 }
 
 void ServiceManagerApp::handleUnsubscribeTopic(ClientConnection* conn, const Message& msg) {
-        std::string topic;
-        if (!sm_internal::tryReadExactTopicArg(msg, topic)) {
-            OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe topic request from fd=%d", conn->fd);
-            return;
-        }
+    std::string topic;
+    if (!sm_internal::tryReadExactTopicArg(msg, topic)) {
+        OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe topic request from fd=%d", conn->fd);
+        return;
+    }
 
-        topic_manager_.removeSubscriber(topic, conn->fd);
-        // No reply needed
+    topic_manager_.removeSubscriber(topic, conn->fd);
+    // 无需回复
 }
 
 void ServiceManagerApp::sendTopicPublisherNotify(int subscriber_fd,
-                                                 const std::string& topic,
-                                                 const ServiceInfo& pub_info) {
-        auto it = clients_.find(subscriber_fd);
-        if (it == clients_.end()) {
-            return;
-        }
+                                             const std::string& topic,
+                                             const ServiceInfo& pub_info) {
+    auto it = clients_.find(subscriber_fd);
+    if (it == clients_.end()) {
+        return;
+    }
 
-        Message notify(MessageType::MSG_TOPIC_PUBLISHER_NOTIFY, nextSMProactiveSequence());
-        notify.payload.writeString(topic);
-        serializeServiceInfo(pub_info, notify.payload);
-        sendMessage(it->second, notify);
+    Message notify(MessageType::MSG_TOPIC_PUBLISHER_NOTIFY, nextSMProactiveSequence());
+    notify.payload.writeString(topic);
+    if (!serializeServiceInfo(pub_info, notify.payload)) {
+        OMNI_LOG_ERROR(TAG, "Failed to serialize publisher notify for topic %s", topic.c_str());
+        return;
+    }
+    uint32_t idl_hash = 0;
+    topic_manager_.getIdlHash(topic, idl_hash);
+    if (!notify.payload.writeUint32(idl_hash)) {
+        return;
+    }
+    sendMessage(it->second, notify);
 }
 
 } // namespace omnibinder

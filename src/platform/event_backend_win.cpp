@@ -19,17 +19,17 @@ namespace omnibinder {
 namespace platform {
 
 // ============================================================
-// IocpBackend — IOCP-based EventBackend for Windows
+// IocpBackend — Windows 上基于 IOCP 的 EventBackend
 //
-//   - Named Pipes:        overlapped ReadFile → IOCP completion
-//                          (immediate wakeup, zero polling)
+//   - Named Pipes:        overlapped ReadFile → IOCP 完成事件
+//                          （立即唤醒，零轮询）
 //   - TCP sockets
-//       (listen + data):  select(0) non-blocking probe, only
-//                          checked when IOCP has no completions
-//   - Cross-thread wakeup: PostQueuedCompletionStatus
-//   - Waiting:            single GetQueuedCompletionStatus
-//                          blocks until pipe event or timeout;
-//                          no fixed-interval WSAPoll loop
+//       (listen + data):  select(0) 非阻塞探测，仅在
+//                          IOCP 无完成事件时检查
+//   - 跨线程唤醒:          PostQueuedCompletionStatus
+//   - 等待:                单次 GetQueuedCompletionStatus
+//                          阻塞至 pipe 事件或超时；
+//                          无固定间隔 WSAPoll 轮询
 // ============================================================
 
 static HANDLE       g_iocp_wakeup = NULL;
@@ -37,7 +37,7 @@ thread_local HANDLE tls_iocp      = NULL;
 static const int    IOCP_WAKEUP_FD  = 0x7FFFFFFF;
 static const ULONG_PTR IOCP_WAKEUP_KEY = 0;
 
-// ── Pipe state ──────────────────────────────────────────────
+// ── Pipe 状态 ──────────────────────────────────────────────
 
 struct PipeEntry {
     HANDLE      pipe;
@@ -113,7 +113,7 @@ static bool postPipeRead(int fd) {
     return false;
 }
 
-// ── Backend class ───────────────────────────────────────────
+// ── 后端类 ───────────────────────────────────────────
 
 class IocpBackend : public EventBackend {
 public:
@@ -152,7 +152,7 @@ public:
 
         if (fd == IOCP_WAKEUP_FD) return true;
 
-        // TCP socket — track in sock_fds_ for select(0) probing
+        // TCP socket——记录到 sock_fds_ 供 select(0) 探测
         sock_fds_.insert(fd);
         return true;
     }
@@ -183,23 +183,23 @@ public:
             : INT64_MAX;
 
         while (true) {
-            // 1. Drain already-queued IOCP pipe completions (non-blocking)
+            // 1. 排空已入队的 IOCP pipe 完成事件（非阻塞）
             int n = drainPipeCompletions(events, max_events);
             if (n > 0) return n;
 
-            // 2. Probe all TCP sockets with select(0) (non-blocking)
+            // 2. 用 select(0) 探测所有 TCP socket（非阻塞）
             n = probeSockets(events, max_events);
             if (n > 0) return n;
 
-            // 3. Deadline check
+            // 3. 检查截止时间
             if (timeout_ms >= 0 && currentTimeMs() >= deadline)
                 return 0;
 
-            // 4. Block on IOCP.
-            //    Pipes deliver completions through IOCP → wake immediately.
-            //    Sockets are probed above (select(0)); when sockets exist we
-            //    use a 1ms IOCP timeout so that socket events are detected
-            //    promptly (pipe completions still wake the IOCP inline).
+            // 4. 阻塞等待 IOCP。
+            //    Pipe 通过 IOCP 投递完成事件 → 立即唤醒。
+            //    socket 已在上方用 select(0) 探测；存在 socket 时
+            //    使用 1ms 的 IOCP 超时，以便及时检测 socket 事件
+            //    （pipe 完成事件仍会就地唤醒 IOCP）。
             DWORD wait_ms = INFINITE;
             if (!sock_fds_.empty()) {
                 wait_ms = 1;
@@ -226,7 +226,7 @@ public:
             if (g_pipes.find(fd) != g_pipes.end())
                 return handlePipeCompletion(fd, events, 0, max_events);
 
-            // Unknown completion — ignore and loop
+            // 未知完成事件——忽略并继续循环
         }
     }
 
@@ -237,7 +237,7 @@ private:
         return (int64_t)((uli.QuadPart - 116444736000000000ULL) / 10000);
     }
 
-    // ── Pipe IOCP ─────────────────────────────────────────
+    // ── Pipe IOCP 处理 ─────────────────────────────────────
 
     int drainPipeCompletions(ReadyEvent* events, int max_events) {
         int count = 0;
@@ -289,7 +289,7 @@ private:
         }
     }
 
-    // ── Socket probing (select-based, non-blocking) ───────
+    // ── Socket 探测（基于 select，非阻塞）───────
 
     int probeSockets(ReadyEvent* events, int max_events) {
         if (sock_fds_.empty() || max_events <= 0) return 0;
@@ -323,11 +323,11 @@ private:
         return count;
     }
 
-    // ── members ─────────────────────────────────────────────
+    // ── 成员变量 ─────────────────────────────────────────────
 
     HANDLE              iocp_;
     std::map<int, uint32_t> fd_events_;
-    std::set<int>       sock_fds_;    // all TCP sockets (listen + data)
+    std::set<int>       sock_fds_;    // 所有 TCP socket（监听 + 数据）
 };
 
 EventBackend* createEventBackend() { return new IocpBackend(); }

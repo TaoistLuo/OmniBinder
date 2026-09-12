@@ -177,7 +177,7 @@ cmake --build build --config Release -j8
 
 要求：
 - Windows: MinGW 7.3+ (GCC) 或 MSVC 2017+
-- CMake 3.10+
+- CMake 3.12+
 - 零外部依赖
 
 > **注意**：Windows 上 SHM 使用 Named Pipe + TCP loopback 实现，功能等价于 Linux 的 eventfd + AF_UNIX。
@@ -372,7 +372,7 @@ int main() {
     runtime.init("127.0.0.1", 9900);
 
     MySensorService service;
-    service.setShmConfig(64 * 1024, 64 * 1024);
+    service.setShmConfig(omnibinder::ShmConfig(64 * 1024, 64 * 1024));
     runtime.registerService(&service);
     runtime.publishTopic("SensorUpdate");
     runtime.publishTopic("AsyncResultReady");
@@ -556,14 +556,14 @@ omnibinder/
 
 - **操作系统**: Linux / Windows / 更多平台（详见[平台适配指南](docs/platform-porting.md)）
 - **编译器**: GCC 4.8+, Clang 3.4+, MinGW 7.3+, MSVC 2017+（支持 C++11）
-- **CMake**: 3.10+
+- **CMake**: 3.12+
 - **外部依赖**: 无
 
 ### 平台差异
 
 | 特性 | Linux | Windows |
 |------|-------|---------|
-| I/O 多路复用 | epoll | IOCP + WSAPoll |
+| I/O 多路复用 | epoll | IOCP + select |
 | 跨进程通知 | eventfd | Named Pipe |
 | Unix Domain Socket | AF_UNIX | TCP loopback (127.0.0.1) |
 | 共享内存 | POSIX SHM | Named File Mapping |

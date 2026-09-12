@@ -49,22 +49,17 @@ namespace omnibinder {
 
 class EventLoop;
 
-// ============================================================
-// 单个服务连接的上下文
-// ============================================================
+/*
+ * @brief  单个服务连接的上下文
+ */
 struct ServiceConnection {
     std::string     service_name;
-    ITransport*     transport;
+    IClientTransport*     transport;
     Buffer          recv_buffer;
     bool            connected;
 
-    // 话题发布者专属连接标记：由 ensureTopicPublisherConnection 创建的直连
-    bool            is_topic_publisher;
-    std::string     topic_name;   // is_topic_publisher 时有效
-
     ServiceConnection()
-        : transport(NULL), connected(false)
-        , is_topic_publisher(false), topic_name() {}
+        : transport(NULL), connected(false) {}
 
     ~ServiceConnection() {
         if (transport) {
@@ -79,77 +74,94 @@ private:
     ServiceConnection& operator=(const ServiceConnection&);
 };
 
-// ============================================================
-// ConnectionManager - 管理与其他服务的直连
-// ============================================================
+/*
+ * @brief  ConnectionManager - 管理与其他服务的直连
+ */
 class ConnectionManager {
 public:
     typedef std::function<void(const std::string& service_name,
-                               const Message& msg)> MessageCallback;
-    typedef std::function<void(std::string service_name,
-                               bool is_topic_publisher,
-                               std::string topic_name)> DisconnectCallback;
+                               Message& msg)> MessageCallback;
+    typedef std::function<void(std::string service_name)> DisconnectCallback;
 
     ConnectionManager(EventLoop& loop, const std::string& local_host_id);
     ~ConnectionManager();
 
-    // 获取或创建到指定服务的连接
+    /*
+     * @brief  获取或创建到指定服务的连接
+     */
     ServiceConnection* getOrCreateConnection(
         const std::string& service_name,
         const std::string& host,
         uint16_t port,
         const std::string& host_id,
-        const ShmConfig& shm_config = ShmConfig(),
-        bool is_topic_publisher = false,
-        const std::string& topic_name = std::string());
+        const ShmConfig& shm_config = ShmConfig());
 
-    // 获取已有连接
+    /*
+     * @brief  获取已有连接
+     */
     ServiceConnection* getConnection(const std::string& service_name);
 
-    // 移除连接
+    /*
+     * @brief  移除连接
+     */
     void removeConnection(const std::string& service_name);
 
-    // 通过连接发送消息
-    bool sendMessage(const std::string& service_name, const Message& msg);
+    /*
+     * @brief  通过连接发送消息（原地序列化：成功后 msg.payload 即完整线上帧）
+     */
+    bool sendMessage(const std::string& service_name, Message& msg);
 
-    // 通过连接发送原始数据
+    /*
+     * @brief  通过连接发送原始数据
+     */
     bool sendRaw(ServiceConnection* conn, const uint8_t* data, size_t length);
 
-    // 在超时内将完整消息同步发送出去
-    bool sendMessageWithinTimeout(const std::string& service_name, const Message& msg,
+    /*
+     * @brief  在超时内将完整消息同步发送出去
+     */
+    bool sendMessageWithinTimeout(const std::string& service_name, Message& msg,
                                   uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
 
-    // 在超时内将完整原始数据同步发送出去
+    /*
+     * @brief  在超时内将完整原始数据同步发送出去
+     */
     bool sendRawWithinTimeout(ServiceConnection* conn, const uint8_t* data, size_t length,
                               uint32_t timeout_ms, uint32_t* elapsed_ms = NULL);
 
-    // 在 deadline 时间戳前发送数据，0 表示无 deadline
+    /*
+     * @brief  在 deadline 时间戳前发送数据，0 表示无 deadline
+     */
     bool sendRawWithDeadline(ServiceConnection* conn, const uint8_t* data, size_t length,
                              uint32_t deadline_ms);
 
-    // 设置消息回调
+    /*
+     * @brief  设置消息回调
+     */
     void setMessageCallback(const MessageCallback& cb);
 
-    // 设置断开回调
+    /*
+     * @brief  设置断开回调
+     */
     void setDisconnectCallback(const DisconnectCallback& cb);
 
-    // 关闭所有连接
+    /*
+     * @brief  关闭所有连接
+     */
     void closeAll();
 
-    uint32_t activeConnectionCount() const;
-    uint32_t tcpConnectionCount() const;
-    uint32_t shmConnectionCount() const;
+    void connectionCounts(uint32_t& active, uint32_t& tcp, uint32_t& shm) const;
 
 private:
     ConnectionManager(const ConnectionManager&);
     ConnectionManager& operator=(const ConnectionManager&);
 
-    // 连接失败统一处理：connected=false → removeFd → disconnect_cb_ → 判活。
-    // 返回 false 表示回调链已删除该连接，调用方须立即停止使用 conn（约束 1/3）
+    /*
+     * @brief  连接失败统一处理：connected=false → removeFd → disconnect_cb_ → 判活
+     * @return false 表示回调链已删除该连接，调用方须立即停止使用 conn（约束 1/3）
+     */
     bool failConnection(ServiceConnection* conn);
 
     void onConnectionData(const std::string& service_name, int fd);
-    void processMessages(ServiceConnection* conn);
 
     EventLoop&      loop_;
     std::string     local_host_id_;

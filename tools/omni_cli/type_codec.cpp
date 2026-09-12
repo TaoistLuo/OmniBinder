@@ -342,33 +342,4 @@ bool TypeCodec::decodeFromBuffer(omnibinder::Buffer& buf, const omnic::TypeRef& 
     }
 }
 
-simple_json::Value TypeCodec::generateSchema(const omnic::TypeRef& type, const std::string& package) {
-    simple_json::Value schema;
-    schema.setObject();
-    
-    if (type.primitive == omnic::TYPE_CUSTOM) {
-        // 自定义结构体 - 展开字段
-        std::string structPackage = type.package_name.empty() ? package : type.package_name;
-        const omnic::StructDef* structDef = findStruct(type.custom_name, structPackage);
-        if (structDef) {
-            for (size_t i = 0; i < structDef->fields.size(); ++i) {
-                const omnic::FieldDef& field = structDef->fields[i];
-                simple_json::Value fieldSchema = generateSchema(field.type, structPackage);
-                schema.set(field.name, fieldSchema);
-            }
-        }
-    } else if (type.primitive == omnic::TYPE_ARRAY) {
-        // 数组类型
-        schema.set("type", simple_json::Value("array"));
-        if (type.element_type) {
-            schema.set("element", generateSchema(*type.element_type, package));
-        }
-    } else {
-        // 基础类型 - 返回类型名
-        schema.set("type", simple_json::Value(omni_cli::primitiveTypeName(type.primitive)));
-    }
-    
-    return schema;
-}
-
 } // namespace type_codec

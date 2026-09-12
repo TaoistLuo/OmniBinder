@@ -50,7 +50,9 @@ static const size_t IDLC_MAX_IMPORT_FILES = 256u;
 static const size_t IDLC_MAX_IMPORT_DEPTH = 64u;
 static const size_t IDLC_MAX_TYPE_NESTING = 64u;
 
-/// 跨文件共享的解析上下文
+/**
+ * @brief 跨文件共享的解析上下文
+ */
 struct ParseContext {
     /// 包名 → AST 映射（所有已加载的文件）
     std::map<std::string, AstFile> loaded_packages;
@@ -77,12 +79,20 @@ struct ParseContext {
 
 class Parser {
 public:
-    /// 带上下文的构造函数（用于递归解析和外部传入上下文）
+    /* @brief 带上下文的构造函数
+     * @param[in,out] lexer 词法分析器
+     * @param[in,out] ctx 解析上下文
+     * @param[in] file_path 当前文件路径
+     * @note 用于递归解析和外部传入上下文
+     */
     Parser(Lexer& lexer, ParseContext& ctx, const std::string& file_path);
     Parser(Lexer& lexer, ParseContext& ctx, const std::string& file_path,
            size_t import_depth);
     
-    /// 无上下文的构造函数（向后兼容，内部创建默认上下文）
+    /* @brief 无上下文的构造函数
+     * @param[in,out] lexer 词法分析器
+     * @note 向后兼容，内部创建默认上下文
+     */
     Parser(Lexer& lexer);
     
     bool parse(AstFile& ast);
@@ -103,13 +113,24 @@ private:
     bool parseMethod(MethodDef& method);
     bool parseType(TypeRef& type, size_t nesting = 0);
     
-    /// 将文件中的所有类型注册到全局类型表
+    /* @brief 将文件中的所有类型注册到全局类型表
+     * @param[in] ast 待注册的 AST
+     * @return 注册成功返回 true
+     */
     bool registerTypes(const AstFile& ast);
     
-    /// 路径解析：相对路径基于 base_dir_，绝对路径直接使用
+    /* @brief 路径解析
+     * @param[in] import_path import 路径
+     * @return 解析后的路径
+     * @note 相对路径基于 base_dir_，绝对路径直接使用
+     */
     std::string resolvePath(const std::string& import_path);
     
-    /// 规范化路径（消除 ../ ./ ，转为绝对路径）
+    /* @brief 规范化路径
+     * @param[in] path 原始路径
+     * @return 规范化后的绝对路径
+     * @note 消除 ../ ./ ，转为绝对路径
+     */
     std::string normalizePath(const std::string& path);
     
     Lexer& lexer_;

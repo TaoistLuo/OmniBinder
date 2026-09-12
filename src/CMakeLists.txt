@@ -6,6 +6,7 @@ set(OMNIBINDER_SOURCES
     core/buffer.cpp
     core/buffer_view.cpp
     core/message.cpp
+    core/message_reader.cpp
     core/error.cpp
     core/event_loop.cpp
     core/omni_allocator.cpp
@@ -22,6 +23,7 @@ set(OMNIBINDER_SOURCES
     core/runtime_diag.cpp
     core/runtime_config.cpp
     core/sm_control_channel.cpp
+    core/pending_reply_table.cpp
     core/rpc_runtime.cpp
     core/topic_runtime.cpp
     core/connection_manager.cpp
@@ -29,7 +31,9 @@ set(OMNIBINDER_SOURCES
 
     # transport
     transport/tcp_transport.cpp
-    transport/shm_transport.cpp
+    transport/shm_ring.cpp
+    transport/shm_client_transport.cpp
+    transport/shm_server_transport.cpp
     transport/transport_selector.cpp
 
     # platform

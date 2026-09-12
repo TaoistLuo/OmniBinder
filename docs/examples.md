@@ -37,6 +37,11 @@ struct StatusResponse {
     int32   code;
     string  message;
 }
+
+struct NameValue {
+    string name;
+    int32  value;
+}
 ```
 
 ### 2.2 sensor_service.bidl（服务接口定义）
@@ -150,18 +155,19 @@ omni-idlc --lang=c --output=generated/ sensor_service.bidl
 # examples/example_cpp/CMakeLists.txt
 
 add_executable(example_cpp_sensor_server sensor_server.cpp)
+target_link_libraries(example_cpp_sensor_server PRIVATE omnibinder_static)
 
-# 使用 IDL 生成代码
-omnic_generate(
-    TARGET example_cpp_sensor_server
-    LANGUAGE cpp
-    FILES
-        ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-        ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
-    OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
-)
-
-target_link_libraries(example_cpp_sensor_server omnibinder_static)
+# IDL 代码生成（C++）
+if(TARGET omni-idlc OR TARGET omnic)
+    omnic_generate(
+        TARGET example_cpp_sensor_server
+        LANGUAGE cpp
+        FILES
+            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+        OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
+    )
+endif()
 ```
 
 ### 3.2 `sensor_server.cpp`
@@ -219,18 +225,19 @@ public:
 # examples/example_cpp/CMakeLists.txt
 
 add_executable(example_cpp_sensor_client sensor_client.cpp)
+target_link_libraries(example_cpp_sensor_client PRIVATE omnibinder_static)
 
 # 客户端使用同一份 IDL 生成的 Proxy
-omnic_generate(
-    TARGET example_cpp_sensor_client
-    LANGUAGE cpp
-    FILES
-        ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-        ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
-    OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
-)
-
-target_link_libraries(example_cpp_sensor_client omnibinder_static)
+if(TARGET omni-idlc OR TARGET omnic)
+    omnic_generate(
+        TARGET example_cpp_sensor_client
+        LANGUAGE cpp
+        FILES
+            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+        OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
+    )
+endif()
 ```
 
 ### 4.2 sensor_client.cpp
@@ -254,22 +261,22 @@ runtime.init("127.0.0.1", 9900);
 demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
-uint8_t bool_out = 0;
+bool bool_out = false;
 proxy.EchoBool(false, bool_out);
 
 int32_t int_out = 0;
 proxy.EchoInt32(32, int_out);
 
-StatusResponse status_out;
+common::StatusResponse status_out;
 proxy.EchoStatus(status, status_out);
 
-SensorEnvelope envelope_out;
+demo::SensorEnvelope envelope_out;
 proxy.EchoEnvelope(envelope, envelope_out);
 
 std::vector<int32_t> ids_out;
 proxy.EchoIdArray(ids, ids_out);
 
-SensorArrayBundle bundle_out;
+demo::SensorArrayBundle bundle_out;
 proxy.EchoBundle(bundle, bundle_out);
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
@@ -297,14 +304,15 @@ proxy.RequestLatestDataAsync(req, ack);
 add_executable(example_c_sensor_server sensor_server.c)
 target_link_libraries(example_c_sensor_server PRIVATE omnibinder_static)
 
-if(TARGET omni-idlc)
+if(TARGET omni-idlc OR TARGET omnic)
     omnic_generate(
         TARGET example_c_sensor_server
         LANGUAGE c
-        FILES ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+        FILES
+            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
-    add_dependencies(example_c_sensor_server omni-idlc)
 endif()
 ```
 
@@ -406,7 +414,7 @@ $ ./target/bin/omni-cli list
 NAME                HOST            PORT    STATUS
 ----                ----            ----    ------
 SensorService       127.0.0.1       8001    ONLINE
-Total: 1 service online
+Total: 1 services online
 ```
 
 ### 7.2 查询服务详细信息
@@ -726,7 +734,7 @@ ctest --output-on-failure
 $ ./target/bin/service_manager --host 0.0.0.0 --port 9900
 
 # 启动服务端（连接本机 SM，但显式把 192.168.1.10 注册给其它机器访问）
-$ ./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900
+$ ./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900 --register-host 192.168.1.10
 ```
 
 ```cpp
@@ -759,18 +767,18 @@ $ ./target/example/example_cpp_sensor_client --sm-host 192.168.1.10 --sm-port 99
 如果在同一台机器上运行，每个客户端会创建自己独立的共享内存，并通过 UDS 与服务端交换 eventfd：
 
 ```
-[OmniRuntime] Connecting to SensorService via SHM '/binder_SensorService_cli_1234_0' (same machine)
-[OmniRuntime] SHM eventfd exchange via UDS: shm_name=/binder_SensorService_cli_1234_0, resp_eventfd=OK, master_eventfd=OK
+[OmniRuntime] Connecting to SensorService via SHM '/binder_SensorService_1f2e3d4c_cli_1234_0' (same machine)
+[OmniRuntime] SHM eventfd exchange via UDS: shm_name=/binder_SensorService_1f2e3d4c_cli_1234_0, resp_eventfd=OK, master_eventfd=OK
 ```
 
 **注意**：新的 per-client SHM 模型中，每个客户端创建独立的共享内存段，名称格式为
-`/binder_<ServiceName>_cli_<PID>_<N>`。客户端通过 UDS 将 SHM 名称发送给服务端，
+`/binder_<ServiceName>_<hash>_cli_<PID>_<N>`。客户端通过 UDS 将 SHM 名称发送给服务端，
 服务端回复 `resp_eventfd`（用于通知客户端响应已就绪）和 `master_eventfd`
 （用于客户端通知服务端新请求到达）。
 
 不再使用 slot 分配机制，也没有 32 客户端的硬限制。多个客户端各自拥有独立的 SHM ring，
 互不共享资源，避免了同一共享内存段上的竞争条件。
-此场景已在 `test_full_integration` 的 `three_clients_concurrent_invoke` 测试中验证通过。
+此场景已在 `test_full_integration` 的 `ThreeClientsConcurrentInvoke` 测试中验证通过。
 
 ## 10. 基于 OmniBinder 库构建独立项目
 
@@ -790,7 +798,7 @@ make install
 #   bin_host/  → omni-idlc，以及主机版 omni-cli/service_manager（普通主机构建时）
 #   bin_cross/ → 交叉编译版 omni-cli/service_manager（交叉编译时）
 #   include/   → omnibinder/*.h
-#   lib/       → libomnibinder.so, libomnibinder.a, cmake/OmniBinder/
+#   lib/       → libomnibinder.a, cmake/OmniBinder/
 ```
 
 下面示例中，将安装路径记为 `OMNIBINDER_DIR`：
@@ -931,7 +939,7 @@ int main() {
 
     MyServiceImpl service;
     runtime.registerService(&service);
-    runtime.publishTopic("StatusUpdate");
+    service.PublishStatusUpdate();
 
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {
@@ -1099,7 +1107,7 @@ int main(void) {
     /* 直接绑定生成的 impl 接口 */
     omni_service_t* svc = myapp_MyService_stub_create(runtime);
     omni_runtime_register_service(runtime, svc);
-    omni_runtime_publish_topic(runtime, "StatusUpdate");
+    omni_runtime_publish_topic(runtime, "StatusUpdate", myapp_StatusUpdate_TOPIC_IDL_HASH);
 
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {
