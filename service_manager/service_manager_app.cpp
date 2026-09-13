@@ -330,8 +330,7 @@ void ServiceManagerApp::closeClient(int fd) {
     // 其存活注册保持不动。
     std::vector<std::string> removed = registry_.removeByFd(fd);
     for (size_t i = 0; i < removed.size(); ++i) {
-        heartbeat_.stopTracking(removed[i]);
-        notifyServiceDeath(removed[i]);
+        notifyServiceRemoved(removed[i]);
     }
 
     // 清理死亡通知订阅

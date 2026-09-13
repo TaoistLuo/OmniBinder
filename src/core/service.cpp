@@ -18,6 +18,10 @@ const std::string& Service::name() const {
     return name_;
 }
 
+const char* Service::serviceName() const {
+    return name_.c_str();
+}
+
 uint16_t Service::port() const {
     return port_;
 }

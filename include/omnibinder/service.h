@@ -54,7 +54,11 @@ public:
     const std::string& getRegisterHost() const;
     void setShmConfig(const ShmConfig& config);
     ShmConfig shmConfig() const;
-    virtual const char* serviceName() const = 0;
+    /* @brief 服务名称（默认取自构造时传入的名称，子类可覆盖）
+     * @return 服务的 C 字符串名称
+     * @note   运行时注册/发现统一使用 name()；本方法为兼容与外部识别保留，
+     *         默认实现即返回 name()，子类无需再重复实现 */
+    virtual const char* serviceName() const;
     virtual const InterfaceInfo& interfaceInfo() const = 0;
 
 protected:

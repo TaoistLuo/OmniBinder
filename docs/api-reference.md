@@ -546,8 +546,8 @@ public:
     // 获取接口信息（由 IDL 生成的子类实现）
     virtual const InterfaceInfo& interfaceInfo() const = 0;
 
-    // 获取服务名（由 IDL 生成的子类实现）
-    virtual const char* serviceName() const = 0;
+    // 获取服务名（默认返回构造时传入的名称，子类可覆盖）
+    virtual const char* serviceName() const;
 
 protected:
     // 处理接口调用请求（由 IDL 生成的子类实现）

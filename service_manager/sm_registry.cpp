@@ -51,26 +51,15 @@ void ServiceManagerApp::handleUnregister(ClientConnection* conn, const Message& 
         return;
     }
 
-    bool success = registry_.removeService(name);
+    // 摘除可能经 notifyServiceDeath 发送失败重入 closeClient(fd)（自订阅场景），
+    // 故使用 conn 前需按 fd 重新校验存活（约束 1）。
+    bool success = removeServiceAndNotify(name, fd);
+
     if (success) {
-        heartbeat_.stopTracking(name);
-
-        // 先通知死亡订阅者，再做发布者清理（与心跳超时路径顺序一致）。
-        // notifyServiceDeath -> sendDeathNotify -> sendMessage 在发送失败时
-        // 可能重入 closeClient(fd)（自订阅场景），因此后续使用前必须按 fd
-        // 重新校验 conn 存活（约束 1）。
-        notifyServiceDeath(name);
-
         if (clients_.find(fd) == clients_.end()) {
-            // closeClient(fd) 已在其自身的 topic_manager_.removeByFd(fd)
-            // 调用中清理了该 fd 的发布者。
             return;
         }
         conn = clients_.find(fd)->second;
-
-        // 只清理该服务的发布者。同一 runtime 控制连接上的订阅关系
-        // 和同级服务保持有效。
-        topic_manager_.removePublishersByService(name, fd);
     }
 
     sendBoolReply(conn, MessageType::MSG_UNREGISTER_REPLY, msg.header.sequence, success);
@@ -229,22 +218,14 @@ void ServiceManagerApp::onHeartbeatCheck() {
         const std::string& name = timed_out[i];
         OMNI_LOG_WARN(TAG, "Service timed out: %s", name.c_str());
 
-        // 移除前先获取控制连接 fd
+        // 移除前先获取控制连接 fd，走与显式注销一致的摘除序列
         int fd = registry_.getControlFd(name);
-
-        if (!registry_.removeService(name)) {
+        if (!removeServiceAndNotify(name, fd)) {
             continue;
         }
 
         if (fd >= 0) {
             affected_fds.insert(fd);
-        }
-
-        // 保持既定顺序：先移除注册表条目，再通知死亡，
-        // 最后只清理该超时服务的发布者。
-        notifyServiceDeath(name);
-        if (fd >= 0) {
-            topic_manager_.removePublishersByService(name, fd);
         }
     }
 
@@ -280,6 +261,22 @@ void ServiceManagerApp::notifyServiceDeath(const std::string& service_name) {
             sendDeathNotify(it->second, service_name);
         }
     }
+}
+
+void ServiceManagerApp::notifyServiceRemoved(const std::string& name) {
+    heartbeat_.stopTracking(name);
+    notifyServiceDeath(name);
+}
+
+bool ServiceManagerApp::removeServiceAndNotify(const std::string& name, int fd) {
+    if (!registry_.removeService(name)) {
+        return false;
+    }
+    notifyServiceRemoved(name);
+    if (fd >= 0) {
+        topic_manager_.removePublishersByService(name, fd);
+    }
+    return true;
 }
 
 void ServiceManagerApp::sendDeathNotify(ClientConnection* conn,

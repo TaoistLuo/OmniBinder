@@ -308,7 +308,7 @@ void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
     os << "public:\n";
     os << "    " << svc.name << "Stub() : Service(\"" << svc.name << "\") {}\n";
     os << "    virtual ~" << svc.name << "Stub() {}\n\n";
-    os << "    const char* serviceName() const override { return \"" << svc.name << "\"; }\n";
+    // serviceName() 由基类默认返回构造名，无需在此重复生成
     os << "    const omnibinder::InterfaceInfo& interfaceInfo() const override;\n\n";
     
     for (size_t i = 0; i < svc.methods.size(); ++i) {

@@ -374,8 +374,7 @@ public:
     void PublishSystemAlert();
     void BroadcastSystemAlert(const SystemAlert& msg);
 
-    // ---- 服务名和接口信息（框架使用） ----
-    const char* serviceName() const override;
+    // ---- 接口信息（框架使用） ----
     const omnibinder::InterfaceInfo& interfaceInfo() const override;
 
 protected:

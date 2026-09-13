@@ -159,6 +159,19 @@ private:
     void sendTopicPublisherNotify(int subscriber_fd, const std::string& topic, const ServiceInfo& pub_info);
     void onHeartbeatCheck();
     void notifyServiceDeath(const std::string& service_name);
+    /*
+     * @brief  服务摘除后的统一收尾：停止控制面心跳跟踪并通知死亡订阅者
+     * @param[in]  name 服务名称
+     * @note   显式注销 / 心跳超时 / 连接关闭三条摘除路径共用，保证收尾顺序一致
+     */
+    void notifyServiceRemoved(const std::string& name);
+    /*
+     * @brief  单个服务的完整摘除：移除注册表条目 + 统一收尾 + 清理其发布者
+     * @param[in]  name 服务名称
+     * @param[in]  fd   该服务控制连接 fd；-1 表示未知，仅跳过发布者清理
+     * @return true 表示注册表确实移除了该条目；false 表示该服务未注册
+     */
+    bool removeServiceAndNotify(const std::string& name, int fd);
     void sendDeathNotify(ClientConnection* conn, const std::string& service_name);
     void closeClient(int fd);
     void sendMessage(ClientConnection* conn, Message& msg);
