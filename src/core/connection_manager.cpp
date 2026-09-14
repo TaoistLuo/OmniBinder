@@ -46,7 +46,7 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
     ServiceConnection* conn = new ServiceConnection();
     conn->service_name = service_name;
 
-    conn->transport = createClientTransport(service_name, host, port,
+    conn->transport = createClientConnection(service_name, host, port,
                                       local_host_id_, host_id, shm_config);
     if (!conn->transport) {
         delete conn;

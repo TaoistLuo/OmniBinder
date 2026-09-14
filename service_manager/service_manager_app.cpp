@@ -49,8 +49,8 @@ bool ServiceManagerApp::init(const std::string& host, uint16_t port) {
         return false;
     }
 
-    // 创建 TCP 服务端端点（统一契约：IServerTransport）
-    server_ = createServerTransport("service_manager", TransportType::TCP, TransportConfig());
+    // 创建 TCP 服务端端点（统一契约：IServerEndpoint）
+    server_ = createServerEndpoint("service_manager", TransportType::TCP, TransportConfig());
     if (!server_) {
         OMNI_LOG_ERROR(TAG, "Failed to create server transport");
         return false;
@@ -65,7 +65,7 @@ bool ServiceManagerApp::init(const std::string& host, uint16_t port) {
     }
 
     // 端点回调：接入/可读/断开统一由端点上报；client transport 由端点持有（非拥有）
-    server_->setAcceptCallback([this](int client_id, IClientTransport* client) {
+    server_->setAcceptCallback([this](int client_id, IMessageConnection* client) {
         this->onClientAccepted(client_id, client);
     });
     server_->setReadableCallback([this](int client_id) {
@@ -161,7 +161,7 @@ void ServiceManagerApp::registerEndpointFd(int fd) {
         });
 }
 
-void ServiceManagerApp::onClientAccepted(int client_id, IClientTransport* client) {
+void ServiceManagerApp::onClientAccepted(int client_id, IMessageConnection* client) {
     if (!client || clients_.find(client_id) != clients_.end()) {
         return;
     }

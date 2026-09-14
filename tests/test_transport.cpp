@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
-#include "transport/tcp_transport.h"
+#include "transport/tcp_connection.h"
 #include "transport/transport_selector.h"
 #include "platform/platform.h"
 
@@ -22,7 +22,7 @@ TEST_F(TransportTest, TcpEcho) {
     uint16_t port = server.port();
     ASSERT_GT(port, 0);
 
-    TcpClientTransport client;
+    TcpConnection client;
     int ret = client.connect("127.0.0.1", port);
     ASSERT_GE(ret, 0);
 
@@ -35,7 +35,7 @@ TEST_F(TransportTest, TcpEcho) {
     }
     ASSERT_EQ(client.state(), ConnectionState::CONNECTED);
 
-    IClientTransport* accepted = server.waitAccept();
+    IMessageConnection* accepted = server.waitAccept();
     ASSERT_NE(accepted, nullptr);
 
     const char* msg = "Hello OmniBinder!";
@@ -63,7 +63,7 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
     uint16_t port = server.port();
     ASSERT_GT(port, 0);
 
-    TcpClientTransport client;
+    TcpConnection client;
     int ret = client.connect("127.0.0.1", port);
     ASSERT_GE(ret, 0);
     if (ret == 1) {
@@ -75,7 +75,7 @@ TEST_F(TransportTest, TcpSendReturnsPartialWhenPeerNotDraining) {
     }
     ASSERT_EQ(client.state(), ConnectionState::CONNECTED);
 
-    IClientTransport* accepted = server.waitAccept();
+    IMessageConnection* accepted = server.waitAccept();
     ASSERT_NE(accepted, nullptr);
 
     int sndbuf = 4096;

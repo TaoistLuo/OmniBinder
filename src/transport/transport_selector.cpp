@@ -1,7 +1,8 @@
 #include "transport/transport_selector.h"
-#include "transport/tcp_transport.h"
-#include "transport/shm_client_transport.h"
-#include "transport/shm_server_transport.h"
+#include "transport/tcp_connection.h"
+#include "transport/tcp_server_endpoint.h"
+#include "transport/shm_client_connection.h"
+#include "transport/shm_server_endpoint.h"
 #include "platform/platform.h"
 #include "omnibinder/error.h"
 #include "omnibinder/log.h"
@@ -21,7 +22,7 @@ TransportSelectionPolicy chooseTransportPolicy(
         : TransportSelectionPolicy::USE_TCP;
 }
 
-IClientTransport* createClientTransport(const std::string& service_name,
+IMessageConnection* createClientConnection(const std::string& service_name,
                             const std::string& host, uint16_t port,
                             const std::string& local_host_id,
                             const std::string& remote_host_id,
@@ -33,7 +34,7 @@ IClientTransport* createClientTransport(const std::string& service_name,
             ? shm_config.req_ring_capacity : SHM_DEFAULT_REQ_RING_CAPACITY;
         size_t resp_cap = shm_config.resp_ring_capacity > 0
             ? shm_config.resp_ring_capacity : SHM_DEFAULT_RESP_RING_CAPACITY;
-        ShmClientTransport* shm = new ShmClientTransport(service_name, req_cap, resp_cap);
+        ShmClientConnection* shm = new ShmClientConnection(service_name, req_cap, resp_cap);
         int ret = shm->connect("", 0);
         if (ret == 0 && shm->state() == ConnectionState::CONNECTED) {
             OMNI_LOG_INFO(LOG_TAG, "Connected to %s via SHM (same machine)", service_name.c_str());
@@ -45,7 +46,7 @@ IClientTransport* createClientTransport(const std::string& service_name,
         delete shm;
     }
 
-    TcpClientTransport* tcp = new TcpClientTransport();
+    TcpConnection* tcp = new TcpConnection();
     int ret = tcp->connect(host, port);
     if (ret < 0) {
         OMNI_LOG_ERROR(LOG_TAG,
@@ -72,7 +73,7 @@ IClientTransport* createClientTransport(const std::string& service_name,
     return tcp;
 }
 
-IServerTransport* createServerTransport(const std::string& service_name,
+IServerEndpoint* createServerEndpoint(const std::string& service_name,
                                         TransportType type,
                                         const TransportConfig& config)
 {
@@ -82,18 +83,18 @@ IServerTransport* createServerTransport(const std::string& service_name,
             ? config.req_capacity : SHM_DEFAULT_REQ_RING_CAPACITY;
         size_t resp_cap = config.resp_capacity > 0
             ? config.resp_capacity : SHM_DEFAULT_RESP_RING_CAPACITY;
-        return new ShmServerTransport(service_name, req_cap, resp_cap);
+        return new ShmServerEndpoint(service_name, req_cap, resp_cap);
     }
     (void)service_name;
     (void)config;
-    return new TcpServerTransport();
+    return new TcpServerEndpoint();
 }
 
-IClientTransport* createControlTransport(const std::string& host, uint16_t port,
+IMessageConnection* createControlConnection(const std::string& host, uint16_t port,
                                          int& out_err)
 {
     out_err = 0;
-    TcpClientTransport* tcp = new TcpClientTransport();
+    TcpConnection* tcp = new TcpConnection();
     int ret = tcp->connect(host, port);
     if (ret < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "sm_connect_failed host=%s port=%u err=%d",

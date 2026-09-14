@@ -278,7 +278,7 @@ int OmniRuntime::Impl::reconnectServiceManager() {
     }
 
     int connect_err = 0;
-    IClientTransport* control_transport = createControlTransport(sm_host_, sm_port_, connect_err);
+    IMessageConnection* control_transport = createControlConnection(sm_host_, sm_port_, connect_err);
     if (!control_transport) {
         return connect_err;
     }

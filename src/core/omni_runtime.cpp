@@ -242,7 +242,7 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     owner_executor_.bindLoop(loop_);
     
     int connect_err = 0;
-    IClientTransport* control_transport = createControlTransport(sm_host, sm_port, connect_err);
+    IMessageConnection* control_transport = createControlConnection(sm_host, sm_port, connect_err);
     if (!control_transport) {
         delete loop_;
         loop_ = NULL;

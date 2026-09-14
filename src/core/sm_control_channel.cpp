@@ -16,11 +16,11 @@ bool SmControlChannel::isConnected() const {
     return transport_ && transport_->state() == ConnectionState::CONNECTED;
 }
 
-IClientTransport* SmControlChannel::transport() const {
+IMessageConnection* SmControlChannel::transport() const {
     return transport_;
 }
 
-void SmControlChannel::resetTransport(IClientTransport* t) {
+void SmControlChannel::resetTransport(IMessageConnection* t) {
     transport_ = t;
 }
 

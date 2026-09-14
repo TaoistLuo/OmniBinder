@@ -54,7 +54,7 @@ class EventLoop;
  */
 struct ServiceConnection {
     std::string     service_name;
-    IClientTransport*     transport;
+    IMessageConnection*     transport;
     Buffer          recv_buffer;
     bool            connected;
 

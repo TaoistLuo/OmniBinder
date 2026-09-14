@@ -83,8 +83,8 @@ struct LocalServiceEntry {
     Service*            service;
     uint16_t            port;
 
-    std::vector<IServerTransport*>    endpoints;
-    std::map<int, IClientTransport*> clients;
+    std::vector<IServerEndpoint*>    endpoints;
+    std::map<int, IMessageConnection*> clients;
     std::map<int, Buffer*>           client_recv_buffers;
     // 已注册到 EventLoop 的端点级 fd（含 TCP 客户端 fd / SHM liveness fd）
     std::set<int>                    endpoint_fds;
@@ -344,11 +344,11 @@ private:
     // 入站请求分派 — 端点事件 / TCP 流 / SHM 帧 / 本地调用
     // ============================================================
     void wireServiceEndpoint(const std::string& name, LocalServiceEntry* entry,
-                             IServerTransport* endpoint);
+                             IServerEndpoint* endpoint);
     void syncEndpointFds(const std::string& name, LocalServiceEntry* entry);
     void onServiceEndpointEvent(const std::string& name, int fd, uint32_t events);
     void onServiceClientAccepted(const std::string& name, int client_id,
-                                 IClientTransport* client);
+                                 IMessageConnection* client);
     void onServiceClientReadable(const std::string& name, int client_id);
     void onServiceClientDisconnected(const std::string& name, int client_id);
     void handleServiceClientMessage(const std::string& name, int client_id,
@@ -377,13 +377,13 @@ private:
     void sendHeartbeatToService(const std::string& name);
     void checkHeartbeatTimeout(const std::string& name);
     void sendHeartbeat();
-    bool sendOnFd(IClientTransport* transport, Message& msg);
-    bool sendRawOnFd(IClientTransport* transport, const uint8_t* data, size_t size);
+    bool sendOnFd(IMessageConnection* transport, Message& msg);
+    bool sendRawOnFd(IMessageConnection* transport, const uint8_t* data, size_t size);
     /*
      * @brief  发送可丢弃报文（如心跳 ACK）
      * @note   timeout=0 只尝试一次，不占用 owner 发送预算
      */
-    bool sendOnFdBestEffort(IClientTransport* transport, Message& msg);
+    bool sendOnFdBestEffort(IMessageConnection* transport, Message& msg);
 
     // ============================================================
     // 基础设施 — 线程模型 / 生命周期 / 工具

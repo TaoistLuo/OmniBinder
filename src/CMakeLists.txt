@@ -30,10 +30,12 @@ set(OMNIBINDER_SOURCES
     core/omnibinder_c.cpp
 
     # transport
-    transport/tcp_transport.cpp
+    transport/tcp_connection.cpp
+    transport/tcp_server_endpoint.cpp
     transport/shm_ring.cpp
-    transport/shm_client_transport.cpp
-    transport/shm_server_transport.cpp
+    transport/shm_client_connection.cpp
+    transport/shm_server_endpoint.cpp
+    transport/shm_server_connection.cpp
     transport/transport_selector.cpp
 
     # platform

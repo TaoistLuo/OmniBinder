@@ -5,7 +5,7 @@
 #include <omnibinder/omnibinder_c.h>
 #include <omnibinder/service.h>
 #include <omnibinder/message.h>
-#include "transport/tcp_transport.h"
+#include "transport/tcp_connection.h"
 #include <cstdio>
 #include <fstream>
 #include <thread>
@@ -22,7 +22,7 @@ static const uint32_t IFACE_ID     = fnv1a_32("IdlTestService");
 static const uint32_t SERVER_HASH  = 0xABCD0001u;
 static const uint32_t WRONG_HASH   = 0xDEAD0001u;
 
-static bool connectTcp(TcpClientTransport& t, const char* host, uint16_t port) {
+static bool connectTcp(TcpConnection& t, const char* host, uint16_t port) {
     int ret = t.connect(host, port);
     if (ret < 0) return false;
     if (ret == 1) {
@@ -36,12 +36,12 @@ static bool connectTcp(TcpClientTransport& t, const char* host, uint16_t port) {
     return t.state() == ConnectionState::CONNECTED;
 }
 
-static bool sendMsg(TcpClientTransport& t, const Message& msg) {
+static bool sendMsg(TcpConnection& t, const Message& msg) {
     Buffer out; msg.serialize(out);
     return t.send(out.data(), out.size()) == static_cast<int>(out.size());
 }
 
-static bool recvMsg(TcpClientTransport& t, Message& msg, int timeout_ms) {
+static bool recvMsg(TcpConnection& t, Message& msg, int timeout_ms) {
     Buffer input; uint8_t buf[2048];
     for (int i = 0; i < timeout_ms / 20; ++i) {
         int ret = t.recv(buf, sizeof(buf));
@@ -111,7 +111,7 @@ TEST_F(IdlMismatchTest, InvokeWrongIdlHashReturnsMismatch) {
     std::atomic<bool> srv_stop{false};
     std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(10); });
 
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc.port()));
 
     Message msg(MessageType::MSG_INVOKE, 1);
@@ -144,7 +144,7 @@ TEST_F(IdlMismatchTest, InvokeCorrectIdlHashSucceeds) {
     std::atomic<bool> srv_stop{false};
     std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(10); });
 
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc.port()));
 
     Message msg(MessageType::MSG_INVOKE, 2);
@@ -208,7 +208,7 @@ TEST_F(IdlMismatchTest, InvokeOneWayWrongHashErrorLog) {
 }
 
 TEST_F(IdlMismatchTest, TopicSubscribeReturnsPublisherIdlHash) {
-    TcpClientTransport sm_conn;
+    TcpConnection sm_conn;
     ASSERT_TRUE(connectTcp(sm_conn, "127.0.0.1", SM_PORT));
 
     {

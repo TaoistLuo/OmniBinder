@@ -12,9 +12,9 @@
 namespace omnibinder {
 namespace test {
 
-// 用 IServerTransport 契约驱动的最小 TCP 服务端测试夹具：start() 绑定端口，
+// 用 IServerEndpoint 契约驱动的最小 TCP 服务端测试夹具：start() 绑定端口，
 // waitAccept() 轮询监听 fd 并分派 onPollEvent() 触发接入回调。接入的
-// IClientTransport 由端点持有，用 releaseAccepted()/close() 释放。
+// IMessageConnection 由端点持有，用 releaseAccepted()/close() 释放。
 class TcpTestServer {
 public:
     TcpTestServer()
@@ -25,11 +25,11 @@ public:
     }
 
     bool start(const std::string& host = "127.0.0.1", uint16_t port = 0) {
-        server_ = createServerTransport("test_tcp_server", TransportType::TCP, TransportConfig());
+        server_ = createServerEndpoint("test_tcp_server", TransportType::TCP, TransportConfig());
         if (!server_) {
             return false;
         }
-        server_->setAcceptCallback([this](int client_id, IClientTransport* client) {
+        server_->setAcceptCallback([this](int client_id, IMessageConnection* client) {
             accepted_id_ = client_id;
             accepted_ = client;
         });
@@ -53,7 +53,7 @@ public:
 
     uint16_t port() const { return port_; }
 
-    IClientTransport* waitAccept(uint32_t timeout_ms = 5000) {
+    IMessageConnection* waitAccept(uint32_t timeout_ms = 5000) {
         for (uint32_t elapsed = 0; elapsed < timeout_ms && !accepted_; elapsed += 5) {
             if (listen_fd_ >= 0 && platform::waitFdReadable(listen_fd_, 5)) {
                 server_->onPollEvent(listen_fd_, EventLoop::EVENT_READ);
@@ -62,7 +62,7 @@ public:
         return accepted_;
     }
 
-    IClientTransport* accepted() const { return accepted_; }
+    IMessageConnection* accepted() const { return accepted_; }
 
     void releaseAccepted() {
         if (server_ && accepted_id_ >= 0) {
@@ -87,10 +87,10 @@ private:
     TcpTestServer(const TcpTestServer&);
     TcpTestServer& operator=(const TcpTestServer&);
 
-    IServerTransport* server_;
+    IServerEndpoint* server_;
     int listen_fd_;
     uint16_t port_;
-    IClientTransport* accepted_;
+    IMessageConnection* accepted_;
     int accepted_id_;
 };
 

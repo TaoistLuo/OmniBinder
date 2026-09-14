@@ -120,8 +120,8 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 
 `LocalServiceEntry` 直接持有具体 transport 对象完成本地服务数据面托管：
 
-- `std::vector<IServerTransport*> endpoints` 持有各传输端点：TCP 端点负责 listen / accept，SHM 端点负责 UDS 握手与 per-client ring
-- 端点接入的客户端统一为 `IClientTransport*`，并配套拆包 `Buffer*` 与端点级 fd 集合
+- `std::vector<IServerEndpoint*> endpoints` 持有各传输端点：TCP 端点负责 listen / accept，SHM 端点负责 UDS 握手与 per-client ring
+- 端点接入的客户端统一为 `IMessageConnection*`，并配套拆包 `Buffer*` 与端点级 fd 集合
 - `OmniRuntime::Impl` 的私有方法从 transport 侧收到的完整 `Message` 中执行 invoke / topic / diagnostic 的协议与业务分派
 - 所有 transport 销毁前通过 `removeServiceEndpointsFromLoop()` 从 EventLoop 摘除端点级 fd
 
@@ -133,7 +133,7 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 - 避免重复建立直连
 - 根据 `host_id` 判断同机，同机优先 SHM
 - SHM 失败后降级 TCP
-- 通过 `createClientTransport()` 创建实际数据面 transport
+- 通过 `createClientConnection()` 创建实际数据面 transport
 - 处理直连消息与断开回调
 
 ## 4. Transport 选择策略
@@ -151,13 +151,15 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 3. 如果不同 → 直接使用 TCP
 4. 如果 SHM 建立失败 → 自动回退到 TCP
 
-这一策略由 `src/transport/transport_selector.h` / `transport_selector.cpp` 中的 `createClientTransport()` 实现。
-`ConnectionManager::getOrCreateConnection()` 调用 `createClientTransport()`，传入 service_name、host、port、
+这一策略由 `src/transport/transport_selector.h` / `transport_selector.cpp` 中的 `createClientConnection()` 实现。
+`ConnectionManager::getOrCreateConnection()` 调用 `createClientConnection()`，传入 service_name、host、port、
 双方 host_id 和 ShmConfig。函数内部判断同机后尝试 SHM，失败或跨机时自动回退到 TCP。
 
-该扩展点在 `transport_selector` 中，是源码级扩展边界，不属于已安装公共 API，
-也不承诺动态插件或二进制 ABI。`ConnectionManager` 出站连接使用 `createClientTransport()`；
-本地服务 hosting 在 `OmniRuntime::Impl` 中直接创建 transport 对象，不经过 `createClientTransport()`。
+`transport_selector` 是新增传输的落点，但属**源码级、侵入式**扩展：新增传输还需同步修改 core（`TransportType`
+分支、服务端端点半创建、topic 订阅模型），**非单点接入**，也不属于已安装公共 API、不承诺动态插件或二进制 ABI；
+仅适用于与"点对点连接"模型一致的传输，**总线型传输（I2C/RS-485 等）不在支持范围**。
+`ConnectionManager` 出站连接使用 `createClientConnection()`；
+本地服务 hosting 在 `OmniRuntime::Impl` 中直接创建端点对象（`TcpServerEndpoint` / `ShmServerEndpoint`），不经过 `createClientConnection()`。
 `ServiceManager` 控制面仍固定使用 TCP。
 
 ## 5. SHM 架构
@@ -232,7 +234,7 @@ setShmConfig(ShmConfig(16 * 1024, 16 * 1024));
 - **Linux**: `eventfd + epoll`，通过 AF_UNIX (SCM_RIGHTS) 交换 fd
 - **Windows**: Named Pipe + IOCP overlapped ReadFile，通过 TCP loopback 交换 pipe 名称
 - Client `send()` → notify 服务端 master eventfd → 服务端 epoll 唤醒 → 排空所有客户端请求 ring
-- Server 客户端连接 `IClientTransport::send()` → notify 客户端 resp eventfd → 客户端 epoll 唤醒 → 读取响应
+- Server 客户端连接 `IMessageConnection::send()` → notify 客户端 resp eventfd → 客户端 epoll 唤醒 → 读取响应
 - 每对 notify/consume 严格配对，避免 level-triggered epoll 假唤醒
 
 ## 6. 服务生命周期

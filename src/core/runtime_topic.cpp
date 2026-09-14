@@ -194,7 +194,7 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
                 topic_runtime_.removeTcpSubscriber(topic_id, client_id);
                 continue;
             }
-            std::map<int, IClientTransport*>::iterator tit =
+            std::map<int, IMessageConnection*>::iterator tit =
                 eit->second->clients.find(client_id);
             if (tit == eit->second->clients.end() || !tit->second) {
                 topic_runtime_.removeTcpSubscriber(topic_id, client_id);
@@ -221,7 +221,7 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
             if (eit == local_services_.end()) {
                 continue;
             }
-            std::map<int, IClientTransport*>::iterator tit =
+            std::map<int, IMessageConnection*>::iterator tit =
                 eit->second->clients.find(static_cast<int>(shm_subscribers[i].client_id));
             if (tit == eit->second->clients.end() || !tit->second) {
                 continue;

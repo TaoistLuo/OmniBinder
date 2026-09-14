@@ -61,7 +61,7 @@ int OmniRuntime::Impl::registerServiceInternal(Service* service) {
 
 int OmniRuntime::Impl::initializeServiceListener(LocalServiceEntry* entry, Service* service,
                                                  std::string& advertise_host) {
-    IServerTransport* tcp = createServerTransport(service->name(), TransportType::TCP,
+    IServerEndpoint* tcp = createServerEndpoint(service->name(), TransportType::TCP,
                                                   TransportConfig());
     if (!tcp) {
         return static_cast<int>(ErrorCode::ERR_LISTEN_FAILED);
@@ -106,9 +106,9 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
     // SHM 端点：每个客户端创建自己的 SHM，服务端通过握手打开；
     // 容量为 0 时由 SHM 传输使用默认值。
     TransportConfig config(req_ring_capacity, resp_ring_capacity);
-    IServerTransport* shm = createServerTransport(name, TransportType::SHM, config);
+    IServerEndpoint* shm = createServerEndpoint(name, TransportType::SHM, config);
     if (!shm) {
-        OMNI_LOG_WARN(LOG_TAG, "createServerTransport(SHM) failed for service %s", name.c_str());
+        OMNI_LOG_WARN(LOG_TAG, "createServerEndpoint(SHM) failed for service %s", name.c_str());
         return;
     }
     if (shm->start("", 0, config) != 0) {
@@ -122,9 +122,9 @@ void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServi
 }
 
 void OmniRuntime::Impl::wireServiceEndpoint(const std::string& name, LocalServiceEntry* entry,
-                                            IServerTransport* endpoint) {
+                                            IServerEndpoint* endpoint) {
     // 回调只捕获 name：entry 可能被用户回调注销释放，回调内必须按名重查（约束 1）
-    endpoint->setAcceptCallback([this, name](int client_id, IClientTransport* client) {
+    endpoint->setAcceptCallback([this, name](int client_id, IMessageConnection* client) {
         onServiceClientAccepted(name, client_id, client);
     });
     endpoint->setReadableCallback([this, name](int client_id) {
@@ -215,7 +215,7 @@ void OmniRuntime::Impl::detachClientsFromEntry(const std::string& name,
     if (!entry) {
         return;
     }
-    for (std::map<int, IClientTransport*>::iterator it = entry->clients.begin();
+    for (std::map<int, IMessageConnection*>::iterator it = entry->clients.begin();
          it != entry->clients.end(); ++it) {
         client_id_to_service_.erase(it->first);
         topic_runtime_.removeTcpSubscriberFd(it->first);

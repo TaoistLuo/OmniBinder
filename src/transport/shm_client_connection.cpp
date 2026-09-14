@@ -1,4 +1,4 @@
-#include "transport/shm_client_transport.h"
+#include "transport/shm_client_connection.h"
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
 #include "platform/platform.h"
@@ -6,11 +6,11 @@
 #include <atomic>
 #include <stdio.h>
 
-#define LOG_TAG "ShmClientTransport"
+#define LOG_TAG "ShmClientConnection"
 
 namespace omnibinder {
 
-ShmClientTransport::ShmClientTransport(const std::string& service_name,
+ShmClientConnection::ShmClientConnection(const std::string& service_name,
                                        size_t req_ring_capacity,
                                        size_t resp_ring_capacity)
     : service_name_(service_name)
@@ -26,7 +26,7 @@ ShmClientTransport::ShmClientTransport(const std::string& service_name,
 {
 }
 
-ShmClientTransport::~ShmClientTransport()
+ShmClientConnection::~ShmClientConnection()
 {
     close();
 }
@@ -35,7 +35,7 @@ ShmClientTransport::~ShmClientTransport()
 // 连接：创建自己的 SHM + 握手交换通知句柄
 // ============================================================
 
-bool ShmClientTransport::initClient()
+bool ShmClientConnection::initClient()
 {
     std::string server_shm_name = generateShmName(service_name_);
 
@@ -131,7 +131,7 @@ bool ShmClientTransport::initClient()
     return true;
 }
 
-void ShmClientTransport::cleanup()
+void ShmClientConnection::cleanup()
 {
     if (handshake_channel_) {
         platform::handshakeClose(handshake_channel_);
@@ -157,10 +157,10 @@ void ShmClientTransport::cleanup()
 }
 
 // ============================================================
-// IClientTransport
+// IMessageConnection
 // ============================================================
 
-int ShmClientTransport::connect(const std::string& host, uint16_t port)
+int ShmClientConnection::connect(const std::string& host, uint16_t port)
 {
     (void)host;
     (void)port;
@@ -178,7 +178,7 @@ int ShmClientTransport::connect(const std::string& host, uint16_t port)
     return 0;
 }
 
-int ShmClientTransport::send(const uint8_t* data, size_t length)
+int ShmClientConnection::send(const uint8_t* data, size_t length)
 {
     if (state_ != ConnectionState::CONNECTED) {
         return -1;
@@ -212,7 +212,7 @@ int ShmClientTransport::send(const uint8_t* data, size_t length)
     return static_cast<int>(length);
 }
 
-int ShmClientTransport::sendAll(const uint8_t* data, size_t length,
+int ShmClientConnection::sendAll(const uint8_t* data, size_t length,
                                 uint32_t timeout_ms, uint32_t* elapsed_ms)
 {
     int64_t start_ms = platform::currentTimeMs();
@@ -257,19 +257,19 @@ int ShmClientTransport::sendAll(const uint8_t* data, size_t length,
     return 0;
 }
 
-void ShmClientTransport::consumeReadiness()
+void ShmClientConnection::consumeReadiness()
 {
     if (event_fd_ >= 0) {
         platform::eventFdConsume(event_fd_);
     }
 }
 
-bool ShmClientTransport::isFramed() const
+bool ShmClientConnection::isFramed() const
 {
     return true;
 }
 
-int ShmClientTransport::recv(uint8_t* buf, size_t buf_size)
+int ShmClientConnection::recv(uint8_t* buf, size_t buf_size)
 {
     if (state_ != ConnectionState::CONNECTED) {
         return -1;
@@ -303,7 +303,7 @@ int ShmClientTransport::recv(uint8_t* buf, size_t buf_size)
     return static_cast<int>(msg_len);
 }
 
-int ShmClientTransport::peekFrameSize(size_t& out_length)
+int ShmClientConnection::peekFrameSize(size_t& out_length)
 {
     out_length = 0;
     if (state_ != ConnectionState::CONNECTED || !ctrl_) return -1;
@@ -317,7 +317,7 @@ int ShmClientTransport::peekFrameSize(size_t& out_length)
     return ret;
 }
 
-void ShmClientTransport::close()
+void ShmClientConnection::close()
 {
     if (state_ == ConnectionState::DISCONNECTED && shm_addr_ == NULL) {
         return;
@@ -328,17 +328,17 @@ void ShmClientTransport::close()
     state_ = ConnectionState::DISCONNECTED;
 }
 
-ConnectionState ShmClientTransport::state() const
+ConnectionState ShmClientConnection::state() const
 {
     return state_;
 }
 
-int ShmClientTransport::fd() const
+int ShmClientConnection::fd() const
 {
     return event_fd_;
 }
 
-TransportType ShmClientTransport::type() const
+TransportType ShmClientConnection::type() const
 {
     return TransportType::SHM;
 }
@@ -347,26 +347,26 @@ TransportType ShmClientTransport::type() const
 // SHM 指针导航
 // ============================================================
 
-ShmRingHeader* ShmClientTransport::requestRing() const
+ShmRingHeader* ShmClientConnection::requestRing() const
 {
     if (!shm_addr_) return NULL;
     return shmRequestRingFromBase(static_cast<uint8_t*>(shm_addr_));
 }
 
-uint8_t* ShmClientTransport::requestData() const
+uint8_t* ShmClientConnection::requestData() const
 {
     if (!shm_addr_) return NULL;
     return shmRequestDataFromBase(static_cast<uint8_t*>(shm_addr_));
 }
 
-ShmRingHeader* ShmClientTransport::responseRing() const
+ShmRingHeader* ShmClientConnection::responseRing() const
 {
     if (!shm_addr_ || !ctrl_) return NULL;
     return shmResponseRingFromBase(static_cast<uint8_t*>(shm_addr_),
                                    static_cast<uint32_t>(requested_req_ring_capacity_));
 }
 
-uint8_t* ShmClientTransport::responseData() const
+uint8_t* ShmClientConnection::responseData() const
 {
     if (!shm_addr_ || !ctrl_) return NULL;
     return shmResponseDataFromBase(static_cast<uint8_t*>(shm_addr_),

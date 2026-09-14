@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * @file        message_reader.h
  * @brief       统一消息读取器
- * @details     从 IClientTransport 读出下一条完整协议消息，屏蔽成帧传输（SHM）与字节流
+ * @details     从 IMessageConnection 读出下一条完整协议消息，屏蔽成帧传输（SHM）与字节流
  *              传输（TCP）的差异。core 的所有入站读路径（服务端请求、数据面直连、
  *              SM 控制通道）共用本读取器，不再各自手写组帧循环。
  *
@@ -49,7 +49,7 @@ namespace omnibinder {
  * @note   内部消费传输就绪通知；成帧传输直接按帧解析，不经过 recv_buffer；
  *         返回 -1 时调用方决定重同步或断开（本函数不改动连接状态之外的缓冲）
  */
-int readNextMessage(IClientTransport& transport, Buffer& recv_buffer, Message& out);
+int readNextMessage(IMessageConnection& transport, Buffer& recv_buffer, Message& out);
 
 } // namespace omnibinder
 

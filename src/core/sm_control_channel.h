@@ -73,13 +73,13 @@ public:
      * @brief  获取当前控制通道传输对象
      * @return 传输对象指针；未连接时为 NULL
      */
-    IClientTransport* transport() const;
+    IMessageConnection* transport() const;
 
     /*
      * @brief  设置控制通道传输对象（接管所有权，不释放旧对象）
      * @param[in] t 新传输对象，可为 NULL
      */
-    void resetTransport(IClientTransport* t);
+    void resetTransport(IMessageConnection* t);
 
     /*
      * @brief  从 event-loop 摘除 fd 后关闭并释放当前传输对象，最后置空
@@ -97,7 +97,7 @@ public:
 
 private:
     PendingReplyTable pending_replies_;
-    IClientTransport* transport_;
+    IMessageConnection* transport_;
     Buffer recv_buffer_;
 };
 

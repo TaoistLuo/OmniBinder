@@ -40,7 +40,7 @@
 
 namespace omnibinder {
 
-class IClientTransport;
+class IMessageConnection;
 
 enum class TransportSelectionPolicy {
     PREFER_SHM,
@@ -52,17 +52,19 @@ TransportSelectionPolicy chooseTransportPolicy(
     const std::string& remote_host_id);
 
 /*
- * @brief  传输选择 — 扩展点
+ * @brief  创建客户端连接（当前策略：同机优先 SHM，失败/跨机回退 TCP）
  * @param[in]  service_name   目标服务名
  * @param[in]  host           目标主机
  * @param[in]  port           目标端口
  * @param[in]  local_host_id  本机 host_id
  * @param[in]  remote_host_id 远端 host_id
  * @param[in]  shm_config     SHM 容量配置
- * @return 客户端传输实例
- * @note   当前：同机优先 SHM，失败/跨机使用 TCP；如需添加新传输（如 I2C/UDP/RDMA），在此函数中扩展
+ * @return 已连接的 IMessageConnection；失败返回 NULL
+ * @note   这里是接入新传输的落点，但只适用于与"点对点连接"模型一致的传输；
+ *         总线型传输（I2C/RS-485 等）的拓扑与寻址模型不同，需配合 core 侧改动，
+ *         不是在此单点即可扩展
  */
-IClientTransport* createClientTransport(const std::string& service_name,
+IMessageConnection* createClientConnection(const std::string& service_name,
                             const std::string& host, uint16_t port,
                             const std::string& local_host_id,
                             const std::string& remote_host_id,
@@ -73,11 +75,11 @@ IClientTransport* createClientTransport(const std::string& service_name,
  * @param[in]  service_name 服务名
  * @param[in]  type         传输类型
  * @param[in]  config       端点容量配置
- * @return 未启动的 IServerTransport；调用方负责 start()/close()/delete；NULL 表示该传输不可用
+ * @return 未启动的 IServerEndpoint；调用方负责 start()/close()/delete；NULL 表示该传输不可用
  * @note   TCP：service_name/config 忽略，host/port 由 start() 提供；
  *         SHM：service_name 派生握手路径，config 提供默认 ring 容量
  */
-IServerTransport* createServerTransport(const std::string& service_name,
+IServerEndpoint* createServerEndpoint(const std::string& service_name,
                             TransportType type,
                             const TransportConfig& config);
 
@@ -89,7 +91,7 @@ IServerTransport* createServerTransport(const std::string& service_name,
  * @return 连接成功的传输实例；失败返回 NULL
  * @note   保留 sm_connect_failed / sm_connect_timeout 日志关键词与错误码语义
  */
-IClientTransport* createControlTransport(const std::string& host, uint16_t port,
+IMessageConnection* createControlConnection(const std::string& host, uint16_t port,
                                          int& out_err);
 
 } // namespace omnibinder

@@ -1,11 +1,11 @@
 /**************************************************************************************************
  * @file        transport.h
  * @brief       传输层抽象
- * @details     定义客户端侧传输抽象接口 IClientTransport（connect/send/sendAll/recv/
+ * @details     定义消息连接抽象接口 IMessageConnection（send/sendAll/recv/
  *              consumeReadiness/isFramed）。基础 I/O 为非阻塞设计，配合 EventLoop 使用；
  *              sendAll 提供限时全量发送语义，供 core 在有超时预算的发送路径使用。
  *              成帧能力（isFramed）让 core 无需按 TransportType 分支即可选择正确的
- *              读帧策略。具体实现包括 TcpClientTransport 和 ShmClientTransport。
+ *              读帧策略。具体实现包括 TcpConnection 和 ShmClientConnection。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -73,26 +73,20 @@ struct TransportConfig {
 // ============================================================
 // 前置声明
 // ============================================================
-class IClientTransport;
-class IServerTransport;
+class IMessageConnection;
+class IServerEndpoint;
 
 // ============================================================
-// IClientTransport — 客户端传输接口
+// IMessageConnection — 消息连接接口（双向收发通道，不区分方向）
 //
 // 表示一条双向消息连接，可能是字节流（TCP）或成帧（SHM）。
 // 基础 I/O（send/recv）为非阻塞模式，配合 EventLoop 使用：
 // 按需将 fd() 注册为读写事件；sendAll 在超时预算内等待可写/空间。
 // ============================================================
 
-class IClientTransport {
+class IMessageConnection {
 public:
-    virtual ~IClientTransport() {}
-
-    /* @brief 发起非阻塞连接
-     * @param[in]  host 目标主机
-     * @param[in]  port 目标端口
-     * @return 0 立即成功，1 连接进行中（状态变为 CONNECTING），-1 失败（状态变为 ERROR） */
-    virtual int connect(const std::string& host, uint16_t port) = 0;
+    virtual ~IMessageConnection() {}
 
     /* @brief 发送数据（尽力而为，非阻塞）
      * @param[in]  data   数据缓冲区
@@ -154,20 +148,20 @@ public:
 };
 
 // ============================================================
-// IServerTransport — 服务端托管端点接口
+// IServerEndpoint — 服务端托管端点接口
 //
 // 与传输种类无关：TCP 监听/accept 与 SHM 握手/ring 都实现同一接口。
 // 端点只负责"接入、事件、生命周期"，并把每个已接入的客户端产出为
-// 一条 IClientTransport 交给 core；core 只用 IClientTransport 读写数据。
+// 一条 IMessageConnection 交给 core；core 只用 IMessageConnection 读写数据。
 // ============================================================
 
-class IServerTransport {
+class IServerEndpoint {
 public:
-    typedef std::function<void(int client_id, IClientTransport* client)> AcceptCallback;
+    typedef std::function<void(int client_id, IMessageConnection* client)> AcceptCallback;
     typedef std::function<void(int client_id)> ReadableCallback;
     typedef std::function<void(int client_id)> DisconnectCallback;
 
-    virtual ~IServerTransport() {}
+    virtual ~IServerEndpoint() {}
 
     virtual TransportType type() const = 0;
 

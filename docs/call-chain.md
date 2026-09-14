@@ -10,7 +10,7 @@ OmniBinder 的运行时分成控制面和数据面：
 
 - **控制面**：`OmniRuntime::Impl` 通过 `SmControlChannel` 连接 `ServiceManager`，发送注册、查找、订阅、运行时诊断等控制消息。
 - **数据面**：客户端和服务端通过 `ConnectionManager` 建立直连，数据路径自动选择 SHM 或 TCP。
-- **服务端数据分派**：`LocalServiceEntry` 通过 `std::vector<IServerTransport*>` 持有 TCP / SHM 端点（`TcpServerTransport` / `ShmServerTransport`），通过 `OmniRuntime::Impl` 的私有方法分派完整消息。
+- **服务端数据分派**：`LocalServiceEntry` 通过 `std::vector<IServerEndpoint*>` 持有 TCP / SHM 端点（`TcpServerEndpoint` / `ShmServerEndpoint`），通过 `OmniRuntime::Impl` 的私有方法分派完整消息。
 - **Topic 状态**：`TopicRuntime` 保存本地订阅回调、已发布 topic、TCP 订阅者 fd 和 SHM 订阅者 `(service_name, client_id)`。
 - **同步等待**：`RpcRuntime` 管理 sequence、默认超时和 `waitForReply()` 的等待状态；控制面 reply 存储在 `SmControlChannel::pending_replies_`，数据面 reply 存储在 `RpcRuntime` 独立的 `dataReplies()` 槽表，SM 重连只清理控制面槽。
 
@@ -24,8 +24,8 @@ ServiceManager 只负责服务注册发现、Topic 发布/订阅关系、死亡�
 用户代码 registerService(service)
   -> OmniRuntime::Impl::registerService()
   -> registerServiceInternal()
-     - initializeServiceListener()：createServerTransport(TCP) 启动 listen 并 wireServiceEndpoint()
-     - initializeServiceShm()：createServerTransport(SHM) 启动 UDS 握手监听（失败仅告警，自动降级 TCP）
+     - initializeServiceListener()：createServerEndpoint(TCP) 启动 listen 并 wireServiceEndpoint()
+     - initializeServiceShm()：createServerEndpoint(SHM) 启动 UDS 握手监听（失败仅告警，自动降级 TCP）
      - syncEndpointFds() 把端点级 fd（listen / master / handshake 等）注册到 EventLoop
   -> registerServiceWithManager()
      - sendRegisterToManager() 构造 ServiceInfo{name, host, port, host_id, shm_config, interfaces}
@@ -64,16 +64,16 @@ ServiceProxyBase::connect()
 
 ```text
 ConnectionManager::getOrCreateConnection()
-  -> 调用 createClientTransport(service_name, host, port, local_host_id, remote_host_id, shm_config)
-     - 同机：尝试 SHM（创建 ShmClientTransport 并 connect）
-     - 同机 SHM 失败/跨机：创建 TcpClientTransport 并 connect
-     - 成功返回 CONNECTED 状态的 IClientTransport*，移入 ServiceConnection
+  -> 调用 createClientConnection(service_name, host, port, local_host_id, remote_host_id, shm_config)
+     - 同机：尝试 SHM（创建 ShmClientConnection 并 connect）
+     - 同机 SHM 失败/跨机：创建 TcpConnection 并 connect
+     - 成功返回 CONNECTED 状态的 IMessageConnection*，移入 ServiceConnection
      - 失败返回 NULL，上层返回 ERR_CONNECT_FAILED
 ```
 
 SHM ring 容量来自服务注册时上报的 `ServiceInfo.shm_config`；未配置时使用 `SHM_DEFAULT_REQ_RING_CAPACITY` / `SHM_DEFAULT_RESP_RING_CAPACITY`。
 TCP provider 内部完成非阻塞 connect 的 writable 等待与 `checkConnectComplete()`，因此 `ConnectionManager` 不再依赖具体 TCP 类型。
-`createClientTransport()` 位于 `src/transport/transport_selector.{h,cpp}`，是内部源码扩展边界。service hosting 直接在 `OmniRuntime::Impl` 中创建 `TcpServerTransport` 和 `ShmServerTransport`，不经过 `createClientTransport()`。ServiceManager 控制面仍固定使用 TCP。
+`createClientConnection()` 位于 `src/transport/transport_selector.{h,cpp}`，是新增传输的落点，但属源码级、侵入式扩展（新增传输还需同步修改 core：`TransportType` 分支、端点半创建、topic 订阅模型），非单点接入。service hosting 直接在 `OmniRuntime::Impl` 中创建 `TcpServerEndpoint` 和 `ShmServerEndpoint`，不经过 `createClientConnection()`。ServiceManager 控制面仍固定使用 TCP。
 
 ---
 
@@ -106,7 +106,7 @@ TCP provider 内部完成非阻塞 connect 的 writable 等待与 `checkConnectC
 
 ```text
 TCP listener/client fd 可读
-  -> TcpServerTransport::onPollEvent() / 客户端 IClientTransport::recv() / 拆 Message frame
+  -> TcpServerEndpoint::onPollEvent() / 客户端 IMessageConnection::recv() / 拆 Message frame
   -> OmniRuntime::Impl::onServiceClientReadable()
   -> OmniRuntime::Impl::handleServiceClientMessage()
      - MSG_INVOKE         -> OmniRuntime::Impl::onInvokeRequest()
@@ -130,13 +130,13 @@ TCP listener/client fd 可读
 ```text
 SHM request notify fd 可读
   -> eventFdConsume()
-  -> ShmServerTransport::onPollEvent() 扫描 client request ring / 客户端 IClientTransport::recv() 拆帧
+  -> ShmServerEndpoint::onPollEvent() 扫描 client request ring / 客户端 IMessageConnection::recv() 拆帧
   -> OmniRuntime::Impl::handleServiceClientMessage(service_name, client_id, msg)
 ```
 
 `OmniRuntime::Impl::handleServiceClientMessage()` 对 SHM 单帧消息分派：
 
-- `MSG_INVOKE`：回到 `dispatchLocalInvoke()`，再把 reply 序列化后通过服务端客户端连接（`IClientTransport::send()`）写回响应 ring。
+- `MSG_INVOKE`：回到 `dispatchLocalInvoke()`，再把 reply 序列化后通过服务端客户端连接（`IMessageConnection::send()`）写回响应 ring。
 - `MSG_INVOKE_ONEWAY`：只执行本地调用，不发 reply。
 - `MSG_SUBSCRIBE_BROADCAST`：记录 SHM topic 订阅者。
 - `MSG_BROADCAST`：本地 dispatch 给订阅回调。
@@ -153,7 +153,7 @@ ConnectionManager fd 回调
      - MSG_HEARTBEAT_ACK：刷新 heartbeat state
 ```
 
-对于 SHM 客户端，`ShmClientTransport::recv()` 从 response ring 读取消息并触发同一条 `onDirectMessage()` 路径。
+对于 SHM 客户端，`ShmClientConnection::recv()` 从 response ring 读取消息并触发同一条 `onDirectMessage()` 路径。
 
 ---
 
@@ -216,7 +216,7 @@ SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo)
      - conn_mgr_->sendMessage(pub_name, sub_msg)，并把话题订阅绑定到该连接的 ReconnectConfig
 ```
 
-发布者收到 `MSG_SUBSCRIBE_BROADCAST` 后，由 `handleServiceClientMessage()` 的 subscribe 分支按 `IClientTransport::isFramed()` 区分：
+发布者收到 `MSG_SUBSCRIBE_BROADCAST` 后，由 `handleServiceClientMessage()` 的 subscribe 分支按 `IMessageConnection::isFramed()` 区分：
 
 - TCP 路径：`TopicRuntime::addTcpSubscriber(topic_id, client_id)`。
 - SHM 路径：`TopicRuntime::addShmSubscriberService(topic_id, service_name, client_id)`。
@@ -228,8 +228,8 @@ SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo)
   -> runtime.broadcast(topic_id, payload)
   -> broadcastInternal(topic_id, payload)
      - 构造 MSG_BROADCAST(topic_id, data_length, data)
-     - TCP 订阅者：按 client_id 找到 IClientTransport，sendAll(timeout=0)；发送不完整视为连接损坏，走断开路径
-     - SHM 订阅者：按 service_name/client_id 找到 LocalServiceEntry 的客户端连接，走 IClientTransport::send()（ring 满丢帧不断开）
+     - TCP 订阅者：按 client_id 找到 IMessageConnection，sendAll(timeout=0)；发送不完整视为连接损坏，走断开路径
+     - SHM 订阅者：按 service_name/client_id 找到 LocalServiceEntry 的客户端连接，走 IMessageConnection::send()（ring 满丢帧不断开）
 ```
 
 订阅者收到 `MSG_BROADCAST` 后，TCP 和 SHM 最终都调用 `TopicRuntime::dispatch(topic_id, data)`，再进入用户注册的 `TopicCallback`。
@@ -311,10 +311,12 @@ watcher runtime
 | `src/core/sm_control_channel.cpp` | SM 控制连接收发缓冲（持有控制面 PendingReplyTable） |
 | `src/core/connection_manager.cpp` | 数据面连接创建/复用/删除，SHM/TCP 选择和发送 |
 | `src/core/topic_runtime.cpp` | 本地 topic 回调、publisher、TCP/SHM subscriber 状态 |
-| `src/transport/shm_client_transport.cpp` | 客户端 per-client SHM：UDS 握手、request/response ring、eventfd |
-| `src/transport/shm_server_transport.cpp` | 服务端 SHM 端点：握手监听、per-client ring 映射、eventfd 通知 |
-| `src/transport/tcp_transport.cpp` | TCP connect/listen/accept/send/recv |
-| `src/transport/transport_selector.cpp` | `createClientTransport()` 自由函数：同机 SHM→TCP 自动选择 |
+| `src/transport/shm_client_connection.cpp` | 客户端 per-client SHM 出站连接：UDS 握手、request/response ring、eventfd |
+| `src/transport/shm_server_connection.cpp` | 服务端 per-client SHM 入站连接：请求/响应 ring 适配 |
+| `src/transport/shm_server_endpoint.cpp` | 服务端 SHM 端点：握手监听、per-client ring 映射、eventfd 通知 |
+| `src/transport/tcp_connection.cpp` | TCP 连接：connect/send/recv（出站+入站共用） |
+| `src/transport/tcp_server_endpoint.cpp` | TCP 端点：listen/accept |
+| `src/transport/transport_selector.cpp` | `createClientConnection()` 自由函数：同机 SHM→TCP 自动选择 |
 | `service_manager/main.cpp` | 入口函数（已拆分为 5 个文件） |
 | `service_manager/service_manager_app.cpp` | 主循环与消息分派 |
 | `service_manager/sm_registry.cpp` | 服务注册/发现控制面 |

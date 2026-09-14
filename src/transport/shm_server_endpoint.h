@@ -1,9 +1,9 @@
 /**************************************************************************************************
- * @file        shm_server_transport.h
+ * @file        shm_server_endpoint.h
  * @brief       共享内存服务端传输实现
- * @details     基于 per-client SHM 架构的 IServerTransport 实现：
+ * @details     基于 per-client SHM 架构的 IServerEndpoint 实现：
  *              服务端创建握手监听 + 主控 eventfd，接受客户端握手后打开客户端 SHM，
- *              为每个客户端产出私有 IClientTransport（仅在本文件内定义/使用），
+ *              为每个客户端产出私有 IMessageConnection（仅在本文件内定义/使用），
  *              并统一上报接入/可读/断开事件。
  *
  *              客户端 ID 命名空间：SHM 客户端 ID 从 SHM_CLIENT_ID_BASE 起
@@ -36,8 +36,8 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *************************************************************************************************/
-#ifndef OMNIBINDER_SHM_SERVER_TRANSPORT_H
-#define OMNIBINDER_SHM_SERVER_TRANSPORT_H
+#ifndef OMNIBINDER_SHM_SERVER_ENDPOINT_H
+#define OMNIBINDER_SHM_SERVER_ENDPOINT_H
 
 #include "omnibinder/transport.h"
 #include "transport/shm_ring.h"
@@ -54,20 +54,20 @@ namespace omnibinder {
 const int SHM_CLIENT_ID_BASE = 0x40000000;
 
 // ============================================================
-// ShmServerClientConnection — 服务端持有的单个客户端连接（私有）
+// ShmServerConnection — 服务端持有的单个客户端连接（私有）
 //
 // 具体定义位于 shm_server_transport.cpp，不对外暴露。
-// 它把该客户端的请求/响应 ring 适配为 IClientTransport：
+// 它把该客户端的请求/响应 ring 适配为 IMessageConnection：
 //   - recv/peekFrameSize 读请求 ring（客户端→服务端）
 //   - send              写响应 ring 并通知客户端 resp eventfd
 //   - fd()              返回 liveness channel fd（用于死亡检测）
 // ============================================================
-class ShmServerClientConnection;
+class ShmServerConnection;
 
 // ============================================================
-// ShmServerTransport — 共享内存服务端端点
+// ShmServerEndpoint — 共享内存服务端端点
 // ============================================================
-class ShmServerTransport : public IServerTransport {
+class ShmServerEndpoint : public IServerEndpoint {
 public:
     /*
      * @brief  创建 SHM 服务端端点（未启动）
@@ -75,16 +75,16 @@ public:
      * @param[in]  req_ring_capacity  请求 ring 默认容量
      * @param[in]  resp_ring_capacity 响应 ring 默认容量
      */
-    explicit ShmServerTransport(const std::string& service_name,
+    explicit ShmServerEndpoint(const std::string& service_name,
                                 size_t req_ring_capacity = SHM_DEFAULT_REQ_RING_CAPACITY,
                                 size_t resp_ring_capacity = SHM_DEFAULT_RESP_RING_CAPACITY);
-    virtual ~ShmServerTransport();
+    virtual ~ShmServerEndpoint();
 
     // 禁止拷贝
-    ShmServerTransport(const ShmServerTransport&) = delete;
-    ShmServerTransport& operator=(const ShmServerTransport&) = delete;
+    ShmServerEndpoint(const ShmServerEndpoint&) = delete;
+    ShmServerEndpoint& operator=(const ShmServerEndpoint&) = delete;
 
-    // IServerTransport
+    // IServerEndpoint
     TransportType type() const override;
     int  start(const std::string& host, uint16_t port, const TransportConfig& config) override;
     void close() override;
@@ -95,7 +95,7 @@ public:
     void setDisconnectCallback(const DisconnectCallback& cb) override;
     void removeClient(int client_id) override;
 
-    // 测试/诊断辅助（非 IServerTransport 契约）
+    // 测试/诊断辅助（非 IServerEndpoint 契约）
     size_t clientCount() const { return clients_.size(); }
 
     /*
@@ -111,7 +111,7 @@ public:
     int requestEventFd() const { return master_eventfd_; }
 
 private:
-    ShmServerClientConnection* createClientFromHandshake(platform::handshake_channel* ch);
+    ShmServerConnection* createClientFromHandshake(platform::handshake_channel* ch);
     void acceptHandshakeClients();
     void scanClientsForReadable();
     static int allocClientId();
@@ -124,7 +124,7 @@ private:
     std::string                   handshake_path_;
     int                           master_eventfd_;
 
-    std::map<int, ShmServerClientConnection*> clients_;
+    std::map<int, ShmServerConnection*> clients_;
 
     AcceptCallback     accept_cb_;
     ReadableCallback   readable_cb_;
@@ -133,4 +133,4 @@ private:
 
 } // namespace omnibinder
 
-#endif // OMNIBINDER_SHM_SERVER_TRANSPORT_H
+#endif // OMNIBINDER_SHM_SERVER_ENDPOINT_H

@@ -1,25 +1,25 @@
-#include "transport/tcp_transport.h"
+#include "transport/tcp_connection.h"
 #include "platform/event_backend.h"
 #include "omnibinder/log.h"
 
 #include <cstring>
 
-#define LOG_TAG "TcpClientTransport"
+#define LOG_TAG "TcpConnection"
 
 namespace omnibinder {
 
 // ============================================================
-// TcpClientTransport 实现
+// TcpConnection 实现
 // ============================================================
 
-TcpClientTransport::TcpClientTransport()
+TcpConnection::TcpConnection()
     : fd_(platform::INVALID_SOCKET_FD)
     , state_(ConnectionState::DISCONNECTED)
     , remote_port_(0)
 {
 }
 
-TcpClientTransport::TcpClientTransport(platform::SocketFd connected_fd)
+TcpConnection::TcpConnection(platform::SocketFd connected_fd)
     : fd_(connected_fd)
     , state_(ConnectionState::DISCONNECTED)
     , remote_port_(0)
@@ -33,12 +33,12 @@ TcpClientTransport::TcpClientTransport(platform::SocketFd connected_fd)
     }
 }
 
-TcpClientTransport::~TcpClientTransport()
+TcpConnection::~TcpConnection()
 {
     close();
 }
 
-int TcpClientTransport::connect(const std::string& host, uint16_t port)
+int TcpConnection::connect(const std::string& host, uint16_t port)
 {
     if (state_ == ConnectionState::CONNECTED || state_ == ConnectionState::CONNECTING) {
         OMNI_LOG_WARN(LOG_TAG, "connect() called in state %d, closing existing connection",
@@ -85,7 +85,7 @@ int TcpClientTransport::connect(const std::string& host, uint16_t port)
     }
 }
 
-int TcpClientTransport::send(const uint8_t* data, size_t length)
+int TcpConnection::send(const uint8_t* data, size_t length)
 {
     if (state_ != ConnectionState::CONNECTED) {
         if (state_ == ConnectionState::ERROR) {
@@ -126,7 +126,7 @@ int TcpClientTransport::send(const uint8_t* data, size_t length)
     return static_cast<int>(total_sent);
 }
 
-int TcpClientTransport::sendAll(const uint8_t* data, size_t length,
+int TcpConnection::sendAll(const uint8_t* data, size_t length,
                                 uint32_t timeout_ms, uint32_t* elapsed_ms)
 {
     if (elapsed_ms) {
@@ -151,23 +151,23 @@ int TcpClientTransport::sendAll(const uint8_t* data, size_t length,
     return 0;
 }
 
-void TcpClientTransport::consumeReadiness()
+void TcpConnection::consumeReadiness()
 {
     // TCP 为字节流，无底层就绪通知需要消费
 }
 
-bool TcpClientTransport::isFramed() const
+bool TcpConnection::isFramed() const
 {
     return false;
 }
 
-int TcpClientTransport::peekFrameSize(size_t& out_length)
+int TcpConnection::peekFrameSize(size_t& out_length)
 {
     (void)out_length;
     return 0;
 }
 
-int TcpClientTransport::recv(uint8_t* buf, size_t buf_size)
+int TcpConnection::recv(uint8_t* buf, size_t buf_size)
 {
     if (state_ != ConnectionState::CONNECTED) {
         if (state_ == ConnectionState::ERROR) {
@@ -209,7 +209,7 @@ int TcpClientTransport::recv(uint8_t* buf, size_t buf_size)
     }
 }
 
-void TcpClientTransport::close()
+void TcpConnection::close()
 {
     if (fd_ != platform::INVALID_SOCKET_FD) {
         OMNI_LOG_DEBUG(LOG_TAG, "Closing fd=%d", static_cast<int>(fd_));
@@ -219,22 +219,22 @@ void TcpClientTransport::close()
     state_ = ConnectionState::DISCONNECTED;
 }
 
-ConnectionState TcpClientTransport::state() const
+ConnectionState TcpConnection::state() const
 {
     return state_;
 }
 
-int TcpClientTransport::fd() const
+int TcpConnection::fd() const
 {
     return static_cast<int>(fd_);
 }
 
-TransportType TcpClientTransport::type() const
+TransportType TcpConnection::type() const
 {
     return TransportType::TCP;
 }
 
-bool TcpClientTransport::checkConnectComplete()
+bool TcpConnection::checkConnectComplete()
 {
     if (state_ != ConnectionState::CONNECTING) {
         return state_ == ConnectionState::CONNECTED;
@@ -260,191 +260,6 @@ bool TcpClientTransport::checkConnectComplete()
                          remote_host_.c_str(), remote_port_, so_error);
         state_ = ConnectionState::ERROR;
         return false;
-    }
-}
-
-// ============================================================
-// TcpServerTransport 实现
-// ============================================================
-
-TcpServerTransport::TcpServerTransport()
-    : listen_fd_(platform::INVALID_SOCKET_FD)
-    , listen_port_(0)
-{
-}
-
-TcpServerTransport::~TcpServerTransport()
-{
-    close();
-}
-
-int TcpServerTransport::start(const std::string& host, uint16_t port, const TransportConfig& config)
-{
-    (void)config;
-
-    if (listen_fd_ != platform::INVALID_SOCKET_FD) {
-        OMNI_LOG_WARN(LOG_TAG, "start() called while already listening, closing old socket");
-        close();
-    }
-
-    listen_fd_ = platform::createTcpSocket();
-    if (listen_fd_ == platform::INVALID_SOCKET_FD) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to create listen socket");
-        return -1;
-    }
-
-    if (!platform::setReuseAddr(listen_fd_)) {
-        OMNI_LOG_WARN(LOG_TAG, "Failed to set SO_REUSEADDR on listen socket");
-    }
-
-    if (!platform::setNonBlocking(listen_fd_)) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to set non-blocking on listen socket");
-        platform::closeSocket(listen_fd_);
-        listen_fd_ = platform::INVALID_SOCKET_FD;
-        return -1;
-    }
-
-    if (!platform::bindSocket(listen_fd_, host, port)) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to bind on %s:%u", host.c_str(), port);
-        platform::closeSocket(listen_fd_);
-        listen_fd_ = platform::INVALID_SOCKET_FD;
-        return -1;
-    }
-
-    if (!platform::listenSocket(listen_fd_)) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to listen on %s:%u", host.c_str(), port);
-        platform::closeSocket(listen_fd_);
-        listen_fd_ = platform::INVALID_SOCKET_FD;
-        return -1;
-    }
-
-    // 获取实际端口（请求 port=0 时尤为重要）
-    listen_port_ = platform::getSocketPort(listen_fd_);
-    listen_host_ = host;
-
-    OMNI_LOG_INFO(LOG_TAG, "Listening on %s:%u (fd=%d)",
-                    listen_host_.c_str(), listen_port_, static_cast<int>(listen_fd_));
-
-    return static_cast<int>(listen_port_);
-}
-
-void TcpServerTransport::close()
-{
-    if (listen_fd_ != platform::INVALID_SOCKET_FD) {
-        OMNI_LOG_INFO(LOG_TAG, "Closing listen socket fd=%d (%s:%u)",
-                        static_cast<int>(listen_fd_),
-                        listen_host_.c_str(), listen_port_);
-        platform::closeSocket(listen_fd_);
-        listen_fd_ = platform::INVALID_SOCKET_FD;
-    }
-    listen_port_ = 0;
-    for (std::map<int, IClientTransport*>::iterator it = clients_.begin();
-         it != clients_.end(); ++it) {
-        it->second->close();
-        delete it->second;
-    }
-    clients_.clear();
-}
-
-TransportType TcpServerTransport::type() const
-{
-    return TransportType::TCP;
-}
-
-void TcpServerTransport::pollFds(std::vector<int>& fds) const
-{
-    if (listen_fd_ != platform::INVALID_SOCKET_FD) {
-        fds.push_back(static_cast<int>(listen_fd_));
-    }
-    for (std::map<int, IClientTransport*>::const_iterator it = clients_.begin();
-         it != clients_.end(); ++it) {
-        fds.push_back(it->first);
-    }
-}
-
-void TcpServerTransport::onPollEvent(int fd, uint32_t events)
-{
-    if (fd == static_cast<int>(listen_fd_)) {
-        // 先完成本轮所有接入再逐个回调：回调链可能注销服务并删除本 transport，
-        // 回调仅使用本地拷贝的 id/指针，之后不再访问成员
-        std::vector<std::pair<int, IClientTransport*> > accepted;
-        while (true) {
-            std::string remote_host;
-            uint16_t remote_port = 0;
-            platform::SocketFd client_fd =
-                platform::acceptSocket(listen_fd_, remote_host, remote_port);
-            if (client_fd == platform::INVALID_SOCKET_FD) {
-                // 非阻塞 accept 下 EAGAIN/EWOULDBLOCK 属正常现象，不是错误
-                int err = platform::getSocketError();
-                if (!platform::isWouldBlock(err)) {
-                    OMNI_LOG_ERROR(LOG_TAG, "accept failed: error=%d", err);
-                }
-                break;
-            }
-
-            OMNI_LOG_INFO(LOG_TAG, "Accepted connection from %s:%u (fd=%d)",
-                          remote_host.c_str(), remote_port, static_cast<int>(client_fd));
-
-            IClientTransport* client = new TcpClientTransport(client_fd);
-            int client_id = client->fd();
-            clients_[client_id] = client;
-            accepted.push_back(std::make_pair(client_id, client));
-        }
-
-        AcceptCallback cb = accept_cb_;
-        for (size_t i = 0; i < accepted.size() && cb; ++i) {
-            cb(accepted[i].first, accepted[i].second);
-        }
-        return;
-    }
-
-    std::map<int, IClientTransport*>::iterator it = clients_.find(fd);
-    if (it == clients_.end()) {
-        return;
-    }
-
-    // 读事件优先：对端 FIN 可能伴随未消费数据，先交给读路径消费完；
-    // 回调可能 removeClient 删除本 client，回调返回后不得再访问成员
-    if (events & platform::EVENT_READ) {
-        ReadableCallback cb = readable_cb_;
-        if (cb) cb(fd);
-        return;
-    }
-
-    // EPOLLHUP / EPOLLERR 等断开事件：与 SHM 端点语义一致，上报 disconnect 回调，
-    // 由调用方先摘除 fd/清理状态，再调用 removeClient 释放
-    if (events & platform::EVENT_ERROR) {
-        DisconnectCallback cb = disconnect_cb_;
-        if (cb) cb(fd);
-    }
-}
-
-void TcpServerTransport::setAcceptCallback(const AcceptCallback& cb)
-{
-    accept_cb_ = cb;
-}
-
-void TcpServerTransport::setReadableCallback(const ReadableCallback& cb)
-{
-    readable_cb_ = cb;
-}
-
-void TcpServerTransport::setDisconnectCallback(const DisconnectCallback& cb)
-{
-    disconnect_cb_ = cb;
-}
-
-void TcpServerTransport::removeClient(int client_id)
-{
-    std::map<int, IClientTransport*>::iterator it = clients_.find(client_id);
-    if (it == clients_.end()) {
-        return;
-    }
-    IClientTransport* client = it->second;
-    clients_.erase(it);
-    if (client) {
-        client->close();
-        delete client;
     }
 }
 

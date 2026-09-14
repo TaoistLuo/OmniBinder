@@ -9,7 +9,7 @@ namespace omnibinder {
 
 namespace {
 
-std::string serviceClientLabel(IClientTransport* client, int client_id) {
+std::string serviceClientLabel(IMessageConnection* client, int client_id) {
     const char* prefix = (client && client->isFramed()) ? "shm=" : "fd=";
     return std::string(prefix) + std::to_string(client_id);
 }
@@ -58,7 +58,7 @@ void OmniRuntime::Impl::onServiceEndpointEvent(const std::string& name, int fd,
 }
 
 void OmniRuntime::Impl::onServiceClientAccepted(const std::string& name, int client_id,
-                                                IClientTransport* client) {
+                                                IMessageConnection* client) {
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
     if (it == local_services_.end() || !client) return;
     LocalServiceEntry* entry = it->second;
@@ -79,9 +79,9 @@ void OmniRuntime::Impl::onServiceClientReadable(const std::string& name, int cli
         std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
         if (it == local_services_.end()) return;
         LocalServiceEntry* entry = it->second;
-        std::map<int, IClientTransport*>::iterator tit = entry->clients.find(client_id);
+        std::map<int, IMessageConnection*>::iterator tit = entry->clients.find(client_id);
         if (tit == entry->clients.end() || !tit->second) return;
-        IClientTransport* transport = tit->second;
+        IMessageConnection* transport = tit->second;
         std::map<int, Buffer*>::iterator bit = entry->client_recv_buffers.find(client_id);
         if (bit == entry->client_recv_buffers.end()) return;
         Buffer* recv_buf = bit->second;
@@ -104,9 +104,9 @@ void OmniRuntime::Impl::handleServiceClientMessage(const std::string& name, int 
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
     if (it == local_services_.end()) return;
     LocalServiceEntry* entry = it->second;
-    std::map<int, IClientTransport*>::iterator tit = entry->clients.find(client_id);
+    std::map<int, IMessageConnection*>::iterator tit = entry->clients.find(client_id);
     if (tit == entry->clients.end() || !tit->second) return;
-    IClientTransport* transport = tit->second;
+    IMessageConnection* transport = tit->second;
     const char* transport_label = dataChannelKindName(transport->type());
 
     switch (msg.getType()) {
@@ -190,13 +190,13 @@ void OmniRuntime::Impl::onServiceClientDisconnected(const std::string& name, int
         return;
     }
     LocalServiceEntry* entry = it->second;
-    std::map<int, IClientTransport*>::iterator cit = entry->clients.find(client_id);
+    std::map<int, IMessageConnection*>::iterator cit = entry->clients.find(client_id);
     if (cit == entry->clients.end()) {
         client_id_to_service_.erase(client_id);
         return;
     }
 
-    IClientTransport* client = cit->second;
+    IMessageConnection* client = cit->second;
     // 先摘除 EventLoop 注册再释放对象（约束 3）
     if (client && client->fd() >= 0) {
         loop_->removeFd(client->fd());
@@ -254,8 +254,8 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name, int cli
         emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
         // emitDiagHook 可能经话题分发执行用户回调并注销服务（约束 1）
         if (!isEntryAlive(service_name, entry)) return;
-        std::map<int, IClientTransport*>::iterator tit = entry->clients.find(client_id);
-        IClientTransport* transport = (tit != entry->clients.end()) ? tit->second : NULL;
+        std::map<int, IMessageConnection*>::iterator tit = entry->clients.find(client_id);
+        IMessageConnection* transport = (tit != entry->clients.end()) ? tit->second : NULL;
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s client=%d seq=%u status=0",
                           service_name.c_str(), client_id, msg.getSequence());
@@ -265,8 +265,8 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name, int cli
                                              static_cast<ErrorCode>(result.error_code));
         emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
         if (!isEntryAlive(service_name, entry)) return;
-        std::map<int, IClientTransport*>::iterator tit = entry->clients.find(client_id);
-        IClientTransport* transport = (tit != entry->clients.end()) ? tit->second : NULL;
+        std::map<int, IMessageConnection*>::iterator tit = entry->clients.find(client_id);
+        IMessageConnection* transport = (tit != entry->clients.end()) ? tit->second : NULL;
         if (transport && !sendOnFd(transport, reply)) {
             OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s client=%d seq=%u status=%d",
                           service_name.c_str(), client_id, msg.getSequence(),

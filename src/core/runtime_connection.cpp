@@ -341,21 +341,21 @@ void OmniRuntime::Impl::checkHeartbeatTimeout(const std::string& service_name) {
 // 数据面辅助
 // ============================================================
 
-bool OmniRuntime::Impl::sendRawOnFd(IClientTransport* transport, const uint8_t* data, size_t size) {
+bool OmniRuntime::Impl::sendRawOnFd(IMessageConnection* transport, const uint8_t* data, size_t size) {
     if (!transport) return false;
     // 服务端回复发送：使用专用有界预算（默认 1000ms，可经 setReplySendTimeout 调整），
     // 不再无条件占用默认 RPC 超时（5s），避免慢客户端卡住 owner event-loop
     return transport->sendAll(data, size, reply_send_timeout_ms_, NULL) == 0;
 }
 
-bool OmniRuntime::Impl::sendOnFd(IClientTransport* transport, Message& msg) {
+bool OmniRuntime::Impl::sendOnFd(IMessageConnection* transport, Message& msg) {
     if (!transport || !msg.serializeInPlace()) {
         return false;
     }
     return sendRawOnFd(transport, msg.payload.data(), msg.payload.size());
 }
 
-bool OmniRuntime::Impl::sendOnFdBestEffort(IClientTransport* transport, Message& msg) {
+bool OmniRuntime::Impl::sendOnFdBestEffort(IMessageConnection* transport, Message& msg) {
     if (!transport || !msg.serializeInPlace()) {
         return false;
     }

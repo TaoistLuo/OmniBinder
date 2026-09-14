@@ -52,7 +52,7 @@ namespace omnibinder {
 
 struct ClientConnection {
     int fd;
-    IClientTransport* transport;  // 非拥有：生命周期由 IServerTransport 端点管理
+    IMessageConnection* transport;  // 非拥有：生命周期由 IServerEndpoint 端点管理
     Buffer recv_buffer;
     Buffer send_buffer;
     size_t send_offset;
@@ -93,7 +93,7 @@ public:
 private:
     void registerEndpointFd(int fd);
     void onEndpointEvent(int fd, uint32_t events);
-    void onClientAccepted(int client_id, IClientTransport* client);
+    void onClientAccepted(int client_id, IMessageConnection* client);
     void onClientReadable(int client_id);
     void onClientDisconnected(int client_id);
     void dispatchMessage(ClientConnection* conn, const Message& msg);
@@ -180,7 +180,7 @@ private:
     void disableClientWriteEvents(ClientConnection* conn);
 
     EventLoop loop_;
-    IServerTransport* server_;
+    IServerEndpoint* server_;
     std::map<int, ClientConnection*> clients_;
     std::set<int> endpoint_fds_;
     std::map<uint32_t, std::vector<int> > pid_to_fds_;

@@ -599,19 +599,21 @@ private:
 
 旧的 `reportInvokeError()` / `consumeInvokeError()` 已移除。
 
-### 2.4 IClientTransport / IServerTransport（传输层接口）
+### 2.4 IMessageConnection / IServerEndpoint（传输层接口）
 
 `include/omnibinder/transport.h`
 
-传输层抽象接口。客户端侧 `IClientTransport` 表示一条双向消息连接，服务端侧 `IServerTransport` 表示托管端点。
+传输层抽象接口。客户端侧 `IMessageConnection` 表示一条双向消息连接，服务端侧 `IServerEndpoint` 表示托管端点。
 SHM 通过 eventfd 事件驱动，TCP 通过 socket fd 事件驱动，均注册到 EventLoop。
 
-出站数据面由 `src/transport/transport_selector.h` 中的 `createClientTransport()` 创建；
-服务端端点由 `createServerTransport()` 创建；ServiceManager 控制通道由 `createControlTransport()` 创建（始终 TCP）。
-`transport_selector.h` 不随安装导出，仅用于仓库内构建/源码集成：`createClientTransport()` 供 `ConnectionManager`
-建立客户端数据面连接（同机优先 SHM，失败或跨机回退 TCP）；`createServerTransport()` 供 runtime 服务 hosting
-与 ServiceManager 创建服务端端点；`createControlTransport()` 供 runtime 连接 ServiceManager。
-新增传输类型时在这三个工厂函数中扩展；当前不提供运行时 provider 注入或动态插件 ABI。
+出站数据面由 `src/transport/transport_selector.h` 中的 `createClientConnection()` 创建；
+服务端端点由 `createServerEndpoint()` 创建；ServiceManager 控制通道由 `createControlConnection()` 创建（始终 TCP）。
+`transport_selector.h` 不随安装导出，仅用于仓库内构建/源码集成：`createClientConnection()` 供 `ConnectionManager`
+建立客户端数据面连接（同机优先 SHM，失败或跨机回退 TCP）；`createServerEndpoint()` 供 runtime 服务 hosting
+与 ServiceManager 创建服务端端点；`createControlConnection()` 供 runtime 连接 ServiceManager。
+`transport_selector` 是新增传输的落点，但新增传输类型属**源码级、侵入式**扩展：还需同步修改 core（`TransportType`
+分支、服务端端点半创建、topic 订阅模型），并非在这三个工厂函数里改一下即可。当前不提供运行时 provider 注入或动态插件 ABI；
+仅适用于与"点对点连接"模型一致的传输，**总线型传输（I2C/RS-485）不在支持范围**。
 
 ```cpp
 namespace omnibinder {
@@ -640,9 +642,9 @@ struct TransportConfig {
 };
 
 // 客户端传输接口（单条双向消息连接）
-class IClientTransport {
+class IMessageConnection {
 public:
-    virtual ~IClientTransport() {}
+    virtual ~IMessageConnection() {}
 
     // 发起非阻塞连接
     // 返回: 0 立即成功，1 连接进行中，-1 失败
@@ -687,13 +689,13 @@ public:
 };
 
 // 服务端托管端点接口（TCP 监听/accept 与 SHM 握手/ring 共用）
-class IServerTransport {
+class IServerEndpoint {
 public:
-    typedef std::function<void(int client_id, IClientTransport* client)> AcceptCallback;
+    typedef std::function<void(int client_id, IMessageConnection* client)> AcceptCallback;
     typedef std::function<void(int client_id)> ReadableCallback;
     typedef std::function<void(int client_id)> DisconnectCallback;
 
-    virtual ~IServerTransport() {}
+    virtual ~IServerEndpoint() {}
 
     virtual TransportType type() const = 0;
 

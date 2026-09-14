@@ -153,7 +153,7 @@ ctest --test-dir build --output-on-failure -R test_event_loop
 
 - 验证 TCP transport 基本行为
 - 验证 transport policy 基础选择
-- 验证 `TcpClientTransport::send()` 在背压下可返回 partial write
+- 验证 `TcpConnection::send()` 在背压下可返回 partial write
 
 推荐运行：
 

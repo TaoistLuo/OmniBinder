@@ -1,4 +1,5 @@
-#include "transport/shm_server_transport.h"
+#include "transport/shm_server_endpoint.h"
+#include "transport/shm_server_connection.h"
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
 #include "platform/platform.h"
@@ -6,258 +7,15 @@
 #include <atomic>
 #include <string.h>
 
-#define LOG_TAG "ShmServerTransport"
+#define LOG_TAG "ShmServerEndpoint"
 
 namespace omnibinder {
 
 // ============================================================
-// ShmServerClientConnection — 服务端持有的单客户端连接
+// ShmServerEndpoint
 // ============================================================
 
-class ShmServerClientConnection : public IClientTransport {
-public:
-    ShmServerClientConnection(int client_id, const std::string& shm_name,
-                              void* shm_addr, size_t shm_size, ShmControlBlock* ctrl,
-                              uint32_t req_ring_capacity, uint32_t resp_ring_capacity,
-                              int resp_eventfd, int request_notify_fd,
-                              platform::handshake_channel* liveness_channel)
-        : client_id_(client_id)
-        , shm_name_(shm_name)
-        , shm_addr_(shm_addr)
-        , shm_size_(shm_size)
-        , ctrl_(ctrl)
-        , req_ring_capacity_(req_ring_capacity)
-        , resp_ring_capacity_(resp_ring_capacity)
-        , resp_eventfd_(resp_eventfd)
-        , request_notify_fd_(request_notify_fd)
-        , liveness_channel_(liveness_channel)
-        , state_(ConnectionState::CONNECTED)
-    {
-    }
-
-    virtual ~ShmServerClientConnection()
-    {
-        cleanup();
-    }
-
-    // 服务端不主动发起连接
-    virtual int connect(const std::string&, uint16_t) { return -1; }
-
-    virtual int send(const uint8_t* data, size_t length);
-    virtual int sendAll(const uint8_t* data, size_t length,
-                        uint32_t timeout_ms, uint32_t* elapsed_ms);
-    virtual int recv(uint8_t* buf, size_t buf_size);
-    int peekFrameSize(size_t& out_length) override;
-
-    // 端点 onPollEvent 已消费 master eventfd，故连接级无需再消费
-    virtual void consumeReadiness() {}
-    virtual bool isFramed() const { return true; }
-
-    // 最小化 close：真正释放由 ShmServerTransport::removeClient 触发（析构 cleanup）
-    virtual void close() { state_ = ConnectionState::DISCONNECTED; }
-    virtual ConnectionState state() const { return state_; }
-
-    // 返回 liveness channel fd（死亡检测）
-    virtual int fd() const { return livenessFd(); }
-    virtual TransportType type() const { return TransportType::SHM; }
-
-    int clientId() const { return client_id_; }
-    int requestNotifyFd() const { return request_notify_fd_; }
-
-    int livenessFd() const
-    {
-        return liveness_channel_ ? platform::handshakeGetFd(liveness_channel_) : -1;
-    }
-
-    // 释放 SHM 映射（服务端负责 unlink）/ eventfd / liveness channel，幂等
-    void cleanup();
-
-private:
-    ShmRingHeader* requestRing() const;
-    uint8_t*       requestData() const;
-    ShmRingHeader* responseRing() const;
-    uint8_t*       responseData() const;
-
-    int             client_id_;
-    std::string     shm_name_;
-    void*           shm_addr_;
-    size_t          shm_size_;
-    ShmControlBlock* ctrl_;
-    uint32_t        req_ring_capacity_;
-    uint32_t        resp_ring_capacity_;
-    int             resp_eventfd_;
-    int             request_notify_fd_;
-    platform::handshake_channel* liveness_channel_;
-    ConnectionState state_;
-};
-
-ShmRingHeader* ShmServerClientConnection::requestRing() const
-{
-    if (!shm_addr_) return NULL;
-    return shmRequestRingFromBase(static_cast<uint8_t*>(shm_addr_));
-}
-
-uint8_t* ShmServerClientConnection::requestData() const
-{
-    if (!shm_addr_) return NULL;
-    return shmRequestDataFromBase(static_cast<uint8_t*>(shm_addr_));
-}
-
-ShmRingHeader* ShmServerClientConnection::responseRing() const
-{
-    if (!shm_addr_ || !ctrl_) return NULL;
-    return shmResponseRingFromBase(static_cast<uint8_t*>(shm_addr_), req_ring_capacity_);
-}
-
-uint8_t* ShmServerClientConnection::responseData() const
-{
-    if (!shm_addr_ || !ctrl_) return NULL;
-    return shmResponseDataFromBase(static_cast<uint8_t*>(shm_addr_), req_ring_capacity_);
-}
-
-int ShmServerClientConnection::peekFrameSize(size_t& out_length)
-{
-    out_length = 0;
-    if (state_ != ConnectionState::CONNECTED) return -1;
-    int ret = shmInspectFrame(requestRing(), requestData(), req_ring_capacity_, out_length);
-    if (ret < 0) {
-        state_ = ConnectionState::ERROR;
-    }
-    return ret;
-}
-
-int ShmServerClientConnection::recv(uint8_t* buf, size_t buf_size)
-{
-    if (state_ != ConnectionState::CONNECTED) return -1;
-    if (buf_size == 0) return 0;
-
-    ShmRingHeader* req_ring = requestRing();
-    const uint8_t* req_data = requestData();
-    if (!req_ring || !req_data) {
-        OMNI_LOG_ERROR(LOG_TAG, "recv() missing request ring for client[%d]", client_id_);
-        return -1;
-    }
-
-    size_t msg_len = 0;
-    int ret = shmRingRecvFrame(req_ring, req_data, req_ring_capacity_,
-                               buf, buf_size, msg_len);
-    if (ret < 0) {
-        OMNI_LOG_ERROR(LOG_TAG, "recv() malformed request ring from client[%d]", client_id_);
-        state_ = ConnectionState::ERROR;
-        return -1;
-    }
-    if (ret == 0) {
-        return 0;
-    }
-
-    OMNI_LOG_DEBUG(LOG_TAG, "Received %zu bytes from client[%d] on shm '%s'",
-                   msg_len, client_id_, shm_name_.c_str());
-    return static_cast<int>(msg_len);
-}
-
-int ShmServerClientConnection::send(const uint8_t* data, size_t length)
-{
-    if (state_ != ConnectionState::CONNECTED) return -1;
-    if (length == 0) return 0;
-    if (length > MAX_MESSAGE_SIZE || length > 0x7FFFFFFF) {
-        OMNI_LOG_ERROR(LOG_TAG, "send() message too large: %zu bytes", length);
-        return -1;
-    }
-
-    ShmRingHeader* resp_ring = responseRing();
-    uint8_t* resp_data = responseData();
-    if (!resp_ring || !resp_data) {
-        OMNI_LOG_ERROR(LOG_TAG, "send() missing response ring for client[%d]", client_id_);
-        return -1;
-    }
-
-    uint32_t written = shmRingSendFrame(resp_ring, resp_data, resp_ring_capacity_,
-                                        data, static_cast<uint32_t>(length),
-                                        resp_eventfd_);
-    if (written == 0) {
-        OMNI_LOG_DEBUG(LOG_TAG, "send() response ring full for client[%d]", client_id_);
-        return 0;
-    }
-
-    OMNI_LOG_DEBUG(LOG_TAG, "Sent %zu bytes to client[%d] on shm '%s'",
-                   length, client_id_, shm_name_.c_str());
-    return static_cast<int>(length);
-}
-
-int ShmServerClientConnection::sendAll(const uint8_t* data, size_t length,
-                                       uint32_t timeout_ms, uint32_t* elapsed_ms)
-{
-    int64_t start_ms = platform::currentTimeMs();
-    if (elapsed_ms) {
-        *elapsed_ms = 0;
-    }
-    if (state_ != ConnectionState::CONNECTED) return -1;
-    if (length == 0) return 0;
-    if (length > MAX_MESSAGE_SIZE || length > 0x7FFFFFFF) {
-        OMNI_LOG_ERROR(LOG_TAG, "sendAll() message too large: %zu bytes", length);
-        return -1;
-    }
-
-    ShmRingHeader* resp_ring = responseRing();
-    uint8_t* resp_data = responseData();
-    if (!resp_ring || !resp_data) {
-        OMNI_LOG_ERROR(LOG_TAG, "sendAll() missing response ring for client[%d]", client_id_);
-        return -1;
-    }
-
-    int rc = shmRingSendFrameWithinTimeout(resp_ring, resp_data, resp_ring_capacity_,
-                                           data, static_cast<uint32_t>(length),
-                                           resp_eventfd_, timeout_ms);
-    if (elapsed_ms) {
-        *elapsed_ms = static_cast<uint32_t>(platform::currentTimeMs() - start_ms);
-    }
-    if (rc == -1) {
-        OMNI_LOG_ERROR(LOG_TAG,
-                       "sendAll() frame can never fit for client[%d]: need %zu, ring capacity %u",
-                       client_id_, length + sizeof(uint32_t), resp_ring_capacity_);
-        return -1;
-    }
-    if (rc != 0) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "sendAll() response ring full timeout for client[%d]: need=%zu timeout_ms=%u",
-                      client_id_, length + sizeof(uint32_t), timeout_ms);
-        return -1;
-    }
-    return 0;
-}
-
-void ShmServerClientConnection::cleanup()
-{
-    if (shm_addr_ != NULL) {
-        platform::shmDetach(shm_addr_, shm_size_);
-        shm_addr_ = NULL;
-    }
-    // 客户端已断开时，服务端负责清理 SHM 对象避免 /dev/shm 残留
-    if (!shm_name_.empty()) {
-        platform::shmUnlink(shm_name_);
-    }
-    if (resp_eventfd_ >= 0) {
-        platform::closeEventFd(resp_eventfd_);
-        resp_eventfd_ = -1;
-    }
-    if (request_notify_fd_ >= 0) {
-        platform::closeEventFd(request_notify_fd_);
-        request_notify_fd_ = -1;
-    }
-    if (liveness_channel_) {
-        platform::handshakeClose(liveness_channel_);
-        liveness_channel_ = NULL;
-    }
-    ctrl_ = NULL;
-    shm_size_ = 0;
-    state_ = ConnectionState::DISCONNECTED;
-}
-
-// ============================================================
-// ShmServerTransport
-// ============================================================
-
-ShmServerTransport::ShmServerTransport(const std::string& service_name,
+ShmServerEndpoint::ShmServerEndpoint(const std::string& service_name,
                                        size_t req_ring_capacity,
                                        size_t resp_ring_capacity)
     : service_name_(service_name)
@@ -268,12 +26,12 @@ ShmServerTransport::ShmServerTransport(const std::string& service_name,
 {
 }
 
-ShmServerTransport::~ShmServerTransport()
+ShmServerEndpoint::~ShmServerEndpoint()
 {
     close();
 }
 
-int ShmServerTransport::start(const std::string& host, uint16_t port,
+int ShmServerEndpoint::start(const std::string& host, uint16_t port,
                               const TransportConfig& config)
 {
     (void)host;
@@ -315,9 +73,9 @@ int ShmServerTransport::start(const std::string& host, uint16_t port,
     return 0;
 }
 
-void ShmServerTransport::close()
+void ShmServerEndpoint::close()
 {
-    for (std::map<int, ShmServerClientConnection*>::iterator it = clients_.begin();
+    for (std::map<int, ShmServerConnection*>::iterator it = clients_.begin();
          it != clients_.end(); ++it) {
         delete it->second;
     }
@@ -334,17 +92,17 @@ void ShmServerTransport::close()
     handshake_path_.clear();
 }
 
-TransportType ShmServerTransport::type() const
+TransportType ShmServerEndpoint::type() const
 {
     return TransportType::SHM;
 }
 
-int ShmServerTransport::handshakeListenFd() const
+int ShmServerEndpoint::handshakeListenFd() const
 {
     return handshake_listener_ ? platform::handshakeGetListenerFd(handshake_listener_) : -1;
 }
 
-void ShmServerTransport::pollFds(std::vector<int>& fds) const
+void ShmServerEndpoint::pollFds(std::vector<int>& fds) const
 {
     int listen_fd = handshakeListenFd();
     if (listen_fd >= 0) {
@@ -353,7 +111,7 @@ void ShmServerTransport::pollFds(std::vector<int>& fds) const
     if (master_eventfd_ >= 0) {
         fds.push_back(master_eventfd_);
     }
-    for (std::map<int, ShmServerClientConnection*>::const_iterator it = clients_.begin();
+    for (std::map<int, ShmServerConnection*>::const_iterator it = clients_.begin();
          it != clients_.end(); ++it) {
         int liveness_fd = it->second->livenessFd();
         if (liveness_fd >= 0) {
@@ -367,7 +125,7 @@ void ShmServerTransport::pollFds(std::vector<int>& fds) const
     }
 }
 
-void ShmServerTransport::onPollEvent(int fd, uint32_t events)
+void ShmServerEndpoint::onPollEvent(int fd, uint32_t events)
 {
     (void)events;
 
@@ -384,7 +142,7 @@ void ShmServerTransport::onPollEvent(int fd, uint32_t events)
 
     int client_id = -1;
     bool is_request_notify = false;
-    for (std::map<int, ShmServerClientConnection*>::iterator it = clients_.begin();
+    for (std::map<int, ShmServerConnection*>::iterator it = clients_.begin();
          it != clients_.end(); ++it) {
         if (it->second->livenessFd() == fd) {
             client_id = it->first;
@@ -413,22 +171,22 @@ void ShmServerTransport::onPollEvent(int fd, uint32_t events)
     if (cb) cb(client_id);
 }
 
-void ShmServerTransport::setAcceptCallback(const AcceptCallback& cb)
+void ShmServerEndpoint::setAcceptCallback(const AcceptCallback& cb)
 {
     accept_cb_ = cb;
 }
 
-void ShmServerTransport::setReadableCallback(const ReadableCallback& cb)
+void ShmServerEndpoint::setReadableCallback(const ReadableCallback& cb)
 {
     readable_cb_ = cb;
 }
 
-void ShmServerTransport::setDisconnectCallback(const DisconnectCallback& cb)
+void ShmServerEndpoint::setDisconnectCallback(const DisconnectCallback& cb)
 {
     disconnect_cb_ = cb;
 }
 
-int ShmServerTransport::allocClientId()
+int ShmServerEndpoint::allocClientId()
 {
     // 进程内单调递增，与 fd 号命名空间隔离
     static std::atomic<int> s_next(SHM_CLIENT_ID_BASE);
@@ -441,7 +199,7 @@ int ShmServerTransport::allocClientId()
 }
 
 // 完成一次握手：接收 SHM 名 → 打开并校验 → 回传通知句柄 → 建立私有连接
-ShmServerClientConnection* ShmServerTransport::createClientFromHandshake(
+ShmServerConnection* ShmServerEndpoint::createClientFromHandshake(
     platform::handshake_channel* ch)
 {
     // 步骤 1：接收 SHM 名（不允许携带 fd）
@@ -518,7 +276,7 @@ ShmServerClientConnection* ShmServerTransport::createClientFromHandshake(
     int local_notify_fd = platform::handshakeTakeLocalNotifyFd(ch);
 
     int assigned_id = allocClientId();
-    ShmServerClientConnection* conn = new ShmServerClientConnection(
+    ShmServerConnection* conn = new ShmServerConnection(
         assigned_id, client_shm_name, addr, mapped_size, ctrl,
         req_capacity, resp_capacity, resp_efd, local_notify_fd, ch);
 
@@ -527,21 +285,21 @@ ShmServerClientConnection* ShmServerTransport::createClientFromHandshake(
     return conn;
 }
 
-void ShmServerTransport::acceptHandshakeClients()
+void ShmServerEndpoint::acceptHandshakeClients()
 {
-    std::vector<std::pair<int, IClientTransport*> > accepted;
+    std::vector<std::pair<int, IMessageConnection*> > accepted;
     while (true) {
         platform::handshake_channel* ch = platform::handshakeAccept(handshake_listener_);
         if (!ch) {
             break;
         }
-        ShmServerClientConnection* conn = createClientFromHandshake(ch);
+        ShmServerConnection* conn = createClientFromHandshake(ch);
         if (!conn) {
             continue;
         }
         clients_[conn->clientId()] = conn;
         accepted.push_back(std::make_pair(conn->clientId(),
-                                          static_cast<IClientTransport*>(conn)));
+                                          static_cast<IMessageConnection*>(conn)));
         // 新客户端的首批请求可能已就绪，通知主控 eventfd 触发扫描
         if (master_eventfd_ >= 0) {
             platform::eventFdNotify(master_eventfd_);
@@ -556,12 +314,12 @@ void ShmServerTransport::acceptHandshakeClients()
     }
 }
 
-void ShmServerTransport::scanClientsForReadable()
+void ShmServerEndpoint::scanClientsForReadable()
 {
     std::vector<int> malformed;
     std::vector<int> readable;
 
-    for (std::map<int, ShmServerClientConnection*>::iterator it = clients_.begin();
+    for (std::map<int, ShmServerConnection*>::iterator it = clients_.begin();
          it != clients_.end(); ++it) {
         size_t frame_size = 0;
         int ret = it->second->peekFrameSize(frame_size);
@@ -587,13 +345,13 @@ void ShmServerTransport::scanClientsForReadable()
     }
 }
 
-void ShmServerTransport::removeClient(int client_id)
+void ShmServerEndpoint::removeClient(int client_id)
 {
-    std::map<int, ShmServerClientConnection*>::iterator it = clients_.find(client_id);
+    std::map<int, ShmServerConnection*>::iterator it = clients_.find(client_id);
     if (it == clients_.end()) {
         return;
     }
-    ShmServerClientConnection* conn = it->second;
+    ShmServerConnection* conn = it->second;
     clients_.erase(it);
     delete conn;
     OMNI_LOG_INFO(LOG_TAG, "client[%d] disconnected from shm service '%s'",

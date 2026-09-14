@@ -2,7 +2,7 @@
 
 namespace omnibinder {
 
-int readNextMessage(IClientTransport& transport, Buffer& recv_buffer, Message& out)
+int readNextMessage(IMessageConnection& transport, Buffer& recv_buffer, Message& out)
 {
     transport.consumeReadiness();
 

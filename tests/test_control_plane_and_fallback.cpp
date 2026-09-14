@@ -2,7 +2,7 @@
 #include "test_common.h"
 #include <omnibinder/omnibinder.h>
 #include "transport/shm_ring.h"
-#include "transport/tcp_transport.h"
+#include "transport/tcp_connection.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -68,7 +68,7 @@ static bool waitSM(uint16_t port, int retries) {
     return false;
 }
 
-static bool connectTcp(TcpClientTransport& transport, const std::string& host, uint16_t port) {
+static bool connectTcp(TcpConnection& transport, const std::string& host, uint16_t port) {
     int ret = transport.connect(host, port);
     if (ret < 0) {
         return false;
@@ -86,13 +86,13 @@ static bool connectTcp(TcpClientTransport& transport, const std::string& host, u
     return transport.state() == ConnectionState::CONNECTED;
 }
 
-static bool sendMessage(TcpClientTransport& transport, const Message& msg) {
+static bool sendMessage(TcpConnection& transport, const Message& msg) {
     Buffer out;
     msg.serialize(out);
     return transport.send(out.data(), out.size()) == static_cast<int>(out.size());
 }
 
-static bool recvMessage(TcpClientTransport& transport, Message& msg, int timeout_ms) {
+static bool recvMessage(TcpConnection& transport, Message& msg, int timeout_ms) {
     uint8_t buf[4096];
     int loops = timeout_ms / 20;
     for (int i = 0; i < loops; ++i) {
@@ -114,7 +114,7 @@ static bool recvMessage(TcpClientTransport& transport, Message& msg, int timeout
     return false;
 }
 
-static bool recvFullMessage(IClientTransport& transport, Message& msg, int timeout_ms) {
+static bool recvFullMessage(IMessageConnection& transport, Message& msg, int timeout_ms) {
     Buffer input;
     std::vector<uint8_t> buf(65536);
     int loops = timeout_ms / 5;
@@ -142,7 +142,7 @@ static bool recvFullMessage(IClientTransport& transport, Message& msg, int timeo
     return false;
 }
 
-static bool sendFullMessage(IClientTransport& transport, const Message& msg, int timeout_ms) {
+static bool sendFullMessage(IMessageConnection& transport, const Message& msg, int timeout_ms) {
     Buffer out;
     msg.serialize(out);
     size_t sent = 0;
@@ -165,7 +165,7 @@ static bool decodeInvokeReplyForTest(const Message& msg, int32_t& status, Buffer
     return tryDecodeInvokeReplyForTest(msg, status, response);
 }
 
-static bool registerFakeService(TcpClientTransport& transport, uint32_t seq,
+static bool registerFakeService(TcpConnection& transport, uint32_t seq,
                                 const std::string& name, uint16_t port,
                                 const std::string& host_id) {
     Message msg(MessageType::MSG_REGISTER, seq);
@@ -196,7 +196,7 @@ static bool registerFakeService(TcpClientTransport& transport, uint32_t seq,
     return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
-static bool publishFakeTopic(TcpClientTransport& transport, uint32_t seq,
+static bool publishFakeTopic(TcpConnection& transport, uint32_t seq,
                              const std::string& service_name,
                              const std::string& topic) {
     Message msg(MessageType::MSG_PUBLISH_TOPIC, seq);
@@ -219,7 +219,7 @@ static bool publishFakeTopic(TcpClientTransport& transport, uint32_t seq,
     return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
-static bool queryRawPublishedTopics(TcpClientTransport& transport, uint32_t seq,
+static bool queryRawPublishedTopics(TcpConnection& transport, uint32_t seq,
                                     const std::string& service_name, bool& found,
                                     std::vector<std::string>& topics) {
     Message msg(MessageType::MSG_QUERY_PUBLISHED_TOPICS, seq);
@@ -236,7 +236,7 @@ static bool queryRawPublishedTopics(TcpClientTransport& transport, uint32_t seq,
     return deserializePublishedTopicsReply(payload, found, topics);
 }
 
-static bool sendHeartbeat(TcpClientTransport& transport, uint32_t seq,
+static bool sendHeartbeat(TcpConnection& transport, uint32_t seq,
                           const std::string& service_name) {
     Message heartbeat(MessageType::MSG_HEARTBEAT, seq);
     heartbeat.payload.writeString(service_name);
@@ -246,7 +246,7 @@ static bool sendHeartbeat(TcpClientTransport& transport, uint32_t seq,
         && reply.getType() == MessageType::MSG_HEARTBEAT_ACK;
 }
 
-static bool lookupRaw(TcpClientTransport& transport, uint32_t seq,
+static bool lookupRaw(TcpConnection& transport, uint32_t seq,
                       const std::string& service_name, bool& found) {
     Message msg(MessageType::MSG_LOOKUP, seq);
     msg.payload.writeString(service_name);
@@ -261,7 +261,7 @@ static bool lookupRaw(TcpClientTransport& transport, uint32_t seq,
     return true;
 }
 
-static bool sendRuntimeHello(TcpClientTransport& transport, uint32_t seq,
+static bool sendRuntimeHello(TcpConnection& transport, uint32_t seq,
                              uint32_t pid, const std::string& process_name) {
     Message msg(MessageType::MSG_RUNTIME_HELLO, seq);
     RuntimeInfo info;
@@ -278,7 +278,7 @@ static bool sendRuntimeHello(TcpClientTransport& transport, uint32_t seq,
     return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
-static bool sendWatchStart(TcpClientTransport& transport, uint32_t seq, uint32_t pid) {
+static bool sendWatchStart(TcpConnection& transport, uint32_t seq, uint32_t pid) {
     Message msg(MessageType::MSG_DIAG_WATCH_START, seq);
     msg.payload.writeUint32(pid);
     if (!sendMessage(transport, msg)) return false;
@@ -291,7 +291,7 @@ static bool sendWatchStart(TcpClientTransport& transport, uint32_t seq, uint32_t
     return mustRead<bool>(payload, &Buffer::tryReadBool);
 }
 
-static bool sendWatchStop(TcpClientTransport& transport, uint32_t seq, uint32_t pid) {
+static bool sendWatchStop(TcpConnection& transport, uint32_t seq, uint32_t pid) {
     Message msg(MessageType::MSG_DIAG_WATCH_STOP, seq);
     msg.payload.writeUint32(pid);
     if (!sendMessage(transport, msg)) return false;
@@ -444,7 +444,7 @@ static void delayedReadServiceThread(void* arg) {
     ctx->port = ctx->server.port();
     ctx->ready = true;
 
-    IClientTransport* accepted = ctx->server.waitAccept();
+    IMessageConnection* accepted = ctx->server.waitAccept();
     if (!accepted) {
         ctx->done = true;
         return;
@@ -530,7 +530,7 @@ OwnedServerCtx ControlPlaneTest::owned_ctx_;
 std::thread ControlPlaneTest::owned_tid_;
 
 TEST_F(ControlPlaneTest, IllegalUnregisterRejected) {
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", SM_PORT));
     Message msg(MessageType::MSG_UNREGISTER, 1001);
     msg.payload.writeString("OwnedService");
@@ -550,7 +550,7 @@ TEST_F(ControlPlaneTest, IllegalUnregisterRejected) {
 }
 
 TEST_F(ControlPlaneTest, MalformedLookupAndSubscribeTopicDoNotCrashSM) {
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", SM_PORT));
 
     Message bad_lookup(MessageType::MSG_LOOKUP, 1004);
@@ -581,7 +581,7 @@ TEST_F(ControlPlaneTest, MalformedLookupAndSubscribeTopicDoNotCrashSM) {
 }
 
 TEST_F(ControlPlaneTest, IllegalPublishTopicRejected) {
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", SM_PORT));
     Message msg(MessageType::MSG_PUBLISH_TOPIC, 1002);
     msg.payload.writeString("owned/topic");
@@ -601,8 +601,8 @@ TEST_F(ControlPlaneTest, IllegalPublishTopicRejected) {
 }
 
 TEST_F(ControlPlaneTest, InvalidTopicControlRequestsDoNotMutateState) {
-    TcpClientTransport owner;
-    TcpClientTransport query;
+    TcpConnection owner;
+    TcpConnection query;
     ASSERT_TRUE(connectTcp(owner, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(owner, 1050, "RawValidatedService", 12340,
@@ -665,8 +665,8 @@ TEST_F(ControlPlaneTest, InvalidTopicControlRequestsDoNotMutateState) {
 }
 
 TEST_F(ControlPlaneTest, PublishedTopicsQueryAndServiceScopedUnregister) {
-    TcpClientTransport registrant;
-    TcpClientTransport query;
+    TcpConnection registrant;
+    TcpConnection query;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(registrant, 1100, "RawServiceA", 12345, "raw-owner"));
@@ -746,9 +746,9 @@ TEST_F(ControlPlaneTest, PublishedTopicsQueryAndServiceScopedUnregister) {
 }
 
 TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
-    TcpClientTransport registrant;
-    TcpClientTransport observer;
-    TcpClientTransport query;
+    TcpConnection registrant;
+    TcpConnection observer;
+    TcpConnection query;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(observer, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
@@ -807,7 +807,7 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     EXPECT_TRUE(sendHeartbeat(registrant, 1264, "RawHealthyB"));
 
-    TcpClientTransport future_publisher;
+    TcpConnection future_publisher;
     ASSERT_TRUE(connectTcp(future_publisher, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(future_publisher, 1265, "RawFuturePublisher",
                                     12402, "raw-heartbeat"));
@@ -854,7 +854,7 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
     TcpTestServer server;
     ASSERT_TRUE(server.start("127.0.0.1", port));
     std::thread fake_sm([&server]() {
-        IClientTransport* client = server.waitAccept();
+        IMessageConnection* client = server.waitAccept();
         if (!client) return;
         Message hello;
         if (recvFullMessage(*client, hello, 2000)) {
@@ -927,7 +927,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
 }
 
 TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     const int before_count = owned_ctx_.service.invokeCount();
@@ -971,7 +971,7 @@ TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
 }
 
 TEST_F(ControlPlaneTest, MalformedSubscribeBroadcastDoesNotCrashService) {
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     Message bad_subscribe(MessageType::MSG_SUBSCRIBE_BROADCAST, 2003);
@@ -996,7 +996,7 @@ TEST_F(ControlPlaneTest, MalformedSubscribeBroadcastDoesNotCrashService) {
 }
 
 TEST_F(ControlPlaneTest, ListServicesLargeReplyHandlesPartialSend) {
-    TcpClientTransport registrant;
+    TcpConnection registrant;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
 
     OmniRuntime host_probe;
@@ -1025,7 +1025,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     for (int i = 0; i < 50 && !delayed_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     ASSERT_TRUE(delayed_ctx.ready);
 
-    TcpClientTransport registrant;
+    TcpConnection registrant;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(registerFakeService(registrant, 3001, "SlowReadService", delayed_ctx.port, "remote-delayed-node"));
 
@@ -1045,7 +1045,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
 }
 
 TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
-    TcpClientTransport rogue;
+    TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
     int rcvbuf = 4096;
@@ -1084,9 +1084,9 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
  *          因为已移除的无保护 closeClient 路径删除的正是该名称。
  */
 TEST_F(ControlPlaneTest, StaleFdCloseKeepsReRegisteredService) {
-    TcpClientTransport old_conn;
-    TcpClientTransport new_conn;
-    TcpClientTransport query;
+    TcpConnection old_conn;
+    TcpConnection new_conn;
+    TcpConnection query;
     ASSERT_TRUE(connectTcp(old_conn, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(new_conn, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
@@ -1130,9 +1130,9 @@ TEST_F(ControlPlaneTest, DiagWatchTracksEachPidPairIndependently) {
     const uint32_t PID_A = 0x7F000001u;
     const uint32_t PID_B = 0x7F000002u;
 
-    TcpClientTransport target_a;
-    TcpClientTransport target_b;
-    TcpClientTransport watcher;
+    TcpConnection target_a;
+    TcpConnection target_b;
+    TcpConnection watcher;
     ASSERT_TRUE(connectTcp(target_a, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(target_b, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(watcher, "127.0.0.1", SM_PORT));

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "transport/shm_client_transport.h"
-#include "transport/shm_server_transport.h"
+#include "transport/shm_client_connection.h"
+#include "transport/shm_server_endpoint.h"
 #include "platform/platform.h"
 #include "core/event_loop.h"
 #include "core/topic_runtime.h"
@@ -31,10 +31,10 @@ using namespace omnibinder;
  * @details 客户端 connect() 会阻塞，直到服务端接受连接并发送通知句柄。 */
 class HandshakeAcceptor {
 public:
-    explicit HandshakeAcceptor(ShmServerTransport& server)
+    explicit HandshakeAcceptor(ShmServerEndpoint& server)
         : server_(server), stop_(false)
     {
-        server_.setAcceptCallback([this](int client_id, IClientTransport* client) {
+        server_.setAcceptCallback([this](int client_id, IMessageConnection* client) {
             std::lock_guard<std::mutex> lock(mutex_);
             clients_[client_id] = client;
         });
@@ -68,7 +68,7 @@ public:
         return clientCount() == expected;
     }
 
-    IClientTransport* firstClient(uint32_t timeout_ms = 2000) {
+    IMessageConnection* firstClient(uint32_t timeout_ms = 2000) {
         for (uint32_t elapsed = 0; elapsed < timeout_ms; ++elapsed) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!clients_.empty()) return clients_.begin()->second;
@@ -77,10 +77,10 @@ public:
         return NULL;
     }
 
-    std::vector<std::pair<int, IClientTransport*> > clients() {
+    std::vector<std::pair<int, IMessageConnection*> > clients() {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::vector<std::pair<int, IClientTransport*> > result;
-        for (std::map<int, IClientTransport*>::iterator it = clients_.begin();
+        std::vector<std::pair<int, IMessageConnection*> > result;
+        for (std::map<int, IMessageConnection*>::iterator it = clients_.begin();
              it != clients_.end(); ++it) {
             result.push_back(std::make_pair(it->first, it->second));
         }
@@ -88,32 +88,32 @@ public:
     }
 
 private:
-    ShmServerTransport& server_;
+    ShmServerEndpoint& server_;
     std::atomic<bool> stop_;
     std::thread thread_;
     std::mutex mutex_;
-    std::map<int, IClientTransport*> clients_;
+    std::map<int, IMessageConnection*> clients_;
 };
 
 /* @brief RAII 辅助：在专用 owner EventLoop 上驱动服务端端点
  * @details 与 core 注册 pollFds() 并分派 onPollEvent() 的方式一致。 */
 class ShmServerLoop {
 public:
-    explicit ShmServerLoop(ShmServerTransport& server)
+    explicit ShmServerLoop(ShmServerEndpoint& server)
         : server_(server), ready_(false)
         , accepted_count_(0), cleanup_count_(0), timer_count_(0)
         , readable_frames_(0), wrong_thread_(false)
     {
-        server_.setAcceptCallback([this](int client_id, IClientTransport* client) {
+        server_.setAcceptCallback([this](int client_id, IMessageConnection* client) {
             std::lock_guard<std::mutex> lock(mutex_);
             clients_[client_id] = client;
             accepted_count_++;
         });
         server_.setReadableCallback([this](int client_id) {
-            IClientTransport* client = NULL;
+            IMessageConnection* client = NULL;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                std::map<int, IClientTransport*>::iterator it = clients_.find(client_id);
+                std::map<int, IMessageConnection*>::iterator it = clients_.find(client_id);
                 if (it != clients_.end()) client = it->second;
             }
             if (!client) return;
@@ -136,7 +136,7 @@ public:
             int fd = -1;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                std::map<int, IClientTransport*>::iterator it = clients_.find(client_id);
+                std::map<int, IMessageConnection*>::iterator it = clients_.find(client_id);
                 if (it != clients_.end()) {
                     fd = it->second->fd();
                     clients_.erase(it);
@@ -220,7 +220,7 @@ public:
     bool cleanupRanOnOwnerThread() const { return !wrong_thread_.load(); }
 
 private:
-    ShmServerTransport& server_;
+    ShmServerEndpoint& server_;
     EventLoop loop_;
     std::thread thread_;
     std::thread::id owner_thread_;
@@ -231,7 +231,7 @@ private:
     std::atomic<uint32_t> readable_frames_;
     std::atomic<bool> wrong_thread_;
     std::mutex mutex_;
-    std::map<int, IClientTransport*> clients_;
+    std::map<int, IMessageConnection*> clients_;
     std::vector<uint8_t> received_;
     std::set<int> registered_;
 };
@@ -242,7 +242,7 @@ protected:
     static void TearDownTestSuite() { platform::netCleanup(); }
 };
 
-static bool waitForFrame(IClientTransport* client, uint32_t timeout_ms = 2000)
+static bool waitForFrame(IMessageConnection* client, uint32_t timeout_ms = 2000)
 {
     for (uint32_t elapsed = 0; elapsed < timeout_ms; ++elapsed) {
         size_t frame_size = 0;
@@ -481,7 +481,7 @@ TEST_F(ShmTransportTest, GenerateShmName) {
 // ============================================================
 
 TEST_F(ShmTransportTest, ServerCreate) {
-    ShmServerTransport server("srv_create_test");
+    ShmServerEndpoint server("srv_create_test");
     EXPECT_EQ(server.type(), TransportType::SHM);
     EXPECT_EQ(server.clientCount(), 0u);
 
@@ -493,11 +493,11 @@ TEST_F(ShmTransportTest, ServerCreate) {
 }
 
 TEST_F(ShmTransportTest, ClientConnect) {
-    ShmServerTransport server("client_conn_test");
+    ShmServerEndpoint server("client_conn_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     HandshakeAcceptor acceptor(server);
 
-    ShmClientTransport client("client_conn_test");
+    ShmClientConnection client("client_conn_test");
     EXPECT_EQ(client.state(), ConnectionState::DISCONNECTED);
     EXPECT_EQ(client.type(), TransportType::SHM);
 
@@ -511,13 +511,13 @@ TEST_F(ShmTransportTest, ClientConnect) {
 }
 
 TEST_F(ShmTransportTest, MultipleClientsConnect) {
-    ShmServerTransport server("multi_client_test");
+    ShmServerEndpoint server("multi_client_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     HandshakeAcceptor acceptor(server);
 
-    ShmClientTransport client0("multi_client_test");
-    ShmClientTransport client1("multi_client_test");
-    ShmClientTransport client2("multi_client_test");
+    ShmClientConnection client0("multi_client_test");
+    ShmClientConnection client1("multi_client_test");
+    ShmClientConnection client2("multi_client_test");
     ASSERT_EQ(client0.connect("", 0), 0);
     ASSERT_EQ(client1.connect("", 0), 0);
     ASSERT_EQ(client2.connect("", 0), 0);
@@ -531,10 +531,10 @@ TEST_F(ShmTransportTest, MultipleClientsConnect) {
 }
 
 TEST_F(ShmTransportTest, CleanCloseReclaimsExactlyOnceOnOwnerLoop) {
-    ShmServerTransport server("clean_liveness_test");
+    ShmServerEndpoint server("clean_liveness_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     ShmServerLoop owner(server);
-    ShmClientTransport client("clean_liveness_test");
+    ShmClientConnection client("clean_liveness_test");
 
     ASSERT_EQ(client.connect("", 0), 0);
     ASSERT_TRUE(owner.waitForClientCount(1));
@@ -550,17 +550,17 @@ TEST_F(ShmTransportTest, CleanCloseReclaimsExactlyOnceOnOwnerLoop) {
 }
 
 TEST_F(ShmTransportTest, ClosedClientDoesNotHarmSurvivingClient) {
-    ShmServerTransport server("surviving_client_test");
+    ShmServerEndpoint server("surviving_client_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport departing("surviving_client_test");
-    ShmClientTransport survivor("surviving_client_test");
+    ShmClientConnection departing("surviving_client_test");
+    ShmClientConnection survivor("surviving_client_test");
 
     ASSERT_EQ(departing.connect("", 0), 0);
     ASSERT_EQ(survivor.connect("", 0), 0);
     ASSERT_TRUE(acceptor.waitForClientCount(2));
 
-    std::vector<std::pair<int, IClientTransport*> > conns = acceptor.clients();
+    std::vector<std::pair<int, IMessageConnection*> > conns = acceptor.clients();
     ASSERT_EQ(conns.size(), 2u);
 
     departing.close();
@@ -580,14 +580,14 @@ TEST_F(ShmTransportTest, ClosedClientDoesNotHarmSurvivingClient) {
 
 #ifndef _WIN32
 TEST_F(ShmTransportTest, AbruptPeerDeathReclaimsAndAllowsReconnect) {
-    ShmServerTransport server("abrupt_liveness_test");
+    ShmServerEndpoint server("abrupt_liveness_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     ShmServerLoop owner(server);
 
     pid_t child = fork();
     ASSERT_GE(child, 0);
     if (child == 0) {
-        ShmClientTransport client("abrupt_liveness_test");
+        ShmClientConnection client("abrupt_liveness_test");
         int result = client.connect("", 0);
         _exit(result == 0 ? 0 : 1);
     }
@@ -600,7 +600,7 @@ TEST_F(ShmTransportTest, AbruptPeerDeathReclaimsAndAllowsReconnect) {
     ASSERT_TRUE(owner.waitForClientCount(0));
     EXPECT_EQ(owner.cleanupCount(), 1u);
 
-    ShmClientTransport reconnected("abrupt_liveness_test");
+    ShmClientConnection reconnected("abrupt_liveness_test");
     ASSERT_EQ(reconnected.connect("", 0), 0);
     ASSERT_TRUE(owner.waitForClientCount(1));
     reconnected.close();
@@ -611,7 +611,7 @@ TEST_F(ShmTransportTest, AbruptPeerDeathReclaimsAndAllowsReconnect) {
 }
 
 TEST_F(ShmTransportTest, StalledHandshakeOnlyBoundsOwnerLoopOnce) {
-    ShmServerTransport server("stalled_owner_loop_test");
+    ShmServerEndpoint server("stalled_owner_loop_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     ShmServerLoop owner(server);
     uint32_t timer_before = owner.timerCount();
@@ -622,7 +622,7 @@ TEST_F(ShmTransportTest, StalledHandshakeOnlyBoundsOwnerLoopOnce) {
     EXPECT_GT(owner.timerCount(), timer_before);
     EXPECT_EQ(server.clientCount(), 0u);
 
-    ShmClientTransport healthy_client("stalled_owner_loop_test");
+    ShmClientConnection healthy_client("stalled_owner_loop_test");
     ASSERT_EQ(healthy_client.connect("", 0), 0);
     ASSERT_TRUE(owner.waitForClientCount(1));
     healthy_client.close();
@@ -632,7 +632,7 @@ TEST_F(ShmTransportTest, StalledHandshakeOnlyBoundsOwnerLoopOnce) {
 
 TEST_F(ShmTransportTest, UnexpectedReadableHandshakeDataUsesLivenessCleanup) {
     std::string server_name = "readable_liveness_test";
-    ShmServerTransport server(server_name);
+    ShmServerEndpoint server(server_name);
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     ShmServerLoop owner(server);
 
@@ -677,13 +677,13 @@ TEST_F(ShmTransportTest, UnexpectedReadableHandshakeDataUsesLivenessCleanup) {
 TEST_F(ShmTransportTest, ClientSendServerRecv) {
     const size_t data_size = 64 * 1024;
     const size_t ring_size = 128 * 1024;
-    ShmServerTransport server("c2s_test", ring_size, ring_size);
+    ShmServerEndpoint server("c2s_test", ring_size, ring_size);
     ASSERT_EQ(server.start("", 0, TransportConfig(ring_size, ring_size)), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("c2s_test", ring_size, ring_size);
+    ShmClientConnection client("c2s_test", ring_size, ring_size);
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
 
     std::vector<uint8_t> send_data(data_size);
     for (size_t i = 0; i < data_size; i++) {
@@ -717,13 +717,13 @@ TEST_F(ShmTransportTest, ClientSendServerRecv) {
 TEST_F(ShmTransportTest, Delivers65537ByteFramesBothDirections) {
     const size_t data_size = 65537;
     const size_t ring_size = 128 * 1024;
-    ShmServerTransport server("frame_65537_test", ring_size, ring_size);
+    ShmServerEndpoint server("frame_65537_test", ring_size, ring_size);
     ASSERT_EQ(server.start("", 0, TransportConfig(ring_size, ring_size)), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("frame_65537_test", ring_size, ring_size);
+    ShmClientConnection client("frame_65537_test", ring_size, ring_size);
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
 
     std::vector<uint8_t> request(data_size);
     for (size_t i = 0; i < request.size(); ++i) request[i] = static_cast<uint8_t>(i * 31u + 7u);
@@ -751,13 +751,13 @@ TEST_F(ShmTransportTest, Delivers65537ByteFramesBothDirections) {
 TEST_F(ShmTransportTest, LargerConfiguredRingPreservesPayloadAndLargeThenSmallOrder) {
     const size_t large_size = 100 * 1024;
     const size_t ring_size = 256 * 1024;
-    ShmServerTransport server("large_then_small_test", ring_size, ring_size);
+    ShmServerEndpoint server("large_then_small_test", ring_size, ring_size);
     ASSERT_EQ(server.start("", 0, TransportConfig(ring_size, ring_size)), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("large_then_small_test", ring_size, ring_size);
+    ShmClientConnection client("large_then_small_test", ring_size, ring_size);
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
 
     std::vector<uint8_t> large(large_size);
     for (size_t i = 0; i < large.size(); ++i) large[i] = static_cast<uint8_t>((i ^ (i >> 8)) & 0xffu);
@@ -782,13 +782,13 @@ TEST_F(ShmTransportTest, LargerConfiguredRingPreservesPayloadAndLargeThenSmallOr
 }
 
 TEST_F(ShmTransportTest, RecvReturnsZeroWhenNoData) {
-    ShmServerTransport server("nodata_test");
+    ShmServerEndpoint server("nodata_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("nodata_test");
+    ShmClientConnection client("nodata_test");
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
 
     uint8_t recv_buf[64];
     size_t frame_size = 0;
@@ -803,10 +803,10 @@ TEST_F(ShmTransportTest, RecvReturnsZeroWhenNoData) {
 #ifndef _WIN32
 TEST_F(ShmTransportTest, ImpossibleHeadDeterministicallyDisconnectsClient) {
     const uint32_t ring_size = 128 * 1024;
-    ShmServerTransport server("invalid_head_disconnect_test", ring_size, ring_size);
+    ShmServerEndpoint server("invalid_head_disconnect_test", ring_size, ring_size);
     ASSERT_EQ(server.start("", 0, TransportConfig(ring_size, ring_size)), 0);
     ShmServerLoop owner(server);
-    ShmClientTransport client("invalid_head_disconnect_test", ring_size, ring_size);
+    ShmClientConnection client("invalid_head_disconnect_test", ring_size, ring_size);
     ASSERT_EQ(client.connect("", 0), 0);
     ASSERT_TRUE(owner.waitForClientCount(1));
 
@@ -830,13 +830,13 @@ TEST_F(ShmTransportTest, ImpossibleHeadDeterministicallyDisconnectsClient) {
 }
 
 TEST_F(ShmTransportTest, RecvDoesNotConsumeResponseEventFd) {
-    ShmServerTransport server("recv_eventfd_owner_test");
+    ShmServerEndpoint server("recv_eventfd_owner_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("recv_eventfd_owner_test");
+    ShmClientConnection client("recv_eventfd_owner_test");
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
 
     const uint8_t response[] = {1, 2, 3, 4};
     ASSERT_EQ(conn->send(response, sizeof(response)),
@@ -853,13 +853,13 @@ TEST_F(ShmTransportTest, RecvDoesNotConsumeResponseEventFd) {
 }
 
 TEST_F(ShmTransportTest, ServerRecvDoesNotConsumeRequestEventFd) {
-    ShmServerTransport server("server_recv_eventfd_owner_test");
+    ShmServerEndpoint server("server_recv_eventfd_owner_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("server_recv_eventfd_owner_test");
+    ShmClientConnection client("server_recv_eventfd_owner_test");
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
     ASSERT_TRUE(platform::waitFdReadable(server.requestEventFd(), 100));
     ASSERT_TRUE(platform::eventFdConsume(server.requestEventFd()));
 
@@ -880,13 +880,13 @@ TEST_F(ShmTransportTest, ServerRecvDoesNotConsumeRequestEventFd) {
 }
 
 TEST_F(ShmTransportTest, NonemptyRingDoesNotGeneratePerFrameNotifications) {
-    ShmServerTransport server("transition_notify_test");
+    ShmServerEndpoint server("transition_notify_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("transition_notify_test");
+    ShmClientConnection client("transition_notify_test");
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
     ASSERT_TRUE(platform::waitFdReadable(server.requestEventFd(), 100));
     ASSERT_TRUE(platform::eventFdConsume(server.requestEventFd()));
 
@@ -915,13 +915,13 @@ TEST_F(ShmTransportTest, NonemptyRingDoesNotGeneratePerFrameNotifications) {
 
 TEST_F(ShmTransportTest, ConcurrentEnqueueAndRaceSafeDrainDoesNotStrandFrames) {
     const uint32_t frame_count = 20000;
-    ShmServerTransport server("eventfd_drain_race_test", 4096, 4096);
+    ShmServerEndpoint server("eventfd_drain_race_test", 4096, 4096);
     ASSERT_EQ(server.start("", 0, TransportConfig(4096, 4096)), 0);
     HandshakeAcceptor acceptor(server);
-    ShmClientTransport client("eventfd_drain_race_test", 4096, 4096);
+    ShmClientConnection client("eventfd_drain_race_test", 4096, 4096);
     ASSERT_EQ(client.connect("", 0), 0);
-    IClientTransport* conn = acceptor.firstClient();
-    ASSERT_NE(conn, static_cast<IClientTransport*>(NULL));
+    IMessageConnection* conn = acceptor.firstClient();
+    ASSERT_NE(conn, static_cast<IMessageConnection*>(NULL));
     ASSERT_TRUE(platform::waitFdReadable(server.requestEventFd(), 100));
     ASSERT_TRUE(platform::eventFdConsume(server.requestEventFd()));
 
@@ -989,14 +989,14 @@ TEST_F(ShmTransportTest, ConcurrentEnqueueAndRaceSafeDrainDoesNotStrandFrames) {
 TEST_F(ShmTransportTest, ConcurrentMultiClientSendRecv) {
     const int NUM_CLIENTS = 4;
     const size_t data_size = 4096;
-    ShmServerTransport server("concurrent_test", 128 * 1024, 128 * 1024);
+    ShmServerEndpoint server("concurrent_test", 128 * 1024, 128 * 1024);
     ASSERT_EQ(server.start("", 0, TransportConfig(128 * 1024, 128 * 1024)), 0);
     HandshakeAcceptor acceptor(server);
 
-    std::vector<std::unique_ptr<ShmClientTransport> > clients;
+    std::vector<std::unique_ptr<ShmClientConnection> > clients;
     for (int i = 0; i < NUM_CLIENTS; ++i) {
-        std::unique_ptr<ShmClientTransport> c(
-            new ShmClientTransport("concurrent_test", 128 * 1024, 128 * 1024));
+        std::unique_ptr<ShmClientConnection> c(
+            new ShmClientConnection("concurrent_test", 128 * 1024, 128 * 1024));
         ASSERT_EQ(c->connect("", 0), 0);
         clients.push_back(std::move(c));
     }
@@ -1020,7 +1020,7 @@ TEST_F(ShmTransportTest, ConcurrentMultiClientSendRecv) {
     for (size_t i = 0; i < threads.size(); ++i) threads[i].join();
     EXPECT_EQ(send_ok.load(), NUM_CLIENTS);
 
-    std::vector<std::pair<int, IClientTransport*> > conns = acceptor.clients();
+    std::vector<std::pair<int, IMessageConnection*> > conns = acceptor.clients();
     ASSERT_EQ(conns.size(), static_cast<size_t>(NUM_CLIENTS));
 
     std::set<int> done;
@@ -1045,19 +1045,19 @@ TEST_F(ShmTransportTest, ConcurrentMultiClientSendRecv) {
 TEST_F(ShmTransportTest, ConcurrentDataIntegrity) {
     const int NUM_CLIENTS = 3;
     const int ROUNDS = 50;
-    ShmServerTransport server("integrity_test", 128 * 1024, 128 * 1024);
+    ShmServerEndpoint server("integrity_test", 128 * 1024, 128 * 1024);
     ASSERT_EQ(server.start("", 0, TransportConfig(128 * 1024, 128 * 1024)), 0);
     HandshakeAcceptor acceptor(server);
 
-    std::vector<std::unique_ptr<ShmClientTransport> > clients;
+    std::vector<std::unique_ptr<ShmClientConnection> > clients;
     for (int i = 0; i < NUM_CLIENTS; ++i) {
-        std::unique_ptr<ShmClientTransport> c(
-            new ShmClientTransport("integrity_test", 128 * 1024, 128 * 1024));
+        std::unique_ptr<ShmClientConnection> c(
+            new ShmClientConnection("integrity_test", 128 * 1024, 128 * 1024));
         ASSERT_EQ(c->connect("", 0), 0);
         clients.push_back(std::move(c));
     }
     ASSERT_TRUE(acceptor.waitForClientCount(static_cast<size_t>(NUM_CLIENTS)));
-    std::vector<std::pair<int, IClientTransport*> > conns = acceptor.clients();
+    std::vector<std::pair<int, IMessageConnection*> > conns = acceptor.clients();
     ASSERT_EQ(conns.size(), static_cast<size_t>(NUM_CLIENTS));
 
     for (int round = 0; round < ROUNDS; ++round) {
