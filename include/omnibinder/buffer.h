@@ -105,6 +105,17 @@ public:
     void resize(size_t new_size) noexcept;
     void compact() noexcept;
 
+    /* @brief 返回尾部可直接写入（例如 recv 落盘）的连续区域
+     * @param[out] out_writable 本次可写字节数，保证 >= 1（容量不足时内部按需增长）
+     * @return 可写起始指针；分配失败时返回 NULL 且 out_writable = 0
+     * @note 写入后必须调用 commitWritten() 提交实际写入长度，否则 size() 不前进 */
+    uint8_t* writableTail(size_t& out_writable) noexcept;
+
+    /* @brief 提交 writableTail() 区域实际写入的 n 字节，推进写游标
+     * @param[in] n 实际写入字节数，不得超过上次 writableTail 返回的 out_writable
+     * @return true 成功；false 表示 n 越界或缓冲区已失效（writeOk() 为 false） */
+    bool commitWritten(size_t n) noexcept;
+
     // ---- 写入状态检查 ----
     bool writeOk() const noexcept;
 

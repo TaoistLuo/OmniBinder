@@ -73,15 +73,20 @@ int readNextMessage(IMessageConnection& transport, Buffer& recv_buffer, Message&
             return -1;
         }
 
-        uint8_t chunk[DEFAULT_BUFFER_SIZE];
-        int ret = transport.recv(chunk, sizeof(chunk));
+        // 直接读入 recv_buffer 尾部，省去"栈 chunk 中转"的一次拷贝
+        size_t space = 0;
+        uint8_t* tail = recv_buffer.writableTail(space);
+        if (!tail) {
+            return -1;
+        }
+        int ret = transport.recv(tail, space);
         if (ret <= 0) {
             return ret;
         }
         if (recv_buffer.remaining() + static_cast<size_t>(ret) > MAX_MESSAGE_SIZE) {
             return -1;
         }
-        if (!recv_buffer.writeRaw(chunk, static_cast<size_t>(ret))) {
+        if (!recv_buffer.commitWritten(static_cast<size_t>(ret))) {
             return -1;
         }
     }

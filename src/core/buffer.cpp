@@ -390,4 +390,27 @@ void Buffer::compact() noexcept {
     read_pos_ = 0;
 }
 
+uint8_t* Buffer::writableTail(size_t& out_writable) noexcept {
+    out_writable = 0;
+    if (write_failed_) {
+        return NULL;
+    }
+    if (write_pos_ == capacity_) {
+        reserve(write_pos_ + 1);
+        if (write_failed_) {
+            return NULL;
+        }
+    }
+    out_writable = capacity_ - write_pos_;
+    return data_ + write_pos_;
+}
+
+bool Buffer::commitWritten(size_t n) noexcept {
+    if (write_failed_ || n > capacity_ - write_pos_) {
+        return false;
+    }
+    write_pos_ += n;
+    return true;
+}
+
 } // namespace omnibinder
