@@ -248,7 +248,9 @@ target_compile_definitions(test_generated_runtime_integration PRIVATE
 target_link_libraries(test_generated_runtime_integration PRIVATE omnibinder_static gtest gtest_main)
 add_dependencies(test_generated_runtime_integration service_manager)
 add_test(NAME test_generated_runtime_integration COMMAND test_generated_runtime_integration WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-set_tests_properties(test_generated_runtime_integration PROPERTIES TIMEOUT 300)
+set_tests_properties(test_generated_runtime_integration PROPERTIES
+    TIMEOUT 300
+    ENVIRONMENT "OMNI_TEST_CXX=${CMAKE_CXX_COMPILER};OMNI_TEST_CC=${CMAKE_C_COMPILER};OMNI_TEST_CXX_FLAGS=${CMAKE_CXX_FLAGS};OMNI_TEST_C_FLAGS=${CMAKE_C_FLAGS}")
 
 endif()
 

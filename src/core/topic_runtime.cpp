@@ -18,9 +18,32 @@ TopicRuntime::TopicState& TopicRuntime::ensureTopic(uint32_t id, const std::stri
 
 void TopicRuntime::dropNameIfUnused(const std::string& name, uint32_t id) {
     std::map<uint32_t, TopicState>::iterator it = topics_.find(id);
-    if (it == topics_.end() || (!it->second.has_callback && !it->second.published)) {
+    if (it == topics_.end()) {
+        name_to_id_.erase(name);
+        return;
+    }
+    if (!it->second.has_callback && !it->second.published) {
         name_to_id_.erase(name);
     }
+    eraseTopicIfUnused(it);
+}
+
+bool TopicRuntime::isTopicUnused(const TopicState& state) const {
+    return !state.has_callback && !state.has_error_callback && !state.published
+        && state.expected_subscription_hash == 0
+        && state.tcp_subscribers.empty() && state.shm_subscribers.empty();
+}
+
+std::map<uint32_t, TopicRuntime::TopicState>::iterator
+TopicRuntime::eraseTopicIfUnused(std::map<uint32_t, TopicState>::iterator it) {
+    if (!isTopicUnused(it->second)) {
+        return ++it;
+    }
+    // 订阅/发布/回调/订阅者全部清空后擦除节点，避免 topics_ 随动态话题无界增长
+    if (!it->second.name.empty()) {
+        name_to_id_.erase(it->second.name);
+    }
+    return topics_.erase(it);
 }
 
 void TopicRuntime::rememberSubscription(const std::string& topic_name,
@@ -119,9 +142,10 @@ void TopicRuntime::addTcpSubscriber(uint32_t topic_id, int client_fd) {
 
 void TopicRuntime::removeTcpSubscriberFd(int client_fd) {
     for (std::map<uint32_t, TopicState>::iterator it = topics_.begin();
-         it != topics_.end(); ++it) {
+         it != topics_.end();) {
         std::vector<int>& fds = it->second.tcp_subscribers;
         fds.erase(std::remove(fds.begin(), fds.end(), client_fd), fds.end());
+        it = eraseTopicIfUnused(it);
     }
 }
 
@@ -142,7 +166,7 @@ void TopicRuntime::addShmSubscriberService(uint32_t topic_id, const std::string&
 void TopicRuntime::removeShmSubscriberService(const std::string& service_name,
                                                uint32_t client_id) {
     for (std::map<uint32_t, TopicState>::iterator it = topics_.begin();
-         it != topics_.end(); ++it) {
+         it != topics_.end();) {
         std::vector<ShmSubscriber>& subscribers = it->second.shm_subscribers;
         subscribers.erase(
             std::remove_if(subscribers.begin(), subscribers.end(),
@@ -151,6 +175,7 @@ void TopicRuntime::removeShmSubscriberService(const std::string& service_name,
                                    && subscriber.client_id == client_id;
                            }),
             subscribers.end());
+        it = eraseTopicIfUnused(it);
     }
 }
 

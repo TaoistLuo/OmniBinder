@@ -101,6 +101,9 @@ private:
 
     TopicState& ensureTopic(uint32_t id, const std::string& name);
     void dropNameIfUnused(const std::string& name, uint32_t id);
+    bool isTopicUnused(const TopicState& state) const;
+    std::map<uint32_t, TopicState>::iterator eraseTopicIfUnused(
+        std::map<uint32_t, TopicState>::iterator it);
 
     std::map<uint32_t, TopicState> topics_;
     std::map<std::string, uint32_t> name_to_id_;

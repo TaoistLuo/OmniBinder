@@ -66,6 +66,24 @@ static bool runCommand(const std::string& command) {
     return system(command.c_str()) == 0;
 }
 
+// 下游 harness 必须用"构建同款编译器 + 标志"编译：否则在 sanitizer 构建下
+// 缺少 -fsanitize 标志，链接 ASAN 版 libomnibinder.a 会因 __asan_*/__ubsan_*
+// 未定义而失败。编译器与标志由 CMake 经环境变量注入。
+static std::string toolchainValue(const char* env_name, const char* fallback) {
+    const char* value = std::getenv(env_name);
+    return (value != NULL && *value != '\0') ? std::string(value) : std::string(fallback);
+}
+
+static std::string cxxToolchain() {
+    return toolchainValue("OMNI_TEST_CXX", "g++") + " -std=c++11 "
+        + toolchainValue("OMNI_TEST_CXX_FLAGS", "") + " ";
+}
+
+static std::string cToolchain() {
+    return toolchainValue("OMNI_TEST_CC", "cc") + " -std=c99 "
+        + toolchainValue("OMNI_TEST_C_FLAGS", "") + " ";
+}
+
 static std::string replaceAll(std::string input, const std::string& from, const std::string& to) {
     size_t pos = 0;
     while ((pos = input.find(from, pos)) != std::string::npos) {
@@ -725,6 +743,7 @@ int main() {
     for (int i = 0; i < 20; ++i) { omni_runtime_poll_once(sub_runtime, 20); std::this_thread::sleep_for(std::chrono::microseconds(10000)); }
     assert(topic_hits.load() == 0);
     broadcast_rogue.close();
+    demo_ItemService_proxy_destroy(&proxy);
     omni_runtime_stop(sub_runtime);
     omni_runtime_destroy(sub_runtime);
 
@@ -946,7 +965,7 @@ std::string GeneratedRuntimeTest::cpp_harness_path_;
 std::string GeneratedRuntimeTest::c_harness_path_;
 
 TEST_F(GeneratedRuntimeTest, CompileGeneratedCppRuntimeHarness) {
-    std::string cmd = std::string("g++ -std=c++11 ") + getIncludeFlags() +
+    std::string cmd = cxxToolchain() + getIncludeFlags() +
         " " + shellQuote(cpp_harness_path_) +
         " " + shellQuote(dir_ + "/guarded.cpp") +
         " " + shellQuote(getLibPath()) +
@@ -960,10 +979,10 @@ TEST_F(GeneratedRuntimeTest, RunGeneratedCppRuntimeHarness) {
 
 TEST_F(GeneratedRuntimeTest, CompileGeneratedCRuntimeHarness) {
     std::string c_object = dir_ + "/guarded_c99.o";
-    std::string compile_c = std::string("cc -std=c99 ") + getIncludeFlags() +
+    std::string compile_c = cToolchain() + getIncludeFlags() +
         " -c " + shellQuote(dir_ + "/guarded.c") + " -o " + shellQuote(c_object);
     ASSERT_TRUE(runCommand(compile_c));
-    std::string cmd = std::string("g++ -std=c++11 ") + getIncludeFlags() +
+    std::string cmd = cxxToolchain() + getIncludeFlags() +
         " " + shellQuote(c_harness_path_) +
         " " + shellQuote(c_object) +
         " " + shellQuote(getLibPath()) +
@@ -989,7 +1008,7 @@ TEST_F(GeneratedRuntimeTest, GeneratedArrayDeserializersRejectHostileCounts) {
         "}\n";
     const std::string cpp_path = dir_ + "/array_guard_cpp.cpp";
     writeFile(cpp_path, cpp_source);
-    std::string cpp_cmd = std::string("g++ -std=c++11 ") + getIncludeFlags() +
+    std::string cpp_cmd = cxxToolchain() + getIncludeFlags() +
         " " + shellQuote(cpp_path) + " " + shellQuote(dir_ + "/guarded.cpp") +
         " " + shellQuote(getLibPath()) + " -lpthread -lrt -o " +
         shellQuote(dir_ + "/array_guard_cpp");
@@ -1011,10 +1030,10 @@ TEST_F(GeneratedRuntimeTest, GeneratedArrayDeserializersRejectHostileCounts) {
         "}\n";
     const std::string c_path = dir_ + "/array_guard_c.c";
     writeFile(c_path, c_source);
-    std::string compile_guard_c = std::string("cc -std=c99 ") + getIncludeFlags() +
+    std::string compile_guard_c = cToolchain() + getIncludeFlags() +
         " -c " + shellQuote(c_path) + " -o " + shellQuote(dir_ + "/array_guard_c.o");
     ASSERT_TRUE(runCommand(compile_guard_c));
-    std::string c_cmd = std::string("g++ ") + shellQuote(dir_ + "/array_guard_c.o") +
+    std::string c_cmd = cxxToolchain() + shellQuote(dir_ + "/array_guard_c.o") +
         " " + shellQuote(dir_ + "/guarded_c99.o") + " " + shellQuote(getLibPath()) +
         " -lpthread -lrt -o " + shellQuote(dir_ + "/array_guard_c");
     ASSERT_TRUE(runCommand(c_cmd));
