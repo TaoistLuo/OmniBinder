@@ -26,10 +26,45 @@ TEST(ServiceRegistryTest, AddBasic) {
     EXPECT_TRUE(reg.exists("svc.audio"));
 }
 
-TEST(ServiceRegistryTest, AddDuplicateNameRejected) {
+TEST(ServiceRegistryTest, AddDuplicateNameTakesOver) {
     ServiceRegistry reg;
-    EXPECT_NE(reg.addService(makeInfo("svc.dup"), 10), INVALID_HANDLE);
-    EXPECT_EQ(reg.addService(makeInfo("svc.dup"), 11), INVALID_HANDLE);
+    const ServiceHandle h1 = reg.addService(makeInfo("svc.dup"), 10);
+    ASSERT_NE(h1, INVALID_HANDLE);
+
+    int displaced_fd = -1;
+    const ServiceHandle h2 = reg.addService(makeInfo("svc.dup"), 11, &displaced_fd);
+    EXPECT_EQ(h2, h1);            // 名称身份保持，handle 不变
+    EXPECT_EQ(displaced_fd, 10);  // 旧控制连接被顶替
+    EXPECT_EQ(reg.count(), 1u);
+    EXPECT_EQ(reg.getControlFd("svc.dup"), 11);
+    EXPECT_TRUE(reg.ownsService(11, "svc.dup"));
+    EXPECT_FALSE(reg.ownsService(10, "svc.dup"));
+}
+
+TEST(ServiceRegistryTest, AddDuplicateSameFdHasNoDisplacedFd) {
+    ServiceRegistry reg;
+    const ServiceHandle h1 = reg.addService(makeInfo("svc.dupsame"), 10);
+    ASSERT_NE(h1, INVALID_HANDLE);
+
+    int displaced_fd = -1;
+    const ServiceHandle h2 = reg.addService(makeInfo("svc.dupsame"), 10, &displaced_fd);
+    EXPECT_EQ(h2, h1);
+    EXPECT_EQ(displaced_fd, -1);
+    EXPECT_EQ(reg.count(), 1u);
+}
+
+TEST(ServiceRegistryTest, AddDuplicateDifferentHostTakesOver) {
+    ServiceRegistry reg;
+    ServiceInfo a = makeInfo("svc.cross");
+    a.host_id = "host-a";
+    ASSERT_NE(reg.addService(a, 10), INVALID_HANDLE);
+
+    ServiceInfo b = makeInfo("svc.cross");
+    b.host_id = "host-b";
+    int displaced_fd = -1;
+    EXPECT_NE(reg.addService(b, 11, &displaced_fd), INVALID_HANDLE);
+    EXPECT_EQ(displaced_fd, 10);
+    EXPECT_EQ(reg.getControlFd("svc.cross"), 11);
     EXPECT_EQ(reg.count(), 1u);
 }
 

@@ -16,7 +16,9 @@ void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& ms
         return;
     }
 
-    ServiceHandle handle = registry_.addService(info, conn->fd);
+    const int new_fd = conn->fd;
+    int displaced_fd = -1;
+    ServiceHandle handle = registry_.addService(info, new_fd, &displaced_fd);
     if (handle == INVALID_HANDLE) {
         OMNI_LOG_WARN(TAG, "Failed to register service: %s", info.name.c_str());
         sendRegisterReply(conn, msg.header.sequence, INVALID_HANDLE);
@@ -24,8 +26,19 @@ void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& ms
     }
 
     heartbeat_.startTracking(info.name);
-
     sendRegisterReply(conn, msg.header.sequence, handle);
+
+    // 后来者已接管该名称：回收被顶替的旧控制连接上残留的发布关系，否则旧 fd
+    // 会继续占住话题发布者位置，新 owner 的 publishTopic 被拒。旧连接若已无
+    // 其它存活服务则直接关闭，避免其心跳被永久丢弃、连接变僵尸。
+    // 此处关闭的是其它 fd，不重入本连接；closeClient 先摘表再清理（约束 1/2）。
+    if (displaced_fd >= 0 && displaced_fd != new_fd
+        && clients_.find(displaced_fd) != clients_.end()) {
+        topic_manager_.removePublishersByService(info.name, displaced_fd);
+        if (registry_.listServiceNamesByFd(displaced_fd).empty()) {
+            closeClient(displaced_fd);
+        }
+    }
 }
 
 void ServiceManagerApp::sendRegisterReply(ClientConnection* conn, uint32_t seq,

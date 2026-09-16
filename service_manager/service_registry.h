@@ -39,6 +39,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <stddef.h>
 
 namespace omnibinder {
 
@@ -71,14 +72,18 @@ public:
     ServiceRegistry& operator=(const ServiceRegistry&) = delete;
 
     /*
-     * @brief  向注册表添加新服务
-     * @param[in]  info       服务信息
-     * @param[in]  control_fd 服务的控制连接 TCP fd
-     * @return 新分配的 ServiceHandle；服务名已被不同 host_id 注册时返回 INVALID_HANDLE
-     * @note   同一 runtime（相同且非空 host_id）重复注册视为更新：刷新条目
-     *         并返回原 handle
+     * @brief  向注册表添加新服务（同名后来者顶替先前者）
+     * @param[in]   info         服务信息
+     * @param[in]   control_fd   服务的控制连接 TCP fd
+     * @param[out]  displaced_fd 非空时输出被顶替的旧控制连接 fd；未被顶替或与
+     *                           control_fd 相同时置 -1
+     * @return 服务 handle；名称为空或超长时返回 INVALID_HANDLE
+     * @note   服务名全局唯一，同名重复注册一律视为后来者顶替（崩溃重启场景），
+     *         刷新 ServiceInfo 与控制 fd 并保留原 handle。旧连接上残留的话题
+     *         归属与连接回收由调用方依据 displaced_fd 完成。
      */
-    ServiceHandle addService(const ServiceInfo& info, int control_fd);
+    ServiceHandle addService(const ServiceInfo& info, int control_fd,
+                             int* displaced_fd = NULL);
 
     /*
      * @brief  按名称移除服务

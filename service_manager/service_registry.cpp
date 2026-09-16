@@ -28,8 +28,13 @@ ServiceHandle ServiceRegistry::generateHandle()
     }
 }
 
-ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_fd)
+ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_fd,
+                                          int* displaced_fd)
 {
+    if (displaced_fd) {
+        *displaced_fd = -1;
+    }
+
     if (info.name.empty()) {
         OMNI_LOG_ERROR(TAG, "Cannot register service with empty name");
         return INVALID_HANDLE;
@@ -40,31 +45,29 @@ ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_f
         return INVALID_HANDLE;
     }
 
-    // 检查重名。同一 runtime（相同且非空 host_id）重复注册视为幂等更新：
-    // 刷新 ServiceInfo 和控制 fd，保留原 handle 并返回成功。这样客户端在
-    // 部分失败后可重试完整注册流程而不被拒绝。不同 host_id 使用相同名称
-    // 仍是硬冲突。
+    // 服务名全局唯一，后来者一律顶替先前者：同名注册总是接管现有条目，
+    // 刷新 ServiceInfo 与控制 fd 并保留原 handle。崩溃重启的服务因此能顶替
+    // 旧实例（含旧控制连接未及时回收的场景），且重连恢复可安全重试。
     std::map<std::string, ServiceEntry>::iterator existing = services_by_name_.find(info.name);
     if (existing != services_by_name_.end()) {
-        if (!existing->second.info.host_id.empty()
-            && existing->second.info.host_id == info.host_id) {
-            int old_fd = existing->second.control_fd;
-            existing->second.info = info;
-            existing->second.control_fd = control_fd;
+        int old_fd = existing->second.control_fd;
+        existing->second.info = info;
+        existing->second.control_fd = control_fd;
 
-            // 控制连接变化时（例如重连后）保持 fd -> services 索引一致
-            if (old_fd != control_fd) {
-                removeFromFdIndex(old_fd, info.name);
-                fd_to_services_[control_fd].push_back(info.name);
+        // 控制连接变化时（例如重连/重启后）保持 fd -> services 索引一致，
+        // 并回传旧 fd 供调用方回收其上残留的话题/连接状态
+        if (old_fd != control_fd) {
+            removeFromFdIndex(old_fd, info.name);
+            fd_to_services_[control_fd].push_back(info.name);
+            if (displaced_fd) {
+                *displaced_fd = old_fd;
             }
-
-            OMNI_LOG_INFO(TAG, "Re-registered service (idempotent update): %s (handle=%u, fd=%d)",
-                          info.name.c_str(), existing->second.handle, control_fd);
-            return existing->second.handle;
         }
 
-        OMNI_LOG_WARN(TAG, "Service already registered by a different host_id: %s", info.name.c_str());
-        return INVALID_HANDLE;
+        OMNI_LOG_INFO(TAG, "Service taken over by newer registration: %s "
+                           "(handle=%u, fd=%d replaces fd=%d)",
+                      info.name.c_str(), existing->second.handle, control_fd, old_fd);
+        return existing->second.handle;
     }
 
     ServiceHandle handle = generateHandle();
