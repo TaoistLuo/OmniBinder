@@ -2,8 +2,8 @@
 #include "transport/shm_client_connection.h"
 #include "transport/shm_server_endpoint.h"
 #include "platform/platform.h"
+#include "platform/platform_test.h"
 #include "core/event_loop.h"
-#include "core/topic_runtime.h"
 #include <cstring>
 #include <algorithm>
 #include <thread>
@@ -217,6 +217,11 @@ public:
     uint32_t acceptedCount() const { return accepted_count_.load(); }
     uint32_t cleanupCount() const { return cleanup_count_.load(); }
     uint32_t timerCount() const { return timer_count_.load(); }
+    uint32_t readableFrames() const { return readable_frames_.load(); }
+    std::vector<uint8_t> receivedBytes() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return received_;
+    }
     bool cleanupRanOnOwnerThread() const { return !wrong_thread_.load(); }
 
 private:
@@ -252,6 +257,8 @@ static bool waitForFrame(IMessageConnection* client, uint32_t timeout_ms = 2000)
     return false;
 }
 
+// Linux 专属：直接驱动 AF_UNIX + SCM_RIGHTS 裸线格式（分片头/EOF/畸形帧），
+// 验证握手通道的字节级契约；平台抽象层无法表达"半帧/伪造 fd"等非法线格式，故保留 POSIX 直调。
 #ifndef _WIN32
 namespace {
 
@@ -462,7 +469,15 @@ TEST_F(ShmTransportTest, CalculateShmSize) {
               + sizeof(ShmRingHeader) + 1024
               + sizeof(ShmRingHeader) + 512);
     EXPECT_EQ(sizeof(ShmControlBlock) % alignof(ShmRingHeader), 0u);
-    EXPECT_EQ(sizeof(ShmRingHeader) % alignof(ShmRingHeader), 0u);
+
+    // 请求/响应数据区相对基址的实际偏移必须保持 ring 单元对齐
+    std::vector<uint8_t> layout(calculateShmSize(1024, 512));
+    uint8_t* base = layout.data();
+    const size_t req_offset = static_cast<size_t>(shmRequestDataFromBase(base) - base);
+    const size_t resp_offset = static_cast<size_t>(
+        shmResponseDataFromBase(base, 1024) - base);
+    EXPECT_EQ(req_offset % alignof(ShmRingHeader), 0u);
+    EXPECT_EQ(resp_offset % alignof(ShmRingHeader), 0u);
 }
 
 TEST_F(ShmTransportTest, CalculateShmSizeNormalizesTinyRings) {
@@ -474,6 +489,48 @@ TEST_F(ShmTransportTest, GenerateShmName) {
     EXPECT_EQ(generateShmName("myservice"), "/binder_myservice_cfb2a296");
     EXPECT_EQ(generateShmName("test"), "/binder_test_afd071e5");
     EXPECT_NE(generateShmName("test"), generateShmName("Test"));
+}
+
+TEST_F(ShmTransportTest, GenerateShmNameIncludesInstanceId) {
+    const std::string name = "multi_instance_test";
+    const std::string base = generateShmName(name);
+    const std::string inst_a = generateShmName(name, "inst-a");
+    const std::string inst_b = generateShmName(name, "inst-b");
+
+    EXPECT_EQ(base, generateShmName(name, ""));  // 空实例保持历史命名
+    EXPECT_NE(inst_a, base);
+    EXPECT_NE(inst_b, base);
+    EXPECT_NE(inst_a, inst_b);
+    EXPECT_NE(shmHandshakePath(inst_a), shmHandshakePath(inst_b));
+}
+
+TEST_F(ShmTransportTest, GenerateShmNameIncludesHostId) {
+    const std::string name = "multi_host_test";
+    const std::string base = generateShmName(name);
+    const std::string host_a = generateShmName(name, "", "host-a");
+    const std::string host_b = generateShmName(name, "", "host-b");
+    const std::string with_inst = generateShmName(name, "inst-a", "host-a");
+
+    EXPECT_EQ(base, generateShmName(name, "", ""));  // 空 host 保持历史命名
+    EXPECT_NE(host_a, base);
+    EXPECT_NE(host_b, host_a);
+    EXPECT_NE(with_inst, host_a);
+}
+
+TEST_F(ShmTransportTest, SameNameDifferentInstanceHandshakePathsDiffer) {
+    const std::string name = "same_name_multi";
+    ShmServerEndpoint inst_a(name, SHM_DEFAULT_REQ_RING_CAPACITY,
+                             SHM_DEFAULT_RESP_RING_CAPACITY, "inst-a");
+    ShmServerEndpoint inst_b(name, SHM_DEFAULT_REQ_RING_CAPACITY,
+                             SHM_DEFAULT_RESP_RING_CAPACITY, "inst-b");
+
+    ASSERT_EQ(inst_a.start("", 0, TransportConfig()), 0);
+    ASSERT_EQ(inst_b.start("", 0, TransportConfig()), 0);
+    EXPECT_FALSE(inst_a.handshakePath().empty());
+    EXPECT_NE(inst_a.handshakePath(), inst_b.handshakePath());
+
+    inst_a.close();
+    inst_b.close();
 }
 
 // ============================================================
@@ -578,6 +635,29 @@ TEST_F(ShmTransportTest, ClosedClientDoesNotHarmSurvivingClient) {
     EXPECT_EQ(memcmp(received, response, sizeof(response)), 0);
 }
 
+TEST_F(ShmTransportTest, ServerLoopReadableCallbackConsumesFrames) {
+    ShmServerEndpoint server("loop_readable_test");
+    ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
+    ShmServerLoop owner(server);
+    ShmClientConnection client("loop_readable_test");
+    ASSERT_EQ(client.connect("", 0), 0);
+    ASSERT_TRUE(owner.waitForClientCount(1));
+
+    const uint8_t payload[] = {0x11, 0x22, 0x33, 0x44, 0x55};
+    ASSERT_EQ(client.send(payload, sizeof(payload)), static_cast<int>(sizeof(payload)));
+
+    for (int i = 0; i < 2000 && owner.readableFrames() == 0; ++i) {
+        platform::sleepMs(1);
+    }
+    EXPECT_EQ(owner.readableFrames(), 1u);
+    std::vector<uint8_t> received = owner.receivedBytes();
+    ASSERT_EQ(received.size(), sizeof(payload));
+    EXPECT_EQ(memcmp(received.data(), payload, sizeof(payload)), 0);
+
+    client.close();
+}
+
+// Linux 专属：依赖 POSIX fork/waitpid 制造客户端进程突然死亡（Windows 无等价能力）
 #ifndef _WIN32
 TEST_F(ShmTransportTest, AbruptPeerDeathReclaimsAndAllowsReconnect) {
     ShmServerEndpoint server("abrupt_liveness_test");
@@ -800,6 +880,7 @@ TEST_F(ShmTransportTest, RecvReturnsZeroWhenNoData) {
     server.close();
 }
 
+// Linux 专属：同一进程内二次映射 SHM 并篡改 ring 头（Windows Named Pipe 无等价布局）
 #ifndef _WIN32
 TEST_F(ShmTransportTest, ImpossibleHeadDeterministicallyDisconnectsClient) {
     const uint32_t ring_size = 128 * 1024;
@@ -1094,6 +1175,7 @@ TEST_F(ShmTransportTest, ConcurrentDataIntegrity) {
     server.close();
 }
 
+// Linux 专属：依赖 POSIX shm_open 多次打开返回对象实际长度
 #ifndef _WIN32
 TEST_F(ShmTransportTest, RepeatedLargeObjectOpenReportsActualDetachLength) {
     std::ostringstream name_builder;
@@ -1117,21 +1199,3 @@ TEST_F(ShmTransportTest, RepeatedLargeObjectOpenReportsActualDetachLength) {
 }
 #endif
 
-TEST(TopicRuntimeTest, ExactShmRemovalPreservesOtherClientsAndServices) {
-    TopicRuntime topics;
-    const uint32_t first_topic = 11;
-    const uint32_t second_topic = 22;
-    topics.addShmSubscriberService(first_topic, "service-a", 1);
-    topics.addShmSubscriberService(first_topic, "service-a", 2);
-    topics.addShmSubscriberService(first_topic, "service-b", 1);
-    topics.addShmSubscriberService(second_topic, "service-a", 1);
-    topics.addShmSubscriberService(second_topic, "service-a", 3);
-
-    topics.removeShmSubscriberService("service-a", 1);
-
-    ASSERT_EQ(topics.shmSubscribers(first_topic).size(), 2u);
-    EXPECT_EQ(topics.shmSubscribers(first_topic)[0].client_id, 2u);
-    EXPECT_EQ(topics.shmSubscribers(first_topic)[1].service_name, "service-b");
-    ASSERT_EQ(topics.shmSubscribers(second_topic).size(), 1u);
-    EXPECT_EQ(topics.shmSubscribers(second_topic)[0].client_id, 3u);
-}

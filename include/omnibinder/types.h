@@ -1,10 +1,9 @@
 /**************************************************************************************************
  * @file        types.h
  * @brief       类型定义
- * @details     定义 OmniBinder 框架的基础数据类型和常量，包括 ServiceHandle 句柄、
- *              默认配置常量（心跳间隔、超时、缓冲区大小等）、MethodInfo/InterfaceInfo/
- *              ServiceInfo 元数据结构体，以及用于生成 interface_id/method_id/topic_id
- *              的 FNV-1a 32 位哈希函数。
+ * @details     定义 OmniBinder 框架的基础数据类型和常量，包括默认配置常量、
+ *              MethodInfo/InterfaceInfo/ServiceInfo 元数据结构体，以及用于生成
+ *              interface_id/method_id/topic_id 的 FNV-1a 32 位哈希函数。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -57,7 +56,6 @@ const uint16_t DEFAULT_SM_PORT              = 9900;
 const char     DIAG_SERVICE_NAME_PREFIX[]   = "__diag_pid_";
 const uint32_t DEFAULT_HEARTBEAT_INTERVAL   = 3000;   // ms
 const uint32_t DEFAULT_HEARTBEAT_TIMEOUT    = 10000;  // ms
-const uint32_t DEFAULT_MAX_MISSED_HEARTBEATS = 3;
 const uint32_t DEFAULT_INVOKE_TIMEOUT       = 5000;   // ms
 // 服务端 RPC 回复发送的专用超时预算：独立于 DEFAULT_INVOKE_TIMEOUT，避免慢客户端
 // 长时间占住 owner event-loop；可经 OmniRuntime::setReplySendTimeout 调整
@@ -75,6 +73,7 @@ const uint32_t RUNTIME_DIAG_CAP_WATCH       = 1u;
 // ============================================================
 // 方法信息
 // ============================================================
+/* @brief 单个 RPC 方法的元信息（方法 ID、IDL 哈希、参数/返回类型描述） */
 struct MethodInfo {
     uint32_t    method_id;
     uint32_t    idl_hash;      // 方法签名+参数/返回值类型递归哈希，检测 IDL 不匹配
@@ -91,6 +90,7 @@ struct MethodInfo {
 // ============================================================
 // 接口信息
 // ============================================================
+/* @brief 一个接口的元信息（接口 ID、名称、方法列表） */
 struct InterfaceInfo {
     uint32_t    interface_id;
     std::string name;
@@ -102,6 +102,7 @@ struct InterfaceInfo {
 // ============================================================
 // SHM 配置
 // ============================================================
+/* @brief 服务级 SHM ring 容量配置（request / response 各一段环形缓冲） */
 struct ShmConfig {
     size_t req_ring_capacity;
     size_t resp_ring_capacity;
@@ -118,16 +119,65 @@ struct ShmConfig {
 // ============================================================
 // 服务信息
 // ============================================================
+/* @brief 服务注册信息（发现结果）：名称、直连地址、实例身份、SHM 配置与接口列表 */
 struct ServiceInfo {
     std::string name;
     std::string host;
     uint16_t    port;
     std::string host_id;
+    /* @brief 实例标识：同一 host_id 上同名服务的多实例区分
+     * @note  由服务显式声明（Service::setInstanceId）；默认空串表示该板上该服务的
+     *        默认实例 */
+    std::string instance_id;
     ShmConfig    shm_config;
     std::vector<InterfaceInfo> interfaces;
 
     ServiceInfo() : port(0) {}
 };
+
+// ============================================================
+// 服务实例身份 (service_name, host_id, instance_id)
+// ============================================================
+/* @brief 服务实例身份：唯一确定一个真实服务实例
+ * @details 服务名 + 板级 host_id + 实例标识。host_id 复用机器身份，
+ *          instance_id 由服务显式声明（默认空串表示单实例）。 */
+struct ServiceIdentity {
+    std::string name;
+    std::string host_id;
+    std::string instance_id;
+
+    ServiceIdentity() {}
+    explicit ServiceIdentity(const std::string& n)
+        : name(n) {}
+    ServiceIdentity(const std::string& n, const std::string& h, const std::string& i)
+        : name(n), host_id(h), instance_id(i) {}
+
+    bool operator==(const ServiceIdentity& other) const {
+        return name == other.name
+            && host_id == other.host_id
+            && instance_id == other.instance_id;
+    }
+    bool operator!=(const ServiceIdentity& other) const {
+        return !(*this == other);
+    }
+};
+
+/* @brief 生成无歧义的 (host_id, instance_id) 实例键
+ * @param[in]  host_id     板级主机身份
+ * @param[in]  instance_id 实例标识
+ * @return 可用于 map key 的字符串
+ * @note   采用 "host_id长度|host_id|instance_id" 编码：先写 host_id 字节数再写原串，
+ *         因此即使字段中本身含有分割符也不会与其它组合碰撞；instance_id 位于末尾无需长度。
+ *         实现在 src/core/runtime_connection.cpp。 */
+std::string makeServiceInstanceKey(const std::string& host_id,
+                                   const std::string& instance_id);
+
+/* @brief 生成无歧义的完整实例身份键（含服务名）
+ * @param[in]  identity 服务实例身份
+ * @return 可用于 map key 的字符串
+ * @note   编码顺序为 name / host_id / instance_id，各自前置长度前缀，保证无碰撞。
+ *         实现在 src/core/runtime_connection.cpp。 */
+std::string makeServiceIdentityKey(const ServiceIdentity& identity);
 
 struct RuntimeInfo {
     uint32_t pid;

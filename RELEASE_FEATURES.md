@@ -52,6 +52,26 @@ OmniBinder 提供统一的服务化通信模型，用于连接同一设备内的
 
 当目标服务退出或失效时，订阅方可收到统一通知，用于更新业务状态、进入离线模式或触发恢复流程。
 
+### 4. 多实例服务身份
+
+支持同一服务名下多个实例在同一板卡或跨板并存，实例身份为 `(service_name, host_id, instance_id)`。
+
+该能力适用于：
+
+- 单板多实例（例如同一 `SensorService` 分别绑定不同串口 / 传感器）
+- 多板同名服务（HMI 需要分别发现与控制每块板上的同名服务）
+- 崩溃重启后以相同身份接替原实例
+
+提供的能力包括：
+
+- 实例注册与共存：不同 `instance_id` 的同名服务同时在线，各自拥有独立数据面连接
+- 实例发现：按服务名枚举全部实例（含 `host_id` / `instance_id` / `host` / `port`）
+- 实例寻址：客户端可绑定指定 `(host_id, instance_id)` 实例进行 RPC
+- 实例级订阅与死亡通知：区分数据来源实例，按实例感知上下线
+- C / C++ 双接口：C++ 提供 `setInstanceId` / `listServiceInstances` / `connectServiceInstance`，C 提供 `omni_service_set_instance_id` / `omni_runtime_list_instances` / `omni_runtime_connect_service_instance` / `omni_runtime_invoke_instance` 及生成 Proxy 的 `_proxy_connect_instance`
+
+**运行约束**：要在一台设备上运行多个同名服务，必须为每个实例声明**不同的 `instance_id`**；相同身份会被视为同一实例并互相顶替（后者接管）。此外，每台设备必须具有**唯一 `host_id`**——克隆镜像会共享 `/etc/machine-id`，需在各设备通过 `setHostId()` 显式设置唯一标识（MAC / 芯片 ID / 序列号），否则多板会被误判为同一身份。
+
 ---
 
 ## 混合传输模型

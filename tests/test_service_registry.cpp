@@ -7,11 +7,15 @@ using namespace omnibinder::test;
 
 static ServiceInfo makeInfo(const std::string& name,
                             const std::string& host = "127.0.0.1",
-                            uint16_t port = 8080) {
+                            uint16_t port = 8080,
+                            const std::string& host_id = "",
+                            const std::string& instance_id = "") {
     ServiceInfo info;
     info.name = name;
     info.host = host;
     info.port = port;
+    info.host_id = host_id;
+    info.instance_id = instance_id;
     return info;
 }
 
@@ -53,19 +57,134 @@ TEST(ServiceRegistryTest, AddDuplicateSameFdHasNoDisplacedFd) {
     EXPECT_EQ(reg.count(), 1u);
 }
 
-TEST(ServiceRegistryTest, AddDuplicateDifferentHostTakesOver) {
+TEST(ServiceRegistryTest, AddDuplicateDifferentHostCoexists) {
     ServiceRegistry reg;
-    ServiceInfo a = makeInfo("svc.cross");
-    a.host_id = "host-a";
+    ServiceInfo a = makeInfo("svc.cross", "127.0.0.1", 8080, "host-a");
     ASSERT_NE(reg.addService(a, 10), INVALID_HANDLE);
 
-    ServiceInfo b = makeInfo("svc.cross");
-    b.host_id = "host-b";
+    ServiceInfo b = makeInfo("svc.cross", "127.0.0.1", 8081, "host-b");
     int displaced_fd = -1;
     EXPECT_NE(reg.addService(b, 11, &displaced_fd), INVALID_HANDLE);
-    EXPECT_EQ(displaced_fd, 10);
-    EXPECT_EQ(reg.getControlFd("svc.cross"), 11);
+    EXPECT_EQ(displaced_fd, -1);   // 异身份新增，不顶替
+    EXPECT_EQ(reg.count(), 2u);    // 两板同名实例并存
+
+    ServiceEntry ea;
+    ServiceEntry eb;
+    EXPECT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.cross", "host-a", ""), ea));
+    EXPECT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.cross", "host-b", ""), eb));
+    EXPECT_EQ(ea.control_fd, 10);
+    EXPECT_EQ(eb.control_fd, 11);
+}
+
+TEST(ServiceRegistryTest, AddSameNameDifferentInstanceCoexistsOnSameHost) {
+    ServiceRegistry reg;
+    ServiceInfo a = makeInfo("svc.multi", "127.0.0.1", 8080, "host-1", "inst-a");
+    ServiceInfo b = makeInfo("svc.multi", "127.0.0.1", 8081, "host-1", "inst-b");
+
+    ASSERT_NE(reg.addService(a, 10), INVALID_HANDLE);
+    int displaced_fd = -1;
+    EXPECT_NE(reg.addService(b, 11, &displaced_fd), INVALID_HANDLE);
+    EXPECT_EQ(displaced_fd, -1);
+    EXPECT_EQ(reg.count(), 2u);
+    EXPECT_TRUE(reg.exists("svc.multi"));
+
+    ServiceEntry ea;
+    ServiceEntry eb;
+    ASSERT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.multi", "host-1", "inst-a"), ea));
+    ASSERT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.multi", "host-1", "inst-b"), eb));
+    EXPECT_EQ(ea.control_fd, 10);
+    EXPECT_EQ(eb.control_fd, 11);
+    EXPECT_EQ(ea.info.instance_id, "inst-a");
+    EXPECT_EQ(eb.info.instance_id, "inst-b");
+
+    EXPECT_TRUE(reg.ownsService(10, "svc.multi"));
+    EXPECT_TRUE(reg.ownsService(11, "svc.multi"));
+    EXPECT_EQ(reg.listServices().size(), 2u);
+}
+
+TEST(ServiceRegistryTest, AddSameFullIdentityTakesOverKeepsHandle) {
+    ServiceRegistry reg;
+    ServiceInfo first = makeInfo("svc.take", "127.0.0.1", 8080, "host-1", "inst-a");
+    const ServiceHandle h1 = reg.addService(first, 10);
+    ASSERT_NE(h1, INVALID_HANDLE);
+
+    ServiceInfo second = makeInfo("svc.take", "127.0.0.1", 8081, "host-1", "inst-a");
+    int displaced_fd = -1;
+    const ServiceHandle h2 = reg.addService(second, 11, &displaced_fd);
+    EXPECT_EQ(h2, h1);             // 同身份顶替，handle 保持
+    EXPECT_EQ(displaced_fd, 10);   // 旧控制连接被顶替
     EXPECT_EQ(reg.count(), 1u);
+    EXPECT_TRUE(reg.ownsService(11, "svc.take"));
+    EXPECT_FALSE(reg.ownsService(10, "svc.take"));
+
+    ServiceEntry entry;
+    ASSERT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.take", "host-1", "inst-a"), entry));
+    EXPECT_EQ(entry.control_fd, 11);
+    EXPECT_EQ(entry.info.port, 8081);
+}
+
+TEST(ServiceRegistryTest, RemoveServiceByIdentityRemovesOnlyThatInstance) {
+    ServiceRegistry reg;
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8080, "host-1", "inst-a"), 10);
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8081, "host-1", "inst-b"), 11);
+    ASSERT_EQ(reg.count(), 2u);
+
+    EXPECT_TRUE(reg.removeServiceByIdentity(ServiceIdentity("svc.multi", "host-1", "inst-a")));
+    EXPECT_EQ(reg.count(), 1u);
+    EXPECT_TRUE(reg.exists("svc.multi"));
+
+    ServiceEntry entry;
+    EXPECT_FALSE(reg.findServiceByIdentity(ServiceIdentity("svc.multi", "host-1", "inst-a"), entry));
+    EXPECT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.multi", "host-1", "inst-b"), entry));
+    EXPECT_EQ(entry.control_fd, 11);
+}
+
+TEST(ServiceRegistryTest, RemoveServiceRemovesDeterministicFirstInstance) {
+    ServiceRegistry reg;
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8080, "host-1", "inst-a"), 10);
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8081, "host-1", "inst-b"), 11);
+    ASSERT_EQ(reg.count(), 2u);
+
+    // 文档承诺：removeService(name) 移除与 findService 相同的"确定性第一实例"
+    ServiceEntry first;
+    ASSERT_TRUE(reg.findService("svc.multi", first));
+    const std::string first_instance = first.info.instance_id;
+
+    EXPECT_TRUE(reg.removeService("svc.multi"));
+    EXPECT_EQ(reg.count(), 1u);
+    EXPECT_TRUE(reg.exists("svc.multi"));
+
+    ServiceEntry remaining;
+    ASSERT_TRUE(reg.findService("svc.multi", remaining));
+    EXPECT_NE(remaining.info.instance_id, first_instance);
+
+    ServiceEntry gone;
+    EXPECT_FALSE(reg.findServiceByIdentity(
+        ServiceIdentity("svc.multi", "host-1", first_instance), gone));
+}
+
+TEST(ServiceRegistryTest, FindServiceByFdAndNameResolvesInstance) {
+    ServiceRegistry reg;
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8080, "host-1", "inst-a"), 10);
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8081, "host-1", "inst-b"), 11);
+
+    ServiceEntry entry;
+    ASSERT_TRUE(reg.findServiceByFdAndName(11, "svc.multi", entry));
+    EXPECT_EQ(entry.info.instance_id, "inst-b");
+    EXPECT_FALSE(reg.findServiceByFdAndName(12, "svc.multi", entry));
+    EXPECT_FALSE(reg.findServiceByFdAndName(10, "svc.none", entry));
+}
+
+TEST(ServiceRegistryTest, RemoveByFdRemovesAllInstancesOfSameName) {
+    ServiceRegistry reg;
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8080, "host-1", "inst-a"), 10);
+    reg.addService(makeInfo("svc.multi", "127.0.0.1", 8081, "host-1", "inst-b"), 10);
+    ASSERT_EQ(reg.count(), 2u);
+
+    std::vector<ServiceIdentity> removed = reg.removeByFd(10);
+    EXPECT_EQ(removed.size(), 2u);
+    EXPECT_EQ(reg.count(), 0u);
+    EXPECT_TRUE(reg.listServiceNamesByFd(10).empty());
 }
 
 TEST(ServiceRegistryTest, AddEmptyNameRejected) {
@@ -146,18 +265,6 @@ TEST(ServiceRegistryTest, RemoveDoesNotAffectOthers) {
     EXPECT_FALSE(reg.exists("svc.drop"));
 }
 
-TEST(ServiceRegistryTest, RemoveByHandle) {
-    ServiceRegistry reg;
-    EXPECT_TRUE(reg.removeServiceByHandle(reg.addService(makeInfo("svc.byhandle"), 10)));
-    EXPECT_EQ(reg.count(), 0u);
-    EXPECT_FALSE(reg.exists("svc.byhandle"));
-}
-
-TEST(ServiceRegistryTest, RemoveByHandleNonexistent) {
-    ServiceRegistry reg;
-    EXPECT_FALSE(reg.removeServiceByHandle(999));
-}
-
 // ============================================================
 // removeByFd
 // ============================================================
@@ -165,9 +272,9 @@ TEST(ServiceRegistryTest, RemoveByHandleNonexistent) {
 TEST(ServiceRegistryTest, RemoveByFdSingle) {
     ServiceRegistry reg;
     reg.addService(makeInfo("svc.fd1"), 20);
-    std::vector<std::string> removed = reg.removeByFd(20);
-    EXPECT_EQ(removed.size(), 1u);
-    EXPECT_EQ(removed[0], "svc.fd1");
+    std::vector<ServiceIdentity> removed = reg.removeByFd(20);
+    ASSERT_EQ(removed.size(), 1u);
+    EXPECT_EQ(removed[0].name, "svc.fd1");
     EXPECT_EQ(reg.count(), 0u);
 }
 
@@ -177,7 +284,7 @@ TEST(ServiceRegistryTest, RemoveByFdMultiple) {
     reg.addService(makeInfo("svc.y"), 30);
     reg.addService(makeInfo("svc.z"), 31);
 
-    std::vector<std::string> removed = reg.removeByFd(30);
+    std::vector<ServiceIdentity> removed = reg.removeByFd(30);
     EXPECT_EQ(removed.size(), 2u);
     EXPECT_EQ(reg.count(), 1u);
     EXPECT_FALSE(reg.exists("svc.x"));
@@ -187,17 +294,17 @@ TEST(ServiceRegistryTest, RemoveByFdMultiple) {
 
 TEST(ServiceRegistryTest, RemoveByFdNonexistent) {
     ServiceRegistry reg;
-    std::vector<std::string> removed = reg.removeByFd(999);
+    std::vector<ServiceIdentity> removed = reg.removeByFd(999);
     EXPECT_TRUE(removed.empty());
 }
 
-TEST(ServiceRegistryTest, RemoveByFdClearsHandleLookup) {
+TEST(ServiceRegistryTest, RemoveByFdClearsLookup) {
     ServiceRegistry reg;
-    const ServiceHandle handle = reg.addService(makeInfo("svc.fdh"), 40);
+    reg.addService(makeInfo("svc.fdh"), 40);
     reg.removeByFd(40);
 
     ServiceEntry entry;
-    EXPECT_FALSE(reg.findServiceByHandle(handle, entry));
+    EXPECT_FALSE(reg.findServiceByIdentity(ServiceIdentity("svc.fdh"), entry));
 }
 
 // ============================================================
@@ -221,22 +328,6 @@ TEST(ServiceRegistryTest, FindNonexistent) {
     ServiceRegistry reg;
     ServiceEntry entry;
     EXPECT_FALSE(reg.findService("ghost", entry));
-}
-
-TEST(ServiceRegistryTest, FindByHandle) {
-    ServiceRegistry reg;
-    const ServiceHandle handle = reg.addService(makeInfo("svc.hfind"), 60);
-
-    ServiceEntry entry;
-    ASSERT_TRUE(reg.findServiceByHandle(handle, entry));
-    EXPECT_EQ(entry.info.name, "svc.hfind");
-    EXPECT_EQ(entry.handle, handle);
-}
-
-TEST(ServiceRegistryTest, FindByHandleNonexistent) {
-    ServiceRegistry reg;
-    ServiceEntry entry;
-    EXPECT_FALSE(reg.findServiceByHandle(12345, entry));
 }
 
 // ============================================================
@@ -271,6 +362,45 @@ TEST(ServiceRegistryTest, ListAfterRemoval) {
     std::vector<ServiceInfo> list = reg.listServices();
     EXPECT_EQ(list.size(), 1u);
     EXPECT_EQ(list[0].name, "svc.two");
+}
+
+// ============================================================
+// listServiceInstances
+// ============================================================
+
+TEST(ServiceRegistryTest, ListServiceInstancesByName) {
+    ServiceRegistry reg;
+    reg.addService(makeInfo("svc.list", "127.0.0.1", 8080, "host-1", "inst-a"), 10);
+    reg.addService(makeInfo("svc.list", "127.0.0.1", 8081, "host-1", "inst-b"), 11);
+    reg.addService(makeInfo("svc.other", "127.0.0.1", 8082, "host-1", ""), 12);
+
+    std::vector<ServiceInfo> list = reg.listServiceInstances("svc.list");
+    ASSERT_EQ(list.size(), 2u);
+    EXPECT_EQ(list[0].name, "svc.list");
+    EXPECT_EQ(list[0].instance_id, "inst-a");
+    EXPECT_EQ(list[0].port, 8080);
+    EXPECT_EQ(list[1].instance_id, "inst-b");
+    EXPECT_EQ(list[1].port, 8081);
+
+    std::vector<ServiceInfo> other = reg.listServiceInstances("svc.other");
+    ASSERT_EQ(other.size(), 1u);
+    EXPECT_TRUE(other[0].instance_id.empty());
+    EXPECT_TRUE(reg.listServiceInstances("svc.none").empty());
+}
+
+TEST(ServiceRegistryTest, ListServiceInstancesOrdersAcrossHosts) {
+    ServiceRegistry reg;
+    reg.addService(makeInfo("svc.cross", "127.0.0.1", 9080, "host-b", ""), 10);
+    reg.addService(makeInfo("svc.cross", "127.0.0.1", 9081, "host-a", "inst-b"), 11);
+    reg.addService(makeInfo("svc.cross", "127.0.0.1", 9082, "host-a", "inst-a"), 12);
+
+    std::vector<ServiceInfo> list = reg.listServiceInstances("svc.cross");
+    ASSERT_EQ(list.size(), 3u);
+    EXPECT_EQ(list[0].host_id, "host-a");
+    EXPECT_EQ(list[0].instance_id, "inst-a");
+    EXPECT_EQ(list[1].host_id, "host-a");
+    EXPECT_EQ(list[1].instance_id, "inst-b");
+    EXPECT_EQ(list[2].host_id, "host-b");
 }
 
 // ============================================================
@@ -439,20 +569,20 @@ TEST(ServiceRegistryTest, RemoveByNameCleansFdMap) {
     reg.addService(makeInfo("svc.fb"), 50);
     reg.removeService("svc.fa");
 
-    std::vector<std::string> removed = reg.removeByFd(50);
-    EXPECT_EQ(removed.size(), 1u);
-    EXPECT_EQ(removed[0], "svc.fb");
+    std::vector<ServiceIdentity> removed = reg.removeByFd(50);
+    ASSERT_EQ(removed.size(), 1u);
+    EXPECT_EQ(removed[0].name, "svc.fb");
     EXPECT_EQ(reg.count(), 0u);
 }
 
-TEST(ServiceRegistryTest, RemoveByHandleCleansFdMap) {
+TEST(ServiceRegistryTest, RemoveByIdentityCleansFdMap) {
     ServiceRegistry reg;
-    ServiceHandle h1 = reg.addService(makeInfo("svc.ha"), 60);
+    reg.addService(makeInfo("svc.ha"), 60);
     reg.addService(makeInfo("svc.hb"), 60);
-    reg.removeServiceByHandle(h1);
+    reg.removeServiceByIdentity(ServiceIdentity("svc.ha"));
 
-    std::vector<std::string> removed = reg.removeByFd(60);
-    EXPECT_EQ(removed.size(), 1u);
-    EXPECT_EQ(removed[0], "svc.hb");
+    std::vector<ServiceIdentity> removed = reg.removeByFd(60);
+    ASSERT_EQ(removed.size(), 1u);
+    EXPECT_EQ(removed[0].name, "svc.hb");
     EXPECT_EQ(reg.count(), 0u);
 }

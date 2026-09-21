@@ -2,20 +2,22 @@
 
 [中文](omni-tool-usage.md) | English
 
-> **Version**: 1.0.0  
-> **Updated**: 2026-03-05
+> **Version**: 1.1.0  
+> **Updated**: 2026-09-21
 
 ## Overview
 
 `omni-cli` is the command-line debugging tool for OmniBinder. It can be used to:
 
-- list online services
+- list all online service instances (service name / `instance_id` / `host_id` / `host:port`)
 - list online runtimes / PIDs
-- inspect service interfaces and method signatures
-- invoke service methods
+- enumerate every instance of a service name and inspect its interfaces and method signatures
+- invoke a method on a specific instance by `(host_id, instance_id)`
 - display call latency statistics
 - set runtime log levels by PID
 - watch IDL business interface input/output by PID
+
+**Service identity model**: one service name may have several live instances at once, identified by `(service_name, host_id, instance_id)`. An empty `instance_id` is the **default instance** of that name on that `host_id`. `list` / `info` / `call` all work at instance granularity: a single instance is simply the "one row for this name" special case.
 
 It supports both:
 
@@ -39,16 +41,24 @@ omni-cli [options] <command> [args]
 | `-h, --host <addr>` | ServiceManager address | `127.0.0.1` |
 | `-p, --port <port>` | ServiceManager port | `9900` |
 | `--idl <file.bidl>` | IDL file path (enables JSON support) | none |
+| `--instance-id <id>` | Target instance id (`info` / `call`); `--instance-id ''` selects the default instance | none (see each command) |
+| `--host-id <id>` | Board-level host id of the target instance, combined with `--instance-id` for exact selection | none (see each command) |
 | `--help` | Show help | - |
+
+> `--instance-id` / `--host-id` are **instance selectors** with uniform semantics:
+> - only `--instance-id`: match the unique `instance_id` under that service name; if several `host_id` values match, it errors and asks for `--host-id`.
+> - only `--host-id`: match the unique instance on that `host_id`; if that host has more than one same-name instance, it errors and asks for `--instance-id`.
+> - both: exact match on `(host_id, instance_id)`.
+> - neither: `call` uses the **deterministic first instance** and says so in the output; `info` only enumerates when there are multiple instances and never picks one silently.
 
 ### Available commands
 
 | Command | Description |
 |---|---|
-| `list` | List online services |
+| `list` | List all online service instances |
 | `ps` | List online runtime PIDs, roles, log levels, and services |
-| `info <service>` | Show service details |
-| `call <service> <method> [params]` | Invoke a service method |
+| `info <service> [--instance-id <id>] [--host-id <id>]` | Enumerate instances and show the selected instance's interfaces |
+| `call <service> <method> [params] [--instance-id <id>] [--host-id <id>]` | Invoke a method on the selected instance |
 | `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | Set a runtime log level by PID |
 | `watch --pid <pid> --idl <file.bidl> [--filter <name>]` | Watch business interface I/O from a runtime PID |
 
@@ -58,23 +68,36 @@ omni-cli [options] <command> [args]
 
 ### 1. `list`
 
-Lists all online services and their basic information.
+Lists all online service **instances**. Every `(service_name, host_id, instance_id)` in the registry is one row; when a name has only one instance it is simply one row among the same-name rows.
 
 ```bash
 omni-cli list
 ```
 
+Columns:
+
+| Column | Meaning |
+|---|---|
+| `NAME` | Service name |
+| `INSTANCE_ID` | Instance id; an empty `instance_id` is shown as `(default)` |
+| `HOST_ID` | Board-level host id (part of the instance identity and of same-host detection) |
+| `ENDPOINT` | Data-plane direct address `host:port` |
+| `STATUS` | Currently always `ONLINE` |
+
 Example:
 
 ```bash
 $ omni-cli list
-NAME                     HOST             PORT     STATUS
-----                     ----             ----     ------
-SensorService            127.0.0.1        35451    ONLINE
-NavigationService        192.168.1.100    8002     ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+NavigationService        (default)            0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:8002        ONLINE
 
-Total: 2 services online
+Total: 3 service instances online
 ```
+
+> Same-name instances with different `instance_id` are listed side by side; an empty `instance_id` shows as `(default)` and can be selected exactly with `--instance-id ''`.
 
 ---
 
@@ -96,13 +119,27 @@ PID      ROLE     LOG   PROCESS              SERVICES
 12346    client   I     example_cpp_sensor_client    -
 ```
 
-The `PROCESS` column is the executable name reported by the runtime at startup. It has a minimum display width of 20 characters; longer names are printed in full and move the `SERVICES` column to the right. A process registered by an older runtime must be restarted before this field is refreshed to the real process name.
+The `PROCESS` column is the executable name reported by the runtime at startup. It has a minimum display width of 20 characters; longer names are printed in full and move the `SERVICES` column to the right.
 
 ---
 
 ### 3. `info`
 
-Shows a service's published topics, interface, and method definitions. The Published Topics section is always printed before interfaces:
+Enumerates every instance of a service name, then shows the interfaces and method definitions of the selected instance.
+
+```bash
+omni-cli info <service_name> [--instance-id <id>] [--host-id <id>]
+```
+
+Behavior:
+
+1. First enumerate all instances of the name (same columns as `list`).
+2. If `--instance-id` / `--host-id` is given, resolve the unique target instance and show its interfaces.
+3. If no selector is given:
+   - one instance: show its interfaces directly and label it on the `Instance:` line.
+   - several instances: **only enumerate, never pick silently**, and hint to use `--instance-id` / `--host-id`.
+
+The Published Topics section is always printed before interfaces:
 
 ```text
   Published Topics:
@@ -112,24 +149,83 @@ Shows a service's published topics, interface, and method definitions. The Publi
 
 It shows `(none)` when the service publishes no topics. If service lookup succeeds but the dedicated topic query fails, it shows `(unavailable: <reason>)` and continues with interfaces; a missing service instead returns an error before this section.
 
-#### 3.1 Basic mode (without IDL)
+#### 3.1 Basic mode (without IDL), single instance
 
 Displays type names only:
 
 ```bash
-omni-cli info <service_name>
+$ omni-cli info SensorService
+Service: SensorService
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+
+Instance: instance_id="" (default) host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
+
+  Interface: SensorService (id=0xa112646d)
+    Methods:
+      - GetLatestData() -> SensorData  (id=0x61564c6c)
+      - SetThreshold(ControlCommand) -> common.StatusResponse  (id=0x2214744e)
+      - ResetSensor(int32) -> void  (id=0x7f2b95ee)
 ```
 
-#### 3.2 IDL-aware mode
+#### 3.2 Several same-name instances, no selector (enumerate only)
+
+```bash
+$ omni-cli info SensorService
+Service: SensorService
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Multiple instances found; not selecting one automatically. Use --instance-id <id> [--host-id <id>] to inspect a specific instance.
+```
+
+#### 3.3 IDL-aware mode with a selected instance
 
 Expands full field definitions for structs:
 
 ```bash
-omni-cli --idl <file.bidl> info <service_name>
+$ omni-cli --idl examples/sensor_service.bidl info SensorService --instance-id ttyUSB1
+Service: SensorService
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
+
+  Interface: SensorService (id=0xa112646d)
+    Methods:
+      - GetLatestData() -> SensorData  (id=0x61564c6c)
+          return: {
+            sensor_id: int32
+            temperature: float64
+            humidity: float64
+            timestamp: int64
+            location: string
+          }
+      - SetThreshold(ControlCommand) -> common.StatusResponse  (id=0x2214744e)
+          param: {
+            command_type: int32
+            target: string
+            value: int32
+          }
+      - ResetSensor(int32) -> void  (id=0x7f2b95ee)
 ```
 
 Notes:
 
+- the identity line always prints the explicitly selected `(instance_id, host_id, endpoint)`; there is no silent hit on some instance
 - imported IDL dependencies are loaded recursively
 - cross-package types such as `common.StatusResponse` are expanded correctly
 - `--idl` runs the same strict semantic validation as `omni-idlc` and can fail before connecting to ServiceManager
@@ -138,14 +234,40 @@ Notes:
 
 ### 4. `call`
 
-Invokes a service method.
+Invokes a method on a service instance. The instance selector is a first-class argument: `omni-cli` enumerates the name's instances, resolves the target by `(host_id, instance_id)`, then establishes a data-plane direct connection with `connectServiceInstance`.
+
+```bash
+omni-cli call <service> <method> [params] [--instance-id <id>] [--host-id <id>]
+```
+
+Instance selection semantics:
+
+- with `--instance-id` (optionally `--host-id`): invoke the exactly matched instance; a missing or ambiguous match (same name across hosts) is reported as an error.
+- with no selector: invoke the **deterministic first instance** (the same one as the first `list` row) and print which instance was actually hit on the first output line.
 
 #### 4.1 Hex mode
 
 Use a hex string as input and get hex output.
 
 ```bash
-omni-cli call <service> <method> [hex_params]
+# explicit instance (no-arg method)
+$ omni-cli call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+Calling SensorService.GetLatestData() ...
+  interface_id = 0xa112646d
+  method_id    = 0x61564c6c
+Response (status=OK, 38 bytes, 0.75 ms):
+  Hex: 01 00 00 00 00 00 00 00 80 39 40 ...
+
+# no selector: deterministic first instance, reported explicitly
+$ omni-cli call SensorService ResetSensor 01000000
+No instance selector given; using deterministic first instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+  Hint: use --instance-id <id> [--host-id <id>] to target another instance.
+Calling SensorService.ResetSensor() ...
+  interface_id = 0xa112646d
+  method_id    = 0x7f2b95ee
+  request (4 bytes)
+Response (status=OK, 0 bytes, 0.61 ms):
 ```
 
 #### 4.2 JSON mode
@@ -153,28 +275,64 @@ omni-cli call <service> <method> [hex_params]
 Use IDL type information to encode input. Decodable non-`void` responses are formatted as JSON; otherwise output falls back to hex (with a warning when decoding fails).
 
 ```bash
-omni-cli --idl <file.bidl> call <service> <method> [json_params]
+omni-cli --idl <file.bidl> call <service> <method> [json_params] [--instance-id <id>] [--host-id <id>]
 ```
 
 Examples:
 
+**Example 1: no-argument method**
 ```bash
-omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
+$ omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+Calling SensorService.GetLatestData() ...
+  interface_id = 0xa112646d
+  method_id    = 0x61564c6c
+Response (status=OK, 38 bytes, 0.81 ms):
+  {
+    "humidity": 61.95,
+    "location": "Room-A",
+    "sensor_id": 1,
+    "temperature": 23.99,
+    "timestamp": 1772645628
+  }
+```
 
-omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
-  '{"command_type":1,"target":"sensor1","value":100}'
+**Example 2: struct parameter**
+```bash
+$ omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
+  '{"command_type":1,"target":"sensor1","value":100}' --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+Calling SensorService.SetThreshold() ...
+  interface_id = 0xa112646d
+  method_id    = 0x2214744e
+  request (19 bytes)
+Response (status=OK, 10 bytes, 0.47 ms):
+  {
+    "code": 0,
+    "message": "OK"
+  }
+```
 
-omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1
+**Example 3: scalar parameter**
+```bash
+$ omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1 --instance-id ttyUSB0
+Target instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+Calling SensorService.ResetSensor() ...
+  interface_id = 0xa112646d
+  method_id    = 0x7f2b95ee
+  request (4 bytes)
+Response (status=OK, 0 bytes, 0.58 ms):
 ```
 
 Notes:
 
 - objects beginning with `{` and arrays beginning with `[` are parsed as JSON
 - known scalar parameters are parsed from unwrapped CLI text; strings are raw arguments (`EchoString hello`), so `EchoString '"hello"'` includes the quotes
-- non-scalar input beginning with neither `{` nor `[` is parsed as hex for backward compatibility
+- non-scalar input beginning with neither `{` nor `[` is parsed as hex
 - every declared struct field is required; the JSON codec does not currently support `bytes`, including nested uses
 - JSON numbers use a lightweight number representation, so `int64`/`uint64` values outside the IEEE-754 exact integer range are not guaranteed to remain exact
 - response time is displayed in milliseconds
+- the target instance's interface list comes from the instance discovery result, so single-instance and multi-instance calls share one method-resolution path
 
 ---
 
@@ -216,6 +374,80 @@ Example:
 ```bash
 omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatestData
 ```
+
+---
+
+## Multi-instance addressing walkthrough
+
+Scenario: two same-name `SensorService` instances run on one board, bound to `ttyUSB0` and `ttyUSB1` (the server calls `Service::setInstanceId("ttyUSB0")` / `setInstanceId("ttyUSB1")` before registering). They share a `host_id` but differ in `instance_id`, and coexist in ServiceManager.
+
+**1. Start ServiceManager and the two instances**
+
+```bash
+./build/target/bin/service_manager -p 9900
+# two instance processes (pseudo-code; real services call setInstanceId)
+#   SensorService(instance_id="ttyUSB0")  -> register + broadcast
+#   SensorService(instance_id="ttyUSB1")  -> register + broadcast
+```
+
+**2. `list` shows both instances**
+
+```bash
+$ omni-cli list
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Total: 2 service instances online
+```
+
+**3. `info` enumerates and selects by `instance_id`**
+
+```bash
+$ omni-cli info SensorService
+Service: SensorService
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Multiple instances found; not selecting one automatically. Use --instance-id <id> [--host-id <id>] to inspect a specific instance.
+
+$ omni-cli info SensorService --instance-id ttyUSB1
+# (same table)
+Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+  ...interfaces and method definitions...
+```
+
+**4. Call each instance separately**
+
+```bash
+# only ttyUSB0
+$ omni-cli call SensorService GetLatestData --instance-id ttyUSB0
+Target instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+Calling SensorService.GetLatestData() ...
+Response (status=OK, 38 bytes, 0.75 ms):
+  Hex: 01 00 00 00 ...
+
+# only ttyUSB1 (add --host-id when the same instance_id exists on another host)
+$ omni-cli call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+Calling SensorService.GetLatestData() ...
+Response (status=OK, 38 bytes, 0.74 ms):
+  Hex: 02 00 00 00 ...
+```
+
+**5. No selector hits the deterministic first instance and says so**
+
+```bash
+$ omni-cli call SensorService GetLatestData
+No instance selector given; using deterministic first instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+  Hint: use --instance-id <id> [--host-id <id>] to target another instance.
+Calling SensorService.GetLatestData() ...
+```
+
+> The "deterministic first instance" matches the first row of the `list` / `info` table (ServiceManager returns instances in instance-key order), so the same command reproduces the same target instead of hitting a random instance.
 
 ---
 
@@ -310,6 +542,12 @@ Possible reasons:
 
 Cross-package structs decode normally when the complete import chain is available.
 
+How to fix:
+
+- make sure `--idl` is passed with the correct IDL file path
+- check that the IDL file contains the required type definitions
+- cross-package structs decode when the complete import chain is available; use hex mode when needed to inspect the actual type or payload
+
 ### Q2: How do I know what parameters a method expects?
 
 Use detailed `info` mode:
@@ -367,12 +605,10 @@ When `omni-cli` and the target service run on the same machine, OmniBinder autom
 
 ## Related documents
 
-- [Top-level README](../README.en.md)
 - [IDL Specification](idl-specification.en.md)
 - [Protocol](protocol.md)
-- [Examples Guide](examples.en.md)
 
 ---
 
-**Document version**: 1.0.0  
-**Last updated**: 2026-03-05
+**Document version**: 1.1.0  
+**Last updated**: 2026-09-21

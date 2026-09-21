@@ -2,6 +2,8 @@
 #include "test_common.h"
 #include <omnibinder/omnibinder_c.h>
 #include <cstdlib>
+#include <cstring>
+#include <atomic>
 #include <thread>
 #include <chrono>
 
@@ -47,8 +49,8 @@ static int cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
 struct CApiServerCtx {
     omni_runtime_t* runtime;
     omni_service_t* service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     CApiServerCtx() : runtime(NULL), service(NULL), registered(false), should_stop(false) {}
 };
 
@@ -90,11 +92,14 @@ protected:
     }
 
     static void TearDownTestSuite() {
-        server_ctx_->should_stop = true;
-        server_tid_.join();
-        omni_service_destroy(server_ctx_->service);
-        omni_runtime_destroy(server_ctx_->runtime);
-        delete server_ctx_;
+        if (server_ctx_) {
+            server_ctx_->should_stop = true;
+            server_tid_.join();
+            omni_service_destroy(server_ctx_->service);
+            omni_runtime_destroy(server_ctx_->runtime);
+            delete server_ctx_;
+            server_ctx_ = nullptr;
+        }
         stopProcess(sm_pid_);
     }
 };
@@ -130,7 +135,7 @@ TEST_F(CApiTest, BufferRoundtripAndHash) {
     free(empty_text);
     omni_buffer_destroy(empty);
 
-    EXPECT_NE(omni_fnv1a_32("Echo"), 0u);
+    EXPECT_EQ(omni_fnv1a_32("Echo"), 0x3b7d6ba4u);
     omni_buffer_destroy(buf);
 }
 
@@ -256,6 +261,7 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     ASSERT_EQ(omni_runtime_invoke(runtime, "CService", IFACE_ID, METHOD_ECHO_BYTES, HASH_ECHO_BYTES, req, resp, 3000), 0);
     uint32_t out_len = 0;
     uint8_t* out = omni_buffer_read_bytes(resp, &out_len);
+    ASSERT_NE(out, nullptr);
     EXPECT_EQ(out_len, sizeof(payload));
     EXPECT_EQ(std::memcmp(out, payload, sizeof(payload)), 0);
     free(out);

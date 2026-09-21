@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "test_common.h"
+#include "platform/platform_test.h"
 #include <omnibinder/omnibinder.h>
 
 #include <signal.h>
@@ -71,14 +72,26 @@ bool listHasPublishedTopic(OmniRuntime& runtime, const std::string& service_name
 }
 
 bool waitForService(OmniRuntime& runtime, const std::string& name, bool expected) {
-    for (int i = 0; i < 50; ++i) {
-        if (listHasService(runtime, name) == expected) {
-            return true;
+    if (expected) {
+        for (int i = 0; i < 50; ++i) {
+            if (listHasService(runtime, name)) {
+                return true;
+            }
+            runtime.pollOnce(20);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        return false;
+    }
+    // 期望"不存在"：在短窗口内持续确认从未出现，避免立即返回 true 而漏掉
+    // "watch 之后才被注册"的副作用。
+    for (int i = 0; i < 10; ++i) {
         runtime.pollOnce(20);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (listHasService(runtime, name)) {
+            return false;
+        }
     }
-    return false;
+    return true;
 }
 
 uint32_t findPidForService(OmniRuntime& runtime, const std::string& service_name) {
@@ -139,9 +152,13 @@ void runIdleClientChild() {
     }
 }
 
+// 子进程需要运行进程内函数（非外部二进制），故保留 fork；本 target 由 CMake
+// 的 if(NOT WIN32) 守卫，仅非 Windows 构建。子进程内设 parent-death 信号，
+// 回收走 platform 抽象（SIGTERM→超时→SIGKILL），避免孤儿进程。
 pid_t forkChild(void (*entry)()) {
     pid_t pid = fork();
     if (pid == 0) {
+        platform::setParentDeathSignal();
         entry();
         _exit(0);
     }
@@ -149,12 +166,7 @@ pid_t forkChild(void (*entry)()) {
 }
 
 void stopChild(pid_t pid) {
-    if (pid <= 0) {
-        return;
-    }
-    kill(pid, SIGTERM);
-    int status = 0;
-    waitpid(pid, &status, 0);
+    platform::terminateChildProcess(static_cast<platform::TestProcess>(pid));
 }
 
 // ASSERT_* 提前 return 时也必须回收 forked child，避免孤儿进程污染后续用例
@@ -184,6 +196,7 @@ protected:
 TEST_F(DiagnosticsWatchTest, ServicePidWatchDoesNotRegisterHiddenService) {
     pid_t service_pid = forkChild(runServiceChild);
     ASSERT_GT(service_pid, 0);
+    ChildGuard child_guard(service_pid);
 
     OmniRuntime watcher;
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
@@ -321,6 +334,7 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
 TEST_F(DiagnosticsWatchTest, ClientPidWatchRegistersAndCleansHiddenService) {
     pid_t client_pid = forkChild(runIdleClientChild);
     ASSERT_GT(client_pid, 0);
+    ChildGuard child_guard(client_pid);
 
     OmniRuntime watcher;
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);

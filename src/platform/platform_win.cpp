@@ -1,6 +1,7 @@
 #ifdef OMNIBINDER_WINDOWS
 
 #include "platform/platform.h"
+#include "platform/platform_test.h"
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
 
@@ -51,24 +52,25 @@ std::string basenameFromPath(const char* path) {
 
 } // namespace
 
-static bool g_net_initialized = false;
+// [未编译验证] 改为原子：createTcpSocket 可在任意线程惰性初始化，避免与 WSACleanup 竞争
+static std::atomic<bool> g_net_initialized(false);
 
 bool netInit() {
-    if (g_net_initialized) {
+    if (g_net_initialized.load()) {
         return true;
     }
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         return false;
     }
-    g_net_initialized = true;
+    g_net_initialized.store(true);
     return true;
 }
 
 void netCleanup() {
-    if (g_net_initialized) {
+    if (g_net_initialized.load()) {
         WSACleanup();
-        g_net_initialized = false;
+        g_net_initialized.store(false);
     }
 }
 
@@ -173,56 +175,6 @@ int socketRecv(SocketFd fd, void* buf, size_t buf_size) {
     return recv(fd, static_cast<char*>(buf), static_cast<int>(buf_size), 0);
 }
 
-bool socketSendAll(SocketFd fd, const void* data, size_t length,
-                   uint32_t timeout_ms, uint32_t* elapsed_ms) {
-    if (elapsed_ms) {
-        *elapsed_ms = 0;
-    }
-    const uint8_t* bytes = static_cast<const uint8_t*>(data);
-    int64_t start_ms = currentTimeMs();
-    int64_t deadline_ms = start_ms + static_cast<int64_t>(timeout_ms);
-    size_t sent = 0;
-    while (sent < length) {
-        int ret = socketSend(fd, bytes + sent, length - sent);
-        if (ret < 0) {
-            int err = getSocketError();
-            if (isWouldBlock(err)) {
-                int64_t now_ms = currentTimeMs();
-                if (now_ms >= deadline_ms) {
-                    break;
-                }
-                uint32_t remaining_ms = static_cast<uint32_t>(deadline_ms - now_ms);
-                if (!waitSocketWritable(fd, remaining_ms)) {
-                    break;
-                }
-                continue;
-            }
-            if (elapsed_ms) {
-                int64_t spent_ms = currentTimeMs() - start_ms;
-                *elapsed_ms = spent_ms > 0 ? static_cast<uint32_t>(spent_ms) : 0;
-            }
-            return false;
-        }
-        if (ret > 0) {
-            sent += static_cast<size_t>(ret);
-            continue;
-        }
-        int64_t now_ms = currentTimeMs();
-        if (now_ms >= deadline_ms) {
-            break;
-        }
-        uint32_t remaining_ms = static_cast<uint32_t>(deadline_ms - now_ms);
-        if (!waitSocketWritable(fd, remaining_ms)) {
-            break;
-        }
-    }
-    if (elapsed_ms) {
-        int64_t spent_ms = currentTimeMs() - start_ms;
-        *elapsed_ms = spent_ms > 0 ? static_cast<uint32_t>(spent_ms) : 0;
-    }
-    return sent == length;
-}
-
 void closeSocket(SocketFd fd) {
     if (fd != INVALID_SOCKET_FD) {
         closesocket(fd);
@@ -288,6 +240,7 @@ bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
     return FD_ISSET(fd, &write_fds) != 0;
 }
 
+// 测试辅助实现，非生产契约
 bool waitFdReadable(int fd, int timeout_ms) {
     fd_set read_fds;
     FD_ZERO(&read_fds);
@@ -347,7 +300,12 @@ int openNamedEventFdByPipeName(const std::string& pipe_name) {
     int fd = g_efd_next_2.fetch_add(1);
     g_efd_map2[fd] = {hPipe, false, pipe_name};
 
-    iocpRegisterPipeFd(fd, hPipe, false);
+    if (!iocpRegisterPipeFd(fd, hPipe, false)) {
+        // [未编译验证] 注册失败则 fd 永远收不到事件：回收句柄并返回失败
+        g_efd_map2.erase(fd);
+        CloseHandle(hPipe);
+        return -1;
+    }
     return fd;
 }
 
@@ -390,7 +348,11 @@ int createNamedEventFd(const std::string& name) {
     g_efd_map2[fd] = {hPipe, true, pipe_name};
 
     if (!iocpRegisterPipeFd(fd, hPipe, true)) {
+        // [未编译验证] 注册失败则 fd 永远收不到事件：回收句柄并返回失败
         OMNI_LOG_WARN(LOG_TAG, "IOCP pipe registration failed for fd=%d", fd);
+        g_efd_map2.erase(fd);
+        CloseHandle(hPipe);
+        return -1;
     }
 
     OMNI_LOG_DEBUG(LOG_TAG, "Created named eventfd %d: %s", fd, pipe_name.c_str());
@@ -461,6 +423,11 @@ void* shmCreate(const std::string& name, size_t size, bool create, size_t* mappe
 
     {
         std::lock_guard<std::mutex> lock(g_shm_handles_mutex);
+        // [未编译验证] 同名覆盖前先释放旧 HANDLE，避免句柄泄漏
+        std::map<std::string, HANDLE>::iterator old = g_shm_handles.find(name);
+        if (old != g_shm_handles.end() && old->second != hMap) {
+            CloseHandle(old->second);
+        }
         g_shm_handles[name] = hMap;
     }
 
@@ -508,16 +475,22 @@ std::string getMachineId() {
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
                       "SOFTWARE\\Microsoft\\Cryptography",
                       0, KEY_READ | KEY_WOW64_64KEY, &hKey) == ERROR_SUCCESS) {
-        char buf[256];
-        DWORD buf_size = sizeof(buf);
+        // [未编译验证] 零初始化并预留终止符，避免未初始化字节被当作字符串
+        char buf[256] = {0};
+        DWORD buf_size = sizeof(buf) - 1;
         if (RegQueryValueExA(hKey, "MachineGuid", NULL, NULL,
                              reinterpret_cast<LPBYTE>(buf), &buf_size) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
+            buf[sizeof(buf) - 1] = '\0';
             return std::string(buf);
         }
         RegCloseKey(hKey);
     }
-    return getHostName();
+    // [未编译验证] 回退语义与 Linux 对齐：返回 hostname 的 FNV-1a 哈希而非原始主机名
+    std::string hostname = getHostName();
+    char hash_buf[32];
+    snprintf(hash_buf, sizeof(hash_buf), "%08x", fnv1a_32(hostname));
+    return std::string(hash_buf);
 }
 
 int64_t currentTimeMs() {
@@ -698,6 +671,8 @@ void closeOpenedEventFds(int* fds, int count)
 
 handshake_listener* handshakeListen(const std::string& path)
 {
+    // [未编译验证] 与 createTcpSocket 对齐：使用 socket 前确保 WSA 已初始化
+    if (!netInit()) return NULL;
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return NULL;
@@ -759,6 +734,8 @@ handshake_channel* handshakeAccept(handshake_listener* listener)
 
 handshake_channel* handshakeConnect(const std::string& path)
 {
+    // [未编译验证] 与 createTcpSocket 对齐：使用 socket 前确保 WSA 已初始化
+    if (!netInit()) return NULL;
     uint16_t port = udsPathToPort(path);
     SocketFd fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return NULL;
@@ -952,6 +929,35 @@ bool checkSocketConnected(SocketFd fd, int* out_error) {
     return so_error == 0;
 }
 
+// [未编译验证] 与 Linux 对齐的僵尸连接探测（零超时 select + MSG_PEEK）
+bool isPeerClosed(SocketFd fd) {
+    if (fd == INVALID_SOCKET_FD) {
+        return false;
+    }
+    fd_set rfds;
+    fd_set efds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&efds);
+    FD_SET(fd, &rfds);
+    FD_SET(fd, &efds);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    int ret = select(static_cast<int>(fd) + 1, &rfds, NULL, &efds, &tv);
+    if (ret <= 0) {
+        return false;
+    }
+    if (FD_ISSET(fd, &efds)) {
+        return true;
+    }
+    if (!FD_ISSET(fd, &rfds)) {
+        return false;
+    }
+    char probe = 0;
+    int n = recv(fd, &probe, 1, MSG_PEEK);
+    return n == 0;
+}
+
 
 void setupSignalHandlers(SignalHandler handler) {
     signal(SIGINT, handler);
@@ -960,6 +966,74 @@ void setupSignalHandlers(SignalHandler handler) {
 
 void setParentDeathSignal() {
     // Windows 无父进程死亡信号机制（作业对象才能实现），测试场景空实现
+}
+
+// 测试辅助实现，非生产契约
+bool removeFile(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+    return DeleteFileA(path.c_str()) != 0;
+}
+
+// 测试辅助实现，非生产契约
+bool setSocketRecvBufferSize(SocketFd fd, int bytes) {
+    int value = bytes;
+    return setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, SO_RCVBUF,
+                      reinterpret_cast<const char*>(&value), sizeof(value)) == 0;
+}
+
+// 测试辅助实现，非生产契约
+TestProcess spawnChildProcess(const char* path, const char* a1, const char* a2,
+                              const char* a3, const char* a4) {
+    std::string cmd = std::string(path);
+    if (a1) { cmd += " "; cmd += a1; }
+    if (a2) { cmd += " "; cmd += a2; }
+    if (a3) { cmd += " "; cmd += a3; }
+    if (a4) { cmd += " "; cmd += a4; }
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    memset(&pi, 0, sizeof(pi));
+    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        return 0;
+    }
+    CloseHandle(pi.hThread);
+    return reinterpret_cast<TestProcess>(pi.hProcess);
+}
+
+// 测试辅助实现，非生产契约
+bool waitChildProcess(TestProcess proc, int timeout_sec, int* out_exit_code) {
+    if (proc <= 0) {
+        return false;
+    }
+    DWORD ret = WaitForSingleObject(reinterpret_cast<HANDLE>(proc),
+                                    static_cast<DWORD>(timeout_sec) * 1000);
+    if (ret != WAIT_OBJECT_0) {
+        return false;
+    }
+    if (out_exit_code) {
+        DWORD code = 0;
+        *out_exit_code = GetExitCodeProcess(reinterpret_cast<HANDLE>(proc), &code)
+                         ? static_cast<int>(code) : -1;
+    }
+    return true;
+}
+
+// 测试辅助实现，非生产契约
+void terminateChildProcess(TestProcess proc) {
+    if (proc <= 0) {
+        return;
+    }
+    HANDLE h = reinterpret_cast<HANDLE>(proc);
+    if (WaitForSingleObject(h, 0) != WAIT_OBJECT_0) {
+        TerminateProcess(h, 0);
+        WaitForSingleObject(h, 5000);
+    }
+    CloseHandle(h);
 }
 
 

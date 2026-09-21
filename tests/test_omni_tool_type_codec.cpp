@@ -12,26 +12,60 @@
 #include <fstream>
 #include <iterator>
 #include <string>
-#ifdef _WIN32
-#include <direct.h>
-#define mkdtemp(p) (_mkdir("omnibinder_tmp") == 0 ? (char*)"omnibinder_tmp" : NULL)
-#else
-#include <unistd.h>
-#endif
 #include <vector>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 using namespace omnic;
+
+// 本 target 由 CMake 的 if(NOT WIN32) 守卫，仅在非 Windows 构建。
+// 临时目录统一登记，进程退出时整树清理，避免 /tmp 残留。
+static std::vector<std::string> g_temp_dirs;
+
+static void removeTree(const std::string& path) {
+    DIR* d = ::opendir(path.c_str());
+    if (d) {
+        struct dirent* ent;
+        while ((ent = ::readdir(d)) != NULL) {
+            std::string name = ent->d_name;
+            if (name == "." || name == "..") continue;
+            std::string child = path + "/" + name;
+            struct stat st;
+            if (::lstat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                removeTree(child);
+            } else {
+                ::unlink(child.c_str());
+            }
+        }
+        ::closedir(d);
+    }
+    ::rmdir(path.c_str());
+}
+
+static void cleanupTempDirs() {
+    for (size_t i = 0; i < g_temp_dirs.size(); ++i) {
+        removeTree(g_temp_dirs[i]);
+    }
+    g_temp_dirs.clear();
+}
+
+static std::string makeTempDir() {
+    char dir_template[] = "/tmp/omnibinder_tmp_XXXXXX";
+    char* dir_path = mkdtemp(dir_template);
+    assert(dir_path != NULL);
+    g_temp_dirs.push_back(dir_path);
+    return std::string(dir_path);
+}
 
 #define TEST(name) printf("  TEST %-42s ", #name); fflush(stdout)
 #define PASS() printf("PASS\n"); fflush(stdout)
 
 static std::string writeTempFile(const std::string& prefix, const std::string& suffix,
                                  const std::string& contents) {
-    char dir_template[] = "/tmp/omnibinder_tmp_XXXXXX";
-    char* dir_path = mkdtemp(dir_template);
-    assert(dir_path != NULL);
+    std::string dir_path = makeTempDir();
 
-    std::string file_path = std::string(dir_path) + "/" + prefix + suffix;
+    std::string file_path = dir_path + "/" + prefix + suffix;
     std::ofstream out(file_path.c_str());
     out << contents;
     out.close();
@@ -61,6 +95,7 @@ static void appendTruncatedBuffers(const std::vector<uint8_t>& full,
 }
 
 int main() {
+    atexit(cleanupTempDirs);
     printf("=== omni-cli TypeCodec Tests ===\n\n");
 
     TEST(nested_same_package_struct_roundtrip);
@@ -124,10 +159,7 @@ int main() {
             "    string name;\n"
             "}\n";
 
-        char dir_template[] = "/tmp/omnibinder_codec_XXXXXX";
-        char* dir_path = mkdtemp(dir_template);
-        assert(dir_path != NULL);
-        std::string dir(dir_path);
+        std::string dir = makeTempDir();
         std::string common_path = dir + "/common_types.bidl";
         std::string main_path = dir + "/shape.bidl";
 
@@ -190,10 +222,7 @@ int main() {
             "    common.StatusResponse status;\n"
             "}\n";
 
-        char dir_template[] = "/tmp/omnibinder_resolver_XXXXXX";
-        char* dir_path = mkdtemp(dir_template);
-        assert(dir_path != NULL);
-        std::string dir(dir_path);
+        std::string dir = makeTempDir();
         std::string common_path = dir + "/common_types.bidl";
         std::string main_path = dir + "/wrapper.bidl";
 

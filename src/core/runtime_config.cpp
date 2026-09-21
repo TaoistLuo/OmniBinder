@@ -53,6 +53,14 @@ std::string OmniRuntime::Impl::hostId() const {
     return host_id_;
 }
 
+void OmniRuntime::Impl::setHostId(const std::string& host_id) {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    if (initialized_) {
+        return;
+    }
+    host_id_override_ = host_id;
+}
+
 // ============================================================
 // 统计
 // ============================================================
@@ -75,7 +83,7 @@ int OmniRuntime::Impl::getStats(RuntimeStats& stats) {
 }
 
 int OmniRuntime::Impl::getStatsInternal(RuntimeStats& stats) {
-    stats = stats_;
+    stats = diag_.stats;
     updateConnectionStats(stats);
     return 0;
 }
@@ -88,7 +96,7 @@ int OmniRuntime::Impl::resetStats() {
 }
 
 int OmniRuntime::Impl::resetStatsInternal() {
-    stats_ = RuntimeStats();
+    diag_.stats = RuntimeStats();
     return 0;
 }
 

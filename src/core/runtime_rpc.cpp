@@ -87,19 +87,19 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
                                     uint32_t method_id, uint32_t idl_hash,
                                     const Buffer& request, Buffer& response,
                                     uint32_t timeout_ms) {
-    stats_.total_rpc_calls++;
+    diag_.stats.total_rpc_calls++;
     uint32_t total_timeout_ms = effectiveTimeout(timeout_ms);
 
     ServiceConnection* conn = conn_mgr_->getConnection(service_name);
     if (!conn) {
-        stats_.total_rpc_failures++;
+        diag_.stats.total_rpc_failures++;
         return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
 
     uint32_t seq = allocSequence();
     Message msg(MessageType::MSG_INVOKE, seq);
     if (!populateInvokeMessage(msg, interface_id, method_id, idl_hash, request)) {
-        stats_.total_rpc_failures++;
+        diag_.stats.total_rpc_failures++;
         return static_cast<int>(ErrorCode::ERR_SERIALIZE);
     }
     emitDiagEvent(DIAG_EVENT_REQUEST, msg);
@@ -107,15 +107,15 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
     uint32_t send_elapsed_ms = 0;
     if (!conn_mgr_->sendMessageWithinTimeout(service_name, msg, total_timeout_ms, &send_elapsed_ms)) {
         if (send_elapsed_ms >= total_timeout_ms) {
-            stats_.total_rpc_timeouts++;
-            stats_.total_rpc_failures++;
+            diag_.stats.total_rpc_timeouts++;
+            diag_.stats.total_rpc_failures++;
             OMNI_LOG_WARN(LOG_TAG,
                           "rpc_send_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u",
                           service_name.c_str(), interface_id, method_id, total_timeout_ms);
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
-        stats_.connection_errors++;
-        stats_.total_rpc_failures++;
+        diag_.stats.connection_errors++;
+        diag_.stats.total_rpc_failures++;
         OMNI_LOG_ERROR(LOG_TAG,
                        "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d",
                        service_name.c_str(), interface_id, method_id,
@@ -135,25 +135,25 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
         });
     if (ret != 0) {
         if (ret == static_cast<int>(ErrorCode::ERR_TIMEOUT)) {
-            stats_.total_rpc_timeouts++;
+            diag_.stats.total_rpc_timeouts++;
             OMNI_LOG_WARN(LOG_TAG,
                           "rpc_timeout service=%s iface=0x%08x method=0x%08x timeout_ms=%u err=%d",
                           service_name.c_str(), interface_id, method_id,
                           total_timeout_ms, ret);
         }
-        stats_.total_rpc_failures++;
+        diag_.stats.total_rpc_failures++;
         return ret;
     }
     int32_t status = 0;
     if (!decodeInvokeReplyPayload(reply, status, response)) {
-        stats_.total_rpc_failures++;
+        diag_.stats.total_rpc_failures++;
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (status != 0) {
-        stats_.total_rpc_failures++;
+        diag_.stats.total_rpc_failures++;
         return status;
     }
-    stats_.total_rpc_success++;
+    diag_.stats.total_rpc_success++;
     return 0;
 }
 
@@ -168,31 +168,31 @@ int OmniRuntime::Impl::invokeOneWay(const std::string& service_name, uint32_t in
 int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uint32_t interface_id,
                                            uint32_t method_id, uint32_t idl_hash,
                                            const Buffer& request) {
-    stats_.total_rpc_calls++;
+    diag_.stats.total_rpc_calls++;
 
     ServiceConnection* conn = conn_mgr_->getConnection(service_name);
     if (!conn) {
-        stats_.total_rpc_failures++;
+        diag_.stats.total_rpc_failures++;
         return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
 
     Message msg(MessageType::MSG_INVOKE_ONEWAY, allocSequence());
     if (!populateInvokeMessage(msg, interface_id, method_id, idl_hash, request)) {
-        stats_.total_rpc_failures++;
+        diag_.stats.total_rpc_failures++;
         return static_cast<int>(ErrorCode::ERR_SERIALIZE);
     }
     emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
 
     if (!conn_mgr_->sendMessage(service_name, msg)) {
-        stats_.connection_errors++;
-        stats_.total_rpc_failures++;
+        diag_.stats.connection_errors++;
+        diag_.stats.total_rpc_failures++;
         OMNI_LOG_ERROR(LOG_TAG,
                        "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d",
                        service_name.c_str(), interface_id, method_id,
                        static_cast<int>(ErrorCode::ERR_SEND_FAILED));
         return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
     }
-    stats_.total_rpc_success++;
+    diag_.stats.total_rpc_success++;
     return 0;
 }
 

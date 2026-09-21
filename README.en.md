@@ -65,11 +65,25 @@ OmniBinder covers both **service management** and **service-to-service data path
 - **Proactive connection management** — Proxy provides `connect()`/`disconnect()` for explicit service connections
 - **Auto-reconnect** — automatic reconnection on service recovery with configurable exponential backoff
 - **Heartbeat detection** — periodic heartbeat for service liveness detection, auto-triggers reconnect on timeout
+- **Multi-instance service identity**: same-name services coexist with distinct `instance_id`; an instance is identified by `(service_name, host_id, instance_id)`, with per-instance discovery, addressing, subscription, and death notification
 - **Automatic transport selection** — SHM for same-host communication, TCP for cross-host communication
 - **Per-service SHM configuration** — default small SHM rings (`4KB / 4KB`) with optional per-service enlargement
 - **IDL code generation** — generate Stub/Proxy code from `.bidl` files
 - **Zero external dependencies** — platform abstraction layer shields OS differences, no third-party libraries required. Core library ~500KB (stripped), suitable for resource-constrained environments
 - **CLI tooling** — `omni-cli` for service inspection and invocation, with JSON I/O support
+
+### Multi-instance services
+
+A single board can run multiple services with the **same name** (for example two `SensorService` instances bound to `ttyUSB0` and `ttyUSB1`):
+
+- Each instance must declare a **distinct `instance_id`** (C++ `Service::setInstanceId()`, C `omni_service_set_instance_id()`). An instance is identified by `(service_name, host_id, instance_id)`. **Two registrations with exactly the same identity are treated as the same instance and take over each other (newer wins)**; an empty `instance_id` means the single default instance of that name on that board.
+- Clients enumerate all instances of a name with `listServiceInstances()` / `omni_runtime_list_instances()`, then bind to one with `connectServiceInstance()` / `omni_runtime_connect_service_instance()` / the generated proxy's `connect(host_id, instance_id)` / `_proxy_connect_instance()`.
+- Every board needs a **unique `host_id`**. Mass-produced images often clone `/etc/machine-id`, so multiple boards share one `host_id` and get mistaken for the same identity (taking each other over) while SHM wrongly treats them as same-host. Set each device's unique id (MAC / chip id / serial) at startup via `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()`.
+- Multiple same-name instances may publish under one topic: a service-level subscription receives data from all instances and can tell them apart by source identity, while an instance-level subscription receives only the selected instance.
+
+> **Known boundary (same-identity takeover churn)**: takeover only applies to an **exactly identical identity** `(service_name, host_id, instance_id)`. If two **live** processes declare the same identity, ServiceManager lets the newer one take over and closes the older control connection; the displaced live instance reconnects and re-registers automatically, so the two can repeatedly take each other over (takeover churn). This is an **accepted boundary, not a defect**: operators must give same-name services on one board distinct `instance_id` values and must never run two live instances with the exact same identity.
+
+See the "Run two same-name service instances on one board" section of the [examples guide](docs/examples.en.md).
 
 ### Threading model notes
 
@@ -106,25 +120,27 @@ The following data highlights typical OmniBinder latency on the **same-host SHM 
 
 | Test Item | Samples | Trimmed Mean | 95% Case | Notes |
 |-----------|---------|-------------|----------|-------|
-| RPC EchoBytes (0 bytes) | 1000 | 27.7 us | 46 us | Empty payload, protocol scheduling overhead |
-| RPC EchoBytes (64 bytes) | 1000 | 28.5 us | 45 us | Common small payload RPC |
-| RPC EchoBytes (256 bytes) | 1000 | 28.9 us | 45 us | Common small payload RPC |
-| RPC EchoBytes (1024 bytes) | 1000 | 31.1 us | 47 us | 1KB payload |
-| RPC EchoBytes (4096 bytes) | 1000 | 41.7 us | 55 us | 4KB payload, enlarged SHM ring |
-| RPC EchoBytes (8192 bytes) | 1000 | 52.8 us | 70 us | 8KB payload, enlarged SHM ring |
-| RPC EchoInt32 | 1000 | 13.3 us | 40 us | Small primitive RPC |
-| RPC EchoStruct | 1000 | 19.0 us | 39 us | Struct RPC |
-| RPC Add (2 x int32) | 1000 | 14.0 us | 36 us | Small compute RPC |
-| Topic pub/sub (0 bytes) | 1000 | 4.0 us | 9 us | Empty broadcast payload |
-| Topic pub/sub (256 bytes) | 1000 | 4.1 us | 10 us | Common small broadcast data |
-| Topic pub/sub (4096 bytes) | 1000 | 8.1 us | 15 us | 4KB broadcast data |
-| Topic pub/sub (8192 bytes) | 1000 | 11.1 us | 20 us | 8KB broadcast data |
+| RPC EchoBytes (0 bytes) | 1000 | 24.8 us | 44 us | Empty payload, protocol scheduling overhead |
+| RPC EchoBytes (64 bytes) | 1000 | 26.3 us | 47 us | Common small payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 26.2 us | 46 us | Common small payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 28.0 us | 49 us | 1KB payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 38.0 us | 62 us | 4KB payload, enlarged SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 57.4 us | 79 us | 8KB payload, enlarged SHM ring |
+| RPC EchoInt32 | 1000 | 13.1 us | 43 us | Small primitive RPC |
+| RPC EchoStruct | 1000 | 15.0 us | 40 us | Struct RPC |
+| RPC Add (2 x int32) | 1000 | 16.1 us | 43 us | Small compute RPC |
+| Topic pub/sub (0 bytes) | 1000 | 5.2 us | 12 us | Empty broadcast payload |
+| Topic pub/sub (64 bytes) | 1000 | 5.6 us | 11 us | Small broadcast data |
+| Topic pub/sub (256 bytes) | 1000 | 5.2 us | 11 us | Common small broadcast data |
+| Topic pub/sub (1024 bytes) | 1000 | 6.2 us | 12 us | 1KB broadcast data |
+| Topic pub/sub (4096 bytes) | 1000 | 9.7 us | 18 us | 4KB broadcast data |
+| Topic pub/sub (8192 bytes) | 1000 | 13.6 us | 23 us | 8KB broadcast data |
 
 Based on the full report:
 
-- **Common 0~1024 byte RPC** trimmed mean around **27.7~31.1 us** (WSL2 environment)
-- **4096~8192 byte RPC payloads** around **41.7~52.8 us** under enlarged SHM-ring configuration
-- **Topic pub/sub** around **4.0~11.1 us** (one-way broadcast, no RPC round-trip overhead)
+- **Common 0~1024 byte RPC** trimmed mean around **24.8~28.0 us** (WSL2 environment)
+- **4096~8192 byte RPC payloads** around **38.0~57.4 us** under enlarged SHM-ring configuration
+- **Topic pub/sub** around **5.2~13.6 us** (one-way broadcast, no RPC round-trip overhead)
 
 > **Performance note**: Data collected on WSL2, affected by virtualization jitter — absolute values are for reference only.
 > "Trimmed mean" excludes the lowest/highest 1% of samples, providing a more accurate picture of typical performance by filtering out OS scheduling noise.
@@ -149,10 +165,32 @@ If your system is fundamentally built from **multiple services that collaborate 
 
 ### Build
 
+#### Linux
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
+
+#### Windows (MinGW / MSVC)
+
+```bash
+# MinGW (recommended)
+cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8
+
+# MSVC
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j8
+```
+
+Requirements:
+- Windows: MinGW 7.3+ (GCC) or MSVC 2017+
+- CMake 3.12+
+- No external dependencies
+
+> **Note**: On Windows, SHM is implemented with Named Pipe + TCP loopback, functionally equivalent to Linux eventfd + AF_UNIX.
+> Cross-process SHM is fully supported; in-process multi-EventLoop scenarios fall back to TCP automatically.
 
 For a normal host-only build, no cross-compilation is needed:
 
@@ -260,6 +298,29 @@ For the full example flow, refer to [examples/](examples/) and the [Examples Gui
 ```
 
 See the full guide in [omni-cli Usage Guide](docs/omni-tool-usage.en.md).
+
+**Output example:**
+```
+Response (status=OK, 38 bytes, 0.81 ms):
+  {
+    "humidity": 61.95,
+    "location": "Room-A",
+    "sensor_id": 1,
+    "temperature": 23.99,
+    "timestamp": 1772645628
+  }
+```
+
+> `sm_host` in `runtime.init(sm_host, sm_port)` is the `ServiceManager` the current process connects to.
+> `runtime.setRegisterHost(...)` or `service.setRegisterHost(...)` is the address written into
+> `ServiceInfo.host` when the service registers with the `ServiceManager`, that is, the address other
+> machines use to connect directly to that service later. In cross-machine deployments these two
+> addresses usually differ and must not be mixed up.
+>
+> On the TCP path, the synchronous `invoke()` first writes the complete request to the socket within
+> the timeout budget, and only enters the reply-wait phase after the request is actually sent.
+> On a slow cross-device link, if sending itself takes long, the timeout shows up in the send phase
+> first, rather than "queued locally but reply timed out early".
 
 ---
 
@@ -437,6 +498,12 @@ Useful log keywords include:
 - `data_connect_failed`
 - `data_connect_fallback`
 
+Related tests include:
+
+- `test_threadsafe_client_and_reconnect`
+- `test_runtime_stats`
+- `test_error_logging`
+
 ---
 
 ## Documentation
@@ -456,6 +523,7 @@ Useful log keywords include:
 | [Examples Guide](docs/examples.md) | Complete server/client examples, cross-board communication examples |
 | [Examples Guide (EN)](docs/examples.en.md) | English version of the examples guide |
 | [Downstream Example](examples/artifact_examples/README.en.md) | Building downstream projects with installed OmniBinder artifacts |
+| [Release Features](RELEASE_FEATURES.md) | Core capabilities, deliverables, and applicable scenarios of the current release |
 | [Performance Report](docs/performance-report.md) | RPC and topic latency test data (microsecond level) |
 
 The Chinese documentation remains available in the original `.md` files.
@@ -485,6 +553,16 @@ omnibinder/
 - **CMake**: 3.12+
 - **External dependencies**: none
 
+### Platform differences
+
+| Feature | Linux | Windows |
+|---------|-------|---------|
+| I/O multiplexing | epoll | IOCP + select |
+| Cross-process notification | eventfd | Named Pipe |
+| Unix Domain Socket | AF_UNIX | TCP loopback (127.0.0.1) |
+| Shared memory | POSIX SHM | Named File Mapping |
+| Cross-process SHM | ✅ Fully supported | ✅ Fully supported |
+
 ---
 
 ## Running tests
@@ -497,6 +575,8 @@ ctest --output-on-failure
 # Run the performance benchmark and regenerate the report
 ./target/test/test_performance -o ../docs/performance-report.md
 ```
+
+> **Note**: the available tests depend on the platform and build configuration; Windows builds skip some tests that rely on POSIX/Linux behavior. Use the current output of `ctest -N` as the source of truth.
 
 ---
 

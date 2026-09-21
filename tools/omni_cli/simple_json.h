@@ -37,6 +37,7 @@
 #include <map>
 #include <vector>
 #include <stdexcept>
+#include <stdint.h>
 
 namespace simple_json {
 
@@ -49,14 +50,24 @@ enum ValueType {
     TYPE_OBJECT
 };
 
+// 数值内部存储种类：区分浮点与 64 位整数，避免大整数经 double 中转丢精度
+enum NumberKind {
+    NUM_FP,
+    NUM_INT,
+    NUM_UINT
+};
+
 class Value {
 public:
-    Value() : type_(TYPE_NULL), bool_val_(false), num_val_(0.0) {}
-    explicit Value(bool b) : type_(TYPE_BOOL), bool_val_(b), num_val_(0.0) {}
-    explicit Value(double n) : type_(TYPE_NUMBER), bool_val_(false), num_val_(n) {}
-    explicit Value(const std::string& s) : type_(TYPE_STRING), bool_val_(false), num_val_(0.0), str_val_(s) {}
+    Value() : type_(TYPE_NULL), bool_val_(false), num_kind_(NUM_FP), num_val_(0.0), int_val_(0), uint_val_(0) {}
+    explicit Value(bool b) : type_(TYPE_BOOL), bool_val_(b), num_kind_(NUM_FP), num_val_(0.0), int_val_(0), uint_val_(0) {}
+    explicit Value(double n) : type_(TYPE_NUMBER), bool_val_(false), num_kind_(NUM_FP), num_val_(n), int_val_(0), uint_val_(0) {}
+    explicit Value(int64_t n) : type_(TYPE_NUMBER), bool_val_(false), num_kind_(NUM_INT), num_val_(static_cast<double>(n)), int_val_(n), uint_val_(0) {}
+    explicit Value(uint64_t n) : type_(TYPE_NUMBER), bool_val_(false), num_kind_(NUM_UINT), num_val_(static_cast<double>(n)), int_val_(0), uint_val_(n) {}
+    explicit Value(const std::string& s) : type_(TYPE_STRING), bool_val_(false), num_kind_(NUM_FP), num_val_(0.0), int_val_(0), uint_val_(0), str_val_(s) {}
     
     ValueType type() const { return type_; }
+    NumberKind numberKind() const { return num_kind_; }
     
     bool isNull() const { return type_ == TYPE_NULL; }
     bool isBool() const { return type_ == TYPE_BOOL; }
@@ -67,7 +78,16 @@ public:
     
     bool asBool() const { return bool_val_; }
     double asNumber() const { return num_val_; }
-    int64_t asInt64() const { return static_cast<int64_t>(num_val_); }
+    int64_t asInt64() const {
+        if (num_kind_ == NUM_INT) return int_val_;
+        if (num_kind_ == NUM_UINT) return static_cast<int64_t>(uint_val_);
+        return static_cast<int64_t>(num_val_);
+    }
+    uint64_t asUint64() const {
+        if (num_kind_ == NUM_UINT) return uint_val_;
+        if (num_kind_ == NUM_INT) return static_cast<uint64_t>(int_val_);
+        return static_cast<uint64_t>(num_val_);
+    }
     const std::string& asString() const { return str_val_; }
     
     // 数组操作
@@ -97,7 +117,10 @@ public:
 private:
     ValueType type_;
     bool bool_val_;
+    NumberKind num_kind_;
     double num_val_;
+    int64_t int_val_;
+    uint64_t uint_val_;
     std::string str_val_;
     std::vector<Value> array_val_;
     std::map<std::string, Value> obj_val_;

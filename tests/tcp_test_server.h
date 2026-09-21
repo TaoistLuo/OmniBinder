@@ -5,6 +5,7 @@
 #include "transport/transport_selector.h"
 #include "core/event_loop.h"
 #include "platform/platform.h"
+#include "platform/platform_test.h"
 #include <string>
 #include <vector>
 #include <stdint.h>

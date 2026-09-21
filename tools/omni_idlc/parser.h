@@ -101,8 +101,12 @@ public:
 
 private:
     Token expect(TokenType type);
-    bool match(TokenType type);
     void error(const std::string& msg);
+
+    /* @brief 生成带行号列的当前 token 错误信息
+     * @param[in] expected 期望/上下文描述；当前 token 为 TOK_ERROR 时改用 Lexer 原始信息
+     */
+    void errorAtCurrent(const std::string& expected);
     
     bool parsePackage(AstFile& ast);
     bool parseImport(AstFile& ast);
@@ -115,9 +119,8 @@ private:
     
     /* @brief 将文件中的所有类型注册到全局类型表
      * @param[in] ast 待注册的 AST
-     * @return 注册成功返回 true
      */
-    bool registerTypes(const AstFile& ast);
+    void registerTypes(const AstFile& ast);
     
     /* @brief 路径解析
      * @param[in] import_path import 路径

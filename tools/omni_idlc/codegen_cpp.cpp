@@ -1,4 +1,5 @@
 #include "codegen_cpp.h"
+#include <cctype>
 #include <fstream>
 #include <cstdio>
 
@@ -43,7 +44,7 @@ bool isReferenceType(const TypeRef& type) {
  * @param[in] type 类型引用
  * @return 方法后缀（如 "Int32"、"String"）
  */
-std::string bufferMethodSuffix(const TypeRef& type) {
+static std::string bufferMethodSuffix(const TypeRef& type) {
     switch (type.primitive) {
     case TYPE_BOOL:    return "Bool";
     case TYPE_INT8:    return "Int8";
@@ -62,9 +63,9 @@ std::string bufferMethodSuffix(const TypeRef& type) {
     }
 }
 
-void emitSerializeValue(const TypeRef& type, const std::string& expr,
+static void emitSerializeValue(const TypeRef& type, const std::string& expr,
                         const std::string& buffer_name, const std::string& indent,
-                        int depth, std::ostream& os) {
+                        int depth, const std::string& fail_stmt, std::ostream& os) {
     switch (type.primitive) {
     case TYPE_BOOL:
     case TYPE_INT8:
@@ -80,19 +81,20 @@ void emitSerializeValue(const TypeRef& type, const std::string& expr,
     case TYPE_STRING:
     case TYPE_BYTES:
         os << indent << "if (!" << buffer_name << ".write" << bufferMethodSuffix(type)
-           << "(" << expr << ")) return false;\n";
+           << "(" << expr << ")) " << fail_stmt << "\n";
         break;
     case TYPE_CUSTOM:
-        os << indent << "if (!" << expr << ".serialize(" << buffer_name << ")) return false;\n";
+        os << indent << "if (!" << expr << ".serialize(" << buffer_name << ")) "
+           << fail_stmt << "\n";
         break;
     case TYPE_ARRAY: {
         std::string idx = "i" + std::to_string(depth);
         os << indent << "if (!" << buffer_name << ".writeUint32(static_cast<uint32_t>("
-           << expr << ".size()))) return false;\n";
+           << expr << ".size()))) " << fail_stmt << "\n";
         os << indent << "for (size_t " << idx << " = 0; " << idx << " < "
            << expr << ".size(); ++" << idx << ") {\n";
         emitSerializeValue(*type.element_type, expr + "[" + idx + "]", buffer_name,
-                           indent + "    ", depth + 1, os);
+                           indent + "    ", depth + 1, fail_stmt, os);
         os << indent << "}\n";
         break;
     }
@@ -101,7 +103,7 @@ void emitSerializeValue(const TypeRef& type, const std::string& expr,
     }
 }
 
-void emitDeserializeValue(const TypeRef& type, const std::string& target,
+static void emitDeserializeValue(const TypeRef& type, const std::string& target,
                           const std::string& buffer_name, const std::string& indent,
                           int depth, const std::string& fail_stmt, std::ostream& os) {
     switch (type.primitive) {
@@ -140,7 +142,7 @@ void emitDeserializeValue(const TypeRef& type, const std::string& target,
         }
     os << " if (static_cast<size_t>(" << count << ") > omnibinder::MAX_MESSAGE_SIZE / sizeof("
            << cppTypeName(*type.element_type) << ")) " << fail_stmt;
-        os << " try { " << target << ".resize(" << count << "); } catch (...) { " << fail_stmt << " }\n";
+        os << " " << target << ".resize(" << count << ");\n";
         os << indent << "  for (uint32_t " << idx << " = 0; " << idx << " < "
            << count << "; ++" << idx << ") {\n";
         emitDeserializeValue(*type.element_type, target + "[" + idx + "]", buffer_name,
@@ -156,12 +158,7 @@ void emitDeserializeValue(const TypeRef& type, const std::string& target,
 bool CppCodeGen::generate(const AstFile& ast, const std::string& output_dir,
                           const std::string& filename) {
     pkg_ = ast.package_name;
-    has_error_ = false;
 
-    if (!validateAst(ast)) {
-        return false;
-    }
-    
     std::string header_path = output_dir + "/" + filename + ".h";
     std::string source_path = output_dir + "/" + filename + ".cpp";
     
@@ -175,57 +172,8 @@ bool CppCodeGen::generate(const AstFile& ast, const std::string& output_dir,
     return true;
 }
 
-void CppCodeGen::reportError(const std::string& message) {
-    if (!has_error_) {
-        std::fprintf(stderr, "C++ codegen error: %s\n", message.c_str());
-        has_error_ = true;
-    }
-}
-
-bool CppCodeGen::validateTypeSupported(const TypeRef& type, const std::string& context,
-                                       bool allow_void) {
-    if (type.isVoid()) {
-        if (allow_void) {
-            return true;
-        }
-        reportError(context + " uses unsupported C++ codegen type '" + cppTypeName(type) + "'");
-        return false;
-    }
-
-    if (type.isArray()) {
-        if (type.element_type == NULL) {
-            reportError(context + " uses unsupported C++ codegen type '" + cppTypeName(type) +
-                        "' because array element type is missing");
-            return false;
-        }
-        return validateTypeSupported(*type.element_type, context + " element type", false);
-    }
-
-    if (type.isCustom()) {
-        return true;
-    }
-
-    if (!bufferMethodSuffix(type).empty()) {
-        return true;
-    }
-
-    reportError(context + " uses unsupported C++ codegen type '" + cppTypeName(type) + "'");
-    return false;
-}
-
-bool CppCodeGen::validateAst(const AstFile& ast) {
-    return validateAstCommon(ast, [this](const TypeRef& t, const std::string& ctx, bool allow_void) {
-        return this->validateTypeSupported(t, ctx, allow_void);
-    });
-}
-
 void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::string& filename) {
-    std::string guard = filename;
-    for (size_t i = 0; i < guard.size(); ++i) {
-        if (guard[i] == '.') guard[i] = '_';
-        guard[i] = toupper(guard[i]);
-    }
-    guard += "_H";
+    std::string guard = sanitizeIdentifierPrefix(filename) + "_H";
 
     emitGeneratedFileBanner(os,
                             filename + ".h",
@@ -262,16 +210,21 @@ void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std:
     os << "#endif // " << guard << "\n";
 }
 
-void CppCodeGen::genStruct(const StructDef& s, std::ostream& os) {
-    os << "struct " << s.name << " {\n";
-    for (size_t i = 0; i < s.fields.size(); ++i) {
-        os << "    " << cppTypeName(s.fields[i].type) << " " << s.fields[i].name << ";\n";
+void CppCodeGen::emitStructFields(const std::string& type_name,
+                                  const std::vector<FieldDef>& fields, std::ostream& os) {
+    os << "struct " << type_name << " {\n";
+    for (size_t i = 0; i < fields.size(); ++i) {
+        os << "    " << cppTypeName(fields[i].type) << " " << fields[i].name << ";\n";
     }
-    os << "\n    " << s.name << "()";
+}
+
+void CppCodeGen::emitStructCtorAndDecls(const std::string& type_name,
+                                        const std::vector<FieldDef>& fields, std::ostream& os) {
+    os << "\n    " << type_name << "()";
     bool first = true;
-    for (size_t i = 0; i < s.fields.size(); ++i) {
-        if (!isReferenceType(s.fields[i].type)) {
-            os << (first ? " : " : ", ") << s.fields[i].name << "(0)";
+    for (size_t i = 0; i < fields.size(); ++i) {
+        if (!isReferenceType(fields[i].type)) {
+            os << (first ? " : " : ", ") << fields[i].name << "(0)";
             first = false;
         }
     }
@@ -281,26 +234,16 @@ void CppCodeGen::genStruct(const StructDef& s, std::ostream& os) {
     os << "};\n\n";
 }
 
+void CppCodeGen::genStruct(const StructDef& s, std::ostream& os) {
+    emitStructFields(s.name, s.fields, os);
+    emitStructCtorAndDecls(s.name, s.fields, os);
+}
+
 void CppCodeGen::genTopic(const TopicDef& t, const AstFile& ast, std::ostream& os) {
-    os << "struct " << t.name << " {\n";
-    for (size_t i = 0; i < t.fields.size(); ++i) {
-        os << "    " << cppTypeName(t.fields[i].type) << " " << t.fields[i].name << ";\n";
-    }
-    uint32_t topic_idl_hash = computeTopicHash(t, ast);
+    emitStructFields(t.name, t.fields, os);
     os << "\n    static const uint32_t TOPIC_ID = 0x" << std::hex << fnv1a_hash(t.name) << std::dec << "u;\n";
-    os << "    static const uint32_t TOPIC_IDL_HASH = 0x" << std::hex << topic_idl_hash << std::dec << "u;\n";
-    os << "\n    " << t.name << "()";
-    bool first = true;
-    for (size_t i = 0; i < t.fields.size(); ++i) {
-        if (!isReferenceType(t.fields[i].type)) {
-            os << (first ? " : " : ", ") << t.fields[i].name << "(0)";
-            first = false;
-        }
-    }
-    os << " {}\n";
-    os << "    bool serialize(omnibinder::Buffer& buf) const;\n";
-    os << "    bool deserialize(omnibinder::Buffer& buf);\n";
-    os << "};\n\n";
+    os << "    static const uint32_t TOPIC_IDL_HASH = 0x" << std::hex << computeTopicHash(t, ast) << std::dec << "u;\n";
+    emitStructCtorAndDecls(t.name, t.fields, os);
 }
 
 void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
@@ -338,8 +281,7 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     os << "class " << svc.name << "Proxy : public omnibinder::ServiceProxyBase {\n";
     os << "public:\n";
     os << "    explicit " << svc.name << "Proxy(omnibinder::OmniRuntime& runtime)\n";
-    os << "        : ServiceProxyBase(runtime, \"" << svc.name << "\") {}\n";
-    os << "    ~" << svc.name << "Proxy() {}\n\n";
+    os << "        : ServiceProxyBase(runtime, \"" << svc.name << "\") {}\n\n";
     
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
@@ -362,10 +304,13 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
         os << "    void Subscribe" << svc.publishes[i] << "(const std::function<void(const " << svc.publishes[i] << "&)>& callback);\n";
+        os << "    void Subscribe" << svc.publishes[i] << "WithSource(const std::function<void(const std::string& host_id, const std::string& instance_id, const " << svc.publishes[i] << "&)>& callback);\n";
+        os << "    void Subscribe" << svc.publishes[i] << "Instance(const std::string& host_id, const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << svc.publishes[i] << "&)>& callback);\n";
     }
     
-    os << "\n    // Inherited from ServiceProxyBase: connect(), disconnect(), isConnected(),\n";
-    os << "    //   enableAutoReconnect(), startHeartbeat(), stopHeartbeat(), OnServiceDied()\n";
+    os << "\n    // Inherited from ServiceProxyBase: connect(), connect(host_id, instance_id),\n";
+    os << "    //   setInstance(), disconnect(), isConnected(), enableAutoReconnect(),\n";
+    os << "    //   startHeartbeat(), stopHeartbeat(), OnServiceDied()\n";
     
     os << "};\n\n";
 }
@@ -377,8 +322,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
                             "Auto-generated OmniBinder C++ definitions",
                             "Generated from OmniBinder IDL for C++ serialization and proxy/stub implementation glue.");
     os << "#include \"" << filename << ".h\"\n";
-    os << "#include <stdexcept>\n\n";
-    os << "namespace " << pkg_ << " {\n\n";
+    os << "\nnamespace " << pkg_ << " {\n\n";
     
     // 结构体序列化/反序列化
     for (size_t i = 0; i < ast.structs.size(); ++i) {
@@ -465,17 +409,9 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             if (m.has_param) os << m.param.name;
             os << ");\n";
             if (!m.return_type.isVoid()) {
-                std::ostringstream serialize_os;
-                emitSerializeValue(m.return_type, "result", "response", "        ", 0, serialize_os);
-                std::string serialize_code = serialize_os.str();
-                const std::string from = "return false;";
-                const std::string to = "return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);";
-                size_t pos = 0;
-                while ((pos = serialize_code.find(from, pos)) != std::string::npos) {
-                    serialize_code.replace(pos, from.size(), to);
-                    pos += to.size();
-                }
-                os << serialize_code;
+                emitSerializeValue(m.return_type, "result", "response", "        ", 0,
+                                   "return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);",
+                                   os);
             }
             os << "        return 0;\n    }\n";
         }
@@ -488,9 +424,9 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "    if (runtime()) runtime()->publishTopic(\"" << topic << "\", s_" << topic << "_topic_idl_hash);\n";
             os << "}\n\n";
             os << "void " << svc.name << "Stub::Broadcast" << topic << "(const " << topic << "& msg) {\n";
-            os << "    omnibinder::Buffer buf;\n";
-            os << "    msg.serialize(buf);\n";
-            os << "    if (runtime()) runtime()->broadcast(0x" << std::hex << tid << std::dec << "u, buf);\n";
+        os << "    omnibinder::Buffer buf;\n";
+        os << "    if (!msg.serialize(buf)) return;\n";
+        os << "    if (runtime()) runtime()->broadcast(0x" << std::hex << tid << std::dec << "u, buf);\n";
             os << "}\n\n";
         }
         
@@ -518,24 +454,16 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             if (!m.return_type.isVoid()) os << ", resp";
             os << ";\n";
             if (m.has_param) {
-                std::ostringstream serialize_os;
-                emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0, serialize_os);
-                std::string serialize_code = serialize_os.str();
-                const std::string from = "return false;";
-                const std::string to = m.return_type.isVoid()
+                const std::string fail_stmt = m.return_type.isVoid()
                     ? "return;"
                     : "return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);";
-                size_t pos = 0;
-                while ((pos = serialize_code.find(from, pos)) != std::string::npos) {
-                    serialize_code.replace(pos, from.size(), to);
-                    pos += to.size();
-                }
-                os << serialize_code;
+                emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0,
+                                   fail_stmt, os);
             }
             if (m.return_type.isVoid()) {
-                os << "    runtime_.invokeOneWay(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
+                os << "    runtime_.invokeOneWay(connectionKey(), 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
             } else {
-                os << "    int ret = runtime_.invoke(\"" << svc.name << "\", 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
+                os << "    int ret = runtime_.invoke(connectionKey(), 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
                 os << "    if (ret != 0) return ret;\n";
                 emitDeserializeValue(m.return_type, "out", "resp", "    ", 0,
                                      "return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);",
@@ -548,11 +476,27 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
             const std::string& topic = svc.publishes[pi];
             os << "void " << svc.name << "Proxy::Subscribe" << topic << "(const std::function<void(const " << topic << "&)>& callback) {\n";
-            os << "    runtime_.subscribeTopic(\"" << topic << "\", s_" << topic << "_topic_idl_hash, [callback](uint32_t, const omnibinder::Buffer& data) {\n";
+            os << "    runtime_.subscribeTopic(omnibinder::TopicSubscriptionSelector::service(service_name_), \"" << topic << "\", s_" << topic << "_topic_idl_hash, [callback](const std::string&, const std::string&, uint32_t, const omnibinder::Buffer& data) {\n";
             os << "        " << topic << " msg;\n";
             os << "        omnibinder::Buffer buf(data.data(), data.size());\n";
             os << "        if (!msg.deserialize(buf)) return;\n";
             os << "        callback(msg);\n";
+            os << "    }, nullptr);\n}\n\n";
+
+            os << "void " << svc.name << "Proxy::Subscribe" << topic << "WithSource(const std::function<void(const std::string& host_id, const std::string& instance_id, const " << topic << "&)>& callback) {\n";
+            os << "    runtime_.subscribeTopic(omnibinder::TopicSubscriptionSelector::service(service_name_), \"" << topic << "\", s_" << topic << "_topic_idl_hash, [callback](const std::string& source_host_id, const std::string& source_instance_id, uint32_t, const omnibinder::Buffer& data) {\n";
+            os << "        " << topic << " msg;\n";
+            os << "        omnibinder::Buffer buf(data.data(), data.size());\n";
+            os << "        if (!msg.deserialize(buf)) return;\n";
+            os << "        callback(source_host_id, source_instance_id, msg);\n";
+            os << "    }, nullptr);\n}\n\n";
+
+            os << "void " << svc.name << "Proxy::Subscribe" << topic << "Instance(const std::string& host_id, const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << topic << "&)>& callback) {\n";
+            os << "    runtime_.subscribeTopic(omnibinder::TopicSubscriptionSelector::instance(service_name_, host_id, instance_id), \"" << topic << "\", s_" << topic << "_topic_idl_hash, [callback](const std::string& source_host_id, const std::string& source_instance_id, uint32_t, const omnibinder::Buffer& data) {\n";
+            os << "        " << topic << " msg;\n";
+            os << "        omnibinder::Buffer buf(data.data(), data.size());\n";
+            os << "        if (!msg.deserialize(buf)) return;\n";
+            os << "        callback(source_host_id, source_instance_id, msg);\n";
             os << "    }, nullptr);\n}\n\n";
         }
     }
@@ -564,7 +508,7 @@ void CppCodeGen::genSerialize(const std::vector<FieldDef>& fields, const std::st
     for (size_t i = 0; i < fields.size(); ++i) {
         const FieldDef& f = fields[i];
         std::string name = obj.empty() ? f.name : obj + "." + f.name;
-        emitSerializeValue(f.type, name, "buf", "    ", 0, os);
+        emitSerializeValue(f.type, name, "buf", "    ", 0, "return false;", os);
     }
 }
 

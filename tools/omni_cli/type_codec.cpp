@@ -6,8 +6,56 @@
 #include "type_resolver.h"
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 
 namespace type_codec {
+
+namespace {
+
+bool checkIntegral(const simple_json::Value& json, double& out_value, const char* type_name) {
+    if (!json.isNumber() || !std::isfinite(json.asNumber())) {
+        fprintf(stderr, "Error: Expected finite numeric value for %s\n", type_name);
+        return false;
+    }
+    out_value = json.asNumber();
+    if (std::floor(out_value) != out_value) {
+        fprintf(stderr, "Error: Non-integer value for %s\n", type_name);
+        return false;
+    }
+    return true;
+}
+
+bool checkIntegerRange(const simple_json::Value& json, double min_value, double max_value,
+                       const char* type_name) {
+    double value = 0.0;
+    if (!checkIntegral(json, value, type_name)) return false;
+    if (value < min_value || value > max_value) {
+        fprintf(stderr, "Error: Value out of range for %s\n", type_name);
+        return false;
+    }
+    return true;
+}
+
+bool checkFiniteNumber(const simple_json::Value& json, const char* type_name) {
+    if (!json.isNumber() || !std::isfinite(json.asNumber())) {
+        fprintf(stderr, "Error: Expected finite numeric value for %s\n", type_name);
+        return false;
+    }
+    return true;
+}
+
+bool checkIntegerRangeSafe(const simple_json::Value& json, double min_inclusive,
+                           double max_exclusive, const char* type_name) {
+    double value = 0.0;
+    if (!checkIntegral(json, value, type_name)) return false;
+    if (value < min_inclusive || value >= max_exclusive) {
+        fprintf(stderr, "Error: Value out of range for %s\n", type_name);
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 const omnic::StructDef* TypeCodec::findStruct(const std::string& name, const std::string& package) {
     // 查找指定包中的结构体定义
@@ -35,73 +83,65 @@ bool TypeCodec::encodePrimitive(const simple_json::Value& json, const omnic::Typ
         buf.writeBool(json.asBool());
         return true;
     case omnic::TYPE_INT8:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for int8\n");
-            return false;
-        }
+        if (!checkIntegerRange(json, -128.0, 127.0, "int8")) return false;
         buf.writeInt8(static_cast<int8_t>(json.asInt64()));
         return true;
     case omnic::TYPE_UINT8:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for uint8\n");
-            return false;
-        }
+        if (!checkIntegerRange(json, 0.0, 255.0, "uint8")) return false;
         buf.writeUint8(static_cast<uint8_t>(json.asInt64()));
         return true;
     case omnic::TYPE_INT16:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for int16\n");
-            return false;
-        }
+        if (!checkIntegerRange(json, -32768.0, 32767.0, "int16")) return false;
         buf.writeInt16(static_cast<int16_t>(json.asInt64()));
         return true;
     case omnic::TYPE_UINT16:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for uint16\n");
-            return false;
-        }
+        if (!checkIntegerRange(json, 0.0, 65535.0, "uint16")) return false;
         buf.writeUint16(static_cast<uint16_t>(json.asInt64()));
         return true;
     case omnic::TYPE_INT32:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for int32\n");
-            return false;
-        }
+        if (!checkIntegerRange(json, -2147483648.0, 2147483647.0, "int32")) return false;
         buf.writeInt32(static_cast<int32_t>(json.asInt64()));
         return true;
     case omnic::TYPE_UINT32:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for uint32\n");
-            return false;
-        }
+        if (!checkIntegerRange(json, 0.0, 4294967295.0, "uint32")) return false;
         buf.writeUint32(static_cast<uint32_t>(json.asInt64()));
         return true;
-    case omnic::TYPE_INT64:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for int64\n");
-            return false;
+    case omnic::TYPE_INT64: {
+        if (!checkFiniteNumber(json, "int64")) return false;
+        if (json.numberKind() == simple_json::NUM_UINT) {
+            if (json.asUint64() > static_cast<uint64_t>(INT64_MAX)) {
+                fprintf(stderr, "Error: Value out of range for int64\n");
+                return false;
+            }
+        } else if (json.numberKind() == simple_json::NUM_FP) {
+            if (!checkIntegerRangeSafe(json, -9223372036854775808.0, 9223372036854775808.0, "int64")) {
+                return false;
+            }
         }
         buf.writeInt64(json.asInt64());
         return true;
-    case omnic::TYPE_UINT64:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for uint64\n");
-            return false;
+    }
+    case omnic::TYPE_UINT64: {
+        if (!checkFiniteNumber(json, "uint64")) return false;
+        if (json.numberKind() == simple_json::NUM_INT) {
+            if (json.asInt64() < 0) {
+                fprintf(stderr, "Error: Value out of range for uint64\n");
+                return false;
+            }
+        } else if (json.numberKind() == simple_json::NUM_FP) {
+            if (!checkIntegerRangeSafe(json, 0.0, 18446744073709551616.0, "uint64")) {
+                return false;
+            }
         }
-        buf.writeUint64(static_cast<uint64_t>(json.asInt64()));
+        buf.writeUint64(json.asUint64());
         return true;
+    }
     case omnic::TYPE_FLOAT32:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for float32\n");
-            return false;
-        }
+        if (!checkFiniteNumber(json, "float32")) return false;
         buf.writeFloat32(static_cast<float>(json.asNumber()));
         return true;
     case omnic::TYPE_FLOAT64:
-        if (!json.isNumber()) {
-            fprintf(stderr, "Error: Expected numeric value for float64\n");
-            return false;
-        }
+        if (!checkFiniteNumber(json, "float64")) return false;
         buf.writeFloat64(json.asNumber());
         return true;
     case omnic::TYPE_STRING:
@@ -112,7 +152,7 @@ bool TypeCodec::encodePrimitive(const simple_json::Value& json, const omnic::Typ
         buf.writeString(json.asString());
         return true;
     case omnic::TYPE_BYTES:
-        // TODO: 支持 base64 编码的字节数组
+        fprintf(stderr, "Error: bytes value is only supported as a hex string parameter\n");
         return false;
     default:
         return false;
@@ -166,13 +206,13 @@ bool TypeCodec::decodePrimitive(omnibinder::Buffer& buf, const omnic::TypeRef& t
     case omnic::TYPE_INT64: {
         int64_t value = 0;
         if (!buf.tryReadInt64(value)) return false;
-        json = simple_json::Value(static_cast<double>(value));
+        json = simple_json::Value(value);
         return true;
     }
     case omnic::TYPE_UINT64: {
         uint64_t value = 0;
         if (!buf.tryReadUint64(value)) return false;
-        json = simple_json::Value(static_cast<double>(value));
+        json = simple_json::Value(value);
         return true;
     }
     case omnic::TYPE_FLOAT32: {
@@ -224,6 +264,8 @@ bool TypeCodec::encodeStruct(const simple_json::Value& json, const omnic::Struct
                                    package : field.type.package_name;
         
         if (!encodeToBuffer(fieldValue, field.type, fieldPackage, buf)) {
+            fprintf(stderr, "Error: Failed to encode field '%s' of struct %s\n",
+                    field.name.c_str(), structDef.name.c_str());
             return false;
         }
     }
@@ -280,6 +322,10 @@ bool TypeCodec::decodeArray(omnibinder::Buffer& buf, const omnic::TypeRef& eleme
     json.setArray();
     uint32_t count = 0;
     if (!buf.tryReadUint32(count)) {
+        return false;
+    }
+    if (static_cast<size_t>(count) > omnibinder::MAX_ARRAY_ELEMENTS) {
+        fprintf(stderr, "Error: Array element count %u exceeds limit\n", count);
         return false;
     }
     for (uint32_t i = 0; i < count; ++i) {

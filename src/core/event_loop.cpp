@@ -64,6 +64,12 @@ EventLoop::~EventLoop()
 
 void EventLoop::run()
 {
+    // 后端构造失败时 pollOnce 会立即返回，直接进入 while 将 100% CPU 忙转
+    if (!backend_) {
+        OMNI_LOG_ERROR(LOG_TAG, "EventLoop run skipped: backend not initialized");
+        return;
+    }
+
     // stop 是持久状态：若 stop 已在 run 之前/启动窗口内被请求，直接返回，
     // 不得把 running_ 重新置 true（否则 stop 被吞掉，run 永不退出）。
     // 已入队的 functor 在此排空，保证关闭前成功 post 的调用方不会被永久挂起。
@@ -265,14 +271,13 @@ void EventLoop::cancelTimer(uint32_t timer_id)
     OMNI_LOG_DEBUG(LOG_TAG, "cancelTimer: timer %u not found", timer_id);
 }
 
-int EventLoop::processTimers()
+void EventLoop::processTimers()
 {
     if (timers_.empty()) {
-        return -1;
+        return;
     }
 
     int64_t now = platform::currentTimeMs();
-    int min_remaining = -1;
 
     std::vector<Functor> expired_callbacks;
 
@@ -291,7 +296,6 @@ int EventLoop::processTimers()
 
             if (timer.repeat && timer.interval_ms > 0) {
                 timer.expire_ms = now + static_cast<int64_t>(timer.interval_ms);
-                remaining = static_cast<int64_t>(timer.interval_ms);
                 ++i;
             } else {
                 timers_.erase(timers_.begin() + static_cast<std::ptrdiff_t>(i));
@@ -300,13 +304,6 @@ int EventLoop::processTimers()
         } else {
             ++i;
         }
-
-        if (remaining > 0) {
-            int remaining_int = static_cast<int>(remaining);
-            if (min_remaining < 0 || remaining_int < min_remaining) {
-                min_remaining = remaining_int;
-            }
-        }
     }
 
     for (size_t i = 0; i < expired_callbacks.size(); ++i) {
@@ -314,8 +311,6 @@ int EventLoop::processTimers()
             expired_callbacks[i]();
         }
     }
-
-    return min_remaining;
 }
 
 int EventLoop::calculateTimeout(int requested_timeout_ms)
@@ -354,6 +349,9 @@ int EventLoop::calculateTimeout(int requested_timeout_ms)
 
 bool EventLoop::post(const Functor& func)
 {
+    if (!backend_) {
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
         if (closed_) {

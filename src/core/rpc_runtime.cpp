@@ -29,6 +29,11 @@ uint32_t RpcRuntime::effectiveTimeout(uint32_t timeout_ms) const {
 }
 
 void RpcRuntime::setDefaultTimeout(uint32_t timeout_ms) {
+    // 0 会让 effectiveTimeout 返回 0，所有 RPC/注册等待零预算立即超时；
+    // 视为非法入参忽略，保持既有默认值
+    if (timeout_ms == 0) {
+        return;
+    }
     default_timeout_ms_ = timeout_ms;
 }
 
@@ -52,8 +57,18 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
                              const std::function<void(int)>& poll_once,
                              Message& reply,
                              const std::function<bool()>& is_alive) {
-    bool prev_in_wait = in_wait_for_reply_;
-    int64_t prev_deadline = wait_deadline_ms_;
+    // RAII 恢复等待状态：无论从哪个出口返回都复位，消除 5 处重复恢复
+    struct WaitStateGuard {
+        RpcRuntime& self;
+        bool prev_in_wait;
+        int64_t prev_deadline;
+        WaitStateGuard(RpcRuntime& s, bool in_wait, int64_t deadline)
+            : self(s), prev_in_wait(in_wait), prev_deadline(deadline) {}
+        ~WaitStateGuard() {
+            self.in_wait_for_reply_ = prev_in_wait;
+            self.wait_deadline_ms_ = prev_deadline;
+        }
+    } guard(*this, in_wait_for_reply_, wait_deadline_ms_);
 
     if (!beginWait(timeout_ms)) {
         OMNI_LOG_WARN(LOG_TAG_RPC, "Re-entrant waitForReply detected, this may cause issues");
@@ -63,8 +78,6 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
     while (table.pendingReply(seq) == NULL) {
         if (isTimedOut()) {
             table.eraseWait(seq);
-            in_wait_for_reply_ = prev_in_wait;
-            wait_deadline_ms_ = prev_deadline;
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
 
@@ -72,8 +85,6 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
         // 避免空转至超时
         if (table.isFailed(seq)) {
             table.eraseWait(seq);
-            in_wait_for_reply_ = prev_in_wait;
-            wait_deadline_ms_ = prev_deadline;
             return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
         }
 
@@ -82,19 +93,13 @@ int RpcRuntime::waitForReply(uint32_t seq, uint32_t timeout_ms,
 
         if (table.pendingReply(seq) == NULL && is_alive && !is_alive()) {
             table.eraseWait(seq);
-            in_wait_for_reply_ = prev_in_wait;
-            wait_deadline_ms_ = prev_deadline;
             return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
         }
     }
 
     if (!table.takeReply(seq, reply)) {
-        in_wait_for_reply_ = prev_in_wait;
-        wait_deadline_ms_ = prev_deadline;
         return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
     }
-    in_wait_for_reply_ = prev_in_wait;
-    wait_deadline_ms_ = prev_deadline;
     return 0;
 }
 

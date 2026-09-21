@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import atexit
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -9,6 +11,23 @@ import tempfile
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 SUMMARY = REPO_ROOT / "tools" / "longrun_summary.py"
 VERDICT = REPO_ROOT / "tools" / "longrun_verdict.py"
+
+_TEMP_DIRS = []
+
+
+def _make_temp_dir(prefix: str) -> pathlib.Path:
+    temp_dir = pathlib.Path(tempfile.mkdtemp(prefix=prefix))
+    _TEMP_DIRS.append(temp_dir)
+    return temp_dir
+
+
+def _cleanup_temp_dirs() -> None:
+    for temp_dir in _TEMP_DIRS:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    _TEMP_DIRS.clear()
+
+
+atexit.register(_cleanup_temp_dirs)
 
 
 def run_python(script: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
@@ -19,11 +38,12 @@ def run_python(script: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
         stderr=subprocess.PIPE,
         text=True,
         check=False,
+        timeout=30,
     )
 
 
 def write_log(contents: str) -> pathlib.Path:
-    temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="omnibinder_longrun_"))
+    temp_dir = _make_temp_dir("omnibinder_longrun_")
     log_path = temp_dir / "weekly.log"
     log_path.write_text(contents, encoding="utf-8")
     return log_path
@@ -54,7 +74,7 @@ def test_summary_reports_cycles_and_keywords() -> None:
 
 
 def test_summary_missing_file_fails() -> None:
-    missing = REPO_ROOT / "build" / "longrun_logs" / "does-not-exist.log"
+    missing = _make_temp_dir("omnibinder_longrun_missing_") / "does-not-exist.log"
     result = run_python(SUMMARY, str(missing))
     assert result.returncode == 1
     assert_contains(result.stderr, "Log file not found")

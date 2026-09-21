@@ -28,33 +28,45 @@ ServiceManager 只负责服务注册发现、Topic 发布/订阅关系、死亡�
      - initializeServiceShm()：createServerEndpoint(SHM) 启动 UDS 握手监听（失败仅告警，自动降级 TCP）
      - syncEndpointFds() 把端点级 fd（listen / master / handshake 等）注册到 EventLoop
   -> registerServiceWithManager()
-     - sendRegisterToManager() 构造 ServiceInfo{name, host, port, host_id, shm_config, interfaces}
+     - sendRegisterToManager() 构造 ServiceInfo{name, host, port, host_id, instance_id, shm_config, interfaces}
      - 发送 MSG_REGISTER 到 ServiceManager
      - 等待 MSG_REGISTER_REPLY
   -> ServiceManagerApp::handleRegister()
-     - ServiceRegistry::addService()
-     - HeartbeatMonitor::startTracking()
+     - ServiceRegistry::addService()：以 (name, host_id, instance_id) 身份键存储；
+       同身份重复注册为后来者顶替（保留 handle），异身份新增并存
+     - HeartbeatMonitor::startTracking(ServiceIdentity(name, host_id, instance_id))
 ```
 
-当前 `ServiceInfo` 不包含固定 `shm_name`。SHM 是 per-client 模型：客户端后续直连服务端时创建自己的 SHM，再通过服务端 UDS listener 完成握手。
+`instance_id` 由服务在注册前经 `Service::setInstanceId()` 声明，默认空串表示该 `host_id` 上该服务的默认实例。
+
+当前 `ServiceInfo` 不包含固定 `shm_name`。SHM 是 per-client 模型：客户端后续直连服务端时创建自己的 SHM，再通过服务端 UDS listener 完成握手；服务端握手路径由 `(service_name, host_id, instance_id)` 共同派生（`generateShmName`），因此同机同名不同实例（或不同 `host_id`）互不抢占。
 
 ---
 
 ## 3. 客户端主动连接链路
 
-生成的 Proxy 通常先调用 `ServiceProxyBase::connect()`，该函数会执行：
+生成的 Proxy 通常先调用 `ServiceProxyBase::connect()`。未绑定实例时按服务名连接，绑定实例时按实例连接：
 
 ```text
 ServiceProxyBase::connect()
-  -> OmniRuntime::Impl::connectService(service_name)
-  -> connectServiceInternal()
-     - lookupServiceInfo(): 查 services_ 中该服务的 ServiceState.info；未命中则向 SM 发 MSG_LOOKUP
-     - ConnectionManager::getOrCreateConnection(service_name, host, port, host_id, shm_config)
+  -> 未绑定实例（connection_key_ == service_name_）：
+       OmniRuntime::Impl::connectService(service_name)
+       -> connectServiceInternal()
+          - lookupServiceInfo(): 查 services_ 中该服务的 ServiceState.info；未命中则向 SM 发 MSG_LOOKUP
+            （同名多实例时 SM 返回实例键字典序第一实例）
+          - ConnectionManager::getOrCreateConnectionByKey(service_name, service_name, host, port, host_id, shm_config)
+  -> 已绑定实例（connect(host_id, instance_id) 或 setInstance(...) 之后）：
+       OmniRuntime::Impl::connectServiceInstance(name, host_id, instance_id)
+       -> listServiceInstancesInternal(name): 向 SM 发 MSG_LIST_INSTANCES，解析目标实例
+       -> connectResolvedConnection(makeServiceConnectionKey(name, host_id, instance_id), instance_info, true, &identity)
+          - ConnectionManager::getOrCreateConnectionByKey(connection_key, name, host, port, host_id, shm_config, instance_id)
   -> enableAutoReconnect(true)
   -> startHeartbeat()
-  -> subscribeServiceDeath() -> subscribeServiceDeathInternal()
-     - 向 SM 发 MSG_SUBSCRIBE_SERVICE，注册死亡通知
+  -> 未绑定实例：subscribeServiceDeath()；绑定实例：subscribeServiceInstanceDeath()
+     - 分别向 SM 发 MSG_SUBSCRIBE_SERVICE / MSG_SUBSCRIBE_SERVICE_INSTANCE 注册死亡通知
 ```
+
+连接以 `makeServiceConnectionKey(name, host_id, instance_id)` 为索引键：生成的 Proxy 方法据此调用 `runtime_.invoke(connectionKey(), ...)` / `invokeOneWay(connectionKey(), ...)`；`ServiceProxyBase` 的 `disconnect()`、`enableAutoReconnect()`、`setReconnectInterval()`、`startHeartbeat()`、`stopHeartbeat()` 也都以 `connectionKey()` 为键。默认实例（未显式指定）的连接键即服务名本身。
 
 `invokeInternal()` 本身要求连接已经存在：它只调用 `conn_mgr_->getConnection(service_name)`，连接不存在时返回 `ERR_CONNECT_FAILED`，不会在 invoke 内隐式 lookup/connect。
 
@@ -63,17 +75,20 @@ ServiceProxyBase::connect()
 ## 4. 传输层选择链路
 
 ```text
-ConnectionManager::getOrCreateConnection()
-  -> 调用 createClientConnection(service_name, host, port, local_host_id, remote_host_id, shm_config)
-     - 同机：尝试 SHM（创建 ShmClientConnection 并 connect）
+ConnectionManager::getOrCreateConnectionByKey(connection_key, service_name, host, port, host_id, shm_config, instance_id)
+  -> 调用 createClientConnection(service_name, host, port, local_host_id, remote_host_id, shm_config, instance_id)
+     - 同机：尝试 SHM（创建 ShmClientConnection(service_name, ..., instance_id, remote_host_id) 并 connect）
      - 同机 SHM 失败/跨机：创建 TcpConnection 并 connect
-     - 成功返回 CONNECTED 状态的 IMessageConnection*，移入 ServiceConnection
+     - 成功返回 CONNECTED 状态的 IMessageConnection*，以 connection_key 存入 ServiceConnection
      - 失败返回 NULL，上层返回 ERR_CONNECT_FAILED
 ```
 
+`getOrCreateConnection(service_name, ...)` 是 `getOrCreateConnectionByKey` 的默认实例封装：connection_key 与服务名相同；显式实例寻址使用 `makeServiceConnectionKey` 生成独立键。
+
 SHM ring 容量来自服务注册时上报的 `ServiceInfo.shm_config`；未配置时使用 `SHM_DEFAULT_REQ_RING_CAPACITY` / `SHM_DEFAULT_RESP_RING_CAPACITY`。
+同机 SHM 的服务端握手路径由 `generateShmName(service_name, instance_id, host_id)` 派生：`host_id` 与 `instance_id` 参与 FNV-1a 哈希输入但不进入名称前缀，因此同机同名不同实例或不同 `host_id` 各自得到独立的 SHM 名与 UDS 路径。
 TCP provider 内部完成非阻塞 connect 的 writable 等待与 `checkConnectComplete()`，因此 `ConnectionManager` 不再依赖具体 TCP 类型。
-`createClientConnection()` 位于 `src/transport/transport_selector.{h,cpp}`，是新增传输的落点，但属源码级、侵入式扩展（新增传输还需同步修改 core：`TransportType` 分支、端点半创建、topic 订阅模型），非单点接入。service hosting 直接在 `OmniRuntime::Impl` 中创建 `TcpServerEndpoint` 和 `ShmServerEndpoint`，不经过 `createClientConnection()`。ServiceManager 控制面仍固定使用 TCP。
+`createClientConnection()` 位于 `src/transport/transport_selector.{h,cpp}`，是新增传输的落点，但属源码级、侵入式扩展（新增传输还需同步修改 core：`TransportType` 分支、端点半创建、topic 订阅模型），非单点接入。service hosting 在 `OmniRuntime::Impl` 中通过 `createServerEndpoint()` 创建服务端端点（`TransportType::TCP` / `TransportType::SHM`），不经过 `createClientConnection()`。ServiceManager 控制面仍固定使用 TCP。
 
 ---
 
@@ -84,10 +99,10 @@ TCP provider 内部完成非阻塞 connect 的 writable 等待与 `checkConnectC
 ```text
 生成 Proxy 方法
   -> 序列化参数到 Buffer
-  -> OmniRuntime::Impl::invoke(...)
+  -> OmniRuntime::Impl::invoke(connectionKey(), ...)   // 默认实例时 connectionKey() == 服务名
   -> callSerialized(...)
   -> invokeInternal(...)
-     - conn_mgr_->getConnection(service_name)
+     - conn_mgr_->getConnection(connection_key)
      - allocSequence()
      - populateInvokeMessage(): interface_id + idl_hash + method_id + request_length + request_data
      - emitDiagEvent(DIAG_EVENT_REQUEST, MSG_INVOKE)
@@ -196,25 +211,41 @@ runtime.publishTopic(topic_name)
 ```text
 runtime.subscribeTopic(topic_name, callback)
   -> subscribeTopicInternal(topic_name, callback)
-     - 向 SM 发送 MSG_SUBSCRIBE_TOPIC(topic_name)
+     - 向 SM 发送 MSG_SUBSCRIBE_TOPIC(topic_name)（无选择器，mode 0：仅按主题名）
      - SM handleSubscribeTopic(): TopicManager::addSubscriber()
      - 如果 publisher 已存在，SM 发送 MSG_TOPIC_PUBLISHER_NOTIFY 给订阅者
      - runtime 收到 MSG_SUBSCRIBE_TOPIC_REPLY 后 TopicRuntime::rememberSubscription()
 ```
 
-`MSG_SUBSCRIBE_TOPIC_REPLY` 中可能附带 publisher idl hash；runtime 会与订阅者期望哈希严格校验，不一致时撤销订阅并返回 `ERR_IDL_MISMATCH`。
+按选择器订阅（服务级 / 实例级）走同一消息类型，但在 `topic_name` 后追加订阅选择器：
+
+```text
+runtime.subscribeTopic(selector, topic_name, expected_idl_hash, on_msg, on_err)
+  -> subscribeSourceTopicInternal(selector, ...)
+     - 向 SM 发送 MSG_SUBSCRIBE_TOPIC(topic_name, selector)
+       选择器线格式 mode：1=服务级（publisher_service）/ 2=实例级（+ host_id + instance_id）
+     - SM 按 (发布者服务名, 主题名) 与选择器匹配，为每个匹配的在线发布者实例各下发
+       一条 MSG_TOPIC_PUBLISHER_NOTIFY
+     - runtime 收到 reply 后 TopicRuntime::rememberSourceSubscription() + setSourceErrorCallback()
+```
+
+`MSG_SUBSCRIBE_TOPIC_REPLY` 中可能附带 publisher idl hash；runtime 会与订阅者期望哈希严格校验，不一致时撤销订阅并返回 `ERR_IDL_MISMATCH`。`subscribeTopic(topic_name, ...)`（mode 0）是仅按主题名、匹配任意服务发布的该主题的订阅变体。
 
 ### 7.3 订阅者连接发布者
 
 ```text
-SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo)
+SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo{name, host_id, instance_id}, idl_hash)
   -> OmniRuntime::Impl::onSMMessage()
+  -> topic_runtime_.matchSubscriptions(topic, name, host_id, instance_id)  // 按选择器过滤
   -> ensureTopicPublisherConnection(topic_name, pub_info)
      - pub_name = pub_info.name 非空时复用真实服务名，否则用 "topic_pub_" + topic_name
-     - conn_mgr_->getOrCreateConnection(pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config)
+     - conn_key = makeServiceConnectionKey(pub_name, pub_info.host_id, pub_info.instance_id)
+     - conn_mgr_->getOrCreateConnectionByKey(conn_key, pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config, pub_info.instance_id)
      - 构造 MSG_SUBSCRIBE_BROADCAST(topic_id, topic_name)
-     - conn_mgr_->sendMessage(pub_name, sub_msg)，并把话题订阅绑定到该连接的 ReconnectConfig
+     - conn_mgr_->sendMessage(conn_key, sub_msg)，并把话题订阅与发布者实例信息绑定到该连接的 ReconnectConfig
 ```
+
+服务级订阅下同名的多个发布者实例各占一条独立连接（各自一个实例键），订阅方按连接区分来源实例。未匹配选择器的 `MSG_TOPIC_PUBLISHER_NOTIFY` 直接忽略，不建立连接。
 
 发布者收到 `MSG_SUBSCRIBE_BROADCAST` 后，由 `handleServiceClientMessage()` 的 subscribe 分支按 `IMessageConnection::isFramed()` 区分：
 
@@ -232,7 +263,7 @@ SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo)
      - SHM 订阅者：按 service_name/client_id 找到 LocalServiceEntry 的客户端连接，走 IMessageConnection::send()（ring 满丢帧不断开）
 ```
 
-订阅者收到 `MSG_BROADCAST` 后，TCP 和 SHM 最终都调用 `TopicRuntime::dispatch(topic_id, data)`，再进入用户注册的 `TopicCallback`。
+订阅者收到 `MSG_BROADCAST` 后，TCP 和 SHM 最终都进入 `dispatchBroadcastMessage()`：连接上登记了发布者实例信息（`ServiceState.info`）时以该身份调用 `TopicRuntime::dispatchFrom(publisher_service, host_id, instance_id, topic_id, data)`，按选择器过滤后进入用户注册的 `TopicCallback`（mode 0）或 `TopicSourceCallback`（携带来源 `host_id` / `instance_id`）。
 
 ---
 
@@ -240,12 +271,15 @@ SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo)
 
 ### 8.1 ServiceManager 侧死亡通知
 
-客户端通过 `MSG_SUBSCRIBE_SERVICE` 注册死亡通知。服务 unregister、连接断开或 ServiceManager 判定服务死亡时，SM 调用 `notifyServiceDeath()` 向订阅者发送 `MSG_DEATH_NOTIFY`。
+客户端可通过 `MSG_SUBSCRIBE_SERVICE`（名字级）或 `MSG_SUBSCRIBE_SERVICE_INSTANCE`（实例级）注册死亡通知。服务 unregister、连接断开或 ServiceManager 判定服务死亡时，SM 调用 `notifyServiceInstanceDeath()`：
 
-runtime 在 `onSMMessage()` 中处理 `MSG_DEATH_NOTIFY`：
+- 实例级订阅者收到该实例的死亡通知；仅当该服务名已无任何存活实例时，名字级订阅者才收到"名字死亡"通知。
+- 名字级通知用 `MSG_DEATH_NOTIFY`，实例级（同名仍有存活实例）用 `MSG_DEATH_NOTIFY_INSTANCE`，两者 payload 均为 `service_name + host_id + instance_id`。
 
-- 从 `ServiceState` 取死亡回调副本并触发用户 `DeathCallback`（原 `service_cache_` 已并入 `ServiceState`）。
-- `handleServiceLost()`：调用 `conn_mgr_->removeConnection(service_name)`、暂停 heartbeat、清除该服务的 `ServiceState.info`。
+runtime 在 `onSMMessage()` 中处理死亡通知：
+
+- 解析实例身份：按 `makeServiceIdentityKey` 匹配并触发实例级 `DeathSourceCallback`；`MSG_DEATH_NOTIFY` 额外触发名字级 `DeathCallback`。
+- `handleServiceLost()`：实例死亡只清理该实例键（`makeServiceConnectionKey`）的连接/状态；名字死亡才清理该名及其全部实例键。随后暂停 heartbeat、清除对应 `ServiceState.info`。
 - 如果启用了自动重连，`scheduleReconnect()` 在退避延迟后调度 `tryReconnectService()`。
 
 ### 8.2 数据面 heartbeat

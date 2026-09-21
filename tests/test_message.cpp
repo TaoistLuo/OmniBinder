@@ -39,6 +39,24 @@ TEST(MessageTest, DeclaredPayloadMustFitAvailableFrame) {
     ASSERT_TRUE(Message::validateHeader(header));
     EXPECT_GT(MESSAGE_HEADER_SIZE + static_cast<size_t>(header.length),
               serialized.size());
+
+    // 生产分帧路径必须把"声明长度超出可用字节"判为 NeedMore（等待更多数据）
+    MessageHeader extracted;
+    size_t frame_size = 0;
+    EXPECT_EQ(tryExtractFrame(serialized.data(), serialized.size(), extracted, frame_size),
+              FrameStatus::NeedMore);
+
+    // 头部长度字段超过协议上限时，生产校验必须判为 Corrupt
+    Buffer corrupt;
+    Message oversized(MessageType::MSG_INVOKE, 9);
+    ASSERT_TRUE(oversized.serialize(corrupt));
+    corrupt.mutableData()[12] = 0xFF;
+    corrupt.mutableData()[13] = 0xFF;
+    corrupt.mutableData()[14] = 0xFF;
+    corrupt.mutableData()[15] = 0xFF;
+    MessageHeader corrupt_header;
+    EXPECT_EQ(tryExtractFrame(corrupt.data(), corrupt.size(), corrupt_header, frame_size),
+              FrameStatus::Corrupt);
 }
 
 TEST(MessageTest, ServiceInfoSerializeDeserialize) {
@@ -47,6 +65,7 @@ TEST(MessageTest, ServiceInfoSerializeDeserialize) {
     info.host = "192.168.1.10";
     info.port = 8080;
     info.host_id = "abc123";
+    info.instance_id = "inst-7";
     InterfaceInfo iface;
     iface.interface_id = 0x12345678;
     iface.name = "ITest";
@@ -62,32 +81,113 @@ TEST(MessageTest, ServiceInfoSerializeDeserialize) {
     EXPECT_EQ(info2.host, "192.168.1.10");
     EXPECT_EQ(info2.port, 8080);
     EXPECT_EQ(info2.host_id, "abc123");
+    EXPECT_EQ(info2.instance_id, "inst-7");
     EXPECT_EQ(info2.interfaces.size(), 1u);
     EXPECT_EQ(info2.interfaces[0].interface_id, 0x12345678u);
     EXPECT_EQ(info2.interfaces[0].methods[0].name, "doSomething");
 }
 
-TEST(MessageTest, ServiceInfoWireFormatRemainsLegacyCompatible) {
+TEST(MessageTest, ServiceInfoWireFormatExact) {
     ServiceInfo info;
     info.name = "svc";
     info.host = "host";
     info.port = 42;
     info.host_id = "node";
+    info.instance_id = "inst";
     info.shm_config = ShmConfig(1024, 2048);
 
     Buffer encoded;
     serializeServiceInfo(info, encoded);
 
-    Buffer legacy;
-    legacy.writeString("svc");
-    legacy.writeString("host");
-    legacy.writeUint16(42);
-    legacy.writeString("node");
-    legacy.writeUint32(1024);
-    legacy.writeUint32(2048);
-    legacy.writeUint16(0);
-    ASSERT_EQ(encoded.size(), legacy.size());
-    EXPECT_EQ(memcmp(encoded.data(), legacy.data(), legacy.size()), 0);
+    Buffer expected;
+    expected.writeString("svc");
+    expected.writeString("host");
+    expected.writeUint16(42);
+    expected.writeString("node");
+    expected.writeString("inst");
+    expected.writeUint32(1024);
+    expected.writeUint32(2048);
+    expected.writeUint16(0);
+    ASSERT_EQ(encoded.size(), expected.size());
+    EXPECT_EQ(memcmp(encoded.data(), expected.data(), expected.size()), 0);
+}
+
+TEST(MessageTest, ServiceIdentityPayloadRoundTrip) {
+    Buffer encoded;
+    ASSERT_TRUE(writeServiceIdentityPayload(encoded, "SvcA", "host-1", "inst-a"));
+
+    std::string name;
+    std::string host_id;
+    std::string instance_id;
+    ASSERT_TRUE(readServiceIdentityPayload(encoded, name, host_id, instance_id));
+    EXPECT_EQ(name, "SvcA");
+    EXPECT_EQ(host_id, "host-1");
+    EXPECT_EQ(instance_id, "inst-a");
+
+    // 空 host_id / instance_id（默认单实例）是合法身份
+    Buffer default_instance;
+    ASSERT_TRUE(writeServiceIdentityPayload(default_instance, "SvcA", "host-1", ""));
+    ASSERT_TRUE(readServiceIdentityPayload(default_instance, name, host_id, instance_id));
+    EXPECT_EQ(name, "SvcA");
+    EXPECT_EQ(host_id, "host-1");
+    EXPECT_TRUE(instance_id.empty());
+}
+
+TEST(MessageTest, ServiceIdentityPayloadRejectsMalformedAndTruncated) {
+    const std::string keep_name = "keep";
+    const std::string keep_host = "keep-host";
+    const std::string keep_instance = "keep-inst";
+    std::string name = keep_name;
+    std::string host_id = keep_host;
+    std::string instance_id = keep_instance;
+
+    Buffer empty;
+    EXPECT_FALSE(readServiceIdentityPayload(empty, name, host_id, instance_id));
+
+    Buffer only_name;
+    only_name.writeString("SvcA");
+    EXPECT_FALSE(readServiceIdentityPayload(only_name, name, host_id, instance_id));
+
+    Buffer missing_instance;
+    missing_instance.writeString("SvcA");
+    missing_instance.writeString("host-1");
+    EXPECT_FALSE(readServiceIdentityPayload(missing_instance, name, host_id, instance_id));
+
+    // 恶意长度前缀：声明 1GB 但无数据，不得越界读
+    Buffer huge_length;
+    huge_length.writeUint32(0x40000000u);
+    EXPECT_FALSE(readServiceIdentityPayload(huge_length, name, host_id, instance_id));
+
+    Buffer empty_name;
+    empty_name.writeString("");
+    empty_name.writeString("host-1");
+    empty_name.writeString("inst-a");
+    EXPECT_FALSE(readServiceIdentityPayload(empty_name, name, host_id, instance_id));
+
+    Buffer oversized;
+    oversized.writeString(std::string(MAX_SERVICE_NAME_LENGTH + 1, 'x'));
+    oversized.writeString("host-1");
+    oversized.writeString("inst-a");
+    EXPECT_FALSE(readServiceIdentityPayload(oversized, name, host_id, instance_id));
+
+    Buffer trailing;
+    ASSERT_TRUE(writeServiceIdentityPayload(trailing, "SvcA", "host-1", "inst-a"));
+    trailing.writeUint8(1);
+    EXPECT_FALSE(readServiceIdentityPayload(trailing, name, host_id, instance_id));
+
+    // 失败时不改动输出参数
+    EXPECT_EQ(name, keep_name);
+    EXPECT_EQ(host_id, keep_host);
+    EXPECT_EQ(instance_id, keep_instance);
+}
+
+TEST(MessageTest, InstanceDeathMessageTypeStrings) {
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_DEATH_NOTIFY_INSTANCE),
+                 "DEATH_NOTIFY_INSTANCE");
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE),
+                 "SUBSCRIBE_SERVICE_INSTANCE");
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE),
+                 "UNSUBSCRIBE_SERVICE_INSTANCE");
 }
 
 TEST(MessageTest, PublishedTopicsReplyRoundTrip) {
@@ -106,6 +206,12 @@ TEST(MessageTest, PublishedTopicsReplyRoundTrip) {
                  "QUERY_PUBLISHED_TOPICS");
     EXPECT_STREQ(messageTypeToString(MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY),
                  "QUERY_PUBLISHED_TOPICS_REPLY");
+}
+
+TEST(MessageTest, ListInstancesMessageTypeStrings) {
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_LIST_INSTANCES), "LIST_INSTANCES");
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_LIST_INSTANCES_REPLY),
+                 "LIST_INSTANCES_REPLY");
 }
 
 TEST(MessageTest, PublishedTopicsReplyDistinguishesMissingAndEmpty) {

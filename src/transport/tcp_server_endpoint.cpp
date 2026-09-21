@@ -131,6 +131,10 @@ void TcpServerEndpoint::onPollEvent(int fd, uint32_t events)
 
             IMessageConnection* client = new TcpConnection(client_fd);
             int client_id = client->fd();
+            if (client_id < 0) {
+                delete client;
+                continue;
+            }
             clients_[client_id] = client;
             accepted.push_back(std::make_pair(client_id, client));
         }

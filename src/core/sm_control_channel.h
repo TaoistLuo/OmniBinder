@@ -76,8 +76,11 @@ public:
     IMessageConnection* transport() const;
 
     /*
-     * @brief  设置控制通道传输对象（接管所有权，不释放旧对象）
+     * @brief  设置控制通道传输对象
      * @param[in] t 新传输对象，可为 NULL
+     * @note   本类不接管生命周期：不释放旧对象，析构也不释放 transport_。
+     *         调用方必须在销毁前经 closeTransport(loop) 摘除 fd 并释放
+     *         （OmniRuntime::Impl 析构中执行）
      */
     void resetTransport(IMessageConnection* t);
 

@@ -136,9 +136,6 @@ if(OMNIBINDER_BUILD_TESTS)
 
     add_subdirectory(thirdparty/googletest-release-1.10.0)
 
-    # 恢复项目 C++ 标准
-    set(CMAKE_CXX_STANDARD 11 CACHE STRING "C++ standard" FORCE)
-
     add_subdirectory(tests)
 endif()
 

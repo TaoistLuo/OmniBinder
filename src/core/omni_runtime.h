@@ -38,6 +38,7 @@
 #include "omnibinder/service.h"
 #include "omnibinder/message.h"
 #include "omnibinder/transport.h"
+#include "core/omni_runtime_types.h"
 #include "core/event_loop.h"
 #include "core/owner_thread_executor.h"
 #include "core/connection_manager.h"
@@ -59,62 +60,6 @@
 #include <set>
 
 namespace omnibinder {
-
-enum class InvokeDispatchStatus {
-    SUCCESS,
-    DECODE_FAILED,
-    INTERFACE_MISMATCH,
-    IDL_MISMATCH,
-    INVOKE_FAILED
-};
-
-struct InvokeDispatchResult {
-    InvokeDispatchStatus status;
-    int error_code;
-    Buffer response;
-};
-
-/*
- * @brief  本地注册服务的上下文
- * @details endpoints 拥有各传输端点（TCP/SHM），clients 为端点接入的客户端
- *          非拥有视图（生命周期由 endpoint 管理）。
- */
-struct LocalServiceEntry {
-    Service*            service;
-    uint16_t            port;
-
-    std::vector<IServerEndpoint*>    endpoints;
-    std::map<int, IMessageConnection*> clients;
-    std::map<int, Buffer*>           client_recv_buffers;
-    // 已注册到 EventLoop 的端点级 fd（含 TCP 客户端 fd / SHM liveness fd）
-    std::set<int>                    endpoint_fds;
-
-    bool     diag_enabled;
-    uint32_t diag_topic_id;
-
-    LocalServiceEntry()
-        : service(NULL), port(0)
-        , diag_enabled(false), diag_topic_id(0) {}
-
-    ~LocalServiceEntry() {
-        for (std::map<int, Buffer*>::iterator it = client_recv_buffers.begin();
-             it != client_recv_buffers.end(); ++it) {
-            delete it->second;
-        }
-        client_recv_buffers.clear();
-        clients.clear();
-        for (size_t i = 0; i < endpoints.size(); ++i) {
-            endpoints[i]->close();
-            delete endpoints[i];
-        }
-        endpoints.clear();
-        endpoint_fds.clear();
-    }
-
-private:
-    LocalServiceEntry(const LocalServiceEntry&);
-    LocalServiceEntry& operator=(const LocalServiceEntry&);
-};
 
 /*
  * @brief  OmniRuntime::Impl — 单线程事件循环协调器
@@ -151,6 +96,7 @@ public:
     // 服务发现
     int lookupService(const std::string& name, ServiceInfo& info);
     int listServices(std::vector<ServiceInfo>& services);
+    int listServiceInstances(const std::string& name, std::vector<ServiceInfo>& out);
     int queryInterfaces(const std::string& name, std::vector<InterfaceInfo>& ifaces);
     int queryPublishedTopics(const std::string& name, std::vector<std::string>& topics);
     int queryPublishedTopics(const std::string& name, std::vector<std::string>& topics,
@@ -160,11 +106,21 @@ public:
     int publishTopic(const std::string& topic_name, uint32_t idl_hash);
     int subscribeTopic(const std::string& topic_name, uint32_t expected_idl_hash,
                        const TopicCallback& on_msg, const TopicErrorCallback& on_err);
+    int subscribeTopic(const TopicSubscriptionSelector& selector,
+                       const std::string& topic_name, uint32_t expected_idl_hash,
+                       const TopicSourceCallback& on_msg, const TopicErrorCallback& on_err);
     int unsubscribeTopic(const std::string& topic_name);
+    int unsubscribeTopic(const TopicSubscriptionSelector& selector,
+                         const std::string& topic_name);
 
     // 死亡通知
     int subscribeServiceDeath(const std::string& name, const DeathCallback& cb);
     int unsubscribeServiceDeath(const std::string& name);
+    int subscribeServiceInstanceDeath(const std::string& name, const std::string& host_id,
+                                      const std::string& instance_id,
+                                      const DeathSourceCallback& cb);
+    int unsubscribeServiceInstanceDeath(const std::string& name, const std::string& host_id,
+                                        const std::string& instance_id);
 
     // ============================================================
     // 数据面 — 服务间直连通信
@@ -172,8 +128,14 @@ public:
 
     // 连接管理
     int  connectService(const std::string& name);
+    int  connectServiceInstance(const std::string& name, const std::string& host_id,
+                                const std::string& instance_id);
     int  disconnectService(const std::string& name);
+    int  disconnectServiceInstance(const std::string& name, const std::string& host_id,
+                                   const std::string& instance_id);
     bool isServiceConnected(const std::string& name);
+    bool isServiceInstanceConnected(const std::string& name, const std::string& host_id,
+                                    const std::string& instance_id);
     void enableAutoReconnect(const std::string& name, bool enable);
     void setReconnectInterval(const std::string& name, uint32_t interval_ms);
 
@@ -214,6 +176,7 @@ public:
     void setHeartbeatInterval(uint32_t ms);
     void setDefaultTimeout(uint32_t ms);
     void setReplySendTimeout(uint32_t ms);
+    void setHostId(const std::string& host_id);
     std::string hostId() const;
 
 private:
@@ -223,10 +186,15 @@ private:
     int registerServiceInternal(Service* service);
     int unregisterServiceInternal(Service* service);
     int listServicesInternal(std::vector<ServiceInfo>& services);
+    int listServiceInstancesInternal(const std::string& name, std::vector<ServiceInfo>& out);
     int queryInterfacesInternal(const std::string& name, std::vector<InterfaceInfo>& ifaces);
     int queryPublishedTopicsInternal(const std::string& name, std::vector<std::string>& topics,
                                      uint32_t timeout_ms);
     int connectServiceInternal(const std::string& name, bool explicit_connect = true);
+    int connectServiceInstanceInternal(const std::string& name, const std::string& host_id,
+                                       const std::string& instance_id);
+    int connectResolvedConnection(const std::string& connection_key, const ServiceInfo& info,
+                                  bool explicit_connect, const ServiceIdentity* identity);
     int disconnectServiceInternal(const std::string& name);
     int invokeInternal(const std::string& name, uint32_t iface_id, uint32_t method_id,
                        uint32_t idl_hash, const Buffer& req, Buffer& resp, uint32_t timeout_ms);
@@ -234,67 +202,27 @@ private:
                              uint32_t idl_hash, const Buffer& req);
     int subscribeServiceDeathInternal(const std::string& name, const DeathCallback& cb);
     int unsubscribeServiceDeathInternal(const std::string& name);
+    int subscribeServiceInstanceDeathInternal(const std::string& name, const std::string& host_id,
+                                              const std::string& instance_id,
+                                              const DeathSourceCallback& cb);
+    int unsubscribeServiceInstanceDeathInternal(const std::string& name,
+                                                const std::string& host_id,
+                                                const std::string& instance_id);
     int publishTopicInternal(const std::string& topic_name, uint32_t idl_hash);
     int broadcastInternal(uint32_t topic_id, const Buffer& data);
-    int subscribeTopicInternal(const std::string& topic_name, uint32_t expected_idl_hash,
-                               const TopicCallback& cb);
-    int unsubscribeTopicInternal(const std::string& topic_name);
+    int subscribeTopicInternal(const TopicSubscriptionSelector& selector,
+                               const std::string& topic_name,
+                               uint32_t expected_idl_hash,
+                               const TopicSourceCallback& cb,
+                               const TopicErrorCallback& on_err);
+    int unsubscribeTopicInternal(const TopicSubscriptionSelector& selector,
+                                 const std::string& topic_name);
     int getStatsInternal(RuntimeStats& stats);
     int resetStatsInternal();
 
 private:
     Impl(const Impl&);
     Impl& operator=(const Impl&);
-
-    struct ReconnectConfig {
-        bool     enabled;
-        uint32_t interval_ms;
-        uint32_t max_retries;
-        uint32_t current_retry;
-        uint32_t timer_id;
-        // 是否由用户显式 connectService 建立：仅由话题订阅建立的条目在最后一个
-        // 订阅移除后可整体回收，避免为无人使用的连接无限重试
-        bool     explicit_connect;
-        // 话题发布者直连恢复状态：SM 下发的最新端点 + 该连接已发送订阅的话题。
-        // SM 重连会 closeAll 清空数据面连接，成功重连后按此重放
-        // MSG_SUBSCRIBE_BROADCAST（约束 6：恢复必须覆盖数据面）
-        bool       has_topic_endpoint;
-        ServiceInfo topic_endpoint;
-        std::vector<std::string> topic_subscriptions;
-
-        ReconnectConfig() : enabled(true), interval_ms(1000),
-                            max_retries(0), current_retry(0), timer_id(0),
-                            explicit_connect(false), has_topic_endpoint(false) {}
-    };
-
-    struct HeartbeatState {
-        uint32_t interval_ms;
-        uint32_t timeout_ms;
-        uint32_t timer_id;
-        int64_t  last_ack_time;
-        bool     pending;
-        HeartbeatState() : interval_ms(5000), timeout_ms(10000),
-                           timer_id(0), last_ack_time(0), pending(false) {}
-    };
-
-    /*
-     * @brief  单个远端服务的全部本地状态，取代此前四张并行 map
-     *         （service_cache_/death_callbacks_/reconnect_configs_/heartbeat_states_）
-     * @note   约束 6：新增每服务状态必须在此统一登记与清理
-     */
-    struct ServiceState {
-        ServiceInfo     info;
-        bool            has_info;
-        DeathCallback   death_cb;
-        bool            has_death;
-        ReconnectConfig reconnect;
-        bool            has_reconnect;
-        HeartbeatState  heartbeat;
-        bool            has_heartbeat;
-
-        ServiceState()
-            : has_info(false), has_death(false), has_reconnect(false), has_heartbeat(false) {}
-    };
 
     ServiceState* findServiceState(const std::string& name);
     ServiceState& ensureServiceState(const std::string& name);
@@ -316,9 +244,10 @@ private:
     int  restoreControlPlaneState();
     int  restoreRegisterService(const std::string& name);
     int  restoreSubscribeDeath(const std::string& name);
+    int  restoreSubscribeInstanceDeath(const std::string& instance_key);
     int  restorePublishTopic(const std::string& topic, const std::string& owner,
                              uint32_t idl_hash);
-    int  restoreSubscribeTopic(const std::string& topic, uint32_t expected_idl_hash);
+    int  restoreSubscribeTopic(const TopicRuntime::SubscriptionRecord& record);
     int  reconnectServiceManagerIfNeeded();
     int  sendRuntimeHello();
     uint32_t allocSequence();
@@ -358,10 +287,11 @@ private:
      *         分支共用，保证两条路径行为一致
      * @return false 表示 payload 解码失败
      */
-    bool dispatchBroadcastMessage(const Message& msg);
+    bool dispatchBroadcastMessage(const Message& msg, const std::string& publisher_service,
+                                  const std::string& host_id, const std::string& instance_id);
     InvokeDispatchResult dispatchLocalInvoke(Service* service, const Message& msg,
                                               const char* transport, const char* svc_name);
-    InvokeDispatchResult dispatchDiagInvoke(Service* service, const char* service_name,
+    InvokeDispatchResult dispatchDiagInvoke(const char* service_name,
                                             const Buffer& request);
     void onInvokeRequest(const std::string& name, int client_id, const Message& msg,
                           const char* transport);
@@ -388,26 +318,25 @@ private:
     // ============================================================
     // 基础设施 — 线程模型 / 生命周期 / 工具
     // ============================================================
-    template<typename F>
-    typename std::result_of<F()>::type callSerialized(F func);
     /*
-     * @brief  callSerialized 的 owner 投递段：post 被拒绝（loop 已停止）时快速失败
-     * @note   返回 FailFastResult（int → ERR_NOT_RUNNING；bool → false；其余默认构造）
+     * @brief  串行化入口：把 lambda 投递到 owner event-loop 执行（无 owner 时内联）
+     * @note   非 void 调用统一返回 int（0 成功 / 负错误码）；loop 停止后快速失败（约束 5）
      */
     template<typename F>
-    typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
-                            typename std::result_of<F()>::type>::type
-    invokeSerializedOnOwner(F func);
+    typename std::enable_if<std::is_same<typename std::result_of<F()>::type, int>::value,
+                            int>::type
+    callSerialized(F func);
     template<typename F>
     typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value, void>::type
-    invokeSerializedOnOwner(F func);
+    callSerialized(F func);
     uint32_t effectiveTimeout(uint32_t timeout_ms) const;
     bool populateInvokeMessage(Message& msg, uint32_t iface_id, uint32_t method_id,
                                 uint32_t idl_hash, const Buffer& req) const;
     int  lookupServiceInfo(const std::string& name, ServiceInfo& info);
     int  initializeServiceListener(LocalServiceEntry* entry, Service* service,
                                     std::string& advertise_host);
-    void initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
+    void initializeServiceShm(const std::string& name, const std::string& instance_id,
+                              LocalServiceEntry* entry,
                               size_t req_cap, size_t resp_cap);
     int  registerServiceWithManager(const std::string& name, Service* service,
                                      LocalServiceEntry* entry, const std::string& advertise_host);
@@ -456,6 +385,23 @@ private:
      */
     void removeTopicSubscriptionBinding(const std::string& topic_name,
                                         const std::string& keep_pub_name = std::string());
+    /*
+     * @brief  仅移除匹配订阅选择器的连接绑定（服务级/实例级取消订阅使用）
+     * @param[in] selector      订阅选择器（据连接记录的目标实例信息匹配）
+     * @param[in] topic_name    话题名称
+     */
+    void removeTopicSubscriptionBindingForSelector(
+        const TopicRuntime::SubscriptionSelector& selector, const std::string& topic_name);
+    /*
+     * @brief  按跳过谓词清理话题订阅绑定，并在条目清空后回收连接与状态
+     * @param[in] topic_name   待移除的话题
+     * @param[in] should_skip  返回 true 表示该条目保留、不处理
+     * @note   回收动作包含 conn_mgr_->removeConnection()：订阅者连接仅由话题
+     *         订阅建立，最后一个订阅移除后必须整体回收，否则成为孤儿连接
+     */
+    void clearTopicSubscriptionBindings(
+        const std::string& topic_name,
+        const std::function<bool(const std::string&, const ServiceState&)>& should_skip);
     void tryReconnectService(const std::string& name);
     void scheduleReconnect(const std::string& name, uint32_t delay_ms);
     void updateConnectionStats(RuntimeStats& stats) const;
@@ -482,11 +428,7 @@ private:
     /*
      * @brief  SM 重连恢复：重放所有 active==false 的 watcher（幂等）
      */
-    int  restoreDiagWatchers();
-    /*
-     * @brief  心跳周期兜底重放：目标 pid 重连晚于 watcher 时，watch 重放可能先失败
-     */
-    void retryInactiveDiagWatchers();
+    void restoreDiagWatchers();
 
     // ============================================================
     // 成员变量 — 按子系统分组
@@ -510,6 +452,8 @@ private:
     std::string         sm_host_;
     uint16_t            sm_port_;
     std::string         host_id_;
+    // setHostId 覆盖值；空串表示 init 时取平台默认机器标识（设计决策 D8）
+    std::string         host_id_override_;
     uint32_t            heartbeat_interval_ms_;
     uint32_t            heartbeat_timer_id_;
 
@@ -518,6 +462,8 @@ private:
     TopicRuntime        topic_runtime_;
     std::string         register_host_;
     std::map<std::string, ServiceState>          services_;
+    // makeServiceIdentityKey(identity) -> 实例级死亡订阅
+    std::map<std::string, InstanceDeathSubscription> instance_deaths_;
     uint32_t                                     reply_send_timeout_ms_;
 
     // 本地服务托管
@@ -525,22 +471,7 @@ private:
     std::map<int, std::string>                   client_id_to_service_;
 
     // 诊断
-    struct DiagWatcherEntry {
-        DiagEventCallback callback;     // 用户回调（本地订阅已持有副本，此处用于登记）
-        std::string       topic_name;   // 目标 diag 数据话题名
-        bool              active;       // SM 侧关联是否已确认；SM 重连后置 false 待重放
-        DiagWatcherEntry() : active(false) {}
-    };
-
-    RuntimeStats stats_;
-    int          diag_active_count_;
-    uint32_t     pid_;
-    std::string  process_name_;
-    bool         diag_watch_active_;
-    Service*     diag_data_service_;
-    uint32_t     diag_watch_topic_id_;
-    // 本运行时作为 watcher 的本地登记：SM 重连后按此重放（约束 6 控制面状态恢复）
-    std::map<uint32_t, DiagWatcherEntry> diag_watchers_;
+    DiagState diag_;
 
 };
 
@@ -549,74 +480,60 @@ private:
 // ============================================================
 
 /*
- * @brief  loop 已停止时 callSerialized 的快速失败返回值
- * @details int → ERR_NOT_RUNNING；bool → false；其余类型 → 默认构造
+ * @brief  串行化入口：非 void 调用统一返回 int（0 成功 / 负错误码）
+ * @details stop 为终态，owner 认领前也不能内联执行业务逻辑（约束 5）；
+ *          loop 停止后投递不会被处理，快速失败而非阻塞等待
  */
-template<typename T>
-struct FailFastResult {
-    static T value() { return T(); }
-};
-
-template<>
-struct FailFastResult<int> {
-    static int value() { return static_cast<int>(ErrorCode::ERR_NOT_RUNNING); }
-};
-
-template<>
-struct FailFastResult<bool> {
-    static bool value() { return false; }
-};
-
 template<typename F>
-typename std::result_of<F()>::type OmniRuntime::Impl::callSerialized(F func) {
-    typedef typename std::result_of<F()>::type Result;
-
-    // stop 为终态：即使在 owner 认领前（init 后、run/pollOnce 前）也不能内联
-    // 执行业务逻辑，必须快速失败（约束 5）。
+typename std::enable_if<std::is_same<typename std::result_of<F()>::type, int>::value,
+                        int>::type
+OmniRuntime::Impl::callSerialized(F func) {
     if (loop_ != NULL && loop_->stopRequested()) {
-        return FailFastResult<Result>::value();
+        return static_cast<int>(ErrorCode::ERR_NOT_RUNNING);
     }
 
     if (!owner_executor_.hasOwnerThread()) {
-        // 无 owner 时的内联执行路径（含无 driver 的多线程模式）。
-        // 与 run()/pollOnce() 的 owner 认领共用 api_mutex_：
-        // 等待锁期间若 driver 线程已认领 owner，则改为投递，避免
-        // "判定无 owner → 内联执行" 与 "另一线程认领 owner 并驱动 loop" 并发（TOCTOU）
+        // 无 owner 内联路径；与 run()/pollOnce() 的 owner 认领共用 api_mutex_，
+        // 消除 "判定无 owner → 内联" 与 "另一线程认领 owner 驱动 loop" 的 TOCTOU
         std::lock_guard<std::recursive_mutex> lock(api_mutex_);
         if (!owner_executor_.hasOwnerThread()) {
             return func();
         }
-        // owner 已出现：释放锁后走 owner 投递路径
     }
 
-    // 非 owner 线程且 loop 已停止（stop 之后）：投递到 event-loop 的 functor
-    // 永远不会被处理，等待会永久阻塞。这里快速失败返回错误码（int）/默认值（bool）。
     if (!loop_alive_.load()) {
         OMNI_LOG_WARN("OmniRuntime", "callSerialized rejected: event-loop not running");
-        return FailFastResult<Result>::value();
+        return static_cast<int>(ErrorCode::ERR_NOT_RUNNING);
     }
 
-    // EventLoop::post 在 stop 关闭后拒绝投递，且关闭动作先于 run() 退出排空，
-    // 关闭 check 与 post 之间 stop 完成的窗口不会造成永久阻塞
-    return invokeSerializedOnOwner<F>(func);
-}
-
-template<typename F>
-typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
-                        typename std::result_of<F()>::type>::type
-OmniRuntime::Impl::invokeSerializedOnOwner(F func) {
-    typedef typename std::result_of<F()>::type Result;
-    Result out = Result();
+    int out = 0;
     if (owner_executor_.tryInvokeOnOwner(func, out)) {
         return out;
     }
     OMNI_LOG_WARN("OmniRuntime", "callSerialized post rejected: event-loop stopped");
-    return FailFastResult<Result>::value();
+    return static_cast<int>(ErrorCode::ERR_NOT_RUNNING);
 }
 
 template<typename F>
 typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value, void>::type
-OmniRuntime::Impl::invokeSerializedOnOwner(F func) {
+OmniRuntime::Impl::callSerialized(F func) {
+    if (loop_ != NULL && loop_->stopRequested()) {
+        return;
+    }
+
+    if (!owner_executor_.hasOwnerThread()) {
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+        if (!owner_executor_.hasOwnerThread()) {
+            func();
+            return;
+        }
+    }
+
+    if (!loop_alive_.load()) {
+        OMNI_LOG_WARN("OmniRuntime", "callSerialized rejected: event-loop not running");
+        return;
+    }
+
     if (!owner_executor_.tryInvokeOnOwner(func)) {
         OMNI_LOG_WARN("OmniRuntime", "callSerialized post rejected: event-loop stopped");
     }

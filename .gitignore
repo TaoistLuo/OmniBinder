@@ -1,4 +1,6 @@
 build/*
+build-*/
+install/
 .cache/*
 docs/dev/
 .opencode/
@@ -7,3 +9,7 @@ tmp.txt
 /*.json
 /opencode*
 .omo/
+
+# Python 缓存
+__pycache__/
+*.pyc

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
 #include "topic_manager.h"
+#include "core/topic_runtime.h"
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -213,27 +214,89 @@ TEST(TopicManagerTest, ListTopics) {
     EXPECT_EQ(mgr.listTopics().size(), 2u);
 }
 
-TEST(TopicManagerTest, DuplicatePublisherRejection) {
+static ServiceInfo makeInstanceInfo(const std::string& name, const std::string& host,
+                                    uint16_t port, const std::string& host_id,
+                                    const std::string& instance_id) {
+    ServiceInfo info = makeInfo(name, host, port);
+    info.host_id = host_id;
+    info.instance_id = instance_id;
+    return info;
+}
+
+static TopicSubscriptionFilter serviceSelector(const std::string& service) {
+    return TopicSubscriptionFilter::service(service);
+}
+
+static TopicSubscriptionFilter instanceSelector(const std::string& service,
+                                                  const std::string& host_id,
+                                                  const std::string& instance_id) {
+    return TopicSubscriptionFilter::instance(service, host_id, instance_id);
+}
+
+TEST(TopicManagerTest, CoexistingPublishersAcrossServicesAndInstances) {
     TopicManager mgr;
-    ServiceInfo info1 = makeInfo("pub1", "host1", 1000);
-    ServiceInfo info2 = makeInfo("pub2", "host2", 2000);
+    ServiceInfo a1 = makeInstanceInfo("svc.a", "10.0.0.1", 9001, "h1", "i1");
+    ServiceInfo a2 = makeInstanceInfo("svc.a", "10.0.0.1", 9002, "h1", "i2");
+    ServiceInfo b1 = makeInstanceInfo("svc.b", "10.0.0.2", 9101, "h2", "i1");
 
-    EXPECT_TRUE(mgr.registerPublisher("topic/exclusive", info1, 10));
-    EXPECT_FALSE(mgr.registerPublisher("topic/exclusive", info2, 20));
+    EXPECT_TRUE(mgr.registerPublisher("shared/topic", a1, 11));
+    EXPECT_TRUE(mgr.registerPublisher("shared/topic", a2, 12));
+    EXPECT_TRUE(mgr.registerPublisher("shared/topic", b1, 21));
+    // 相同发布者实例重复注册为幂等更新，不再拒绝
+    EXPECT_TRUE(mgr.registerPublisher("shared/topic", a1, 11));
 
-    ServiceInfo out;
-    ASSERT_TRUE(mgr.getPublisher("topic/exclusive", out));
-    EXPECT_EQ(out.host, "host1");
-    EXPECT_EQ(out.port, 1000);
+    std::vector<TopicPublisherView> pubs =
+        mgr.getMatchingPublishers("shared/topic", serviceSelector("svc.a"));
+    ASSERT_EQ(pubs.size(), 2u);
 
-    mgr.removePublisher("topic/exclusive");
-    EXPECT_TRUE(mgr.registerPublisher("topic/exclusive", info2, 20));
+    pubs = mgr.getMatchingPublishers("shared/topic", instanceSelector("svc.a", "h1", "i2"));
+    ASSERT_EQ(pubs.size(), 1u);
+    EXPECT_EQ(pubs[0].info.port, 9002);
 
-    ASSERT_TRUE(mgr.getPublisher("topic/exclusive", out));
-    EXPECT_EQ(out.host, "host2");
-    EXPECT_EQ(out.port, 2000);
+    pubs = mgr.getMatchingPublishers("shared/topic", TopicSubscriptionFilter());
+    ASSERT_EQ(pubs.size(), 3u);
 
-    EXPECT_FALSE(mgr.registerPublisher("", info1, 30));
+    EXPECT_TRUE(mgr.removePublisher("shared/topic", 12));
+    EXPECT_TRUE(mgr.isPublisherOwner("shared/topic", 11));
+    EXPECT_FALSE(mgr.isPublisherOwner("shared/topic", 12));
+    EXPECT_TRUE(mgr.isPublisherOwner("shared/topic", 21));
+}
+
+TEST(TopicManagerTest, MatchingSubscribersRespectSelector) {
+    TopicManager mgr;
+    ServiceInfo a1 = makeInstanceInfo("svc.a", "10.0.0.1", 9001, "h1", "i1");
+    ServiceInfo a2 = makeInstanceInfo("svc.a", "10.0.0.1", 9002, "h1", "i2");
+    ServiceInfo b1 = makeInstanceInfo("svc.b", "10.0.0.2", 9101, "h2", "i1");
+    ASSERT_TRUE(mgr.registerPublisher("t", a1, 11));
+    ASSERT_TRUE(mgr.registerPublisher("t", a2, 12));
+    ASSERT_TRUE(mgr.registerPublisher("t", b1, 21));
+
+    EXPECT_TRUE(mgr.addSubscriber("t", serviceSelector("svc.a"), 100));
+    EXPECT_TRUE(mgr.addSubscriber("t", instanceSelector("svc.a", "h1", "i2"), 101));
+    EXPECT_TRUE(mgr.addSubscriber("t", TopicSubscriptionFilter(), 102));
+    EXPECT_TRUE(mgr.addSubscriber("t", 103));
+
+    std::vector<int> subs = mgr.getMatchingSubscribers("t", a1);
+    std::sort(subs.begin(), subs.end());
+    ASSERT_EQ(subs.size(), 3u);
+    EXPECT_EQ(subs[0], 100);
+    EXPECT_EQ(subs[1], 102);
+    EXPECT_EQ(subs[2], 103);
+
+    subs = mgr.getMatchingSubscribers("t", a2);
+    std::sort(subs.begin(), subs.end());
+    ASSERT_EQ(subs.size(), 4u);
+    EXPECT_EQ(subs[0], 100);
+    EXPECT_EQ(subs[1], 101);
+    EXPECT_EQ(subs[2], 102);
+    EXPECT_EQ(subs[3], 103);
+
+    // 服务级 svc.a 订阅不匹配 svc.b 发布者
+    subs = mgr.getMatchingSubscribers("t", b1);
+    std::sort(subs.begin(), subs.end());
+    ASSERT_EQ(subs.size(), 2u);
+    EXPECT_EQ(subs[0], 102);
+    EXPECT_EQ(subs[1], 103);
 }
 
 TEST(TopicManagerTest, RejectsInvalidTopicNamesWithoutGrowingState) {
@@ -298,4 +361,27 @@ TEST(TopicManagerTest, EnforcesGlobalSubscriptionEdgeLimitAndReleasesCapacity) {
     EXPECT_FALSE(mgr.addSubscriber("edge/overflow", 99));
     EXPECT_TRUE(mgr.removeSubscriber("edge/0", 1));
     EXPECT_TRUE(mgr.addSubscriber("edge/reused", 99));
+}
+
+// ============================================================
+// TopicRuntime — SHM 订阅关系（由 test_shm_transport 迁入）
+// ============================================================
+
+TEST(TopicRuntimeTest, ExactShmRemovalPreservesOtherClientsAndServices) {
+    TopicRuntime topics;
+    const uint32_t first_topic = 11;
+    const uint32_t second_topic = 22;
+    topics.addShmSubscriberService(first_topic, "service-a", 1);
+    topics.addShmSubscriberService(first_topic, "service-a", 2);
+    topics.addShmSubscriberService(first_topic, "service-b", 1);
+    topics.addShmSubscriberService(second_topic, "service-a", 1);
+    topics.addShmSubscriberService(second_topic, "service-a", 3);
+
+    topics.removeShmSubscriberService("service-a", 1);
+
+    ASSERT_EQ(topics.shmSubscribers(first_topic).size(), 2u);
+    EXPECT_EQ(topics.shmSubscribers(first_topic)[0].client_id, 2u);
+    EXPECT_EQ(topics.shmSubscribers(first_topic)[1].service_name, "service-b");
+    ASSERT_EQ(topics.shmSubscribers(second_topic).size(), 1u);
+    EXPECT_EQ(topics.shmSubscribers(second_topic)[0].client_id, 3u);
 }

@@ -93,50 +93,6 @@ bool shmIsValidRingCapacity(size_t capacity);
 size_t shmNormalizeRingCapacity(size_t capacity);
 
 /*
- * @brief  (pos + delta) % capacity 的无溢出版，用于 ring 位置前进
- * @param[in]  pos      当前 ring 位置
- * @param[in]  delta    前进量
- * @param[in]  capacity ring 容量
- * @return 前进后的位置
- * @note   前置条件：pos < capacity 且 delta <= capacity
- */
-uint32_t shmAdvancePos(uint32_t pos, uint32_t delta, uint32_t capacity);
-
-/*
- * @brief  向上对齐到 alignment 的倍数
- * @param[in]  value     待对齐的值
- * @param[in]  alignment 对齐粒度
- * @return 对齐后的值
- */
-size_t shmAlignUp(size_t value, size_t alignment);
-
-/*
- * @brief  请求 ring 相对基址的偏移
- * @return 偏移字节数
- */
-size_t shmRequestRingOffset();
-
-/*
- * @brief  请求数据区相对基址的偏移
- * @return 偏移字节数
- */
-size_t shmRequestDataOffset();
-
-/*
- * @brief  响应 ring 相对基址的偏移
- * @param[in]  req_ring_capacity 请求 ring 容量
- * @return 偏移字节数
- */
-size_t shmResponseRingOffset(size_t req_ring_capacity);
-
-/*
- * @brief  响应数据区相对基址的偏移
- * @param[in]  req_ring_capacity 请求 ring 容量
- * @return 偏移字节数
- */
-size_t shmResponseDataOffset(size_t req_ring_capacity);
-
-/*
  * @brief  计算单客户端共享内存总大小
  * @param[in]  req_ring_capacity  请求 ring 容量
  * @param[in]  resp_ring_capacity 响应 ring 容量
@@ -145,11 +101,16 @@ size_t shmResponseDataOffset(size_t req_ring_capacity);
 size_t calculateShmSize(size_t req_ring_capacity, size_t resp_ring_capacity);
 
 /*
- * @brief  根据服务名生成确定性 SHM 名称（客户端使用）
+ * @brief  根据服务名、实例标识与 host_id 生成确定性 SHM 名称（客户端使用）
  * @param[in]  service_name 服务名
+ * @param[in]  instance_id  实例标识；空串表示该服务的默认实例
+ * @param[in]  host_id      板级主机身份；空串表示不参与派生（兼容旧调用）
  * @return SHM 名称
- */
-std::string generateShmName(const std::string& service_name);
+ * @note   实例标识与 host_id 只参与哈希，不进入名称前缀，保证名称长度有界。
+ *         同机多板仿真（同服务名同实例但不同 host_id）必须派生不同握手路径 */
+std::string generateShmName(const std::string& service_name,
+                            const std::string& instance_id = "",
+                            const std::string& host_id = "");
 
 /*
  * @brief  由 SHM 名派生的握手通道路径
@@ -170,46 +131,6 @@ uint8_t*       shmResponseDataFromBase(uint8_t* base, uint32_t req_capacity);
 // ============================================================
 // ring 读写与帧探测
 // ============================================================
-
-/*
- * @brief  可读字节数（ring 元数据非法时返回 0）
- * @param[in]  ring     ring 头
- * @param[in]  capacity ring 容量
- * @return 可读字节数
- */
-uint32_t shmRingAvailableRead(const ShmRingHeader* ring, uint32_t capacity);
-
-/*
- * @brief  可写字节数（保留 1 字节用于区分满/空）
- * @param[in]  ring     ring 头
- * @param[in]  capacity ring 容量
- * @return 可写字节数
- */
-uint32_t shmRingAvailableWrite(const ShmRingHeader* ring, uint32_t capacity);
-
-/*
- * @brief  写入原始字节流
- * @param[in]  ring      ring 头
- * @param[in]  ring_data ring 数据区
- * @param[in]  data      待写入数据
- * @param[in]  length    待写入长度
- * @param[in]  capacity  ring 容量
- * @return 实际写入字节数（<= length）
- */
-uint32_t shmRingWrite(ShmRingHeader* ring, uint8_t* ring_data,
-                      const uint8_t* data, uint32_t length, uint32_t capacity);
-
-/*
- * @brief  写入 [length(4B)] [payload] 帧
- * @param[in]  ring      ring 头
- * @param[in]  ring_data ring 数据区
- * @param[in]  data      帧载荷
- * @param[in]  length    帧载荷长度
- * @param[in]  capacity  ring 容量
- * @return 写入总字节数；空间不足返回 0
- */
-uint32_t shmRingWriteFrame(ShmRingHeader* ring, uint8_t* ring_data,
-                           const uint8_t* data, uint32_t length, uint32_t capacity);
 
 /*
  * @brief  写入一帧（含长度前缀）到 ring
@@ -253,18 +174,6 @@ int shmRingSendFrameWithinTimeout(ShmRingHeader* ring, uint8_t* ring_data, uint3
  */
 int shmRingRecvFrame(ShmRingHeader* ring, const uint8_t* ring_data, uint32_t capacity,
                      uint8_t* out, size_t out_size, size_t& out_length);
-
-/*
- * @brief  从 ring 读取 length 字节到 buf
- * @param[in]  ring      ring 头
- * @param[in]  ring_data ring 数据区
- * @param[out] buf       输出缓冲区
- * @param[in]  length    读取长度
- * @param[in]  capacity  ring 容量
- * @return 实际读取字节数
- */
-uint32_t shmRingRead(ShmRingHeader* ring, const uint8_t* ring_data,
-                     uint8_t* buf, uint32_t length, uint32_t capacity);
 
 /*
  * @brief  探测 ring 中下一完整帧

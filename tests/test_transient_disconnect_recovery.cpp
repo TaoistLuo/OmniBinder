@@ -1,27 +1,34 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#ifdef _WIN32
-// Windows：system() 直接返回退出码
-#define WIFEXITED(x) 1
-#define WEXITSTATUS(x) (x)
-#else
-#include <sys/wait.h>
-#endif
+#include "platform/platform.h"
+#include "platform/platform_test.h"
 
-#define TEST(name) printf("  TEST %-42s ", #name); fflush(stdout)
+using namespace omnibinder;
+
+#define TEST(name) printf("  TEST %-42s ", (name)); fflush(stdout)
 #define PASS() printf("PASS\n"); fflush(stdout)
-#define FAIL(msg) do { printf("FAIL: %s\n", msg); fflush(stdout); return 1; } while (0)
+#define FAIL(msg) do { printf("FAIL: %s\n", (msg)); fflush(stdout); return 1; } while (0)
 
-static int runCommand(const std::string& command) {
-    int rc = std::system(command.c_str());
-    if (rc == -1) {
-        return -1;
+static const int CHILD_TIMEOUT_SEC = 120;
+
+/* @brief 运行单个子测试进程，带超时与 SIGKILL 兜底回收
+ * @param[in]  command 子测试可执行文件路径
+ * @param[out] out_rc  子进程退出码；超时/被信号杀死为 -1
+ * @return true 子进程在超时内正常退出；false 超时或启动失败
+ */
+static bool runCommand(const std::string& command, int& out_rc) {
+    platform::TestProcess proc = platform::spawnChildProcess(command.c_str());
+    if (proc <= 0) {
+        out_rc = -1;
+        return false;
     }
-    if (WIFEXITED(rc)) {
-        return WEXITSTATUS(rc);
+    out_rc = -1;
+    if (!platform::waitChildProcess(proc, CHILD_TIMEOUT_SEC, &out_rc)) {
+        platform::terminateChildProcess(proc);
+        return false;
     }
-    return rc;
+    return true;
 }
 
 int main(int argc, char** argv) {
@@ -47,7 +54,13 @@ int main(int argc, char** argv) {
         TEST(label);
 
         for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-            int rc = runCommand(commands[i]);
+            int rc = -1;
+            if (!runCommand(commands[i], rc)) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg), "%s timed out or failed to start in round %d",
+                              commands[i].c_str(), round);
+                FAIL(msg);
+            }
             if (rc != 0) {
                 char msg[256];
                 std::snprintf(msg, sizeof(msg), "%s failed in round %d with rc=%d",

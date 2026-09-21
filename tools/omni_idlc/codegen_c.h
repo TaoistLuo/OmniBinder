@@ -43,21 +43,18 @@ public:
     bool generate(const AstFile& ast, const std::string& output_dir,
                   const std::string& filename);
 private:
-    bool validateAst(const AstFile& ast);
-    bool validateTypeSupported(const TypeRef& type, const std::string& context,
-                               bool allow_void);
-    void reportError(const std::string& message);
-
     void generateHeader(const AstFile& ast, std::ostream& os, const std::string& filename);
     void generateSource(const AstFile& ast, std::ostream& os, const std::string& filename);
 
     void genStruct(const StructDef& s, std::ostream& os);
-    void genStructSerialize(const StructDef& s, std::ostream& os);
-    void genStructDeserialize(const StructDef& s, std::ostream& os);
-
     void genTopic(const TopicDef& t, std::ostream& os);
-    void genTopicSerialize(const TopicDef& t, std::ostream& os);
-    void genTopicDeserialize(const TopicDef& t, std::ostream& os);
+
+    void emitStructTypedef(const std::string& type_name, const std::vector<FieldDef>& fields,
+                           std::ostream& os);
+    void emitStructSerialize(const std::string& type_name, const std::vector<FieldDef>& fields,
+                             std::ostream& os);
+    void emitStructDeserialize(const std::string& type_name, const std::vector<FieldDef>& fields,
+                               std::ostream& os);
 
     void genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, std::ostream& os);
     void genServiceStubSource(const ServiceDef& svc, const AstFile& ast, std::ostream& os);
@@ -69,7 +66,6 @@ private:
     void genFieldDeserialize(const FieldDef& f, const std::string& obj, std::ostream& os);
 
     std::string pkg_;
-    bool has_error_;
 };
 
 } // namespace omnic

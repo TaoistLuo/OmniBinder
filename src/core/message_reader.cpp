@@ -41,6 +41,9 @@ int readNextMessage(IMessageConnection& transport, Buffer& recv_buffer, Message&
         out.payload.clear();
         if (header.length > 0) {
             out.payload.assign(recv_buffer.data() + MESSAGE_HEADER_SIZE, header.length);
+            if (!out.payload.writeOk()) {
+                return -1;
+            }
         }
         return 1;
     }
@@ -62,6 +65,9 @@ int readNextMessage(IMessageConnection& transport, Buffer& recv_buffer, Message&
             if (header.length > 0) {
                 out.payload.assign(recv_buffer.data() + pos + MESSAGE_HEADER_SIZE,
                                    header.length);
+                if (!out.payload.writeOk()) {
+                    return -1;
+                }
             }
             if (!recv_buffer.trySetReadPosition(pos + frame_size)) {
                 return -1;

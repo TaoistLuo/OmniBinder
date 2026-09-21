@@ -56,10 +56,10 @@ std::string OmniRuntime::Impl::diagDataServiceName(uint32_t pid) const {
 }
 
 bool OmniRuntime::Impl::initDiagDataService() {
-    if (diag_watch_topic_id_ != 0) {
+    if (diag_.watch_topic_id != 0) {
         return true;
     }
-    std::string name = diagDataServiceName(pid_);
+    std::string name = diagDataServiceName(diag_.pid);
     RuntimeDiagService* service = NULL;
     if (local_services_.empty()) {
         service = new RuntimeDiagService(name);
@@ -69,51 +69,53 @@ bool OmniRuntime::Impl::initDiagDataService() {
             delete service;
             return false;
         }
-        diag_data_service_ = service;
+        diag_.data_service = service;
     }
     int ret = publishTopicInternal(name, 0);
     if (ret != 0) {
         if (service) {
             unregisterServiceInternal(service);
             delete service;
-            diag_data_service_ = NULL;
+            diag_.data_service = NULL;
         }
         return false;
     }
-    diag_watch_topic_id_ = fnv1a_32(name);
+    diag_.watch_topic_id = fnv1a_32(name);
     return true;
 }
 
 void OmniRuntime::Impl::destroyDiagDataService() {
-    std::string name = diagDataServiceName(pid_);
-    if (diag_watch_topic_id_ != 0) {
+    std::string name = diagDataServiceName(diag_.pid);
+    if (diag_.watch_topic_id != 0) {
         Message unpublish(MessageType::MSG_UNPUBLISH_TOPIC, allocSequence());
         unpublish.payload.writeString(name);
         sendToSM(unpublish);
         topic_runtime_.forgetPublishedTopic(name);
-        diag_watch_topic_id_ = 0;
+        diag_.watch_topic_id = 0;
     }
 
-    if (diag_data_service_) {
-        Service* service = diag_data_service_;
-        diag_data_service_ = NULL;
+    if (diag_.data_service) {
+        Service* service = diag_.data_service;
+        diag_.data_service = NULL;
         unregisterServiceInternal(service);
         delete service;
     }
 }
 
 bool OmniRuntime::Impl::isDiagDataTopic(uint32_t topic_id) const {
-    return diag_watch_topic_id_ != 0 && topic_id == diag_watch_topic_id_;
+    return diag_.watch_topic_id != 0 && topic_id == diag_.watch_topic_id;
 }
 
 void OmniRuntime::Impl::emitDiagEvent(uint8_t direction, const Message& msg) {
-    if (!diag_watch_active_) {
+    if (!diag_.watch_active) {
         return;
     }
     Buffer event_payload;
-    diag_serialize_event(event_payload, direction, msg);
-    if (diag_watch_topic_id_ != 0) {
-        broadcastInternal(diag_watch_topic_id_, event_payload);
+    if (!diag_serialize_event(event_payload, direction, msg)) {
+        return;
+    }
+    if (diag_.watch_topic_id != 0) {
+        broadcastInternal(diag_.watch_topic_id, event_payload);
     }
 }
 
@@ -199,12 +201,13 @@ int OmniRuntime::Impl::watchPid(uint32_t pid, const DiagEventCallback& callback)
         int ret = requestDiagWatch(pid);
         if (ret != 0) return ret;
         std::string topic_name = diagDataServiceName(pid);
-        ret = subscribeTopicInternal(topic_name, 0,
-            [callback](uint32_t, const Buffer& data) {
+        ret = subscribeTopicInternal(TopicSubscriptionSelector(), topic_name, 0,
+            [callback](const std::string&, const std::string&, uint32_t,
+                       const Buffer& data) {
                 if (callback) {
                     callback(data);
                 }
-            });
+            }, nullptr);
         if (ret != 0) {
             Message stop_msg(MessageType::MSG_DIAG_WATCH_STOP, allocSequence());
             stop_msg.payload.writeUint32(pid);
@@ -213,25 +216,20 @@ int OmniRuntime::Impl::watchPid(uint32_t pid, const DiagEventCallback& callback)
             return ret;
         }
         // 本地登记 watcher：SM 重连后据此重放 WATCH_START（约束 6）
-        DiagWatcherEntry& entry = diag_watchers_[pid];
-        entry.callback = callback;
+        DiagWatcherEntry& entry = diag_.watchers[pid];
         entry.topic_name = topic_name;
         entry.active = true;
         return 0;
     });
 }
 
-int OmniRuntime::Impl::restoreDiagWatchers() {
-    if (diag_watchers_.empty()) {
-        return 0;
-    }
-
+void OmniRuntime::Impl::restoreDiagWatchers() {
     // 先拷贝待重放 pid 再遍历：requestDiagWatch 的 waitForReply 期间用户回调
-    // 可能 watchPid/unwatchPid 修改 diag_watchers_（约束 2）
+    // 可能 watchPid/unwatchPid 修改 diag_.watchers（约束 2）
     std::vector<uint32_t> pids;
-    pids.reserve(diag_watchers_.size());
-    for (std::map<uint32_t, DiagWatcherEntry>::iterator it = diag_watchers_.begin();
-         it != diag_watchers_.end(); ++it) {
+    pids.reserve(diag_.watchers.size());
+    for (std::map<uint32_t, DiagWatcherEntry>::iterator it = diag_.watchers.begin();
+         it != diag_.watchers.end(); ++it) {
         if (!it->second.active) {
             pids.push_back(it->first);
         }
@@ -239,13 +237,13 @@ int OmniRuntime::Impl::restoreDiagWatchers() {
 
     for (size_t i = 0; i < pids.size(); ++i) {
         // 重放期间用户可能已 unwatch 移除登记（约束 1），逐项重查
-        std::map<uint32_t, DiagWatcherEntry>::iterator it = diag_watchers_.find(pids[i]);
-        if (it == diag_watchers_.end() || it->second.active) {
+        std::map<uint32_t, DiagWatcherEntry>::iterator it = diag_.watchers.find(pids[i]);
+        if (it == diag_.watchers.end() || it->second.active) {
             continue;
         }
         int ret = requestDiagWatch(pids[i]);
-        it = diag_watchers_.find(pids[i]);
-        if (it == diag_watchers_.end()) {
+        it = diag_.watchers.find(pids[i]);
+        if (it == diag_.watchers.end()) {
             continue;
         }
         if (ret == 0) {
@@ -255,20 +253,12 @@ int OmniRuntime::Impl::restoreDiagWatchers() {
             OMNI_LOG_WARN(LOG_TAG, "diag_watch_restore_failed pid=%u err=%d", pids[i], ret);
         }
     }
-    return 0;
-}
-
-void OmniRuntime::Impl::retryInactiveDiagWatchers() {
-    if (diag_watchers_.empty()) {
-        return;
-    }
-    restoreDiagWatchers();
 }
 
 int OmniRuntime::Impl::unwatchPid(uint32_t pid) {
     return callSerialized([this, pid]() -> int {
-        diag_watchers_.erase(pid);
-        unsubscribeTopicInternal(diagDataServiceName(pid));
+        diag_.watchers.erase(pid);
+        unsubscribeTopicInternal(TopicSubscriptionSelector(), diagDataServiceName(pid));
         Message msg(MessageType::MSG_DIAG_WATCH_STOP, allocSequence());
         msg.payload.writeUint32(pid);
         Message reply;

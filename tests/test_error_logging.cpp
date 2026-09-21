@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "platform/platform_test.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
 #include <omnibinder/log.h>
 #include <thread>
 #include <chrono>
+#include <atomic>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -36,8 +38,8 @@ private:
 struct ErrorLogServerCtx {
     OmniRuntime runtime;
     LogService service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     ErrorLogServerCtx() : registered(false), should_stop(false) {}
 };
 
@@ -47,8 +49,8 @@ static void errorLogServerThread(void* arg) {
     if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
     if (ret != 0) return;
-    ctx->registered = true;
-    while (!ctx->should_stop) ctx->runtime.pollOnce(50);
+    ctx->registered.store(true);
+    while (!ctx->should_stop.load()) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
 }
@@ -75,8 +77,9 @@ protected:
     static const char* log_path_;
 
     static void SetUpTestSuite() {
-        log_path_ = "/tmp/omnibinder_error_logging_test.log";
-        unlink(log_path_);
+        // 相对路径：ctest WORKING_DIRECTORY 为构建根目录，避免硬编码 /tmp
+        log_path_ = "omnibinder_error_logging_test.log";
+        platform::removeFile(log_path_);
         FILE* log_fp = freopen(log_path_, "w", stderr);
         ASSERT_NE(log_fp, nullptr);
         setLogLevel(omnibinder::LOG_DEBUG);
@@ -87,15 +90,23 @@ protected:
 
         server_ctx_ = new ErrorLogServerCtx();
         server_tid_ = std::thread(errorLogServerThread, server_ctx_);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        ASSERT_TRUE(server_ctx_->registered);
+        for (int i = 0; i < 50 && !server_ctx_->registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        ASSERT_TRUE(server_ctx_->registered.load());
     }
 
     static void TearDownTestSuite() {
-        server_ctx_->should_stop = true;
-        server_tid_.join();
+        if (server_ctx_) {
+            server_ctx_->should_stop.store(true);
+        }
+        if (server_tid_.joinable()) {
+            server_tid_.join();
+        }
         delete server_ctx_;
+        server_ctx_ = nullptr;
         stopProcess(sm_pid_);
+        sm_pid_ = 0;
+        fflush(stderr);
+        platform::removeFile(log_path_);
     }
 };
 
@@ -149,6 +160,28 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
 }
 
 TEST_F(ErrorLoggingTest, LogKeywordsPresent) {
+    // 本用例自证日志：自行制造连接失败与 SM 掉线/重连，不依赖其它用例的产出
+    {
+        OmniRuntime bad_runtime;
+        bad_runtime.init("127.0.0.1", 19999);
+    }
+
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    stopProcess(sm_pid_);
+    std::this_thread::sleep_for(std::chrono::microseconds(100000));
+    for (int i = 0; i < 30; ++i) {
+        runtime.pollOnce(50);
+    }
+    sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19933", "--log-level", "0");
+    ASSERT_GT(sm_pid_, 0);
+    ASSERT_TRUE(waitPortReady(SM_PORT, 30));
+    for (int i = 0; i < 80; ++i) {
+        runtime.pollOnce(100);
+    }
+    runtime.stop();
+
     fflush(stderr);
     std::string logs = readFile(log_path_);
     EXPECT_TRUE(logs.find("sm_connect_failed") != std::string::npos ||

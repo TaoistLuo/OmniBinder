@@ -198,9 +198,10 @@ void emitProxyMethodParams(std::ostream& os, const MethodDef& m, const std::stri
 std::string cToSnakeCase(const std::string& name) {
     std::string result;
     for (size_t i = 0; i < name.size(); ++i) {
-        if (isupper(name[i])) {
-            if (i > 0 && !isupper(name[i-1])) result += '_';
-            result += (char)tolower(name[i]);
+        const unsigned char ch = static_cast<unsigned char>(name[i]);
+        if (std::isupper(ch)) {
+            if (i > 0 && !std::isupper(static_cast<unsigned char>(name[i-1]))) result += '_';
+            result += static_cast<char>(std::tolower(ch));
         } else {
             result += name[i];
         }

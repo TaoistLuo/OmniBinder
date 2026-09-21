@@ -39,6 +39,7 @@ set(OMNIBINDER_SOURCES
     transport/transport_selector.cpp
 
     # platform
+    platform/platform_common.cpp
     platform/platform_linux.cpp
     platform/platform_win.cpp
     platform/event_backend_linux.cpp

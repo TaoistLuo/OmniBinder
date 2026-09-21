@@ -140,7 +140,9 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 
 ### 4.1 主机标识
 
-每个节点启动时都会获得本机 `host_id`，用于判断服务是否与调用方同机。
+每个节点启动时都会获得本机 `host_id`，用于判断服务是否与调用方同机，同时也是服务实例身份 `(service_name, host_id, instance_id)` 的组成部分。
+
+`host_id` 默认取自平台机器标识（Linux 为 `/etc/machine-id`），可在 `init()` 之前通过 `OmniRuntime::setHostId()` 显式覆盖。量产镜像可能被克隆导致多板 `machine-id` 相同，此时各设备应设置本设备唯一标识（MAC / 芯片 ID / 序列号）——否则多板会被误判为同一身份而互相顶替，且 SHM 会误判为同机（设计决策 D8）。
 
 ### 4.2 自动选择规则
 
@@ -159,7 +161,7 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 分支、服务端端点半创建、topic 订阅模型），**非单点接入**，也不属于已安装公共 API、不承诺动态插件或二进制 ABI；
 仅适用于与"点对点连接"模型一致的传输，**总线型传输（I2C/RS-485 等）不在支持范围**。
 `ConnectionManager` 出站连接使用 `createClientConnection()`；
-本地服务 hosting 在 `OmniRuntime::Impl` 中直接创建端点对象（`TcpServerEndpoint` / `ShmServerEndpoint`），不经过 `createClientConnection()`。
+本地服务 hosting 在 `OmniRuntime::Impl` 中通过 `createServerEndpoint()` 创建服务端端点（`TransportType::TCP` / `TransportType::SHM`），不经过 `createClientConnection()`。
 `ServiceManager` 控制面仍固定使用 TCP。
 
 ## 5. SHM 架构
@@ -251,6 +253,7 @@ setShmConfig(ShmConfig(16 * 1024, 16 * 1024));
     - host
     - port
     - host_id
+    - instance_id
     - shm_config
     - interface metadata
 
@@ -273,8 +276,11 @@ setShmConfig(ShmConfig(16 * 1024, 16 * 1024));
 - 服务地址
 - 端口
 - `host_id`
+- `instance_id`
 - `shm_config`
 - 接口信息
+
+同名服务的多个实例（不同 `host_id` 或不同 `instance_id`）会逐项返回，`listServiceInstances()` 可枚举某名称下的全部实例。
 
 ### 6.3 服务死亡通知
 

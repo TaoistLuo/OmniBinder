@@ -59,6 +59,7 @@ TransportSelectionPolicy chooseTransportPolicy(
  * @param[in]  local_host_id  本机 host_id
  * @param[in]  remote_host_id 远端 host_id
  * @param[in]  shm_config     SHM 容量配置
+ * @param[in]  instance_id    目标实例标识（SHM 握手路径依据，空串为单实例）
  * @return 已连接的 IMessageConnection；失败返回 NULL
  * @note   这里是接入新传输的落点，但只适用于与"点对点连接"模型一致的传输；
  *         总线型传输（I2C/RS-485 等）的拓扑与寻址模型不同，需配合 core 侧改动，
@@ -68,20 +69,25 @@ IMessageConnection* createClientConnection(const std::string& service_name,
                             const std::string& host, uint16_t port,
                             const std::string& local_host_id,
                             const std::string& remote_host_id,
-                            const ShmConfig& shm_config);
+                            const ShmConfig& shm_config,
+                            const std::string& instance_id = "");
 
 /*
  * @brief  服务端端点选择 — 扩展点
  * @param[in]  service_name 服务名
  * @param[in]  type         传输类型
  * @param[in]  config       端点容量配置
+ * @param[in]  instance_id  实例标识（SHM 握手路径依据，空串为单实例）
+ * @param[in]  host_id      板级主机身份（SHM 握手路径依据，空串表示不参与派生）
  * @return 未启动的 IServerEndpoint；调用方负责 start()/close()/delete；NULL 表示该传输不可用
- * @note   TCP：service_name/config 忽略，host/port 由 start() 提供；
- *         SHM：service_name 派生握手路径，config 提供默认 ring 容量
+ * @note   TCP：service_name/config/instance_id/host_id 忽略，host/port 由 start() 提供；
+ *         SHM：service_name + host_id + instance_id 派生握手路径，config 提供默认 ring 容量
  */
 IServerEndpoint* createServerEndpoint(const std::string& service_name,
                             TransportType type,
-                            const TransportConfig& config);
+                            const TransportConfig& config,
+                            const std::string& instance_id = "",
+                            const std::string& host_id = "");
 
 /*
  * @brief  控制面（ServiceManager）通道专用传输：始终 TCP，不做 SHM 选择

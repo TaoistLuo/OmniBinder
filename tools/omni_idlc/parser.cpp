@@ -109,24 +109,14 @@ Parser::Parser(Lexer& lexer)
 
 Token Parser::expect(TokenType type) {
     if (current_.type != type) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "Expected '%s' but got '%s' ('%s') at line %d:%d",
-                 tokenTypeToString(type), tokenTypeToString(current_.type),
-                 current_.value.c_str(), current_.line, current_.column);
-        error(buf);
+        errorAtCurrent("Expected '" + std::string(tokenTypeToString(type)) +
+                       "' but got '" + tokenTypeToString(current_.type) +
+                       "' ('" + current_.value + "')");
         return current_;
     }
     Token tok = current_;
     current_ = lexer_.nextToken();
     return tok;
-}
-
-bool Parser::match(TokenType type) {
-    if (current_.type == type) {
-        current_ = lexer_.nextToken();
-        return true;
-    }
-    return false;
 }
 
 void Parser::error(const std::string& msg) {
@@ -138,11 +128,23 @@ void Parser::error(const std::string& msg) {
     }
 }
 
+void Parser::errorAtCurrent(const std::string& expected) {
+    char buf[320];
+    if (current_.type == TOK_ERROR) {
+        snprintf(buf, sizeof(buf), "%s at line %d:%d",
+                 lexer_.errorMessage().c_str(), current_.line, current_.column);
+    } else {
+        snprintf(buf, sizeof(buf), "%s at line %d:%d",
+                 expected.c_str(), current_.line, current_.column);
+    }
+    error(buf);
+}
+
 // ---------------------------------------------------------------------------
 // 类型注册
 // ---------------------------------------------------------------------------
 
-bool Parser::registerTypes(const AstFile& ast) {
+void Parser::registerTypes(const AstFile& ast) {
     const std::string& pkg = ast.package_name;
     
     for (size_t i = 0; i < ast.structs.size(); ++i) {
@@ -159,8 +161,6 @@ bool Parser::registerTypes(const AstFile& ast) {
         const std::string name = pkg + "." + ast.services[i].name;
         ctx_->type_registry[name] = pkg;
     }
-    
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,17 +185,14 @@ bool Parser::parse(AstFile& ast) {
         case TOK_TOPIC:    saw_declaration_ = true; parseTopic(ast); break;
         case TOK_SERVICE:  saw_declaration_ = true; parseService(ast); break;
         default:
-            error("Unexpected token: " + current_.value);
-            return false;
+            errorAtCurrent("Unexpected token '" + current_.value + "'");
+            break;
         }
     }
     
     if (!has_error_) {
         // 注册当前文件的类型到全局类型表
-        if (!registerTypes(ast)) {
-            if (!normalized_self.empty()) ctx_->processing_files.erase(normalized_self);
-            return false;
-        }
+        registerTypes(ast);
         
         // 将当前文件的 AST 存入上下文
         if (!ast.package_name.empty()) {
@@ -251,8 +248,10 @@ bool Parser::parseImport(AstFile& ast) {
     std::string resolved = resolvePath(import_path);
     std::string normalized = normalizePath(resolved);
     // 已加载？跳过
-    if (ctx_->file_to_package.find(normalized) != ctx_->file_to_package.end()) {
-        ast.imported_packages.push_back(ctx_->file_to_package[normalized]);
+    std::map<std::string, std::string>::const_iterator known =
+        ctx_->file_to_package.find(normalized);
+    if (known != ctx_->file_to_package.end()) {
+        ast.imported_packages.push_back(known->second);
         return true;
     }
     
@@ -460,9 +459,13 @@ bool Parser::parseType(TypeRef& type, size_t nesting) {
         }
         return !has_error_;
     }
-    default:
-        error("Expected type, got: " + current_.value);
+    default: {
+        const std::string got = current_.value.empty()
+            ? std::string(tokenTypeToString(current_.type))
+            : current_.value;
+        errorAtCurrent("Expected type, got '" + got + "'");
         return false;
+    }
     }
     current_ = lexer_.nextToken();
     return !has_error_;

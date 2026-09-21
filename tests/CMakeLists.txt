@@ -71,55 +71,8 @@ target_link_libraries(test_shm_transport PRIVATE omnibinder_static gtest gtest_m
 add_test(NAME test_shm_transport COMMAND test_shm_transport)
 set_tests_properties(test_shm_transport PROPERTIES TIMEOUT 30)
 
-add_executable(test_idl_compiler
-    test_idl_compiler.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_common.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_header.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_source.cpp
-)
-target_include_directories(test_idl_compiler PRIVATE
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc
-    ${CMAKE_SOURCE_DIR}/include
-)
-target_link_libraries(test_idl_compiler PRIVATE gtest gtest_main)
-if(TARGET omni-idlc)
-    target_compile_definitions(test_idl_compiler PRIVATE
-        OMNI_IDLC_PATH="$<TARGET_FILE:omni-idlc>"
-    )
-    add_dependencies(test_idl_compiler omni-idlc)
-endif()
-add_test(NAME test_idl_compiler COMMAND test_idl_compiler)
-if(TARGET omni-idlc)
-    add_test(NAME test_omni_idlc_invalid_language
-        COMMAND $<TARGET_FILE:omni-idlc> --lang=invalid ${CMAKE_SOURCE_DIR}/tests/perf_service.bidl)
-    set_tests_properties(test_omni_idlc_invalid_language PROPERTIES WILL_FAIL TRUE)
-endif()
-
-add_executable(test_omni_cli_type_codec
-    test_omni_tool_type_codec.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_cli/simple_json.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_cli/type_resolver.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_cli/type_codec.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
-)
-target_include_directories(test_omni_cli_type_codec PRIVATE
-    ${CMAKE_SOURCE_DIR}/tools/omni_cli
-    ${CMAKE_SOURCE_DIR}/tools/omni_idlc
-    ${CMAKE_SOURCE_DIR}/include
-)
-target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static gtest gtest_main)
-if(MSVC)
-    target_compile_options(test_omni_cli_type_codec PRIVATE /UNDEBUG)
-else()
-    target_compile_options(test_omni_cli_type_codec PRIVATE -UNDEBUG)
-endif()
-add_test(NAME test_omni_cli_type_codec COMMAND test_omni_cli_type_codec)
+# test_idl_compiler / test_omni_cli_type_codec 依赖 POSIX 文件系统与 shell 语义，
+# 移入下方 if(NOT WIN32) 统一构建（见「依赖 POSIX 的测试」段）。
 
 add_executable(test_omni_cli_info_formatter
     test_omni_cli_info_formatter.cpp
@@ -135,11 +88,7 @@ add_test(NAME test_omni_cli_info_formatter COMMAND test_omni_cli_info_formatter)
 # 集成测试 — pthread 已替换为 std::thread，Windows 可编译
 # ============================================================
 
-add_executable(test_stats test_stats.cpp)
-target_link_libraries(test_stats PRIVATE omnibinder_static gtest gtest_main)
-add_dependencies(test_stats service_manager)
-add_test(NAME test_stats COMMAND test_stats WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-set_tests_properties(test_stats PROPERTIES TIMEOUT 120)
+# test_stats 的覆盖（成功/失败计数、reset）已并入 test_runtime_stats，不再单独构建。
 
 add_executable(test_c_api test_c_api.cpp)
 target_link_libraries(test_c_api PRIVATE omnibinder_static gtest gtest_main)
@@ -147,11 +96,8 @@ add_dependencies(test_c_api service_manager)
 add_test(NAME test_c_api COMMAND test_c_api WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_c_api PROPERTIES TIMEOUT 120)
 
-add_executable(test_integration test_integration.cpp)
-target_link_libraries(test_integration PRIVATE omnibinder_static gtest gtest_main)
-add_dependencies(test_integration service_manager)
-add_test(NAME test_integration COMMAND test_integration WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-set_tests_properties(test_integration PROPERTIES TIMEOUT 60)
+# test_integration 的独有覆盖（list/lookup/queryInterfaces/publishedTopics/多次调用）
+# 已并入 test_full_integration，不再单独构建。
 
 add_executable(test_threadsafe_client_and_reconnect test_threadsafe_client_and_reconnect.cpp)
 target_link_libraries(test_threadsafe_client_and_reconnect PRIVATE omnibinder_static gtest gtest_main)
@@ -216,6 +162,59 @@ set_tests_properties(test_heartbeat_reconnect PROPERTIES TIMEOUT 120)
 # ============================================================
 if(NOT WIN32)
 
+# test_idl_compiler：用例依赖 POSIX 文件系统（mkdir/unlink/mkdtemp）与 shell 语义，
+# Windows 无等价行为，故仅在非 Windows 构建（CMake 层守卫，见 AGENTS 原则 3/7）。
+add_executable(test_idl_compiler
+    test_idl_compiler.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_cpp.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_common.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_header.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/codegen_c_source.cpp
+)
+target_include_directories(test_idl_compiler PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(test_idl_compiler PRIVATE gtest gtest_main)
+if(TARGET omni-idlc)
+    target_compile_definitions(test_idl_compiler PRIVATE
+        OMNI_IDLC_PATH="$<TARGET_FILE:omni-idlc>"
+    )
+    add_dependencies(test_idl_compiler omni-idlc)
+endif()
+add_test(NAME test_idl_compiler COMMAND test_idl_compiler)
+if(TARGET omni-idlc)
+    add_test(NAME test_omni_idlc_invalid_language
+        COMMAND $<TARGET_FILE:omni-idlc> --lang=invalid ${CMAKE_SOURCE_DIR}/tests/perf_service.bidl)
+    set_tests_properties(test_omni_idlc_invalid_language PROPERTIES WILL_FAIL TRUE)
+endif()
+
+# test_omni_cli_type_codec：依赖 POSIX 临时目录（mkdtemp），同样仅非 Windows 构建。
+add_executable(test_omni_cli_type_codec
+    test_omni_tool_type_codec.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_cli/simple_json.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_cli/type_resolver.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_cli/type_codec.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/lexer.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc/semantic_validator.cpp
+)
+target_include_directories(test_omni_cli_type_codec PRIVATE
+    ${CMAKE_SOURCE_DIR}/tools/omni_cli
+    ${CMAKE_SOURCE_DIR}/tools/omni_idlc
+    ${CMAKE_SOURCE_DIR}/include
+)
+target_link_libraries(test_omni_cli_type_codec PRIVATE omnibinder_static)
+if(MSVC)
+    target_compile_options(test_omni_cli_type_codec PRIVATE /UNDEBUG)
+else()
+    target_compile_options(test_omni_cli_type_codec PRIVATE -UNDEBUG)
+endif()
+add_test(NAME test_omni_cli_type_codec COMMAND test_omni_cli_type_codec)
+
 add_executable(test_idl_mismatch test_idl_mismatch.cpp)
 target_link_libraries(test_idl_mismatch PRIVATE omnibinder_static gtest gtest_main)
 add_dependencies(test_idl_mismatch service_manager)
@@ -277,14 +276,14 @@ if(TARGET omni-idlc OR OMNIBINDER_HOST_IDLC)
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/perf_idl)
 
     add_test(NAME test_performance COMMAND test_performance
-        -o ${CMAKE_SOURCE_DIR}/docs/performance-report.md
+        -o ${CMAKE_BINARY_DIR}/performance-report.md
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     set_tests_properties(test_performance PROPERTIES TIMEOUT 120)
 
     add_executable(test_soak_runner test_soak_runner.cpp)
+    target_link_libraries(test_soak_runner PRIVATE omnibinder_static)
     add_dependencies(test_soak_runner
-        test_performance
         test_performance_server
         test_full_integration
         test_control_plane_and_fallback
@@ -302,13 +301,15 @@ add_dependencies(test_transient_disconnect_recovery service_manager)
 add_test(NAME test_transient_disconnect_recovery COMMAND test_transient_disconnect_recovery WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
 
-# 系统级场景测试
+# 系统级场景测试（自带 main：同一二进制兼作子进程服务端，见文件内 --child-instance）
 add_executable(test_system_scenarios test_system_scenarios.cpp)
-target_link_libraries(test_system_scenarios PRIVATE omnibinder_static gtest gtest_main)
+target_link_libraries(test_system_scenarios PRIVATE omnibinder_static gtest)
 add_dependencies(test_system_scenarios service_manager)
 add_test(NAME test_system_scenarios COMMAND test_system_scenarios WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(test_system_scenarios PROPERTIES TIMEOUT 300)
-set_tests_properties(test_transient_disconnect_recovery PROPERTIES TIMEOUT 180)
+if(TARGET test_soak_runner)
+    add_dependencies(test_soak_runner test_system_scenarios)
+endif()
 
 set_tests_properties(test_transient_disconnect_recovery PROPERTIES RESOURCE_LOCK sm_port_lock)
 if(TARGET test_performance)

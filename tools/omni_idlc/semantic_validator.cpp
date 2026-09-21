@@ -8,6 +8,61 @@ namespace omnic {
 namespace {
 
 static const size_t IDLC_MAX_SEMANTIC_TRAVERSAL = 1048576u;
+static const size_t IDLC_MAX_STRUCT_DEPENDENCY_DEPTH = 64u;
+
+// 生成代码内部的固定局部名/出参名。data 不在此列：C stub 内部已改名为 stub_data。
+static bool isReservedGeneratedName(const std::string& name) {
+    static const char* const kReserved[] = {
+        "p", "req", "resp", "result", "result_len", "out", "user_data", "stub_data"
+    };
+    for (size_t i = 0; i < sizeof(kReserved) / sizeof(kReserved[0]); ++i) {
+        if (name == kReserved[i]) return true;
+    }
+    return false;
+}
+
+// C/C++ 关键字：IDL 标识符原样进入生成代码（C++ 结构体名/成员/方法名），命中即产出非法代码
+static bool isLanguageKeyword(const std::string& name) {
+    static const char* const kKeywords[] = {
+        "asm", "auto", "bool", "break", "case", "catch", "char", "class", "const",
+        "const_cast", "continue", "default", "delete", "do", "double", "dynamic_cast",
+        "else", "enum", "explicit", "export", "extern", "false", "float", "for",
+        "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace",
+        "new", "operator", "private", "protected", "public", "register",
+        "reinterpret_cast", "return", "short", "signed", "sizeof", "static",
+        "static_cast", "struct", "switch", "template", "this", "throw", "true",
+        "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
+        "virtual", "void", "volatile", "wchar_t", "while"
+    };
+    for (size_t i = 0; i < sizeof(kKeywords) / sizeof(kKeywords[0]); ++i) {
+        if (name == kKeywords[i]) return true;
+    }
+    return false;
+}
+
+// 生成代码为结构体/话题类型固定提供的成员函数名（C++ 侧）
+static bool isReservedStructMember(const std::string& name) {
+    return name == "serialize" || name == "deserialize";
+}
+
+static bool validateFieldNames(const std::string& owner_kind, const std::string& owner_name,
+                               const std::vector<FieldDef>& fields, std::string& error) {
+    std::set<std::string> names;
+    for (size_t j = 0; j < fields.size(); ++j) names.insert(fields[j].name);
+    for (size_t j = 0; j < fields.size(); ++j) {
+        const FieldDef& field = fields[j];
+        if (isLanguageKeyword(field.name) || isReservedStructMember(field.name)) {
+            error = owner_kind + " '" + owner_name + "' field '" + field.name + "' is reserved by generated code";
+            return false;
+        }
+        if ((field.type.primitive == TYPE_STRING || field.type.primitive == TYPE_BYTES)
+            && names.find(field.name + "_len") != names.end()) {
+            error = owner_kind + " '" + owner_name + "' field '" + field.name + "' collides with generated '<field>_len' member";
+            return false;
+        }
+    }
+    return true;
+}
 
 enum DeclarationKind { DECL_STRUCT, DECL_TOPIC, DECL_SERVICE };
 typedef std::map<std::string, DeclarationKind> DeclarationMap;
@@ -21,6 +76,10 @@ std::string qualifiedName(const AstFile& ast, const TypeRef& type) {
 bool addDeclaration(const AstFile& ast, const std::string& name,
                     DeclarationKind kind, DeclarationMap& declarations,
                     std::string& error) {
+    if (isLanguageKeyword(name)) {
+        error = "declaration name '" + ast.package_name + "." + name + "' is a language keyword";
+        return false;
+    }
     const std::string qualified = ast.package_name + "." + name;
     if (!declarations.insert(std::make_pair(qualified, kind)).second) {
         error = "duplicate declaration '" + qualified + "'";
@@ -121,7 +180,7 @@ bool visitLocalStruct(size_t index, const AstFile& ast,
                       const std::map<std::string, size_t>& local,
                       std::vector<int>& states, std::vector<size_t>& order,
                       size_t depth, size_t& traversal, std::string& error) {
-    if (depth > IDLC_MAX_TYPE_NESTING) { error = "semantic dependency depth limit exceeded"; return false; }
+    if (depth > IDLC_MAX_STRUCT_DEPENDENCY_DEPTH) { error = "semantic dependency depth limit exceeded"; return false; }
     if (++traversal > IDLC_MAX_SEMANTIC_TRAVERSAL) { error = "semantic traversal limit exceeded"; return false; }
     if (states[index] == 2) return true;
     if (states[index] == 1) { error = "by-value struct cycle involving '" + ast.package_name + "." + ast.structs[index].name + "'"; return false; }
@@ -166,6 +225,7 @@ bool validateFile(AstFile& ast, const std::map<std::string, AstFile>& packages,
             if (!fields.insert(field.name).second) { error = "struct '" + ast.structs[i].name + "' has duplicate field '" + field.name + "'"; return false; }
             if (!validateValueType(ast, field.type, declarations, "struct '" + ast.structs[i].name + "' field '" + field.name + "'", false, 0, traversal, error)) return false;
         }
+        if (!validateFieldNames("struct", ast.structs[i].name, ast.structs[i].fields, error)) return false;
     }
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         std::set<std::string> fields;
@@ -174,6 +234,7 @@ bool validateFile(AstFile& ast, const std::map<std::string, AstFile>& packages,
             if (!fields.insert(field.name).second) { error = "topic '" + ast.topics[i].name + "' has duplicate field '" + field.name + "'"; return false; }
             if (!validateValueType(ast, field.type, declarations, "topic '" + ast.topics[i].name + "' field '" + field.name + "'", false, 0, traversal, error)) return false;
         }
+        if (!validateFieldNames("topic", ast.topics[i].name, ast.topics[i].fields, error)) return false;
     }
     for (size_t i = 0; i < ast.services.size(); ++i) {
         const ServiceDef& service = ast.services[i];
@@ -181,6 +242,8 @@ bool validateFile(AstFile& ast, const std::map<std::string, AstFile>& packages,
         for (size_t j = 0; j < service.methods.size(); ++j) {
             const MethodDef& method = service.methods[j];
             if (!methods.insert(method.name).second) { error = "service '" + service.name + "' has duplicate method '" + method.name + "'"; return false; }
+            if (isLanguageKeyword(method.name)) { error = "service '" + service.name + "' method name '" + method.name + "' is a language keyword"; return false; }
+            if (method.has_param && (isReservedGeneratedName(method.param.name) || isLanguageKeyword(method.param.name))) { error = "service '" + service.name + "' method '" + method.name + "' parameter name '" + method.param.name + "' is reserved by generated code"; return false; }
             if (!validateValueType(ast, method.return_type, declarations, "service '" + service.name + "' method '" + method.name + "' return type", true, 0, traversal, error)) return false;
             if (method.has_param && !validateValueType(ast, method.param.type, declarations, "service '" + service.name + "' method '" + method.name + "' parameter '" + method.param.name + "'", false, 0, traversal, error)) return false;
         }
@@ -199,7 +262,7 @@ bool validateFile(AstFile& ast, const std::map<std::string, AstFile>& packages,
 bool visitQualified(const std::string& name, const StructMap& structs,
                      std::map<std::string, int>& states,
                      size_t depth, size_t& traversal, std::string& error) {
-    if (depth > IDLC_MAX_TYPE_NESTING) { error = "semantic dependency depth limit exceeded"; return false; }
+    if (depth > IDLC_MAX_STRUCT_DEPENDENCY_DEPTH) { error = "semantic dependency depth limit exceeded"; return false; }
     if (++traversal > IDLC_MAX_SEMANTIC_TRAVERSAL) { error = "semantic traversal limit exceeded"; return false; }
     if (states[name] == 2) return true;
     if (states[name] == 1) { error = "by-value struct cycle involving '" + name + "'"; return false; }

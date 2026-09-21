@@ -2,8 +2,8 @@
  * @file        error.h
  * @brief       全局错误码定义
  * @details     定义 OmniBinder 框架中所有模块共用的错误码枚举（ErrorCode），
- *              按功能分段：通用错误(1-99)、网络错误(100-199)、服务错误(200-299)、
- *              话题错误(300-399)、传输层错误(400-499)、序列化错误(500-599)。
+ *              按功能分段：通用错误(-1..-9)、网络错误(-100..-108)、服务错误(-200..-208)、
+ *              话题错误(-300..-303)、传输层错误(-400..-404)、序列化错误(-500..-503)。
  *              同时提供错误码转字符串和成功判断的辅助函数。
  *
  * @author      taoist.luo
@@ -102,13 +102,11 @@ enum class ErrorCode : int32_t {
 /* @brief 错误码转字符串 */
 const char* errorCodeToString(ErrorCode code);
 
-/* @brief 判断是否成功 */
+/* @brief 判断是否成功
+ * @param[in] code 错误码
+ * @return true 表示 code == ErrorCode::OK */
 inline bool isSuccess(ErrorCode code) {
     return code == ErrorCode::OK;
-}
-
-inline bool isSuccess(int code) {
-    return code == 0;
 }
 
 } // namespace omnibinder

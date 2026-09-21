@@ -124,23 +124,6 @@ public:
         return hasOwnerThread() && owner_thread_id_.load() == std::this_thread::get_id();
     }
 
-    template<typename F>
-    typename std::enable_if<!std::is_void<typename std::result_of<F()>::type>::value,
-                            typename std::result_of<F()>::type>::type
-    invokeOnOwner(F func) {
-        typedef typename std::result_of<F()>::type Result;
-        Result out = Result();
-        tryInvokeOnOwner(func, out);
-        return out;
-    }
-
-    template<typename F>
-    typename std::enable_if<std::is_void<typename std::result_of<F()>::type>::value,
-                           void>::type
-    invokeOnOwner(F func) {
-        tryInvokeOnOwner(func);
-    }
-
     /*
      * @brief  尝试把 func 投递到 owner 线程执行
      * @return true  func 已在 owner 线程（或就地）执行完成；

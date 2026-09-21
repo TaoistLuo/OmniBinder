@@ -81,10 +81,15 @@ const size_t MESSAGE_HEADER_SIZE = 16;
 | 0x0013 | MSG_LIST_SERVICES_REPLY | SM -> Service | 列出所有服务响应 |
 | 0x0014 | MSG_QUERY_INTERFACES | Service -> SM | 查询服务接口请求 |
 | 0x0015 | MSG_QUERY_INTERFACES_REPLY | SM -> Service | 查询服务接口响应 |
-| 0x0020 | MSG_SUBSCRIBE_SERVICE | Service -> SM | 订阅服务死亡通知 |
-| 0x0021 | MSG_SUBSCRIBE_SERVICE_REPLY | SM -> Service | 订阅响应 |
-| 0x0022 | MSG_UNSUBSCRIBE_SERVICE | Service -> SM | 取消订阅 |
-| 0x0023 | MSG_DEATH_NOTIFY | SM -> Service | 服务死亡通知 |
+| 0x0016 | MSG_LIST_INSTANCES | Service -> SM | 按服务名列出全部实例请求 |
+| 0x0017 | MSG_LIST_INSTANCES_REPLY | SM -> Service | 按服务名列出全部实例响应 |
+| 0x0020 | MSG_SUBSCRIBE_SERVICE | Service -> SM | 订阅服务（名字级）死亡通知 |
+| 0x0021 | MSG_SUBSCRIBE_SERVICE_REPLY | SM -> Service | 订阅响应（名字级/实例级共用） |
+| 0x0022 | MSG_UNSUBSCRIBE_SERVICE | Service -> SM | 取消名字级订阅 |
+| 0x0023 | MSG_DEATH_NOTIFY | SM -> Service | 名字死亡通知（该名已无存活实例） |
+| 0x0024 | MSG_DEATH_NOTIFY_INSTANCE | SM -> Service | 实例死亡通知（该名仍有存活实例） |
+| 0x0025 | MSG_SUBSCRIBE_SERVICE_INSTANCE | Service -> SM | 订阅服务实例死亡通知 |
+| 0x0026 | MSG_UNSUBSCRIBE_SERVICE_INSTANCE | Service -> SM | 取消实例级死亡订阅 |
 | 0x0030 | MSG_PUBLISH_TOPIC | Service -> SM | 声明发布话题 |
 | 0x0031 | MSG_PUBLISH_TOPIC_REPLY | SM -> Service | 声明响应 |
 | 0x0032 | MSG_SUBSCRIBE_TOPIC | Service -> SM | 订阅话题 |
@@ -136,12 +141,18 @@ enum class MessageType : uint16_t {
     MSG_LIST_SERVICES_REPLY   = 0x0013,
     MSG_QUERY_INTERFACES      = 0x0014,
     MSG_QUERY_INTERFACES_REPLY= 0x0015,
+    MSG_LIST_INSTANCES        = 0x0016,
+    MSG_LIST_INSTANCES_REPLY  = 0x0017,
 
-    // 控制通道 - 死亡通知
+    // 控制通道 - 死亡通知（名字级）
     MSG_SUBSCRIBE_SERVICE     = 0x0020,
     MSG_SUBSCRIBE_SERVICE_REPLY = 0x0021,
     MSG_UNSUBSCRIBE_SERVICE   = 0x0022,
     MSG_DEATH_NOTIFY          = 0x0023,
+    // 控制通道 - 死亡通知（实例级）
+    MSG_DEATH_NOTIFY_INSTANCE = 0x0024,
+    MSG_SUBSCRIBE_SERVICE_INSTANCE = 0x0025,
+    MSG_UNSUBSCRIBE_SERVICE_INSTANCE = 0x0026,
 
     // 控制通道 - 话题
     MSG_PUBLISH_TOPIC         = 0x0030,
@@ -193,15 +204,30 @@ enum class MessageType : uint16_t {
 | host             | port             | host_id_len      |
 | (N bytes)        | (2 bytes)        | (4 bytes)        |
 +------------------+------------------+------------------+
-| host_id          | req_ring_cap     | resp_ring_cap    |
-| (N bytes)        | (4 bytes)        | (4 bytes)        |
+| host_id          | instance_id_len  | instance_id      |
+| (N bytes)        | (4 bytes)        | (N bytes)        |
 +------------------+------------------+------------------+
-| interface_count  | interfaces...    |
-| (2 bytes)        | (变长)            |
-+------------------+------------------+
+| req_ring_cap     | resp_ring_cap    | interface_count  |
+| (4 bytes)        | (4 bytes)        | (2 bytes)        |
++------------------+------------------+------------------+
+| interfaces...    |
+| (变长)            |
++------------------+------------------+------------------+
+
+instance_id: 实例标识，由服务显式声明（Service::setInstanceId）。空串表示该板上该服务的
+          默认实例。服务实例身份 = (service_name, host_id, instance_id)。
+          同机同名不同 instance_id 的服务是合法多实例，各自注册并派生不同的 SHM 名称与
+          UDS 握手路径（host_id 与 instance_id 共同参与 SHM 名哈希派生，见 6.5 节）。
+          host_id / instance_id 长度不得超过 MAX_SERVICE_NAME_LENGTH，否则注册被拒。
 
 req_ring_cap / resp_ring_cap: 服务建议的每客户端 SHM request/response ring 容量。
           客户端同机连接时会创建自己的 SHM，并通过服务端 UDS listener 交换名称和 eventfd。
+
+> **同身份重复注册（顶替）边界**：相同 `(service_name, host_id, instance_id)` 再次注册视为
+> 后来者顶替，SM 保留原 handle、刷新 ServiceInfo 与控制 fd，并关闭被顶替的旧控制连接。
+> 若被顶替的是**仍存活的**进程，其 runtime 会自动重连并重新注册，于是两个活实例可能互相顶替、
+> 反复 ping-pong（takeover churn）。这是**已接受的边界行为**，不是缺陷：正确用法是
+> 同板同名服务各自声明不同的 `instance_id`，**运维不得让两个活实例使用完全相同的身份**。
 
 interfaces 数组中每个元素:
 +------------------+------------------+------------------+
@@ -249,7 +275,9 @@ service_handle:
 +------------------+------------------+
 ```
 
-> 数据面服务间心跳复用同一消息类型，payload 为空。
+心跳 payload 只含服务名，**不含实例身份**。SM 收到心跳后按 `(控制连接 fd, service_name)` 在注册表中解析实例：同一 fd 与同一名称至多对应一个实例（`findServiceByFdAndName`），据此更新该实例的 `HeartbeatMonitor` 时间戳。因此同一进程注册的同名多实例（不同 `instance_id`）心跳互不串扰；来自非归属 fd 或已顶替连接的陈旧心跳被丢弃。
+
+> 数据面服务间心跳复用同一消息类型，payload 为空；实例身份由数据面连接键确定，不在消息内。
 
 ### 4.4 心跳响应（MSG_HEARTBEAT_ACK）
 
@@ -279,13 +307,14 @@ service_handle:
 found:
   1 = 找到服务，后续为完整的 ServiceInfo 序列化数据
       （格式与 MSG_REGISTER payload 相同：service_name, host,
-       port, host_id, shm_config, interfaces[]）
+       port, host_id, instance_id, shm_config, interfaces[]）
   0 = 服务不存在，无后续数据
 
 客户端判断逻辑：
   if (本机 host_id == 响应中的 host_id):
       创建 per-client SHM
       通过服务端 UDS 握手路径（/tmp/omni_<fnv1a_32(server_shm_name) 的十六进制>.sock）交换 SHM 名称和 eventfd
+      其中 server_shm_name 由 (service_name, host_id, instance_id) 共同派生（见 6.5 节）
       若 SHM 握手失败，则 fallback TCP
   else:
       使用 TCP 连接（host:port）
@@ -307,10 +336,47 @@ found:
 
 services 数组中每个元素为完整的 serialized ServiceInfo，
 格式与 MSG_REGISTER payload 相同（service_name, host, port,
-host_id, shm_config, interfaces[]）。
+host_id, instance_id, shm_config, interfaces[]）。同名多实例会返回多个元素。
 ```
 
-### 4.9 订阅服务死亡通知（MSG_SUBSCRIBE_SERVICE）
+### 4.8.1 按名列出全部实例（MSG_LIST_INSTANCES）
+
+```
++------------------+------------------+
+| service_name_len | service_name     |
+| (4 bytes)        | (N bytes)        |
++------------------+------------------+
+```
+
+请求 payload 与 MSG_LOOKUP 相同，但语义为"列出该名称下的全部实例"，
+而非只取确定性的第一个实例。
+
+### 4.8.2 按名列出全部实例响应（MSG_LIST_INSTANCES_REPLY）
+
+```
++------------------+------------------+------------------------------+
+| found            | instance_count   | [if found: serialized         |
+| (1 byte bool)    | (4 bytes uint32) |  ServiceInfo × instance_count]|
++------------------+------------------+------------------------------+
+```
+
+found:
+  1 = 找到该名称下的至少一个实例，随后为 instance_count 个完整的
+      serialized ServiceInfo（格式与 MSG_REGISTER payload 相同：
+      service_name, host, port, host_id, instance_id, shm_config, interfaces[]）
+      同名多实例会逐项返回，顺序为 SM 注册表实例键 (host_id, instance_id) 字典序
+  0 = 该名称下无任何实例，instance_count 为 0
+
+客户端解析规则：
+  found == 0 → 返回 ERR_SERVICE_NOT_FOUND
+  found == 1 → 读取 instance_count，逐项反序列化；instance_count 与剩余字节
+               不匹配或任一 ServiceInfo 反序列化失败 → ERR_DESERIALIZE
+
+### 4.9 订阅服务死亡通知
+
+死亡订阅有两种粒度，共享同一身份线格式 `service_name + host_id + instance_id`：
+
+**名字级（MSG_SUBSCRIBE_SERVICE / MSG_UNSUBSCRIBE_SERVICE）**
 
 ```
 +------------------+------------------+
@@ -319,14 +385,50 @@ host_id, shm_config, interfaces[]）。
 +------------------+------------------+
 ```
 
-### 4.10 死亡通知（MSG_DEATH_NOTIFY）
+语义：仅当该服务名**已无任何存活实例**（最后一个实例消失）时，订阅者收到
+`MSG_DEATH_NOTIFY`；同名仍有其它实例存活时不触发（避免把"一个实例死了"
+误报成"整个名字死了"）。SM 在首个死亡通知后移除该订阅，保持去重语义。
+
+**实例级（MSG_SUBSCRIBE_SERVICE_INSTANCE / MSG_UNSUBSCRIBE_SERVICE_INSTANCE）**
 
 ```
-+------------------+------------------+
-| service_name_len | service_name     |
-| (4 bytes)        | (N bytes)        |
++------------------+------------------+------------------+------------------+
+| name_len         | name             | host_id_len      | host_id          |
+| (4 bytes)        | (N bytes)        | (4 bytes)        | (M bytes)        |
++------------------+------------------+------------------+------------------+
+| instance_id_len  | instance_id      |
+| (4 bytes)        | (K bytes)        |
 +------------------+------------------+
 ```
+
+语义：仅当该 `(name, host_id, instance_id)` 实例死亡时通知，同名的其它实例
+死亡不影响本订阅。订阅应答复用 `MSG_SUBSCRIBE_SERVICE_REPLY`（bool）。
+
+### 4.10 死亡通知（MSG_DEATH_NOTIFY / MSG_DEATH_NOTIFY_INSTANCE）
+
+两种通知消息共用同一 payload：死亡实例的完整身份。
+
+```
++------------------+------------------+------------------+------------------+
+| name_len         | name             | host_id_len      | host_id          |
+| (4 bytes)        | (N bytes)        | (4 bytes)        | (M bytes)        |
++------------------+------------------+------------------+------------------+
+| instance_id_len  | instance_id      |
+| (4 bytes)        | (K bytes)        |
++------------------+------------------+------------------+------------------+
+```
+
+| 消息 | 触发时机 | 接收方 |
+|------|----------|--------|
+| `MSG_DEATH_NOTIFY` | 该服务名已无存活实例（最后一个实例消失） | 名字级订阅者 ∪ 该实例的实例级订阅者 |
+| `MSG_DEATH_NOTIFY_INSTANCE` | 该实例死亡，但同名仍有存活实例 | 该实例的实例级订阅者 |
+
+客户端解析：三个字段必须完整且无尾随字节，`name` 非空、各字段不超过服务名长度上限；
+畸形/截断 payload 一律丢弃并记录告警，不进入回调分发，不越界读取。
+
+接收端据此分派：名字级回调收到服务名；实例级回调收到 `(name, host_id, instance_id)`。
+实例死亡只清理该实例键（`makeServiceConnectionKey(name, host_id, instance_id)`）对应的
+连接/状态；仅当名字级通知到达（名字已消失）时才清理该名及其全部实例键。
 
 ### 4.11 声明发布话题（MSG_PUBLISH_TOPIC）
 
@@ -337,18 +439,34 @@ host_id, shm_config, interfaces[]）。
 +------------------+------------------+------------------------------+------------------+
 ```
 
+话题身份为 **(发布者服务名, 主题名)**：不同服务可使用同名主题而互不影响；同一服务的
+同名主题允许存在多个发布者实例，由 `ServiceInfo.host_id` + `ServiceInfo.instance_id`
+区分（相同发布者实例重复声明为幂等更新）。
+
 idl_hash 为发布者声明的 topic IDL 哈希（0 表示未声明）；订阅者声明了期望哈希时，
 SM 会将该哈希经 MSG_SUBSCRIBE_TOPIC_REPLY / MSG_TOPIC_PUBLISHER_NOTIFY 转发给订阅者用于校验。
-发送端始终写该字段；为兼容旧客户端，SM 读取时允许其缺省（视为 0）。
+发送端始终写该字段；SM 读取时该字段缺省视为 0。
 
-### 4.12 订阅话题（MSG_SUBSCRIBE_TOPIC）
+### 4.12 订阅话题（MSG_SUBSCRIBE_TOPIC / MSG_UNSUBSCRIBE_TOPIC）
 
 ```
-+------------------+------------------+
-| topic_name_len   | topic_name       |
-| (4 bytes)        | (N bytes)        |
-+------------------+------------------+
++------------------+------------------+-----------+------------------+------------------+------------------+
+| topic_name_len   | topic_name       | mode      | publisher_service| host_id          | instance_id      |
+| (4 bytes)        | (N bytes)        | (1 byte)  | [mode>=1, 变长]   | [mode==2, 变长]   | [mode==2, 变长]   |
++------------------+------------------+-----------+------------------+------------------+------------------+
 ```
+
+`mode` 为订阅粒度选择器：
+
+| mode | 语义 | 附加字段 |
+|------|------|----------|
+| 0 | 仅按主题名（不限定发布者服务，匹配任意服务发布的该主题） | 无 |
+| 1 | 服务级：匹配 `(publisher_service, topic_name)` 的全部发布者实例 | `publisher_service` |
+| 2 | 实例级：在服务级基础上再匹配 `host_id` + `instance_id` 的单个发布者实例 | `publisher_service` + `host_id` + `instance_id` |
+
+send 端始终写 `mode`；SM 读取时若 payload 仅含 `topic_name`（无尾随字节），按 mode 0 处理。
+取消订阅使用相同 payload 格式，按选择器精确摘除；由 fd 断开
+触发的批量清理不受影响。
 
 订阅响应（MSG_SUBSCRIBE_TOPIC_REPLY）:
 
@@ -359,10 +477,13 @@ SM 会将该哈希经 MSG_SUBSCRIBE_TOPIC_REPLY / MSG_TOPIC_PUBLISHER_NOTIFY 转
 +------------------+------------------+
 ```
 
-idl_hash 为该 topic 当前发布者声明的哈希；无发布者时为 0。订阅者期望哈希非 0 时：
+idl_hash 为匹配选择器的首个发布者声明的哈希；无匹配发布者时为 0。订阅者期望哈希非 0 时：
 - 发布者已上线：订阅请求直接返回 `ERR_IDL_MISMATCH`，不建立数据面连接；
 - 发布者尚未上线：订阅成功，待 MSG_TOPIC_PUBLISHER_NOTIFY 到达时校验，
-  不匹配则通过 on_err 回调上报 `ERR_IDL_MISMATCH` 并摘除订阅。
+  不匹配则通过 on_err 回调上报 `ERR_IDL_MISMATCH` 并摘除该选择器对应的订阅。
+
+订阅确认后，SM 会立即为所有匹配选择器的在线发布者实例各发送一条
+MSG_TOPIC_PUBLISHER_NOTIFY；此后新发布者实例上线时，仅向选择器匹配的订阅者下发。
 
 ### 4.13 话题发布者通知（MSG_TOPIC_PUBLISHER_NOTIFY）
 
@@ -372,6 +493,9 @@ idl_hash 为该 topic 当前发布者声明的哈希；无发布者时为 0。�
 | (4 bytes)        | (N bytes)        | (变长，格式同 MSG_REGISTER)       | (4 bytes, 可选)  |
 +------------------+------------------+------------------------------+------------------+
 ```
+
+ServiceInfo 中的 `name` / `host_id` / `instance_id` 标识发布者实例：订阅者据此按选择器
+过滤并为每个发布者实例建立独立数据面连接；收到广播时以该身份回填消息来源。
 
 idl_hash 为发布者声明的 topic IDL 哈希（0 表示未声明）。订阅者持有非 0 期望哈希时，
 两者不一致则不上报数据、不建立连接，并经 on_err 上报 `ERR_IDL_MISMATCH`。
@@ -440,7 +564,7 @@ RPC 侧严格 IDL 校验规则（MSG_INVOKE 的 `idl_hash` 字段）：
 
 - 客户端 `idl_hash != 0` 时，服务端注册的方法哈希必须存在且与之相等；
   服务端未声明（0）、方法不存在或哈希不等，一律返回 `ERR_IDL_MISMATCH`（无论 TCP/SHM）。
-- 客户端 `idl_hash == 0`（如 omni-cli hex 模式等无法提供哈希的调用方）跳过校验，保持兼容，
+- 客户端 `idl_hash == 0`（如 omni-cli hex 模式等无法提供哈希的调用方）跳过校验，
   作为受控的“未知哈希”逃生口。
 
 `MSG_INVOKE_REPLY` 的 `status` 字段是当前运行时显式错误传播的正式协议出口，不再依赖内部 side-channel。
@@ -641,13 +765,21 @@ Client                                     Server (UDS listener)
 ```
 握手路径 = /tmp/omni_<fnv1a_32(server_shm_name) 的十六进制>.sock
 
-其中 server_shm_name = /binder_<服务名前 48 字节>_<fnv1a_32(服务名) 的十六进制>
+其中 server_shm_name = /binder_<服务名前 48 字节>_<fnv1a_32(hash_input) 的十六进制>
+      hash_input = 服务名
+                 + (host_id 非空 ? '\x1f' + host_id : "")
+                 + (instance_id 非空 ? '\x1f' + instance_id : "")
 
-示例: 服务名 "ServiceA"
+示例: 服务名 "ServiceA"，host_id / instance_id 均空
       server_shm_name = "/binder_ServiceA_<fnv1a_32("ServiceA")>"
       握手路径 = "/tmp/omni_<fnv1a_32(server_shm_name)>.sock"
 
-（路径经哈希二次压缩，保持在 Linux sun_path 长度限制内）
+示例: 服务名 "ServiceA"，host_id="boardA"，instance_id="ttyUSB0"
+      hash_input = "ServiceA\x1fboardA\x1fttyUSB0"
+      server_shm_name = "/binder_ServiceA_<fnv1a_32("ServiceA\x1fboardA\x1fttyUSB0")>"
+
+（host_id / instance_id 只参与哈希，不进入可见前缀，保证名称/路径长度有界；
+  路径经哈希二次压缩，保持在 Linux sun_path 长度限制内）
 ```
 
 ## 7. 通信时序
@@ -663,9 +795,10 @@ Service                                    ServiceManager
    |                                             |
    |-------- TCP Connect -----------------------|
    |                                             |
-   |-------- MSG_REGISTER --------------------->|
-   |         {name, host, port, host_id,        |
-   |          shm_config, interfaces[]}          |
+    |-------- MSG_REGISTER --------------------->|
+    |         {name, host, port, host_id,        |
+    |          instance_id, shm_config,          |
+    |          interfaces[]}                      |
    |                                             |
    |<------- MSG_REGISTER_REPLY ----------------|
    |         {handle=1}                         |
@@ -683,10 +816,11 @@ ServiceB                ServiceManager              ServiceA
    |--- MSG_LOOKUP ---------->|                          |
    |    {name="ServiceA"}     |                          |
    |                          |                          |
-   |<-- MSG_LOOKUP_REPLY -----|                          |
-   |    {host, port, host_id, |                          |
-   |     shm_config,          |                          |
-   |     interfaces[]}        |                          |
+    |<-- MSG_LOOKUP_REPLY -----|                          |
+    |    {host, port, host_id, |                          |
+    |     instance_id,         |                          |
+    |     shm_config,          |                          |
+    |     interfaces[]}        |                          |
    |                          |                          |
     |  [判断] host_id 相同？                               |
     |    是 -> 创建自己的 SHM, 生成唯一名                  |
@@ -709,23 +843,28 @@ ServiceB                ServiceManager              ServiceA
 ### 7.3 广播订阅时序
 
 ```
-ServiceB              ServiceManager              ServiceA
-   |                        |                          |
-   |                        |<-- MSG_PUBLISH_TOPIC ----|
-   |                        |    {topic="sensor"}      |
-   |                        |                          |
-   |-- MSG_SUBSCRIBE_TOPIC->|                          |
-   |   {topic="sensor"}     |                          |
-   |                        |                          |
-   |<- MSG_TOPIC_PUBLISHER--|                          |
-   |   _NOTIFY              |                          |
-   |   {topic, A's address} |                          |
-   |                        |                          |
-   |========= 直接建立连接 ============================>|
-   |                        |                          |
-   |<-- MSG_BROADCAST ----------------------------------|
-   |    {topic_id, data}    |                          |
+ServiceB                    ServiceManager                   ServiceA
+   |                              |                             |
+   |                              |<-- MSG_PUBLISH_TOPIC -------|
+   |                              |  {topic="sensor", A 实例身份} |
+   |                              |                             |
+   |-- MSG_SUBSCRIBE_TOPIC ------>|                             |
+   |   {topic="sensor",           |                             |
+   |    mode=服务级/实例级选择器}   |                             |
+   |                              |                             |
+   |<-- MSG_TOPIC_PUBLISHER ------|                             |
+   |    _NOTIFY（每个匹配实例一条）|                             |
+   |   {topic, A 实例身份+地址}     |                             |
+   |                              |                             |
+   |===== 每个发布者实例各自直连（实例键） =====================>|
+   |         MSG_SUBSCRIBE_BROADCAST {topic_id, topic_name}      |
+   |                              |                             |
+   |<-- MSG_BROADCAST ------------------------------------------|
+   |    {topic_id, data}（订阅方按来源实例身份回填 host_id/instance_id）|
 ```
+
+服务级订阅会为每个匹配的发布者实例建立独立数据面连接；实例级订阅只接受所选实例。
+不同服务发布的同名主题互不下发（SM 按 `(发布者服务名, 主题名)` 与选择器匹配）。
 
 ## 8. 心跳与超时机制
 
@@ -744,12 +883,17 @@ elapsed = 当前时间 - 最后心跳时间
 if (elapsed >= HEARTBEAT_TIMEOUT):
     missed = elapsed / HEARTBEAT_TIMEOUT
     if (missed >= MAX_MISSED_HEARTBEATS):
-        判定服务死亡
+        判定该服务实例死亡
         触发死亡通知
 ```
 
 > 按默认参数（timeout=10s, max_missed=3），即超过 30s 未收到心跳判定死亡；
 > 检测由 SM 心跳定时器周期执行。
+>
+> HeartbeatMonitor 按完整实例身份 `(name, host_id, instance_id)` 分别跟踪时间戳
+> （键为 `makeServiceIdentityKey`），同名多实例互不干扰。超时后 SM 按实例移除注册、
+> 下发死亡通知，并据该实例的控制连接 fd 判定连接级失联：若该 fd 已无任何存活注册服务
+> 则关闭连接，触发 runtime 走 `disconnect → reconnect → restoreControlPlaneState` 重新注册。
 
 ## 9. 版本兼容性
 

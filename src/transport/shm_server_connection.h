@@ -1,11 +1,10 @@
 /**************************************************************************************************
- * @file        shm_client_connection.h
- * @brief       共享内存客户端传输实现
- * @details     基于 per-client SHM 架构的 IMessageConnection 实现：
- *              客户端创建自己的 SHM，通过握手通道把 SHM 名称发给服务端，
- *              并接收 [响应通知句柄, 服务端主控通知句柄]。
- *              send() 写入请求 ring 后通知服务端主控 eventfd；
- *              recv() 从响应 ring 读取服务端响应。
+ * @file        shm_server_connection.h
+ * @brief       共享内存服务端连接实现
+ * @details     服务端持有的单个客户端 IMessageConnection（per-client SHM）：
+ *              打开客户端 SHM，recv/peekFrameSize 读请求 ring（客户端→服务端），
+ *              send 写响应 ring 并通知客户端 resp eventfd；
+ *              liveness_channel_ 为保留的握手通道，用于检测客户端退出。
  *              具体 ring 布局与读写见 shm_ring.h。
  *
  * @author      taoist.luo

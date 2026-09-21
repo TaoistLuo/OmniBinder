@@ -7,22 +7,12 @@ target_link_libraries(example_cpp_sensor_server PRIVATE omnibinder_static)
 add_executable(example_cpp_sensor_client sensor_client.cpp)
 target_link_libraries(example_cpp_sensor_client PRIVATE omnibinder_static)
 
-# IDL 代码生成（C++）
-if(TARGET omni-idlc OR TARGET omnic)
-    omnic_generate(
-        TARGET example_cpp_sensor_server
-        LANGUAGE cpp
-        FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
-        OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
-    )
-    omnic_generate(
-        TARGET example_cpp_sensor_client
-        LANGUAGE cpp
-        FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
-        OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
-    )
-endif()
+# IDL 代码生成（C++），一次生成并复用到两个目标
+omnic_generate(
+    TARGET example_cpp_sensor_server example_cpp_sensor_client
+    LANGUAGE cpp
+    FILES
+        ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
+        ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+    OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
+)

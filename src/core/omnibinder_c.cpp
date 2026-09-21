@@ -10,8 +10,30 @@
 #include "omnibinder/omnibinder.h"
 #include <cstring>
 #include <cstdlib>
+#include <new>
 #include <string>
 #include <vector>
+
+/* ============================================================
+ * 编译期校验：C 错误码宏必须与 C++ ErrorCode 同值（避免手抄子集漂移）
+ * ============================================================ */
+static_assert(OMNI_OK == static_cast<int>(omnibinder::ErrorCode::OK), "OMNI_OK mismatch");
+static_assert(OMNI_ERR_UNKNOWN == static_cast<int>(omnibinder::ErrorCode::ERR_UNKNOWN), "OMNI_ERR_UNKNOWN mismatch");
+static_assert(OMNI_ERR_INVALID_PARAM == static_cast<int>(omnibinder::ErrorCode::ERR_INVALID_PARAM), "OMNI_ERR_INVALID_PARAM mismatch");
+static_assert(OMNI_ERR_OUT_OF_MEMORY == static_cast<int>(omnibinder::ErrorCode::ERR_OUT_OF_MEMORY), "OMNI_ERR_OUT_OF_MEMORY mismatch");
+static_assert(OMNI_ERR_TIMEOUT == static_cast<int>(omnibinder::ErrorCode::ERR_TIMEOUT), "OMNI_ERR_TIMEOUT mismatch");
+static_assert(OMNI_ERR_NOT_INITIALIZED == static_cast<int>(omnibinder::ErrorCode::ERR_NOT_INITIALIZED), "OMNI_ERR_NOT_INITIALIZED mismatch");
+static_assert(OMNI_ERR_NOT_RUNNING == static_cast<int>(omnibinder::ErrorCode::ERR_NOT_RUNNING), "OMNI_ERR_NOT_RUNNING mismatch");
+static_assert(OMNI_ERR_CONNECT_FAILED == static_cast<int>(omnibinder::ErrorCode::ERR_CONNECT_FAILED), "OMNI_ERR_CONNECT_FAILED mismatch");
+static_assert(OMNI_ERR_CONNECTION_CLOSED == static_cast<int>(omnibinder::ErrorCode::ERR_CONNECTION_CLOSED), "OMNI_ERR_CONNECTION_CLOSED mismatch");
+static_assert(OMNI_ERR_SEND_FAILED == static_cast<int>(omnibinder::ErrorCode::ERR_SEND_FAILED), "OMNI_ERR_SEND_FAILED mismatch");
+static_assert(OMNI_ERR_RECV_FAILED == static_cast<int>(omnibinder::ErrorCode::ERR_RECV_FAILED), "OMNI_ERR_RECV_FAILED mismatch");
+static_assert(OMNI_ERR_SERVICE_NOT_FOUND == static_cast<int>(omnibinder::ErrorCode::ERR_SERVICE_NOT_FOUND), "OMNI_ERR_SERVICE_NOT_FOUND mismatch");
+static_assert(OMNI_ERR_INVOKE_FAILED == static_cast<int>(omnibinder::ErrorCode::ERR_INVOKE_FAILED), "OMNI_ERR_INVOKE_FAILED mismatch");
+static_assert(OMNI_ERR_REGISTER_FAILED == static_cast<int>(omnibinder::ErrorCode::ERR_REGISTER_FAILED), "OMNI_ERR_REGISTER_FAILED mismatch");
+static_assert(OMNI_ERR_IDL_MISMATCH == static_cast<int>(omnibinder::ErrorCode::ERR_IDL_MISMATCH), "OMNI_ERR_IDL_MISMATCH mismatch");
+static_assert(OMNI_ERR_SERIALIZE == static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE), "OMNI_ERR_SERIALIZE mismatch");
+static_assert(OMNI_ERR_DESERIALIZE == static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE), "OMNI_ERR_DESERIALIZE mismatch");
 
 /* ============================================================
  * 内部结构体定义
@@ -117,11 +139,11 @@ inline void markReadError(omni_buffer_t* buf) {
 extern "C" {
 
 omni_buffer_t* omni_buffer_create(void) {
-    return new omni_buffer_t();
+    return new (std::nothrow) omni_buffer_t();
 }
 
 omni_buffer_t* omni_buffer_create_from(const uint8_t* data, size_t len) {
-    return new omni_buffer_t(data, len);
+    return new (std::nothrow) omni_buffer_t(data, len);
 }
 
 void omni_buffer_destroy(omni_buffer_t* buf) {
@@ -350,6 +372,8 @@ char* omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len) {
     if (result) {
         memcpy(result, value.c_str(), len + 1);
     } else {
+        // 分配失败：置读错误，生成的反序列化器据 read_ok 判定失败
+        markReadError(buf);
         if (out_len) *out_len = 0;
         return NULL;
     }
@@ -358,26 +382,30 @@ char* omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len) {
 }
 
 uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len) {
-    if (!buf || !out_len) {
+    if (!buf) {
         if (out_len) *out_len = 0;
         return NULL;
     }
     std::vector<uint8_t> value;
     if (!buf->buf.tryReadBytes(value)) {
         markReadError(buf);
-        *out_len = 0;
+        if (out_len) *out_len = 0;
         return NULL;
     }
     uint32_t len = static_cast<uint32_t>(value.size());
-    uint8_t* result = (uint8_t*)omni_malloc(len);
-    if (!result) {
-        *out_len = 0;
+    if (len == 0) {
+        if (out_len) *out_len = 0;
         return NULL;
     }
-    if (len > 0) {
-        memcpy(result, value.data(), len);
+    uint8_t* result = (uint8_t*)omni_malloc(len);
+    if (!result) {
+        // 分配失败：置读错误，生成的反序列化器据 read_ok 判定失败
+        markReadError(buf);
+        if (out_len) *out_len = 0;
+        return NULL;
     }
-    *out_len = len;
+    memcpy(result, value.data(), len);
+    if (out_len) *out_len = len;
     return result;
 }
 
@@ -389,8 +417,15 @@ omni_service_t* omni_service_create(const char* name, uint32_t interface_id,
     omni_invoke_callback_t callback, void* user_data)
 {
     if (!name) return NULL;
-    omni_service_t* svc = new omni_service_t();
-    svc->bridge = new CServiceBridge(name, interface_id, callback, user_data);
+    omni_service_t* svc = new (std::nothrow) omni_service_t();
+    if (!svc) return NULL;
+    try {
+        svc->bridge = new CServiceBridge(name, interface_id, callback, user_data);
+    } catch (...) {
+        // 分配/构造失败：不向 extern "C" 边界抛出异常
+        delete svc;
+        return NULL;
+    }
     return svc;
 }
 
@@ -434,12 +469,23 @@ const char* omni_service_get_register_host(const omni_service_t* svc) {
     return svc->bridge->getRegisterHost().c_str();
 }
 
+void omni_service_set_instance_id(omni_service_t* svc, const char* instance_id) {
+    if (svc && svc->bridge) {
+        svc->bridge->setInstanceId(instance_id ? instance_id : "");
+    }
+}
+
 /* ============================================================
  * Runtime API 实现
  * ============================================================ */
 
 omni_runtime_t* omni_runtime_create(void) {
-    return new omni_runtime_t();
+    try {
+        return new omni_runtime_t();
+    } catch (...) {
+        // 分配/构造失败：不向 extern "C" 边界抛出异常
+        return NULL;
+    }
 }
 
 void omni_runtime_destroy(omni_runtime_t* runtime) {
@@ -447,7 +493,7 @@ void omni_runtime_destroy(omni_runtime_t* runtime) {
 }
 
 int omni_runtime_init(omni_runtime_t* runtime, const char* sm_host, uint16_t sm_port) {
-    if (!runtime || !sm_host) return -1;
+    if (!runtime || !sm_host) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.init(sm_host, sm_port);
 }
 
@@ -476,6 +522,12 @@ void omni_runtime_set_default_timeout(omni_runtime_t* runtime, uint32_t timeout_
     if (runtime) runtime->runtime.setDefaultTimeout(timeout_ms);
 }
 
+void omni_runtime_set_host_id(omni_runtime_t* runtime, const char* host_id) {
+    if (runtime) {
+        runtime->runtime.setHostId(host_id ? host_id : "");
+    }
+}
+
 const char* omni_runtime_host_id(const omni_runtime_t* runtime) {
     if (!runtime) return NULL;
     // hostId() 按值返回，用线程局部缓冲持有拷贝，保证返回指针在下次调用前有效
@@ -501,12 +553,12 @@ int omni_runtime_is_running(const omni_runtime_t* runtime) {
 }
 
 int omni_runtime_register_service(omni_runtime_t* runtime, omni_service_t* svc) {
-    if (!runtime || !svc || !svc->bridge) return -1;
+    if (!runtime || !svc || !svc->bridge) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.registerService(svc->bridge);
 }
 
 int omni_runtime_unregister_service(omni_runtime_t* runtime, omni_service_t* svc) {
-    if (!runtime || !svc || !svc->bridge) return -1;
+    if (!runtime || !svc || !svc->bridge) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.unregisterService(svc->bridge);
 }
 
@@ -515,7 +567,7 @@ int omni_runtime_invoke(omni_runtime_t* runtime, const char* service_name,
     const omni_buffer_t* request, omni_buffer_t* response,
     uint32_t timeout_ms)
 {
-    if (!runtime || !service_name || !request || !response) return -1;
+    if (!runtime || !service_name || !request || !response) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.invoke(service_name, interface_id, method_id, idl_hash,
                                  request->buf, response->buf, timeout_ms);
 }
@@ -524,23 +576,97 @@ int omni_runtime_invoke_oneway(omni_runtime_t* runtime, const char* service_name
     uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
     const omni_buffer_t* request)
 {
-    if (!runtime || !service_name || !request) return -1;
+    if (!runtime || !service_name || !request) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.invokeOneWay(service_name, interface_id, method_id, idl_hash, request->buf);
 }
 
 int omni_runtime_connect_service(omni_runtime_t* runtime, const char* service_name) {
-    if (!runtime || !service_name) return -1;
+    if (!runtime || !service_name) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.connectService(service_name);
 }
 
 int omni_runtime_disconnect_service(omni_runtime_t* runtime, const char* service_name) {
-    if (!runtime || !service_name) return -1;
+    if (!runtime || !service_name) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.disconnectService(service_name);
+}
+
+int omni_runtime_list_instances(omni_runtime_t* runtime, const char* service_name,
+    omni_instance_callback_t callback, void* user_data)
+{
+    if (!runtime || !service_name || !callback) return OMNI_ERR_INVALID_PARAM;
+    std::vector<omnibinder::ServiceInfo> instances;
+    int ret = runtime->runtime.listServiceInstances(service_name, instances);
+    if (ret != 0) return ret;
+    for (size_t i = 0; i < instances.size(); ++i) {
+        omni_service_instance_t info;
+        info.service_name = instances[i].name.c_str();
+        info.host_id = instances[i].host_id.c_str();
+        info.instance_id = instances[i].instance_id.c_str();
+        info.host = instances[i].host.c_str();
+        info.port = instances[i].port;
+        callback(&info, user_data);
+    }
+    return 0;
+}
+
+int omni_runtime_connect_service_instance(omni_runtime_t* runtime, const char* service_name,
+    const char* host_id, const char* instance_id)
+{
+    if (!runtime || !service_name || !host_id || !instance_id) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.connectServiceInstance(service_name, host_id, instance_id);
+}
+
+int omni_runtime_disconnect_service_instance(omni_runtime_t* runtime, const char* service_name,
+    const char* host_id, const char* instance_id)
+{
+    if (!runtime || !service_name || !host_id || !instance_id) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.disconnectServiceInstance(service_name, host_id, instance_id);
+}
+
+int omni_runtime_invoke_instance(omni_runtime_t* runtime, const char* service_name,
+    const char* host_id, const char* instance_id,
+    uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
+    const omni_buffer_t* request, omni_buffer_t* response,
+    uint32_t timeout_ms)
+{
+    if (!runtime || !service_name || !host_id || !instance_id || !request || !response) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.invoke(omnibinder::makeServiceConnectionKey(service_name, host_id, instance_id),
+                                   interface_id, method_id, idl_hash,
+                                   request->buf, response->buf, timeout_ms);
+}
+
+int omni_runtime_invoke_oneway_instance(omni_runtime_t* runtime, const char* service_name,
+    const char* host_id, const char* instance_id,
+    uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
+    const omni_buffer_t* request)
+{
+    if (!runtime || !service_name || !host_id || !instance_id || !request) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.invokeOneWay(omnibinder::makeServiceConnectionKey(service_name, host_id, instance_id),
+                                         interface_id, method_id, idl_hash, request->buf);
 }
 
 int omni_runtime_is_service_connected(const omni_runtime_t* runtime, const char* service_name) {
     if (!runtime || !service_name) return 0;
     return runtime->runtime.isServiceConnected(service_name) ? 1 : 0;
+}
+
+int omni_runtime_is_service_instance_connected(const omni_runtime_t* runtime,
+    const char* service_name, const char* host_id, const char* instance_id)
+{
+    if (!runtime || !service_name || !host_id || !instance_id) return 0;
+    return runtime->runtime.isServiceInstanceConnected(service_name, host_id, instance_id) ? 1 : 0;
+}
+
+const char* omni_runtime_service_connection_key(const char* service_name,
+    const char* host_id, const char* instance_id)
+{
+    static thread_local std::string holder;
+    if (!service_name || !host_id || !instance_id) {
+        holder.clear();
+        return holder.c_str();
+    }
+    holder = omnibinder::makeServiceConnectionKey(service_name, host_id, instance_id);
+    return holder.c_str();
 }
 
 void omni_runtime_enable_auto_reconnect(omni_runtime_t* runtime, const char* service_name, int enable) {
@@ -566,21 +692,21 @@ void omni_runtime_stop_heartbeat(omni_runtime_t* runtime, const char* service_na
 int omni_runtime_publish_topic(omni_runtime_t* runtime, const char* topic_name,
     uint32_t idl_hash)
 {
-    if (!runtime || !topic_name) return -1;
+    if (!runtime || !topic_name) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.publishTopic(topic_name, idl_hash);
 }
 
 int omni_runtime_broadcast(omni_runtime_t* runtime, uint32_t topic_id,
     const omni_buffer_t* data)
 {
-    if (!runtime || !data) return -1;
+    if (!runtime || !data) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.broadcast(topic_id, data->buf);
 }
 
 int omni_runtime_subscribe_topic(omni_runtime_t* runtime, const char* topic_name,
     uint32_t expected_idl_hash, omni_topic_callback_t callback, void* user_data)
 {
-    if (!runtime || !topic_name || !callback) return -1;
+    if (!runtime || !topic_name || !callback) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.subscribeTopic(topic_name, expected_idl_hash,
         [callback, user_data](uint32_t topic_id, const omnibinder::Buffer& data) {
             omni_buffer_t wrap;
@@ -590,14 +716,14 @@ int omni_runtime_subscribe_topic(omni_runtime_t* runtime, const char* topic_name
 }
 
 int omni_runtime_unsubscribe_topic(omni_runtime_t* runtime, const char* topic_name) {
-    if (!runtime || !topic_name) return -1;
+    if (!runtime || !topic_name) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.unsubscribeTopic(topic_name);
 }
 
 int omni_runtime_subscribe_death(omni_runtime_t* runtime, const char* service_name,
     omni_death_callback_t callback, void* user_data)
 {
-    if (!runtime || !service_name || !callback) return -1;
+    if (!runtime || !service_name || !callback) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.subscribeServiceDeath(service_name,
         [callback, user_data](const std::string& name) {
             callback(name.c_str(), user_data);
@@ -605,12 +731,30 @@ int omni_runtime_subscribe_death(omni_runtime_t* runtime, const char* service_na
 }
 
 int omni_runtime_unsubscribe_death(omni_runtime_t* runtime, const char* service_name) {
-    if (!runtime || !service_name) return -1;
+    if (!runtime || !service_name) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.unsubscribeServiceDeath(service_name);
 }
 
+int omni_runtime_subscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
+    const char* host_id, const char* instance_id,
+    omni_death_callback_t callback, void* user_data)
+{
+    if (!runtime || !service_name || !host_id || !instance_id || !callback) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.subscribeServiceInstanceDeath(service_name, host_id, instance_id,
+        [callback, user_data](const std::string& name, const std::string&, const std::string&) {
+            callback(name.c_str(), user_data);
+        });
+}
+
+int omni_runtime_unsubscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
+    const char* host_id, const char* instance_id)
+{
+    if (!runtime || !service_name || !host_id || !instance_id) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.unsubscribeServiceInstanceDeath(service_name, host_id, instance_id);
+}
+
 int omni_runtime_get_stats(omni_runtime_t* runtime, omni_runtime_stats_t* stats) {
-    if (!runtime || !stats) return -1;
+    if (!runtime || !stats) return OMNI_ERR_INVALID_PARAM;
     omnibinder::RuntimeStats cpp_stats;
     int ret = runtime->runtime.getStats(cpp_stats);
     if (ret != 0) {
@@ -630,7 +774,7 @@ int omni_runtime_get_stats(omni_runtime_t* runtime, omni_runtime_stats_t* stats)
 }
 
 int omni_runtime_reset_stats(omni_runtime_t* runtime) {
-    if (!runtime) return -1;
+    if (!runtime) return OMNI_ERR_INVALID_PARAM;
     return runtime->runtime.resetStats();
 }
 
@@ -640,12 +784,7 @@ int omni_runtime_reset_stats(omni_runtime_t* runtime) {
 
 uint32_t omni_fnv1a_32(const char* str) {
     if (!str) return 0;
-    uint32_t hash = 0x811c9dc5u;
-    while (*str) {
-        hash ^= (uint8_t)*str++;
-        hash *= 0x01000193u;
-    }
-    return hash;
+    return omnibinder::fnv1a_32(str);
 }
 
 } /* extern "C" */

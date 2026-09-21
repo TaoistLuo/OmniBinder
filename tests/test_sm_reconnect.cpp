@@ -41,8 +41,8 @@ private:
 struct SmReconnectServerCtx {
     OmniRuntime runtime;
     ReconnectService service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     SmReconnectServerCtx() : registered(false), should_stop(false) {}
 };
 
@@ -54,8 +54,8 @@ static void smReconnectServerThread(void* arg) {
     if (ret != 0) return;
     ret = ctx->runtime.publishTopic("reconnect/topic");
     if (ret != 0) return;
-    ctx->registered = true;
-    while (!ctx->should_stop) ctx->runtime.pollOnce(50);
+    ctx->registered.store(true);
+    while (!ctx->should_stop.load()) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
 }
@@ -73,15 +73,21 @@ protected:
 
         server_ctx_ = new SmReconnectServerCtx();
         server_tid_ = std::thread(smReconnectServerThread, server_ctx_);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        ASSERT_TRUE(server_ctx_->registered);
+        for (int i = 0; i < 50 && !server_ctx_->registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        ASSERT_TRUE(server_ctx_->registered.load());
     }
 
     static void TearDownTestSuite() {
-        server_ctx_->should_stop = true;
-        server_tid_.join();
+        if (server_ctx_) {
+            server_ctx_->should_stop.store(true);
+        }
+        if (server_tid_.joinable()) {
+            server_tid_.join();
+        }
         delete server_ctx_;
+        server_ctx_ = nullptr;
         stopProcess(sm_pid_);
+        sm_pid_ = 0;
     }
 };
 
@@ -99,6 +105,8 @@ TEST_F(SmReconnectTest, InitialLookupAndInvoke) {
         ASSERT_EQ(runtime.connectService("ReconnectService"), 0);
         ASSERT_EQ(runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000), 0);
     EXPECT_EQ(resp.size(), strlen(msg));
+    EXPECT_EQ(std::string(reinterpret_cast<const char*>(resp.data()), resp.size()),
+              std::string(msg));
     std::vector<std::string> topics;
     ASSERT_EQ(runtime.queryPublishedTopics("ReconnectService", topics), 0);
     ASSERT_EQ(topics.size(), 1u);
@@ -132,9 +140,11 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
             const char* msg = "after-restart";
             req.writeRaw(msg, strlen(msg));
             ASSERT_EQ(runtime.connectService("ReconnectService"), 0);
-            if (runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000) == 0 &&
-                resp.size() == strlen(msg)) {
-                recovered = true;
+            if (runtime.invoke("ReconnectService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000) == 0) {
+                std::string echoed(reinterpret_cast<const char*>(resp.data()), resp.size());
+                if (echoed == msg) {
+                    recovered = true;
+                }
             }
         }
         std::this_thread::sleep_for(std::chrono::microseconds(100000));

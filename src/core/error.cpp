@@ -13,6 +13,7 @@ const char* errorCodeToString(ErrorCode code) {
     case ErrorCode::ERR_ALREADY_INITIALIZED: return "Already initialized";
     case ErrorCode::ERR_NOT_SUPPORTED:       return "Not supported";
     case ErrorCode::ERR_INTERNAL:            return "Internal error";
+    case ErrorCode::ERR_NOT_RUNNING:         return "Not running";
     case ErrorCode::ERR_CONNECT_FAILED:      return "Connection failed";
     case ErrorCode::ERR_CONNECTION_CLOSED:   return "Connection closed";
     case ErrorCode::ERR_SEND_FAILED:         return "Send failed";

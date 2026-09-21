@@ -67,34 +67,51 @@ void ServiceManagerApp::handleRuntimeHello(ClientConnection* conn, const Message
 
 void ServiceManagerApp::handleRuntimeList(ClientConnection* conn, const Message& msg) {
     Message reply(MessageType::MSG_RUNTIME_LIST_REPLY, msg.header.sequence);
-    // 先完整序列化每个条目到独立缓冲，任一失败则跳过该条目并回退写游标，
-    // 避免向调用方发送"数量与实际条目不一致"的截断帧
-    Buffer entries;
-    uint32_t entry_count = 0;
+    // 先按 pid 聚合：同一进程可能有多条控制连接（同进程多 runtime，或重连后旧连接
+    // 尚未回收），runtime list 以进程为行，合并各连接名下服务的并集，避免同 pid
+    // 重复列出多行。服务归属唯一来源是 registry fd 索引，不再依赖 conn 上的镜像列表。
+    std::map<uint32_t, RuntimeInfo> by_pid;
+    std::vector<uint32_t> pid_order;
     for (std::map<int, ClientConnection*>::const_iterator it = clients_.begin(); it != clients_.end(); ++it) {
         ClientConnection* runtime_conn = it->second;
         if (!runtime_conn || !runtime_conn->runtime_registered) {
             continue;
         }
-        RuntimeInfo info;
-        info.pid = runtime_conn->pid;
-        info.process_name = runtime_conn->process_name;
-        // 服务归属唯一来源是 registry fd 索引，不再依赖 conn 上的镜像列表
+        std::map<uint32_t, RuntimeInfo>::iterator pit = by_pid.find(runtime_conn->pid);
+        if (pit == by_pid.end()) {
+            RuntimeInfo info;
+            info.pid = runtime_conn->pid;
+            info.process_name = runtime_conn->process_name;
+            info.log_level = runtime_conn->log_level;
+            info.diag_capabilities = RUNTIME_DIAG_CAP_WATCH;
+            pit = by_pid.insert(std::make_pair(runtime_conn->pid, info)).first;
+            pid_order.push_back(runtime_conn->pid);
+        }
+        RuntimeInfo& info = pit->second;
         const std::vector<std::string> services = registry_.listServiceNamesByFd(it->first);
         for (size_t si = 0; si < services.size(); ++si) {
             const std::string& service = services[si];
             if (service.find(DIAG_SERVICE_NAME_PREFIX) == 0) {
                 continue;
             }
-            info.services.push_back(service);
+            if (std::find(info.services.begin(), info.services.end(), service)
+                == info.services.end()) {
+                info.services.push_back(service);
+            }
         }
+    }
+
+    // 先完整序列化每个条目到独立缓冲，任一失败则跳过该条目并回退写游标，
+    // 避免向调用方发送"数量与实际条目不一致"的截断帧
+    Buffer entries;
+    uint32_t entry_count = 0;
+    for (size_t i = 0; i < pid_order.size(); ++i) {
+        RuntimeInfo& info = by_pid[pid_order[i]];
         info.role = info.services.empty() ? "client" : "service";
-        info.log_level = runtime_conn->log_level;
-        info.diag_capabilities = RUNTIME_DIAG_CAP_WATCH;
         const size_t before = entries.writePosition();
         if (!serializeRuntimeInfo(info, entries)) {
             entries.setWritePosition(before);
-            OMNI_LOG_ERROR(TAG, "Failed to serialize runtime list entry fd=%d, skipped", it->first);
+            OMNI_LOG_ERROR(TAG, "Failed to serialize runtime list entry pid=%u, skipped", info.pid);
             continue;
         }
         entry_count++;
@@ -203,6 +220,26 @@ void ServiceManagerApp::removeWatcherAndMaybeStopTargets(int watcher_fd) {
     watcher_to_pids_.erase(wit);
     for (std::set<uint32_t>::const_iterator it = pids.begin(); it != pids.end(); ++it) {
         stopTargetIfUnwatched(*it, watcher_fd);
+    }
+}
+
+void ServiceManagerApp::removeTargetWatchers(uint32_t pid) {
+    std::map<uint32_t, std::vector<int> >::iterator pit = pid_watchers_.find(pid);
+    if (pit == pid_watchers_.end()) {
+        return;
+    }
+    // 先拷贝 watcher 列表再摘除反向索引，避免删除过程中迭代失效
+    std::vector<int> watchers = pit->second;
+    pid_watchers_.erase(pit);
+    for (size_t i = 0; i < watchers.size(); ++i) {
+        std::map<int, std::set<uint32_t> >::iterator wit = watcher_to_pids_.find(watchers[i]);
+        if (wit == watcher_to_pids_.end()) {
+            continue;
+        }
+        wit->second.erase(pid);
+        if (wit->second.empty()) {
+            watcher_to_pids_.erase(wit);
+        }
     }
 }
 

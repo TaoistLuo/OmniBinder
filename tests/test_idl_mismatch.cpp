@@ -1,6 +1,7 @@
 // test_idl_mismatch.cpp - IDL 不匹配检测测试
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "platform/platform_test.h"
 #include <omnibinder/omnibinder.h>
 #include <omnibinder/omnibinder_c.h>
 #include <omnibinder/service.h>
@@ -110,6 +111,7 @@ TEST_F(IdlMismatchTest, InvokeWrongIdlHashReturnsMismatch) {
     // 服务端轮询线程 — event-loop 必须运行才能接受连接并处理消息
     std::atomic<bool> srv_stop{false};
     std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(10); });
+    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc.port()));
@@ -143,6 +145,7 @@ TEST_F(IdlMismatchTest, InvokeCorrectIdlHashSucceeds) {
     // 服务端轮询线程 — event-loop 必须运行才能接受连接并处理消息
     std::atomic<bool> srv_stop{false};
     std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(10); });
+    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc.port()));
@@ -166,7 +169,7 @@ TEST_F(IdlMismatchTest, InvokeCorrectIdlHashSucceeds) {
     server.stop();
 }
 
-TEST_F(IdlMismatchTest, InvokeOneWayWrongHashErrorLog) {
+TEST_F(IdlMismatchTest, InvokeWrongHashErrorLog) {
     OmniRuntime server;
     ASSERT_EQ(server.init("127.0.0.1", SM_PORT), 0);
     EchoService svc;
@@ -175,6 +178,7 @@ TEST_F(IdlMismatchTest, InvokeOneWayWrongHashErrorLog) {
 
     std::atomic<bool> srv_stop{false};
     std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(5); });
+    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     const char* log_path = "/tmp/omni_idl_oneway_test.log";
     FILE* saved = stderr;
@@ -182,19 +186,15 @@ TEST_F(IdlMismatchTest, InvokeOneWayWrongHashErrorLog) {
     ASSERT_NE(cap, nullptr);
     setbuf(stderr, NULL);
 
-    // 通过 OmniRuntime 建立数据通道，然后发送 oneway 调用
     OmniRuntime client;
     ASSERT_EQ(client.init("127.0.0.1", SM_PORT), 0);
     ASSERT_EQ(client.connectService("IdlTestService"), 0);
 
-    // 用错误 hash 的 invoke() 代理 oneway 场景 — 二者分发路径相同，
-    // 但 invoke() 会阻塞到收到回复，从而保证服务端已处理该消息
+    // 用错误 hash 的阻塞 invoke：分发路径与 oneway 相同，且能保证服务端已处理该消息
     Buffer req, resp;
     req.writeUint32(99);
     int ret = client.invoke("IdlTestService", IFACE_ID, METHOD_ECHO, WRONG_HASH, req, resp, 5000);
     EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
-
-    srv_stop = true; srv_poll.join();
 
     fflush(stderr); fclose(cap); stderr = saved;
 
@@ -202,9 +202,10 @@ TEST_F(IdlMismatchTest, InvokeOneWayWrongHashErrorLog) {
     std::string content((std::istreambuf_iterator<char>(log)), {});
     EXPECT_NE(content.find("idl_mismatch"), std::string::npos);
 
+    srv_stop = true; srv_poll.join();
     client.stop();
     server.stop();
-    unlink(log_path);
+    platform::removeFile(log_path);
 }
 
 TEST_F(IdlMismatchTest, TopicSubscribeReturnsPublisherIdlHash) {
@@ -221,6 +222,10 @@ TEST_F(IdlMismatchTest, TopicSubscribeReturnsPublisherIdlHash) {
         serializeServiceInfo(info, reg.payload);
         ASSERT_TRUE(sendMsg(sm_conn, reg));
         Message reply; ASSERT_TRUE(recvMsg(sm_conn, reply, 2000));
+        ASSERT_EQ(reply.getType(), MessageType::MSG_REGISTER_REPLY);
+        bool reg_ok = false;
+        ASSERT_TRUE(BufferView(reply.payload.data(), reply.payload.size()).tryReadBool(reg_ok));
+        ASSERT_TRUE(reg_ok);
     }
 
     {
@@ -233,6 +238,10 @@ TEST_F(IdlMismatchTest, TopicSubscribeReturnsPublisherIdlHash) {
         pub.payload.writeUint32(SERVER_HASH);
         ASSERT_TRUE(sendMsg(sm_conn, pub));
         Message reply; ASSERT_TRUE(recvMsg(sm_conn, reply, 2000));
+        ASSERT_EQ(reply.getType(), MessageType::MSG_PUBLISH_TOPIC_REPLY);
+        bool pub_ok = false;
+        ASSERT_TRUE(BufferView(reply.payload.data(), reply.payload.size()).tryReadBool(pub_ok));
+        ASSERT_TRUE(pub_ok);
     }
 
     {
@@ -248,11 +257,11 @@ TEST_F(IdlMismatchTest, TopicSubscribeReturnsPublisherIdlHash) {
         ASSERT_TRUE(rv.tryReadBool(accepted));
         ASSERT_TRUE(accepted);
 
+        // 发布者已在线，SM 必须回带其 IDL hash；缺失即视为协议缺陷而非"跳过断言"
+        ASSERT_GE(rv.remaining(), sizeof(uint32_t)) << "subscribe reply 必须携带 publisher idl hash";
         uint32_t hash = 0;
-        if (rv.remaining() >= sizeof(uint32_t)) {
-            ASSERT_TRUE(rv.tryReadUint32(hash));
-            EXPECT_EQ(hash, SERVER_HASH);
-        }
+        ASSERT_TRUE(rv.tryReadUint32(hash));
+        EXPECT_EQ(hash, SERVER_HASH);
     }
     sm_conn.close();
 }
@@ -295,6 +304,7 @@ TEST_F(IdlMismatchTest, ClientHashAgainstUndeclaredServerHashReturnsMismatch) {
 
     std::atomic<bool> srv_stop{false};
     std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(5); });
+    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     OmniRuntime client;
     ASSERT_EQ(client.init("127.0.0.1", SM_PORT), 0);
@@ -322,6 +332,7 @@ TEST_F(IdlMismatchTest, CServiceDeclaredHashEnforcedEndToEnd) {
 
     std::atomic<bool> srv_stop{false};
     std::thread srv_poll([&]() { while (!srv_stop) omni_runtime_poll_once(server, 5); });
+    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     omni_runtime_t* client = omni_runtime_create();
     ASSERT_NE(client, nullptr);
@@ -393,8 +404,8 @@ TEST_F(IdlMismatchTest, TopicPublisherNotifyWrongHashNotifiesError) {
     ASSERT_EQ(pub.registerService(&svc), 0);
     ASSERT_EQ(pub.publishTopic("LateHashTopic", WRONG_HASH), 0);
 
-    for (int i = 0; i < 50 && err_code.load() == 0; ++i) {
-        sub.pollOnce(10);
+    for (int i = 0; i < 250 && err_code.load() == 0; ++i) {
+        sub.pollOnce(20);
     }
     EXPECT_EQ(err_code.load(), static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
     EXPECT_EQ(hits.load(), 0);

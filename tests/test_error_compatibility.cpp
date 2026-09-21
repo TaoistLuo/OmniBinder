@@ -26,6 +26,7 @@ const ErrorExpectation kPublicErrors[] = {
     {ErrorCode::ERR_ALREADY_INITIALIZED, -6, "Already initialized"},
     {ErrorCode::ERR_NOT_SUPPORTED,       -7, "Not supported"},
     {ErrorCode::ERR_INTERNAL,            -8, "Internal error"},
+    {ErrorCode::ERR_NOT_RUNNING,         -9, "Not running"},
     {ErrorCode::ERR_CONNECT_FAILED,      -100, "Connection failed"},
     {ErrorCode::ERR_CONNECTION_CLOSED,   -101, "Connection closed"},
     {ErrorCode::ERR_SEND_FAILED,         -102, "Send failed"},

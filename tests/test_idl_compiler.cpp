@@ -12,14 +12,46 @@
 #include <string>
 #include <vector>
 #include <fstream>
-#ifdef _WIN32
-#include <io.h>
-#include <direct.h>
-#else
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <dirent.h>
 #include <unistd.h>
-#endif
 
 using namespace omnic;
+
+// 本 target 由 CMake 的 if(NOT WIN32) 守卫，仅在非 Windows 构建；
+// 目录创建/删除用 POSIX 原语，避免依赖 shell（system("mkdir -p")）。
+static void ensureDir(const std::string& path) {
+    std::string cur;
+    size_t start = 0;
+    if (!path.empty() && path[0] == '/') { cur = "/"; start = 1; }
+    for (size_t i = start; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            if (!cur.empty() && cur != "/") ::mkdir(cur.c_str(), 0755);
+        }
+        if (i < path.size()) cur += path[i];
+    }
+}
+
+static void removeTree(const std::string& path) {
+    DIR* d = ::opendir(path.c_str());
+    if (d) {
+        struct dirent* ent;
+        while ((ent = ::readdir(d)) != NULL) {
+            std::string name = ent->d_name;
+            if (name == "." || name == "..") continue;
+            std::string child = path + "/" + name;
+            struct stat st;
+            if (::lstat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+                removeTree(child);
+            } else {
+                ::unlink(child.c_str());
+            }
+        }
+        ::closedir(d);
+    }
+    ::rmdir(path.c_str());
+}
 
 static std::vector<Token> tokenize(const std::string& source) {
     Lexer lexer(source);
@@ -577,7 +609,7 @@ TEST(IdlCompilerTest, LexerDotToken) {
 
 TEST(IdlCompilerTest, ParserImportStatement) {
     const char* dir = "/tmp/omni-idlc_test_import";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     {
         std::ofstream f(std::string(dir) + "/common.bidl");
@@ -673,7 +705,7 @@ TEST(IdlCompilerTest, ParserCrossPackageTypeInService) {
 
 TEST(IdlCompilerTest, ParserCircularImportDetection) {
     const char* dir = "/tmp/omni-idlc_test_circular";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     {
         std::ofstream f(std::string(dir) + "/a.bidl");
@@ -700,7 +732,7 @@ TEST(IdlCompilerTest, ParserCircularImportDetection) {
 
 TEST(IdlCompilerTest, ParserDuplicateImportDedup) {
     const char* dir = "/tmp/omni-idlc_test_dedup";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     {
         std::ofstream f(std::string(dir) + "/base.bidl");
@@ -750,7 +782,7 @@ TEST(IdlCompilerTest, ParserMissingImportFile) {
 
 TEST(IdlCompilerTest, ParserRelativePathImport) {
     const char* dir = "/tmp/omni-idlc_test_relpath";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir) + "/sub").c_str()), 0);
+    ensureDir(std::string(dir) + "/sub");
 
     {
         std::ofstream f(std::string(dir) + "/shared.bidl");
@@ -780,7 +812,7 @@ TEST(IdlCompilerTest, ParserRelativePathImport) {
 
 TEST(IdlCompilerTest, ParserImportAllowsSpacesInFileName) {
     const char* dir = "/tmp/omni-idlc_test_import_spaces";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     {
         std::ofstream f(std::string(dir) + "/shared types.bidl");
@@ -801,7 +833,7 @@ TEST(IdlCompilerTest, ParserImportAllowsSpacesInFileName) {
 
 TEST(IdlCompilerTest, ParserTransitiveImport) {
     const char* dir = "/tmp/omni-idlc_test_transitive";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     {
         std::ofstream f(std::string(dir) + "/c.bidl");
@@ -841,7 +873,7 @@ TEST(IdlCompilerTest, ParserTransitiveImport) {
 
 TEST(IdlCompilerTest, SemanticRejectsLateImport) {
     const char* dir = "/tmp/omni-idlc_test_late_import";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     { std::ofstream f(std::string(dir) + "/types.bidl"); f << "package types; struct Value { int32 x; }"; }
     const std::string source = "package demo; struct Local { int32 x; } import \"types.bidl\";";
     ParseContext ctx;
@@ -856,7 +888,7 @@ TEST(IdlCompilerTest, SemanticRejectsLateImport) {
 
 TEST(IdlCompilerTest, SemanticRejectsImportBeforePackage) {
     const char* dir = "/tmp/omni-idlc_test_import_before_package";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     { std::ofstream f(std::string(dir) + "/types.bidl"); f << "package types; struct Value { int32 x; }"; }
     const std::string source = "import \"types.bidl\"; package demo; struct Local { int32 x; }";
     ParseContext ctx;
@@ -892,7 +924,7 @@ TEST(IdlCompilerTest, SemanticRejectsPackageLessFiles) {
     ASSERT_NE(error.find("package declaration is required"), std::string::npos) << error;
 
     const char* dir = "/tmp/omni-idlc_test_packageless_import";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     { std::ofstream f(std::string(dir) + "/types.bidl"); f << "package types; struct Value { int32 x; }"; }
     const std::string source = "import \"types.bidl\"; struct Local { int32 x; }";
     ParseContext import_ctx;
@@ -907,7 +939,7 @@ TEST(IdlCompilerTest, SemanticRejectsPackageLessFiles) {
 
 TEST(IdlCompilerTest, SemanticUsesQualifiedTypeIdentityAcrossPackages) {
     const char* dir = "/tmp/omni-idlc_test_qualified_identity";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     {
         std::ofstream file(std::string(dir) + "/left.bidl");
         file << "package left; struct Value { int32 left_value; }";
@@ -989,7 +1021,7 @@ TEST(IdlCompilerTest, SemanticRejectsDuplicateStructAndTopicFields) {
 
 TEST(IdlCompilerTest, SemanticImportVisibilityRejectsRootSiblingLeakage) {
     const char* dir = "/tmp/omni-idlc_test_sibling_visibility";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     { std::ofstream f(std::string(dir) + "/left.bidl"); f << "package left; struct UsesRight { right.Value value; }"; }
     { std::ofstream f(std::string(dir) + "/right.bidl"); f << "package right; struct Value { int32 x; }"; }
     const std::string source =
@@ -1008,7 +1040,7 @@ TEST(IdlCompilerTest, SemanticImportVisibilityRejectsRootSiblingLeakage) {
 
 TEST(IdlCompilerTest, SemanticImportVisibilityPreservesTransitiveImports) {
     const char* dir = "/tmp/omni-idlc_test_transitive_visibility";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     { std::ofstream f(std::string(dir) + "/base.bidl"); f << "package base; struct Value { int32 x; }"; }
     { std::ofstream f(std::string(dir) + "/middle.bidl"); f << "package middle; import \"base.bidl\"; struct Holder { base.Value value; }"; }
     const std::string source =
@@ -1069,7 +1101,8 @@ TEST(IdlCompilerTest, ExecutableRejectsPackageLessGenerationWithoutOutput) {
     GTEST_SKIP() << "omni-idlc executable is not built in this configuration";
 #else
     const char* dir = "/tmp/omni-idlc_test_package_required";
-    ASSERT_EQ(system(std::string("rm -rf " + std::string(dir) + " && mkdir -p " + dir).c_str()), 0);
+    removeTree(dir);
+    ensureDir(dir);
     const std::string input = std::string(dir) + "/package_less.bidl";
     { std::ofstream file(input.c_str()); file << "struct Value { int32 x; }"; }
     const std::string command = std::string(OMNI_IDLC_PATH) + " --lang=cpp --output=" + dir + " " + input;
@@ -1200,7 +1233,7 @@ TEST(IdlCompilerTest, SemanticOrdersForwardByValueStructDependencies) {
     ASSERT_EQ(ast.structs[2].name, "Independent");
 
     const char* dir = "/tmp/omni-idlc_test_forward_order";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     CppCodeGen cpp_gen;
     CCodeGen c_gen;
     ASSERT_TRUE(cpp_gen.generate(ast, dir, "forward"));
@@ -1254,7 +1287,7 @@ TEST(IdlCompilerTest, CodegenCppArrayUsesBufferSuffixMethods) {
     ASSERT_FALSE(parser.hasError());
 
     const char* dir = "/tmp/omni-idlc_test_codegen_cpp_arrays";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     CppCodeGen gen;
     ASSERT_TRUE(gen.generate(ast, dir, "arrays"));
@@ -1292,7 +1325,7 @@ TEST(IdlCompilerTest, CodegenCppMethodArraysUseRecursiveBufferLogic) {
     ASSERT_FALSE(parser.hasError());
 
     const char* dir = "/tmp/omni-idlc_test_codegen_cpp_method_arrays";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     CppCodeGen gen;
     ASSERT_TRUE(gen.generate(ast, dir, "array_service"));
@@ -1336,7 +1369,7 @@ TEST(IdlCompilerTest, CodegenCppCustomArraysUseRecursiveCustomLogic) {
     ASSERT_FALSE(parser.hasError());
 
     const char* dir = "/tmp/omni-idlc_test_codegen_cpp_custom_arrays";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     CppCodeGen gen;
     ASSERT_TRUE(gen.generate(ast, dir, "custom_arrays"));
@@ -1375,7 +1408,7 @@ TEST(IdlCompilerTest, CodegenCppNestedArraysUseDistinctLoopDepths) {
     ASSERT_FALSE(parser.hasError());
 
     const char* dir = "/tmp/omni-idlc_test_codegen_cpp_nested_arrays";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     CppCodeGen gen;
     ASSERT_TRUE(gen.generate(ast, dir, "nested_arrays"));
@@ -1407,7 +1440,7 @@ TEST(IdlCompilerTest, CodegenCppVoidProxyIsOneWay) {
     ASSERT_TRUE(parseAndValidate(source, ast, ctx, error)) << error;
 
     const char* dir = "/tmp/omni-idlc_test_cpp_oneway";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
     CppCodeGen gen;
     ASSERT_TRUE(gen.generate(ast, dir, "commands"));
     const std::string header = readFile(std::string(dir) + "/commands.h");
@@ -1418,7 +1451,7 @@ TEST(IdlCompilerTest, CodegenCppVoidProxyIsOneWay) {
     ASSERT_NE(header.find("int query(const Request& request, int32_t& out);"), std::string::npos);
     ASSERT_NE(source_code.find("void CommandsProxy::reset()"), std::string::npos);
     ASSERT_NE(source_code.find("void CommandsProxy::submit(const Request& request)"), std::string::npos);
-    ASSERT_NE(source_code.find("runtime_.invokeOneWay(\"Commands\""), std::string::npos);
+    ASSERT_NE(source_code.find("runtime_.invokeOneWay(connectionKey(), 0x"), std::string::npos);
     ASSERT_EQ(source_code.find("void CommandsProxy::reset() {\n    omnibinder::Buffer req, resp;"), std::string::npos);
     ASSERT_NE(source_code.find("if (!request.serialize(req)) return;"), std::string::npos);
     ASSERT_NE(source_code.find("if (!request.serialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);"), std::string::npos);
@@ -1444,7 +1477,7 @@ TEST(IdlCompilerTest, CodegenCStringBytesSignaturesAndMetadata) {
     ASSERT_FALSE(parser.hasError());
 
     const char* dir = "/tmp/omni-idlc_test_codegen_c_strings";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     CCodeGen gen;
     ASSERT_TRUE(gen.generate(ast, dir, "blob_service"));
@@ -1516,7 +1549,7 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
     ASSERT_FALSE(parser.hasError());
 
     const char* dir = "/tmp/omni-idlc_test_codegen_guards";
-    ASSERT_EQ(system(std::string("mkdir -p " + std::string(dir)).c_str()), 0);
+    ensureDir(dir);
 
     CppCodeGen cpp_gen;
     ASSERT_TRUE(cpp_gen.generate(ast, dir, "guarded"));
@@ -1533,7 +1566,7 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
     ASSERT_TRUE(cpp.find("omnibinder::MAX_MESSAGE_SIZE / sizeof(int32_t)") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!msg.deserialize(buf)) return;") != std::string::npos);
     ASSERT_TRUE(cpp.find("GuardedServiceProxy::echo(const AllTypes& input, AllTypes& out)") != std::string::npos);
-    ASSERT_TRUE(cpp.find("int ret = runtime_.invoke(\"GuardedService\"") != std::string::npos);
+    ASSERT_TRUE(cpp.find("int ret = runtime_.invoke(connectionKey(), 0x") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (ret != 0) return ret;") != std::string::npos);
     ASSERT_TRUE(cpp.find("return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
 
@@ -1551,15 +1584,10 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
 }
 
 TEST(IdlCompilerTest, CodegenCCustomStructNamingIsForwardDeclSafe) {
-#ifdef _WIN32
-    std::string dir = "omni-idlc_test_codegen_c_custom";
-    mkdir(dir.c_str());
-#else
     char dir_template[] = "/tmp/omni-idlc_test_codegen_c_custom_XXXXXX";
     char* dir_path = mkdtemp(dir_template);
     ASSERT_TRUE(dir_path != NULL);
     std::string dir(dir_path);
-#endif
 
     const std::string common_src =
         "package common;\n"
@@ -1622,6 +1650,5 @@ TEST(IdlCompilerTest, CodegenCCustomStructNamingIsForwardDeclSafe) {
     ASSERT_TRUE(header.find("struct demo_Item item;") != std::string::npos);
     ASSERT_TRUE(header.find("struct demo_Item* data;") != std::string::npos);
 
-    unlink(common_path.c_str());
-    unlink(main_path.c_str());
+    removeTree(dir);
 }

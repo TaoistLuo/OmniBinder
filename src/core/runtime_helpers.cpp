@@ -21,17 +21,21 @@ const char* dataChannelKindName(TransportType type) {
     return type == TransportType::SHM ? "SHM" : "TCP";
 }
 
-void diag_serialize_event(Buffer& buf, uint8_t direction, const Message& msg) {
+bool diag_serialize_event(Buffer& buf, uint8_t direction, const Message& msg) {
     uint64_t ts_us = static_cast<uint64_t>(platform::currentTimeUs());
-    buf.writeUint8(direction);
     // 时间戳与其他字段一致使用小端序（协议文档约定全协议小端）
-    buf.writeUint64(ts_us);
-    buf.writeUint16(static_cast<uint16_t>(msg.getType()));
-    buf.writeUint32(msg.getSequence());
-    buf.writeUint32(static_cast<uint32_t>(msg.payload.size()));
-    if (msg.payload.size() > 0) {
-        buf.writeRaw(msg.payload.data(), msg.payload.size());
+    if (!buf.writeUint8(direction)
+        || !buf.writeUint64(ts_us)
+        || !buf.writeUint16(static_cast<uint16_t>(msg.getType()))
+        || !buf.writeUint32(msg.getSequence())
+        || !buf.writeUint32(static_cast<uint32_t>(msg.payload.size()))) {
+        return false;
     }
+    if (msg.payload.size() > 0
+        && !buf.writeRaw(msg.payload.data(), msg.payload.size())) {
+        return false;
+    }
+    return true;
 }
 
 bool decodeInvokePayload(const Message& msg, uint32_t& interface_id,
@@ -64,11 +68,6 @@ bool decodeBroadcastPayload(const Message& msg, uint32_t& topic_id, Buffer& payl
     payload.clear();
     return payload_len == 0
         || payload.writeRaw(buf.data() + buf.readPosition(), payload_len);
-}
-
-bool decodeSingleStringPayload(const Message& msg, std::string& value) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    return buf.tryReadString(value);
 }
 
 bool decodeBoolReplyPayload(const Message& msg, bool& value) {

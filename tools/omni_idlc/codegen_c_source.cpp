@@ -209,6 +209,42 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     os << "}\n\n";
 }
 
+/* @brief 生成 struct/topic 共用的 _init/_destroy 定义
+ * @param[in,out] os 输出流
+ * @param[in] tname 生成类型名
+ * @param[in] fields 字段列表
+ * @param[in] pkg 包名
+ * @note struct 与 topic 的 init/destroy 完全一致，仅字段来源不同
+ */
+static void emitInitDestroy(std::ostream& os, const std::string& tname,
+                            const std::vector<FieldDef>& fields, const std::string& pkg) {
+    os << "void " << tname << "_init(" << tname << "* self) {\n";
+    os << "    memset(self, 0, sizeof(*self));\n";
+    os << "}\n\n";
+
+    os << "void " << tname << "_destroy(" << tname << "* self) {\n";
+    bool has_destroy_logic = false;
+    for (size_t j = 0; j < fields.size(); ++j) {
+        const FieldDef& f = fields[j];
+        if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
+            has_destroy_logic = true;
+            os << "    if (self->" << f.name << ") { omni_free(self->" << f.name
+               << "); self->" << f.name << " = NULL; }\n";
+        } else if (f.type.isArray()) {
+            has_destroy_logic = true;
+            os << "    " << cArrayTypeName(f.type, pkg) << "_destroy(&self->" << f.name << ");\n";
+        } else if (f.type.primitive == TYPE_CUSTOM) {
+            has_destroy_logic = true;
+            std::string cpkg = f.type.package_name.empty() ? pkg : f.type.package_name;
+            os << "    " << cpkg << "_" << f.type.custom_name << "_destroy(&self->" << f.name << ");\n";
+        }
+    }
+    if (!has_destroy_logic) {
+        os << "    (void)self;\n";
+    }
+    os << "}\n\n";
+}
+
 void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::string& filename) {
     std::vector<TypeRef> array_types = collectArrayTypesFromAst(ast, pkg_);
     emitGeneratedFileBanner(os,
@@ -226,73 +262,19 @@ void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::s
     // 结构体初始化/销毁/序列化/反序列化
     for (size_t i = 0; i < ast.structs.size(); ++i) {
         const StructDef& s = ast.structs[i];
-        std::string tname = pkg_ + "_" + s.name;
-
-        // 初始化
-        os << "void " << tname << "_init(" << tname << "* self) {\n";
-        os << "    memset(self, 0, sizeof(*self));\n";
-        os << "}\n\n";
-
-        // 销毁
-        os << "void " << tname << "_destroy(" << tname << "* self) {\n";
-        bool has_destroy_logic = false;
-        for (size_t j = 0; j < s.fields.size(); ++j) {
-            const FieldDef& f = s.fields[j];
-            if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
-                has_destroy_logic = true;
-                os << "    if (self->" << f.name << ") { omni_free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
-            } else if (f.type.isArray()) {
-                has_destroy_logic = true;
-                os << "    " << cArrayTypeName(f.type, pkg_) << "_destroy(&self->" << f.name << ");\n";
-            } else if (f.type.primitive == TYPE_CUSTOM) {
-                has_destroy_logic = true;
-                std::string cpkg = f.type.package_name.empty() ? pkg_ : f.type.package_name;
-                os << "    " << cpkg << "_" << f.type.custom_name << "_destroy(&self->" << f.name << ");\n";
-            }
-        }
-        if (!has_destroy_logic) {
-            os << "    (void)self;\n";
-        }
-        os << "}\n\n";
-
-        genStructSerialize(s, os);
-        genStructDeserialize(s, os);
+        const std::string tname = pkg_ + "_" + s.name;
+        emitInitDestroy(os, tname, s.fields, pkg_);
+        emitStructSerialize(tname, s.fields, os);
+        emitStructDeserialize(tname, s.fields, os);
     }
 
     // topic 初始化/销毁/序列化/反序列化
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         const TopicDef& t = ast.topics[i];
-        std::string tname = pkg_ + "_" + t.name;
-
-        // 初始化
-        os << "void " << tname << "_init(" << tname << "* self) {\n";
-        os << "    memset(self, 0, sizeof(*self));\n";
-        os << "}\n\n";
-
-        // 销毁
-        os << "void " << tname << "_destroy(" << tname << "* self) {\n";
-        bool has_destroy_logic = false;
-        for (size_t j = 0; j < t.fields.size(); ++j) {
-            const FieldDef& f = t.fields[j];
-            if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
-                has_destroy_logic = true;
-                os << "    if (self->" << f.name << ") { omni_free(self->" << f.name << "); self->" << f.name << " = NULL; }\n";
-            } else if (f.type.isArray()) {
-                has_destroy_logic = true;
-                os << "    " << cArrayTypeName(f.type, pkg_) << "_destroy(&self->" << f.name << ");\n";
-            } else if (f.type.primitive == TYPE_CUSTOM) {
-                has_destroy_logic = true;
-                std::string cpkg = f.type.package_name.empty() ? pkg_ : f.type.package_name;
-                os << "    " << cpkg << "_" << f.type.custom_name << "_destroy(&self->" << f.name << ");\n";
-            }
-        }
-        if (!has_destroy_logic) {
-            os << "    (void)self;\n";
-        }
-        os << "}\n\n";
-
-        genTopicSerialize(t, os);
-        genTopicDeserialize(t, os);
+        const std::string tname = pkg_ + "_" + t.name;
+        emitInitDestroy(os, tname, t.fields, pkg_);
+        emitStructSerialize(tname, t.fields, os);
+        emitStructDeserialize(tname, t.fields, os);
     }
 
     // 服务 Stub 与 Proxy 实现
@@ -314,56 +296,29 @@ void CCodeGen::genFieldDeserialize(const FieldDef& f, const std::string& obj, st
     emitValueDeserialize(os, f.type, name, len_name, "buf", pkg_, "    ", "goto fail");
 }
 
-void CCodeGen::genStructSerialize(const StructDef& s, std::ostream& os) {
-    std::string tname = pkg_ + "_" + s.name;
-    os << "void " << tname << "_serialize(const " << tname << "* self, omni_buffer_t* buf) {\n";
-    for (size_t i = 0; i < s.fields.size(); ++i) {
-        genFieldSerialize(s.fields[i], "self->", os);
+void CCodeGen::emitStructSerialize(const std::string& type_name,
+                                   const std::vector<FieldDef>& fields, std::ostream& os) {
+    os << "void " << type_name << "_serialize(const " << type_name << "* self, omni_buffer_t* buf) {\n";
+    for (size_t i = 0; i < fields.size(); ++i) {
+        genFieldSerialize(fields[i], "self->", os);
     }
     os << "}\n\n";
 }
 
-void CCodeGen::genStructDeserialize(const StructDef& s, std::ostream& os) {
-    std::string tname = pkg_ + "_" + s.name;
-    os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
+void CCodeGen::emitStructDeserialize(const std::string& type_name,
+                                     const std::vector<FieldDef>& fields, std::ostream& os) {
+    os << "int " << type_name << "_deserialize(" << type_name << "* self, omni_buffer_t* buf) {\n";
     os << "    if (!self || !buf) { return 0; }\n";
-    os << "    " << tname << "_destroy(self);\n";
-    os << "    " << tname << "_init(self);\n";
+    os << "    " << type_name << "_destroy(self);\n";
+    os << "    " << type_name << "_init(self);\n";
     os << "    omni_buffer_clear_error(buf);\n";
-    for (size_t i = 0; i < s.fields.size(); ++i) {
-        genFieldDeserialize(s.fields[i], "self->", os);
+    for (size_t i = 0; i < fields.size(); ++i) {
+        genFieldDeserialize(fields[i], "self->", os);
     }
     os << "    return 1;\n";
     os << "fail:\n";
-    os << "    " << tname << "_destroy(self);\n";
-    os << "    " << tname << "_init(self);\n";
-    os << "    return 0;\n";
-    os << "}\n\n";
-}
-
-void CCodeGen::genTopicSerialize(const TopicDef& t, std::ostream& os) {
-    std::string tname = pkg_ + "_" + t.name;
-    os << "void " << tname << "_serialize(const " << tname << "* self, omni_buffer_t* buf) {\n";
-    for (size_t i = 0; i < t.fields.size(); ++i) {
-        genFieldSerialize(t.fields[i], "self->", os);
-    }
-    os << "}\n\n";
-}
-
-void CCodeGen::genTopicDeserialize(const TopicDef& t, std::ostream& os) {
-    std::string tname = pkg_ + "_" + t.name;
-    os << "int " << tname << "_deserialize(" << tname << "* self, omni_buffer_t* buf) {\n";
-    os << "    if (!self || !buf) { return 0; }\n";
-    os << "    " << tname << "_destroy(self);\n";
-    os << "    " << tname << "_init(self);\n";
-    os << "    omni_buffer_clear_error(buf);\n";
-    for (size_t i = 0; i < t.fields.size(); ++i) {
-        genFieldDeserialize(t.fields[i], "self->", os);
-    }
-    os << "    return 1;\n";
-    os << "fail:\n";
-    os << "    " << tname << "_destroy(self);\n";
-    os << "    " << tname << "_init(self);\n";
+    os << "    " << type_name << "_destroy(self);\n";
+    os << "    " << type_name << "_init(self);\n";
     os << "    return 0;\n";
     os << "}\n\n";
 }
@@ -421,8 +376,8 @@ static void emitStubResultDecl(std::ostream& os, const MethodDef& m, const std::
 }
 
 static void emitStubCallbackCall(std::ostream& os, const MethodDef& m) {
-    os << "        if (data->cbs." << m.name << ") {\n";
-    os << "            data->cbs." << m.name << "(";
+    os << "        if (stub_data->cbs." << m.name << ") {\n";
+    os << "            stub_data->cbs." << m.name << "(";
     bool has_args = false;
     if (m.has_param) {
         if (isCompositePointerType(m.param.type)) {
@@ -444,7 +399,7 @@ static void emitStubCallbackCall(std::ostream& os, const MethodDef& m) {
         has_args = true;
     }
     if (has_args) os << ", ";
-    os << "data->cbs.user_data);\n";
+    os << "stub_data->cbs.user_data);\n";
     os << "        }\n";
 }
 
@@ -489,14 +444,15 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
     os << "static int " << prefix << "_on_invoke(uint32_t method_id,\n";
     os << "    const omni_buffer_t* request, omni_buffer_t* response, void* user_data)\n";
     os << "{\n";
-    os << "    " << prefix << "_stub_data* data = (" << prefix << "_stub_data*)user_data;\n";
+    os << "    " << prefix << "_stub_data* stub_data = (" << prefix << "_stub_data*)user_data;\n";
     os << "    omni_buffer_t* req = omni_buffer_create_from(omni_buffer_data(request), omni_buffer_size(request));\n\n";
 
     bool first = true;
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
         std::string upper_name = cToSnakeCase(m.name);
-        for (size_t j = 0; j < upper_name.size(); ++j) upper_name[j] = toupper(upper_name[j]);
+        for (size_t j = 0; j < upper_name.size(); ++j)
+            upper_name[j] = static_cast<char>(toupper(static_cast<unsigned char>(upper_name[j])));
 
         if (first) {
             os << "    if (method_id == " << prefix << "_METHOD_" << upper_name << ") {\n";
@@ -512,23 +468,30 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
         emitStubParamCleanup(os, m, pkg_);
     }
     if (!svc.methods.empty()) {
+        os << "    } else {\n";
+        os << "        omni_buffer_destroy(req);\n";
+        os << "        return OMNI_ERR_INVOKE_FAILED;\n";
         os << "    }\n";
+        os << "    omni_buffer_destroy(req);\n";
+        os << "    return 0;\n";
+    } else {
+        os << "    omni_buffer_destroy(req);\n";
+        os << "    return OMNI_ERR_INVOKE_FAILED;\n";
     }
-    os << "    omni_buffer_destroy(req);\n";
-    os << "    return 0;\n";
     os << "}\n\n";
 
     os << "omni_service_t* " << prefix << "_stub_create_from_callbacks(const " << prefix << "_callbacks* cbs) {\n";
-    os << "    " << prefix << "_stub_data* data = (" << prefix << "_stub_data*)omni_malloc(sizeof(" << prefix << "_stub_data));\n";
-    os << "    if (!data) return NULL;\n";
-    os << "    data->cbs = *cbs;\n";
+    os << "    " << prefix << "_stub_data* stub_data = (" << prefix << "_stub_data*)omni_malloc(sizeof(" << prefix << "_stub_data));\n";
+    os << "    if (!stub_data) return NULL;\n";
+    os << "    stub_data->cbs = *cbs;\n";
     os << "    omni_service_t* svc = omni_service_create(\"" << svc.name << "\",\n";
-    os << "        " << prefix << "_INTERFACE_ID, " << prefix << "_on_invoke, data);\n";
+    os << "        " << prefix << "_INTERFACE_ID, " << prefix << "_on_invoke, stub_data);\n";
 
     // 添加方法
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         std::string upper_name = cToSnakeCase(svc.methods[i].name);
-        for (size_t j = 0; j < upper_name.size(); ++j) upper_name[j] = toupper(upper_name[j]);
+        for (size_t j = 0; j < upper_name.size(); ++j)
+            upper_name[j] = static_cast<char>(toupper(static_cast<unsigned char>(upper_name[j])));
         std::string param_type_str = svc.methods[i].has_param ? cppTypeName(svc.methods[i].param.type) : "";
         std::string return_type_str = cppTypeName(svc.methods[i].return_type);
         uint32_t idl_hash = computeMethodHash(svc.methods[i], ast);
@@ -585,10 +548,30 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "    memset(p->_sub_ctxs, 0, sizeof(p->_sub_ctxs));\n";
     os << "    memset(p->_sub_topics, 0, sizeof(p->_sub_topics));\n";
     os << "    p->_sub_ctx_count = 0;\n";
+    os << "    p->instance_bound = 0;\n";
+    os << "    p->instance_host_id[0] = '\\0';\n";
+    os << "    p->instance_id[0] = '\\0';\n";
+    os << "}\n\n";
+
+    os << "static int " << prefix << "_copy_bounded(char* dst, size_t dst_size, const char* src) {\n";
+    os << "    size_t n = src ? strlen(src) : 0;\n";
+    os << "    if (n >= dst_size) return -1;\n";
+    os << "    if (n > 0) memcpy(dst, src, n);\n";
+    os << "    dst[n] = '\\0';\n";
+    os << "    return 0;\n";
+    os << "}\n\n";
+
+    os << "static const char* " << prefix << "_proxy_connection_key(const " << prefix << "_proxy* p) {\n";
+    os << "    return p->instance_bound\n";
+    os << "        ? omni_runtime_service_connection_key(\"" << svc.name << "\", p->instance_host_id, p->instance_id)\n";
+    os << "        : \"" << svc.name << "\";\n";
     os << "}\n\n";
 
     os << "int " << prefix << "_proxy_connect(" << prefix << "_proxy* p) {\n";
-    os << "    int ret = omni_runtime_connect_service(p->runtime, \"" << svc.name << "\");\n";
+    os << "    int ret;\n";
+    os << "    if (!p || !p->runtime) return -1;\n";
+    os << "    p->instance_bound = 0;\n";
+    os << "    ret = omni_runtime_connect_service(p->runtime, \"" << svc.name << "\");\n";
     os << "    if (ret == 0) {\n";
     os << "        p->connected = 1;\n";
     os << "        omni_runtime_enable_auto_reconnect(p->runtime, \"" << svc.name << "\", 1);\n";
@@ -600,35 +583,73 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "    return ret;\n";
     os << "}\n\n";
 
+    os << "int " << prefix << "_proxy_connect_instance(" << prefix << "_proxy* p,\n";
+    os << "    const char* host_id, const char* instance_id) {\n";
+    os << "    int ret;\n";
+    os << "    if (!p || !p->runtime || !host_id || !instance_id) return -1;\n";
+    os << "    if (" << prefix << "_copy_bounded(p->instance_host_id, sizeof(p->instance_host_id), host_id) != 0\n";
+    os << "        || " << prefix << "_copy_bounded(p->instance_id, sizeof(p->instance_id), instance_id) != 0) {\n";
+    os << "        return -1;\n";
+    os << "    }\n";
+    os << "    ret = omni_runtime_connect_service_instance(p->runtime, \"" << svc.name << "\",\n";
+    os << "        p->instance_host_id, p->instance_id);\n";
+    os << "    if (ret == 0) {\n";
+    os << "        const char* key = omni_runtime_service_connection_key(\"" << svc.name << "\",\n";
+    os << "            p->instance_host_id, p->instance_id);\n";
+    os << "        p->connected = 1;\n";
+    os << "        p->instance_bound = 1;\n";
+    os << "        omni_runtime_enable_auto_reconnect(p->runtime, key, 1);\n";
+    os << "        p->auto_reconnect_enabled = 1;\n";
+    os << "        omni_runtime_start_heartbeat(p->runtime, key, 5000, 10000);\n";
+    os << "        omni_runtime_subscribe_death_instance(p->runtime, \"" << svc.name << "\",\n";
+    os << "            p->instance_host_id, p->instance_id, " << prefix << "_internal_death_cb, p);\n";
+    os << "    }\n";
+    os << "    return ret;\n";
+    os << "}\n\n";
+
     os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p) {\n";
-    os << "    if (p->connected) {\n";
+    os << "    if (!p) return;\n";
+    os << "    if (p->instance_bound) {\n";
+    os << "        const char* key = omni_runtime_service_connection_key(\"" << svc.name << "\",\n";
+    os << "            p->instance_host_id, p->instance_id);\n";
+    os << "        omni_runtime_stop_heartbeat(p->runtime, key);\n";
+    os << "        omni_runtime_unsubscribe_death_instance(p->runtime, \"" << svc.name << "\",\n";
+    os << "            p->instance_host_id, p->instance_id);\n";
+    os << "        omni_runtime_disconnect_service_instance(p->runtime, \"" << svc.name << "\",\n";
+    os << "            p->instance_host_id, p->instance_id);\n";
+    os << "    } else {\n";
     os << "        omni_runtime_stop_heartbeat(p->runtime, \"" << svc.name << "\");\n";
     os << "        omni_runtime_unsubscribe_death(p->runtime, \"" << svc.name << "\");\n";
     os << "        omni_runtime_disconnect_service(p->runtime, \"" << svc.name << "\");\n";
-    os << "        p->connected = 0;\n";
     os << "    }\n";
+    os << "    p->connected = 0;\n";
     os << "}\n\n";
 
     os << "int " << prefix << "_proxy_is_connected(const " << prefix << "_proxy* p) {\n";
+    os << "    if (!p) return 0;\n";
     os << "    return p->connected;\n";
     os << "}\n\n";
 
     os << "void " << prefix << "_proxy_enable_auto_reconnect(" << prefix << "_proxy* p, int enable) {\n";
-    os << "    omni_runtime_enable_auto_reconnect(p->runtime, \"" << svc.name << "\", enable);\n";
+    os << "    const char* key = " << prefix << "_proxy_connection_key(p);\n";
+    os << "    omni_runtime_enable_auto_reconnect(p->runtime, key, enable);\n";
     os << "    p->auto_reconnect_enabled = enable;\n";
     os << "}\n\n";
 
     os << "void " << prefix << "_proxy_set_reconnect_interval(" << prefix << "_proxy* p, uint32_t interval_ms) {\n";
-    os << "    omni_runtime_set_reconnect_interval(p->runtime, \"" << svc.name << "\", interval_ms);\n";
+    os << "    const char* key = " << prefix << "_proxy_connection_key(p);\n";
+    os << "    omni_runtime_set_reconnect_interval(p->runtime, key, interval_ms);\n";
     os << "    p->reconnect_interval_ms = interval_ms;\n";
     os << "}\n\n";
 
     os << "void " << prefix << "_proxy_start_heartbeat(" << prefix << "_proxy* p, uint32_t interval_ms, uint32_t timeout_ms) {\n";
-    os << "    omni_runtime_start_heartbeat(p->runtime, \"" << svc.name << "\", interval_ms, timeout_ms);\n";
+    os << "    const char* key = " << prefix << "_proxy_connection_key(p);\n";
+    os << "    omni_runtime_start_heartbeat(p->runtime, key, interval_ms, timeout_ms);\n";
     os << "}\n\n";
 
     os << "void " << prefix << "_proxy_stop_heartbeat(" << prefix << "_proxy* p) {\n";
-    os << "    omni_runtime_stop_heartbeat(p->runtime, \"" << svc.name << "\");\n";
+    os << "    const char* key = " << prefix << "_proxy_connection_key(p);\n";
+    os << "    omni_runtime_stop_heartbeat(p->runtime, key);\n";
     os << "}\n\n";
 }
 
@@ -647,7 +668,9 @@ static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const
     os << ") {\n";
 
     os << "    omni_buffer_t* req = omni_buffer_create();\n";
-    os << "    omni_buffer_t* resp = omni_buffer_create();\n";
+    if (!m.return_type.isVoid()) {
+        os << "    omni_buffer_t* resp = omni_buffer_create();\n";
+    }
 
     // 序列化参数
     if (m.has_param) {
@@ -667,11 +690,24 @@ static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const
 
     uint32_t idl_hash = computeMethodHash(m, ast);
     if (m.return_type.isVoid()) {
-        os << "    omni_runtime_invoke_oneway(p->runtime, \"" << svc.name << "\",\n";
-        os << "        0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
+        os << "    if (p->instance_bound) {\n";
+        os << "        omni_runtime_invoke_oneway_instance(p->runtime, \"" << svc.name << "\",\n";
+        os << "            p->instance_host_id, p->instance_id,\n";
+        os << "            0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
+        os << "    } else {\n";
+        os << "        omni_runtime_invoke_oneway(p->runtime, \"" << svc.name << "\",\n";
+        os << "            0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
+        os << "    }\n";
     } else {
-        os << "    int ret = omni_runtime_invoke(p->runtime, \"" << svc.name << "\",\n";
-        os << "        0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
+        os << "    int ret;\n";
+        os << "    if (p->instance_bound) {\n";
+        os << "        ret = omni_runtime_invoke_instance(p->runtime, \"" << svc.name << "\",\n";
+        os << "            p->instance_host_id, p->instance_id,\n";
+        os << "            0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
+        os << "    } else {\n";
+        os << "        ret = omni_runtime_invoke(p->runtime, \"" << svc.name << "\",\n";
+        os << "            0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
+        os << "    }\n";
     }
 
     // 反序列化结果
@@ -696,7 +732,9 @@ static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const
     }
 
     os << "    omni_buffer_destroy(req);\n";
-    os << "    omni_buffer_destroy(resp);\n";
+    if (!m.return_type.isVoid()) {
+        os << "    omni_buffer_destroy(resp);\n";
+    }
 
     if (!m.return_type.isVoid()) {
         os << "    return ret;\n";
@@ -738,7 +776,7 @@ static void emitProxySubscribeSource(std::ostream& os, const std::string& topic,
     os << "int  " << fn_name << "(" << prefix << "_proxy* p,\n";
     os << "    void (*callback)(const " << topic_type << "* msg, void* user_data), void* user_data)\n";
     os << "{\n";
-    os << "    if (p->_sub_ctx_count >= 8 || !p->runtime) return -1;\n";
+    os << "    if (p->_sub_ctx_count >= " << prefix << "_PROXY_MAX_SUBSCRIPTIONS || !p->runtime) return -1;\n";
     os << "    " << prefix << "_" << topic_snake << "_sub_ctx* ctx =\n";
     os << "        (" << prefix << "_" << topic_snake << "_sub_ctx*)omni_malloc(\n";
     os << "            sizeof(" << prefix << "_" << topic_snake << "_sub_ctx));\n";
@@ -775,12 +813,17 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& ast, 
     os << "void " << prefix << "_proxy_on_service_died(" << prefix << "_proxy* p,\n";
     os << "    void (*callback)(void* user_data), void* user_data)\n";
     os << "{\n";
+    os << "    if (!p) return;\n";
     os << "    p->death_callback = callback;\n";
     os << "    p->death_user_data = user_data;\n";
     os << "}\n\n";
 
     os << "void " << prefix << "_proxy_destroy(" << prefix << "_proxy* p)\n";
     os << "{\n";
+    os << "    if (!p) return;\n";
+    // 先断开：摘除死亡订阅/心跳/自动重连与数据面连接，避免 proxy 释放后
+    // 死亡回调仍持有 user_data=p 访问已销毁对象（UAF）。
+    os << "    " << prefix << "_proxy_disconnect(p);\n";
     os << "    for (int i = 0; i < p->_sub_ctx_count; ++i) {\n";
     os << "        if (p->runtime && p->_sub_topics[i]) {\n";
     os << "            omni_runtime_unsubscribe_topic(p->runtime, p->_sub_topics[i]);\n";

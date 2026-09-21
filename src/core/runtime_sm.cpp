@@ -71,8 +71,8 @@ int OmniRuntime::Impl::sendSMRequestAndWaitReply(Message& msg, Message& reply,
 int OmniRuntime::Impl::sendRuntimeHello() {
     Message msg(MessageType::MSG_RUNTIME_HELLO, allocSequence());
     RuntimeInfo info;
-    info.pid = pid_;
-    info.process_name = process_name_;
+    info.pid = diag_.pid;
+    info.process_name = diag_.process_name;
     info.log_level = static_cast<uint32_t>(g_omni_log_level);
     info.diag_capabilities = RUNTIME_DIAG_CAP_WATCH;
     if (!serializeRuntimeInfo(info, msg.payload)) {
@@ -93,7 +93,7 @@ int OmniRuntime::Impl::sendRuntimeHello() {
 }
 
 void OmniRuntime::Impl::dropServiceManagerConnection() {
-    diag_watch_active_ = false;
+    diag_.watch_active = false;
     sm_reconnect_needed_ = true;
     sm_channel_.closeTransport(*loop_);
 }
@@ -128,6 +128,7 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
     if (type == MessageType::MSG_LOOKUP_REPLY
         || type == MessageType::MSG_LIST_SERVICES_REPLY
         || type == MessageType::MSG_QUERY_INTERFACES_REPLY
+        || type == MessageType::MSG_LIST_INSTANCES_REPLY
         || type == MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY
         || type == MessageType::MSG_SUBSCRIBE_SERVICE_REPLY
         || type == MessageType::MSG_REGISTER_REPLY
@@ -165,14 +166,14 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
     }
     case MessageType::MSG_DIAG_WATCH_START: {
         bool ok = initDiagDataService();
-        diag_watch_active_ = ok;
+        diag_.watch_active = ok;
         Message reply(MessageType::MSG_DIAG_WATCH_START_REPLY, msg.getSequence());
         reply.payload.writeBool(ok);
         sendToSM(reply);
         break;
     }
     case MessageType::MSG_DIAG_WATCH_STOP: {
-        diag_watch_active_ = false;
+        diag_.watch_active = false;
         destroyDiagDataService();
         Message reply(MessageType::MSG_DIAG_WATCH_STOP_REPLY, msg.getSequence());
         reply.payload.writeBool(true);
@@ -182,6 +183,7 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
     case MessageType::MSG_HEARTBEAT_ACK:
         break;
     case MessageType::MSG_DEATH_NOTIFY:
+    case MessageType::MSG_DEATH_NOTIFY_INSTANCE:
         handleDeathNotify(msg);
         break;
     case MessageType::MSG_TOPIC_PUBLISHER_NOTIFY:
@@ -194,21 +196,68 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
 }
 
 void OmniRuntime::Impl::handleDeathNotify(const Message& msg) {
-    std::string svc_name;
-    if (!decodeSingleStringPayload(msg, svc_name)) {
+    BufferView buf(msg.payload.data(), msg.payload.size());
+    ServiceIdentity identity;
+    if (!readServiceIdentityPayload(buf, identity.name, identity.host_id, identity.instance_id)) {
         OMNI_LOG_WARN(LOG_TAG, "malformed_death_notify seq=%u err=%d",
                       msg.getSequence(), static_cast<int>(ErrorCode::ERR_DESERIALIZE));
         return;
     }
-    OMNI_LOG_WARN(LOG_TAG, "Service died: %s", svc_name.c_str());
-    ServiceState* dead_state = findServiceState(svc_name);
-    if (dead_state && dead_state->has_death && dead_state->death_cb) {
-        // 先拷贝到局部变量再调用：回调内可能 unsubscribeServiceDeath 清除该节点，
-        // 消除对失效迭代器/容器状态的脆弱依赖
-        DeathCallback callback = dead_state->death_cb;
-        callback(svc_name);
+
+    // MSG_DEATH_NOTIFY：名字已无存活实例（名字级死亡）；MSG_DEATH_NOTIFY_INSTANCE：
+    // 仅该实例死亡，同名仍有存活实例。两者都携带完整实例身份。
+    const bool name_death = (msg.getType() == MessageType::MSG_DEATH_NOTIFY);
+    OMNI_LOG_WARN(LOG_TAG, "Service instance died: %s (host_id=%s, instance_id=%s, name_death=%d)",
+                  identity.name.c_str(), identity.host_id.c_str(),
+                  identity.instance_id.c_str(), name_death ? 1 : 0);
+
+    // 实例级订阅：按身份精确匹配。先拷贝回调再调用：回调内可能
+    // unsubscribeServiceInstanceDeath 清除该节点（约束 1）
+    std::map<std::string, InstanceDeathSubscription>::iterator iit =
+        instance_deaths_.find(makeServiceIdentityKey(identity));
+    if (iit != instance_deaths_.end()) {
+        DeathSourceCallback callback = iit->second.callback;
+        callback(identity.name, identity.host_id, identity.instance_id);
     }
-    handleServiceLost(svc_name);
+
+    if (name_death) {
+        ServiceState* dead_state = findServiceState(identity.name);
+        if (dead_state && dead_state->has_death && dead_state->death_cb) {
+            // 先拷贝到局部变量再调用：回调内可能 unsubscribeServiceDeath 清除该节点，
+            // 消除对失效迭代器/容器状态的脆弱依赖
+            DeathCallback callback = dead_state->death_cb;
+            callback(identity.name);
+        }
+    }
+
+    // 状态清理：实例级只清该实例键；名字级清该名与其全部实例键，不误伤同名其它实例
+    if (name_death) {
+        std::vector<std::string> instance_keys;
+        const std::string prefix = identity.name + '\x1f';
+        for (std::map<std::string, ServiceState>::iterator it = services_.begin();
+             it != services_.end(); ++it) {
+            if (it->first.compare(0, prefix.size(), prefix) == 0) {
+                instance_keys.push_back(it->first);
+            }
+        }
+        handleServiceLost(identity.name);
+        for (size_t i = 0; i < instance_keys.size(); ++i) {
+            handleServiceLost(instance_keys[i]);
+        }
+        return;
+    }
+
+    // 默认（按名）连接恰好指向该实例时也一并清理其按名状态
+    ServiceState* name_state = findServiceState(identity.name);
+    const bool name_key_is_dead_instance = name_state && name_state->has_info
+        && name_state->info.host_id == identity.host_id
+        && name_state->info.instance_id == identity.instance_id;
+
+    handleServiceLost(
+        makeServiceConnectionKey(identity.name, identity.host_id, identity.instance_id));
+    if (name_key_is_dead_instance) {
+        handleServiceLost(identity.name);
+    }
 }
 
 void OmniRuntime::Impl::handleTopicPublisherNotify(const Message& msg) {
@@ -231,21 +280,40 @@ void OmniRuntime::Impl::handleTopicPublisherNotify(const Message& msg) {
         return;
     }
 
-    // 发布者声明了哈希且与订阅者期望不一致时，通知 on_err 并摘除订阅，不建立数据面连接。
-    // 发布者未声明哈希（0）视为无法校验，保持兼容放行。
-    const uint32_t expected_idl_hash = topic_runtime_.expectedSubscriptionHash(topic);
-    if (expected_idl_hash != 0 && publisher_idl_hash != expected_idl_hash) {
-        OMNI_LOG_WARN(LOG_TAG,
-                      "topic_idl_mismatch topic=%s expected_hash=0x%08x publisher_hash=0x%08x",
-                      topic.c_str(), expected_idl_hash, publisher_idl_hash);
-        // notifyError 可能经用户回调修改订阅表（约束 2），topic 为局部副本可安全继续使用
-        topic_runtime_.notifyError(fnv1a_32(topic), ErrorCode::ERR_IDL_MISMATCH);
-        unsubscribeTopicInternal(topic);
+    // 按订阅选择器过滤：服务级/实例级订阅只接受匹配的发布者实例，未匹配则忽略
+    std::vector<TopicRuntime::MatchedSubscription> matched = topic_runtime_.matchSubscriptions(
+        topic, pub_info.name, pub_info.host_id, pub_info.instance_id);
+    if (matched.empty()) {
+        OMNI_LOG_DEBUG(LOG_TAG,
+                       "topic_publisher_notify_ignored topic=%s service=%s instance=%s",
+                       topic.c_str(), pub_info.name.c_str(), pub_info.instance_id.c_str());
         return;
     }
 
-    OMNI_LOG_INFO(LOG_TAG, "Topic %s publisher at %s:%u",
-                    topic.c_str(), pub_info.host.c_str(), pub_info.port);
+    // 发布者声明了哈希且与订阅者期望不一致时，通知该订阅 on_err 并摘除，不建立数据面连接。
+    // 发布者未声明哈希（0）视为无法校验，保持兼容放行。
+    bool any_accepted = false;
+    for (size_t i = 0; i < matched.size(); ++i) {
+        if (matched[i].expected_idl_hash != 0 && publisher_idl_hash != 0
+            && publisher_idl_hash != matched[i].expected_idl_hash) {
+            OMNI_LOG_WARN(LOG_TAG,
+                          "topic_idl_mismatch topic=%s expected_hash=0x%08x publisher_hash=0x%08x",
+                          topic.c_str(), matched[i].expected_idl_hash, publisher_idl_hash);
+            // notify 可能经用户回调修改订阅表（约束 2），topic/key 为局部副本可安全继续使用
+            topic_runtime_.notifySubscriptionError(topic, matched[i].key,
+                                                   ErrorCode::ERR_IDL_MISMATCH);
+            topic_runtime_.forgetSubscription(topic, matched[i].selector);
+            continue;
+        }
+        any_accepted = true;
+    }
+    if (!any_accepted) {
+        return;
+    }
+
+    OMNI_LOG_INFO(LOG_TAG, "Topic %s publisher at %s:%u (service=%s, instance=%s)",
+                    topic.c_str(), pub_info.host.c_str(), pub_info.port,
+                    pub_info.name.c_str(), pub_info.instance_id.c_str());
     if (!ensureTopicPublisherConnection(topic, pub_info)) {
         OMNI_LOG_WARN(LOG_TAG, "Failed to establish topic publisher path for %s", topic.c_str());
         // 发布者连接建立失败：通知订阅者 on_err 回调
@@ -258,13 +326,15 @@ void OmniRuntime::Impl::handleTopicPublisherNotify(const Message& msg) {
 // ============================================================
 
 int OmniRuntime::Impl::reconnectServiceManager() {
-    stats_.sm_reconnect_attempts++;
-    OMNI_LOG_WARN(LOG_TAG, "sm_reconnect_begin host=%s port=%u attempt=%lu",
-                  sm_host_.c_str(), sm_port_,
-                  static_cast<unsigned long>(stats_.sm_reconnect_attempts));
+    // 未初始化时不算一次重连尝试（此前在 loop_ 检查前自增，会把未 init 的调用
+    // 也计入计数并打印重连日志）
     if (!loop_) {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
+    diag_.stats.sm_reconnect_attempts++;
+    OMNI_LOG_WARN(LOG_TAG, "sm_reconnect_begin host=%s port=%u attempt=%lu",
+                  sm_host_.c_str(), sm_port_,
+                  static_cast<unsigned long>(diag_.stats.sm_reconnect_attempts));
 
     sm_channel_.closeTransport(*loop_);
     // 只清理控制面等待槽；数据面等待槽由 RpcRuntime 独立持有，在途直连 RPC 不受影响
@@ -272,8 +342,8 @@ int OmniRuntime::Impl::reconnectServiceManager() {
     // 旧连接上的半帧字节不得混入新连接的数据流
     sm_channel_.clearReceiveBuffer();
     // watcher 与 SM 的关联随旧连接失效，标记待重放（约束 6）
-    for (std::map<uint32_t, DiagWatcherEntry>::iterator wit = diag_watchers_.begin();
-         wit != diag_watchers_.end(); ++wit) {
+    for (std::map<uint32_t, DiagWatcherEntry>::iterator wit = diag_.watchers.begin();
+         wit != diag_.watchers.end(); ++wit) {
         wit->second.active = false;
     }
 
@@ -287,7 +357,7 @@ int OmniRuntime::Impl::reconnectServiceManager() {
     loop_->addFd(sm_channel_.transport()->fd(), EventLoop::EVENT_READ,
         [this](int fd, uint32_t events) { this->onSMData(fd, events); });
     sm_reconnect_needed_ = false;
-    stats_.sm_reconnect_successes++;
+    diag_.stats.sm_reconnect_successes++;
     for (std::map<std::string, ServiceState>::iterator it = services_.begin();
          it != services_.end();) {
         it->second.info = ServiceInfo();
@@ -303,7 +373,7 @@ int OmniRuntime::Impl::reconnectServiceManager() {
     }
     OMNI_LOG_INFO(LOG_TAG, "sm_reconnect_success host=%s port=%u success_count=%lu",
                   sm_host_.c_str(), sm_port_,
-                  static_cast<unsigned long>(stats_.sm_reconnect_successes));
+                  static_cast<unsigned long>(diag_.stats.sm_reconnect_successes));
     return 0;
 }
 
@@ -343,6 +413,19 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         }
     }
 
+    // 同上：实例级死亡订阅也须恢复（约束 6），先拷贝 key 再逐个重放
+    std::vector<std::string> instance_death_keys;
+    for (std::map<std::string, InstanceDeathSubscription>::iterator it = instance_deaths_.begin();
+         it != instance_deaths_.end(); ++it) {
+        instance_death_keys.push_back(it->first);
+    }
+    for (size_t i = 0; i < instance_death_keys.size(); ++i) {
+        int ret = restoreSubscribeInstanceDeath(instance_death_keys[i]);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+
     std::map<std::string, std::string> published_owners = topic_runtime_.publishedTopicOwners();
     std::map<std::string, uint32_t> published_hashes = topic_runtime_.publishedTopicHashes();
     for (std::map<std::string, std::string>::iterator it = published_owners.begin();
@@ -358,11 +441,10 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         }
     }
 
-    std::map<std::string, TopicCallback> subscriptions = topic_runtime_.subscriptions();
-    for (std::map<std::string, TopicCallback>::iterator it = subscriptions.begin();
-         it != subscriptions.end(); ++it) {
-        int ret = restoreSubscribeTopic(it->first,
-                                        topic_runtime_.expectedSubscriptionHash(it->first));
+    std::vector<TopicRuntime::SubscriptionRecord> subscriptions =
+        topic_runtime_.subscriptionRecords();
+    for (size_t i = 0; i < subscriptions.size(); ++i) {
+        int ret = restoreSubscribeTopic(subscriptions[i]);
         if (ret != 0) {
             return ret;
         }
@@ -406,17 +488,39 @@ int OmniRuntime::Impl::restoreSubscribeDeath(const std::string& name) {
     }
     Message msg(MessageType::MSG_SUBSCRIBE_SERVICE, allocSequence());
     msg.payload.writeString(name);
-    if (!sendToSM(msg)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) {
         return ret;
     }
     bool accepted = false;
     if (!decodeBoolReplyPayload(reply, accepted) || !accepted) {
         OMNI_LOG_WARN(LOG_TAG, "restore subscribe death failed for %s", name.c_str());
+    }
+    return 0;
+}
+
+int OmniRuntime::Impl::restoreSubscribeInstanceDeath(const std::string& instance_key) {
+    std::map<std::string, InstanceDeathSubscription>::iterator it =
+        instance_deaths_.find(instance_key);
+    if (it == instance_deaths_.end()) {
+        return 0;
+    }
+    const InstanceDeathSubscription sub = it->second;  // 拷贝后使用：重放期间用户可改订阅表
+
+    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE, allocSequence());
+    if (!writeServiceIdentityPayload(msg.payload, sub.name, sub.host_id, sub.instance_id)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+    Message reply;
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) {
+        return ret;
+    }
+    bool accepted = false;
+    if (!decodeBoolReplyPayload(reply, accepted) || !accepted) {
+        OMNI_LOG_WARN(LOG_TAG, "restore subscribe instance death failed for %s",
+                      instance_key.c_str());
     }
     return 0;
 }
@@ -431,9 +535,13 @@ int OmniRuntime::Impl::restorePublishTopic(const std::string& topic, const std::
     msg.payload.writeString(topic);
     ServiceInfo pub_info;
     pub_info.name = owner;
-    pub_info.host = listenerAdvertiseHost();
+    // 与恢复注册（restoreRegisterService）保持一致：跨机部署必须用
+    // resolveRegisterHost 解析出的可达地址，否则发布者端点退化为 127.0.0.1，
+    // 其它机器的话题直连被破坏
+    pub_info.host = resolveRegisterHost(sit->second->service, listenerAdvertiseHost());
     pub_info.port = sit->second->port;
     pub_info.host_id = host_id_;
+    pub_info.instance_id = sit->second->service->instanceId();
     pub_info.shm_config = sit->second->service->shmConfig();
     if (!serializeServiceInfo(pub_info, msg.payload)) {
         OMNI_LOG_ERROR(LOG_TAG, "serialize_restore_publish_topic_failed topic=%s", topic.c_str());
@@ -443,11 +551,8 @@ int OmniRuntime::Impl::restorePublishTopic(const std::string& topic, const std::
         return static_cast<int>(ErrorCode::ERR_SERIALIZE);
     }
 
-    if (!sendToSM(msg)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
-    }
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) {
         return ret;
     }
@@ -458,17 +563,24 @@ int OmniRuntime::Impl::restorePublishTopic(const std::string& topic, const std::
     return 0;
 }
 
-int OmniRuntime::Impl::restoreSubscribeTopic(const std::string& topic,
-                                             uint32_t expected_idl_hash) {
-    topic_runtime_.setExpectedSubscriptionHash(topic, expected_idl_hash);
+int OmniRuntime::Impl::restoreSubscribeTopic(
+    const TopicRuntime::SubscriptionRecord& record) {
+    const std::string& topic = record.topic_name;
+    const TopicRuntime::SubscriptionSelector& selector = record.selector;
+    topic_runtime_.setExpectedSubscriptionHash(topic, selector, record.expected_idl_hash);
 
     Message msg(MessageType::MSG_SUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic);
-    if (!sendToSM(msg)) {
-        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
+    if (!selector.publisher_service.empty()) {
+        const uint8_t mode = selector.instance_level ? TOPIC_SUB_MODE_INSTANCE
+                                                     : TOPIC_SUB_MODE_SERVICE;
+        if (!writeTopicSubscriptionSelector(msg.payload, mode, selector.publisher_service,
+                                            selector.host_id, selector.instance_id)) {
+            return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+        }
     }
     Message reply;
-    int ret = waitForReply(msg.getSequence(), effectiveTimeout(0), reply);
+    int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) {
         return ret;
     }
@@ -486,13 +598,13 @@ int OmniRuntime::Impl::restoreSubscribeTopic(const std::string& topic,
     }
     // 重连恢复时若发布者哈希与期望不一致：通知错误并摘除该订阅，
     // 但不阻断恢复流程（无效订阅已被移除，恢复继续收敛）
-    if (expected_idl_hash != 0 && publisher_idl_hash != 0
-        && publisher_idl_hash != expected_idl_hash) {
+    if (record.expected_idl_hash != 0 && publisher_idl_hash != 0
+        && publisher_idl_hash != record.expected_idl_hash) {
         OMNI_LOG_WARN(LOG_TAG,
                       "topic_idl_mismatch restore topic=%s expected_hash=0x%08x publisher_hash=0x%08x",
-                      topic.c_str(), expected_idl_hash, publisher_idl_hash);
+                      topic.c_str(), record.expected_idl_hash, publisher_idl_hash);
         topic_runtime_.notifyError(fnv1a_32(topic), ErrorCode::ERR_IDL_MISMATCH);
-        unsubscribeTopicInternal(topic);
+        topic_runtime_.forgetSubscription(topic, selector);
     }
     return 0;
 }
@@ -512,8 +624,8 @@ int OmniRuntime::Impl::reconnectServiceManagerIfNeeded() {
         return 0;
     }
 
-    // RAII scope guard：无论 reconnect/restore 正常返回还是抛异常（bad_alloc）
-    // 都复位 restoring_，避免异常路径导致 SM 重连恢复永久被禁用
+    // RAII scope guard：reconnect/restore 的多个提前返回路径都要复位 restoring_，
+    // 否则一次失败会让 SM 重连恢复被永久禁用
     struct RestoreScopeGuard {
         bool& restoring;
         explicit RestoreScopeGuard(bool& r) : restoring(r) { restoring = true; }
@@ -548,13 +660,13 @@ int OmniRuntime::Impl::reconnectServiceManagerIfNeeded() {
         tryReconnectService(reconnect_names[i]);
     }
 
-    // 诊断 watch 恢复：SM 断线时 onSMData 只置 diag_watch_active_ = false 而保留
-    // diag_watch_topic_id_。重连成功后 restoreControlPlaneState 已重新注册 diag 服务并
+    // 诊断 watch 恢复：SM 断线时 onSMData 只置 diag_.watch_active = false 而保留
+    // diag_.watch_topic_id。重连成功后 restoreControlPlaneState 已重新注册 diag 服务并
     // 重放 topic 发布，这里只需恢复本地事件发射开关。不能再调 initDiagDataService：
     // 其内部重复 publish 会被 SM 以"topic 已有发布者"拒绝，导致 topic_id 被清零、
     // active 保持 false，监控恢复失败。
-    if (diag_watch_topic_id_ != 0 && !diag_watch_active_) {
-        diag_watch_active_ = true;
+    if (diag_.watch_topic_id != 0 && !diag_.watch_active) {
+        diag_.watch_active = true;
     }
     return 0;
 }
@@ -565,9 +677,16 @@ int OmniRuntime::Impl::reconnectServiceManagerIfNeeded() {
 
 void OmniRuntime::Impl::sendHeartbeat() {
     // 先检查 SM 是否需要重连（客户端也可能没有注册服务，但仍需保持 SM 连接）
-    reconnectServiceManagerIfNeeded();
+    const int sm_state = reconnectServiceManagerIfNeeded();
     // 周期兜底：SM 重连时目标 pid 可能尚未重新 hello，watch 重放会先失败
-    retryInactiveDiagWatchers();
+    restoreDiagWatchers();
+
+    // SM 仍不可达时直接返回：每个名字的 sendToSMWithinTimeout 都会再次进入
+    // reconnectServiceManagerIfNeeded 并阻塞一次连接尝试（每 tick N+1 次）。
+    // 已在上方统一尝试过一次，本 tick 不再重复
+    if (sm_state != 0) {
+        return;
+    }
 
     // 先拷贝 key 再遍历：reconnectServiceManagerIfNeeded 可能触发 restore 流程，
     // 其内部 waitForReply 期间用户回调可修改 local_services_（约束 2）

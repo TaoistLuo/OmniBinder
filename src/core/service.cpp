@@ -6,6 +6,7 @@ Service::Service(const std::string& name)
     : name_(name)
     , port_(0)
     , register_host_()
+    , instance_id_()
     , shm_config_()
     , runtime_(NULL)
 {
@@ -44,6 +45,14 @@ void Service::setShmConfig(const ShmConfig& config) {
 
 ShmConfig Service::shmConfig() const {
     return shm_config_;
+}
+
+void Service::setInstanceId(const std::string& instance_id) {
+    instance_id_ = instance_id;
+}
+
+const std::string& Service::instanceId() const {
+    return instance_id_;
 }
 
 OmniRuntime* Service::runtime() const {

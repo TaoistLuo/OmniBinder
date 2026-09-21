@@ -43,6 +43,9 @@
 
 namespace omnibinder {
 
+// 连续丢失多少次心跳后判定服务离线（ServiceManager 内部策略常量）
+const uint32_t DEFAULT_MAX_MISSED_HEARTBEATS = 3;
+
 // ============================================================
 // HeartbeatMonitor — 跟踪每个服务的心跳时间戳
 //
@@ -67,30 +70,31 @@ public:
     HeartbeatMonitor& operator=(const HeartbeatMonitor&) = delete;
 
     /*
-     * @brief  记录指定服务的本次心跳
-     * @param[in]  service_name 服务名称
-     * @note   如果该服务尚未被跟踪，自动开始跟踪
+     * @brief  记录指定服务实例的本次心跳
+     * @param[in]  identity 服务实例身份
+     * @note   如果该实例尚未被跟踪，自动开始跟踪
      */
-    void updateHeartbeat(const std::string& service_name);
+    void updateHeartbeat(const ServiceIdentity& identity);
 
     /*
-     * @brief  开始跟踪指定服务
-     * @param[in]  service_name 服务名称
+     * @brief  开始跟踪指定服务实例
+     * @param[in]  identity 服务实例身份
      * @note   心跳起始时间设为当前时刻
      */
-    void startTracking(const std::string& service_name);
+    void startTracking(const ServiceIdentity& identity);
 
     /*
-     * @brief  停止跟踪指定服务
-     * @param[in]  service_name 服务名称
+     * @brief  停止跟踪指定服务实例
+     * @param[in]  identity 服务实例身份
      */
-    void stopTracking(const std::string& service_name);
+    void stopTracking(const ServiceIdentity& identity);
 
     /*
-     * @brief  检查所有已跟踪服务是否超时
-     * @return 已超时的服务名称列表
+     * @brief  检查所有已跟踪服务实例是否超时
+     * @return 已超时的服务实例身份列表
+     * @note   按完整身份 (name, host_id, instance_id) 跟踪，同名多实例互不干扰
      */
-    std::vector<std::string> checkTimeouts();
+    std::vector<ServiceIdentity> checkTimeouts();
 
     /*
      * @brief  获取当前已跟踪的服务数量
@@ -100,11 +104,13 @@ public:
 
 private:
     struct HeartbeatEntry {
+        ServiceIdentity identity;   // 该条目的完整实例身份
         int64_t last_heartbeat_ms;  // 最近一次心跳的时间戳
 
         HeartbeatEntry() : last_heartbeat_ms(0) {}
     };
 
+    // key: makeServiceIdentityKey(identity)
     std::map<std::string, HeartbeatEntry> entries_;
     uint32_t timeout_ms_;
     uint32_t max_missed_;

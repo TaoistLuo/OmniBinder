@@ -410,23 +410,25 @@ demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 ### 7.1 查询所有在线服务
 
 ```bash
-$ ./target/bin/omni-cli list
-NAME                HOST            PORT    STATUS
-----                ----            ----    ------
-SensorService       127.0.0.1       8001    ONLINE
-Total: 1 services online
+$ ./build/target/bin/omni-cli list
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            a1b2c3d4e5f6                     127.0.0.1:8001        ONLINE
+
+Total: 1 service instances online
 ```
 
 ### 7.2 查询服务详细信息
 
 **基础模式（显示类型名）：**
 ```bash
-$ ./target/bin/omni-cli info SensorService
+$ ./build/target/bin/omni-cli info SensorService
 Service: SensorService
-  Host:    127.0.0.1
-  Port:    8001
-  HostID:  a1b2c3d4e5f6
-  Status:  ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            a1b2c3d4e5f6                     127.0.0.1:8001        ONLINE
+
+Instance: instance_id="" (default) host_id="a1b2c3d4e5f6" endpoint=127.0.0.1:8001
 
   Published Topics:
     - SensorUpdate
@@ -434,19 +436,42 @@ Service: SensorService
 
   Interface: SensorService (id=0xa112646d)
     Methods:
+      - EchoBool(bool) -> bool  (id=0x8889447c)
+      - EchoInt8(int8_t) -> int8_t  (id=0x80e488bf)
+      - EchoUInt8(uint8_t) -> uint8_t  (id=0x154e42fc)
+      - EchoInt16(int16_t) -> int16_t  (id=0xded4e5f6)
+      - EchoUInt16(uint16_t) -> uint16_t  (id=0xc6499dc3)
+      - EchoInt32(int32_t) -> int32_t  (id=0xead97608)
+      - EchoUInt32(uint32_t) -> uint32_t  (id=0x5a4f03ed)
+      - EchoInt64(int64_t) -> int64_t  (id=0x5ed1dddf)
+      - EchoUInt64(uint64_t) -> uint64_t  (id=0x564231ae)
+      - EchoFloat32(float) -> float  (id=0xe6a4ec77)
+      - EchoFloat64(double) -> double  (id=0x4e98c43c)
+      - EchoString(std::string) -> std::string  (id=0x721b4145)
+      - EchoBytes(std::vector<uint8_t>) -> std::vector<uint8_t>  (id=0x27327787)
+      - EchoStatus(common::StatusResponse) -> common::StatusResponse  (id=0xfba0408e)
+      - EchoConfig(SensorConfig) -> SensorConfig  (id=0x2b5df382)
+      - EchoEnvelope(SensorEnvelope) -> SensorEnvelope  (id=0x37a58ab8)
+      - EchoIdArray(std::vector<int32_t>) -> std::vector<int32_t>  (id=0x22c9b2f2)
+      - EchoLabelArray(std::vector<std::string>) -> std::vector<std::string>  (id=0x05410ce3)
+      - EchoSensorArray(std::vector<SensorData>) -> std::vector<SensorData>  (id=0x9991eadb)
+      - EchoBundle(SensorArrayBundle) -> SensorArrayBundle  (id=0xa4e21414)
       - GetLatestData() -> SensorData  (id=0x61564c6c)
-      - SetThreshold(ControlCommand) -> common.StatusResponse  (id=0x2214744e)
-      - ResetSensor(int32) -> void  (id=0x7f2b95ee)
+      - SetThreshold(ControlCommand) -> common::StatusResponse  (id=0x2214744e)
+      - ResetSensor(int32_t) -> void  (id=0x7f2b95ee)
+      - GetSensorCount() -> int32_t  (id=0xd1719a20)
+      - RequestLatestDataAsync(AsyncRequest) -> common::StatusResponse  (id=0xad1829b3)
 ```
 
 **详细模式（展开字段定义）：**
 ```bash
-$ ./target/bin/omni-cli --idl examples/sensor_service.bidl info SensorService
+$ ./build/target/bin/omni-cli --idl examples/sensor_service.bidl info SensorService
 Service: SensorService
-  Host:    127.0.0.1
-  Port:    8001
-  HostID:  a1b2c3d4e5f6
-  Status:  ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            a1b2c3d4e5f6                     127.0.0.1:8001        ONLINE
+
+Instance: instance_id="" (default) host_id="a1b2c3d4e5f6" endpoint=127.0.0.1:8001
 
   Published Topics:
     - SensorUpdate
@@ -454,6 +479,8 @@ Service: SensorService
 
   Interface: SensorService (id=0xa112646d)
     Methods:
+      - EchoBool(bool) -> bool  (id=0x8889447c)
+      - EchoInt32(int32_t) -> int32_t  (id=0xead97608)
       - GetLatestData() -> SensorData  (id=0x61564c6c)
           return:           {
             sensor_id: int32
@@ -462,7 +489,7 @@ Service: SensorService
             timestamp: int64
             location: string
           }
-      - SetThreshold(ControlCommand) -> common.StatusResponse  (id=0x2214744e)
+      - SetThreshold(ControlCommand) -> common::StatusResponse  (id=0x2214744e)
           param:           {
             command_type: int32
             target: string
@@ -472,7 +499,8 @@ Service: SensorService
             code: int32
             message: string
           }
-      - ResetSensor(int32) -> void  (id=0x7f2b95ee)
+      - ResetSensor(int32_t) -> void  (id=0x7f2b95ee)
+      ...（其余方法同样逐条列出；带 --idl 时结构体参数/返回值按字段展开）
 ```
 
 ### 7.3 调用服务接口
@@ -581,56 +609,78 @@ make -j$(nproc)
 **终端1：启动 ServiceManager**
 ```bash
 $ ./target/bin/service_manager --port 9900
-[ServiceManager] Listening on 0.0.0.0:9900
-[ServiceManager] Waiting for service registrations...
+[INFO][ServiceManager] Listening on 0.0.0.0:9900
 ```
 
 **终端2：启动 C++ 服务端**
 ```bash
 $ ./target/example/example_cpp_sensor_server --sm-host 127.0.0.1 --sm-port 9900 --register-host 192.168.1.10
-=== SensorService Starting ===
+=== SensorService (C++ Server) Starting ===
 ServiceManager: 127.0.0.1:9900
-Connected to ServiceManager
-SensorService registered successfully
-Starting broadcast loop (Ctrl+C to stop)...
+RegisterHost: 192.168.1.10
+SensorService registered on port <port> (host_id=<host_id>, instance_id=)
+Demo service is ready. Press Ctrl+C to stop.
 
-[SensorService] Broadcast: temp=25.32, humidity=60.15
-[SensorService] Broadcast: temp=25.48, humidity=59.87
-[SensorService] Broadcast: temp=25.61, humidity=60.23
+[SensorService] GetLatestData: temp=25.0 humidity=60.0
+[Broadcast] temp=25.32 humidity=60.15
+[SensorService] GetLatestData: temp=25.32 humidity=60.15
+[Broadcast] temp=25.48 humidity=59.87
 ...
 ```
+> 服务端每轮广播前会先调用 `GetLatestData()` 打印当前值（`[SensorService] GetLatestData:`），再打印 `[Broadcast]`。
 
 **终端3：启动 C++ 客户端**
 ```bash
 $ ./target/example/example_cpp_sensor_client --sm-host 127.0.0.1 --sm-port 9900
 === SensorClient (C++ Client) Starting ===
 ServiceManager: 127.0.0.1:9900
-Connected to ServiceManager
+Discovered 1 SensorService instance(s):
+  [0] host_id=<host_id> instance_id= host=127.0.0.1 port=<port>
 Connected to SensorService
 
---- Calling GetLatestData ---
-Result: sensor_id=1, temp=25.32, humidity=60.15, location=Room-A
+--- Primitive RPCs ---
+EchoBool(false) => 1
+EchoInt8(7) => 8
+EchoUInt8(7) => 8
+EchoInt16(16) => 18
+EchoUInt16(16) => 18
+EchoInt32(32) => 35
+EchoUInt32(32) => 35
+EchoInt64(64) => 68
+EchoUInt64(64) => 68
+EchoFloat32(1.5) => 2.00
+EchoFloat64(2.5) => 2.75
+EchoString(hello) => hello_echo
+EchoBytes([3 bytes]) => size=4
 
---- Calling SetThreshold ---
-Result: code=0, message=Threshold set successfully
+--- Custom / Nested Struct RPCs ---
+EchoStatus => code=107 message=demo_echo
+EchoConfig => enabled=0 rate=30 label=sensor-main_server
+EchoEnvelope => location=Lab-1 nested_label=sensor-main_nested nanos=322
 
---- Calling ResetSensor (one-way) ---
-ResetSensor sent (no response expected)
+--- Array RPCs ---
+EchoIdArray => size=3 tail=2
+EchoLabelArray => size=3 tail=tail
+EchoSensorArray => first.location=Lab-1_echo
+EchoBundle => ids=3 labels=3 blobs=3 samples=2
 
---- Subscribing to SensorUpdate topic ---
-Subscribed to SensorUpdate
+--- Existing RPCs ---
+GetLatestData => sensor_id=1 temp=25.32 humidity=60.15 location=Room-A
+SetThreshold => code=0 message=OK
+GetSensorCount => 3
 
---- Subscribing to SensorService death notification ---
-Subscribed to death notification
+--- Topic subscriptions ---
 
-Waiting for broadcasts and notifications (Ctrl+C to stop)...
-============================================================
+--- Async RPC via topic reply ---
+RequestLatestDataAsync => code=0 message=accepted
 
-[Broadcast] SensorUpdate: sensor_id=1, temp=25.00, humidity=60.00, time=1707321601
-[Broadcast] SensorUpdate: sensor_id=1, temp=25.15, humidity=59.78, time=1707321602
-[Broadcast] SensorUpdate: sensor_id=1, temp=24.89, humidity=60.12, time=1707321603
+Waiting for broadcasts / async callbacks (Ctrl+C to stop)...
+
+[SensorUpdate] id=1 temp=25.48 humidity=59.87
+[AsyncResultReady] request_id=42 tag=cpp-client code=0 temp=25.48
 ...
 ```
+> 各 `Echo*` 返回值由示例服务端实现决定（如 `EchoInt32` 返回 `value + 3`）；上例数值仅示意格式，实际随广播数据变化。
 
 说明：客户端会持续等待广播，直到用户手动中断。自动化验证时可使用 `timeout 10s ...` 方式运行。
 
@@ -638,28 +688,43 @@ Waiting for broadcasts and notifications (Ctrl+C to stop)...
 ```bash
 # 查询服务列表（端口为运行时动态分配，以下仅示例）
 $ ./target/bin/omni-cli list
-NAME                HOST            PORT    STATUS
-----                ----            ----    ------
-SensorService       127.0.0.1       <dynamic> ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            <host_id>                        127.0.0.1:<dynamic>   ONLINE
 
-Total: 1 services online
+Total: 1 service instances online
 
 # 查看服务信息（基础模式）
 $ ./target/bin/omni-cli info SensorService
 Service: SensorService
-  Host:    127.0.0.1
-  Port:    <dynamic>
-  ...
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            <host_id>                        127.0.0.1:<dynamic>   ONLINE
+
+Instance: instance_id="" (default) host_id="<host_id>" endpoint=127.0.0.1:<dynamic>
+
+  Published Topics:
+    - SensorUpdate
+    - AsyncResultReady
+
+  Interface: SensorService (id=0xa112646d)
+    Methods:
+      ...
 
 # 调用接口（JSON 模式）
 $ ./target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
-Response (status=OK, 42 bytes, 0.85 ms):
+No instance selector given; using deterministic first instance: instance_id="" (default) host_id="<host_id>" endpoint=127.0.0.1:<dynamic>
+  Hint: use --instance-id <id> [--host-id <id>] to target another instance.
+Calling SensorService.GetLatestData() ...
+  interface_id = 0xa112646d
+  method_id    = 0x61564c6c
+Response (status=OK, 38 bytes, 0.85 ms):
   {
+    "humidity": 60.15,
+    "location": "Room-A",
     "sensor_id": 1,
     "temperature": 25.32,
-    "humidity": 60.15,
-    "timestamp": 1707321600,
-    "location": "Room-A"
+    "timestamp": 1707321600
   }
 ```
 
@@ -705,18 +770,90 @@ ctest --output-on-failure
 在终端2中按 `Ctrl+C` 杀掉 C++ 服务端，观察终端3的输出：
 
 ```
-[Broadcast] SensorUpdate: sensor_id=1, temp=25.15, humidity=59.78, time=1707321610
+[SensorUpdate] id=1 temp=25.15 humidity=59.78
 
 !!! [DeathNotify] SensorService has DIED !!!
-!!! Connection lost, need to reconnect when service restarts
+
 ```
 
 同时 ServiceManager（终端1）会输出：
 
 ```
-[ServiceManager] Service 'SensorService' heartbeat timeout, marking as dead
-[ServiceManager] Sending death notification to 1 subscriber(s)
+[WARN][HeartbeatMonitor] Service SensorService timed out (missed 1 heartbeats)
+[WARN][ServiceManager] Service timed out: SensorService (host_id=<host_id>, instance_id=)
+[INFO][DeathNotifier] Instance SensorService (host_id=<host_id>, instance_id=) died, name_gone=1, notifying 1 subscribers
 ```
+
+### 8.5 单板运行两个同名服务实例
+
+要在同一块板上运行多个**同名**服务，必须为每个实例声明**不同的 `instance_id`**：实例身份为 `(service_name, host_id, instance_id)`，相同身份会被视为同一实例而互相顶替（后来者接管）。下面以 C++ 示例演示两个 `SensorService` 实例。
+
+**终端1：启动 ServiceManager**
+```bash
+$ ./target/bin/service_manager --port 9900
+```
+
+**终端2：启动实例 A（`--instance-id ttyUSB0`）**
+```bash
+$ ./target/example/example_cpp_sensor_server --instance-id ttyUSB0
+=== SensorService (C++ Server) Starting ===
+ServiceManager: 127.0.0.1:9900
+InstanceId: ttyUSB0
+SensorService registered on port <A> (host_id=<host>, instance_id=ttyUSB0)
+```
+
+**终端3：启动实例 B（`--instance-id ttyUSB1`）**
+```bash
+$ ./target/example/example_cpp_sensor_server --instance-id ttyUSB1
+...
+SensorService registered on port <B> (host_id=<host>, instance_id=ttyUSB1)
+```
+
+此时 ServiceManager（终端1）会输出两条注册日志，两个实例并存：
+
+```
+Registered service: SensorService (handle=..., fd=..., host=127.0.0.1, port=<A>, host_id=<host>, instance_id=ttyUSB0)
+Registered service: SensorService (handle=..., fd=..., host=127.0.0.1, port=<B>, host_id=<host>, instance_id=ttyUSB1)
+```
+
+> 若两个实例都使用默认空 `instance_id`，第二条日志会变成
+> `Service instance taken over by newer registration: SensorService (... instance_id=)`，
+> 即后者顶替前者，registry 中只剩一个实例。
+>
+> **已知边界（顶替 churn）**：顶替是针对**相同身份** `(service_name, host_id, instance_id)` 的。
+> 如果两个**都还在运行**的进程声明了完全相同的身份，SM 会让后来者接管并关闭先来者的控制连接；
+> 被顶替的活实例会自动重连并重新注册，于是两者可能反复互相顶替（takeover churn）。
+> 这是已接受的边界行为，不是缺陷——运维必须保证同板同名服务各自声明**不同**的 `instance_id`，
+> 绝不能让两个活实例使用完全相同的身份。
+
+**终端4：客户端先列出实例，再绑定指定实例**
+```bash
+$ ./target/example/example_cpp_sensor_client --instance ttyUSB1
+=== SensorClient (C++ Client) Starting ===
+ServiceManager: 127.0.0.1:9900
+Discovered 2 SensorService instance(s):
+  [0] host_id=<host> instance_id=ttyUSB0 host=127.0.0.1 port=<A>
+  [1] host_id=<host> instance_id=ttyUSB1 host=127.0.0.1 port=<B>
+Connected to SensorService instance_id=ttyUSB1
+...
+```
+
+不带 `--instance` 时客户端按服务名连接，命中 SM 注册表实例键字典序第一实例。
+
+C 示例参数一致（服务端 `--instance-id`、客户端 `--instance`），底层走运行时实例 API：
+
+```c
+/* 服务端：注册前声明实例标识 */
+omni_service_t* svc = demo_SensorService_stub_create(runtime);
+omni_service_set_instance_id(svc, "ttyUSB0");
+omni_runtime_register_service(runtime, svc);
+
+/* 客户端：枚举实例后绑定指定实例 */
+omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
+demo_SensorService_proxy_connect_instance(&proxy, lookup.found_host_id, lookup.found_instance_id);
+```
+
+> 跨板部署时 `host_id` 会随实例身份一起参与寻址，请确保每块板 `host_id` 唯一：克隆镜像会共享 `/etc/machine-id`，需在启动时通过 `setHostId()` 显式设置各设备唯一标识（MAC / 芯片 ID / 序列号）。
 
 ## 9. 跨板通信示例
 
@@ -760,24 +897,29 @@ $ ./target/example/example_cpp_sensor_client --sm-host 192.168.1.10 --sm-port 99
 日志中会显示：
 
 ```
-[OmniRuntime] Connecting to SensorService at 192.168.1.10:8001
-[OmniRuntime] Transport: TCP (cross-machine, host_id mismatch)
+[INFO][TcpConnection] Connected to 192.168.1.10:<port> (fd=<n>)
+[INFO][TransportSelector] Connected to SensorService via TCP at 192.168.1.10:<port> (fd=<n>)
 ```
 
 如果在同一台机器上运行，每个客户端会创建自己独立的共享内存，并通过 UDS 与服务端交换 eventfd：
 
 ```
-[OmniRuntime] Connecting to SensorService via SHM '/binder_SensorService_1f2e3d4c_cli_1234_0' (same machine)
-[OmniRuntime] SHM eventfd exchange via UDS: shm_name=/binder_SensorService_1f2e3d4c_cli_1234_0, resp_eventfd=OK, master_eventfd=OK
+[INFO][TransportSelector] Connected to SensorService via SHM (same machine)
+[INFO][ShmClientConnection] Client connected: shm='/binder_SensorService_<hash>', event_fd=<n>, notify_fd=<n>
 ```
 
-**注意**：新的 per-client SHM 模型中，每个客户端创建独立的共享内存段，名称格式为
-`/binder_<ServiceName>_<hash>_cli_<PID>_<N>`。客户端通过 UDS 将 SHM 名称发送给服务端，
-服务端回复 `resp_eventfd`（用于通知客户端响应已就绪）和 `master_eventfd`
-（用于客户端通知服务端新请求到达）。
+SHM 不可用时会自动回退到 TCP，并输出：
 
-不再使用 slot 分配机制，也没有 32 客户端的硬限制。多个客户端各自拥有独立的 SHM ring，
-互不共享资源，避免了同一共享内存段上的竞争条件。
+```
+[WARN][TransportSelector] data_connect_fallback service=SensorService transport=SHM fallback=TCP reason=connect_failed
+```
+
+**注意**：per-client SHM 模型中，每个客户端创建独立的共享内存段，名称格式为
+`/binder_<服务名前缀>_<FNV-1a 哈希>`（`host_id` 与 `instance_id` 参与哈希计算但不进入名称）。
+客户端通过 UDS 将 SHM 名称发送给服务端，服务端回传两个 eventfd：
+一个用于通知客户端响应已就绪，另一个供客户端通知服务端新请求到达。
+
+每个客户端各自拥有独立的 SHM ring，互不共享资源，避免了同一共享内存段上的竞争条件。
 此场景已在 `test_full_integration` 的 `ThreeClientsConcurrentInvoke` 测试中验证通过。
 
 ## 10. 基于 OmniBinder 库构建独立项目

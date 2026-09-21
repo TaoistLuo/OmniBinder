@@ -12,8 +12,12 @@ namespace omnibinder {
 
 ShmClientConnection::ShmClientConnection(const std::string& service_name,
                                        size_t req_ring_capacity,
-                                       size_t resp_ring_capacity)
+                                       size_t resp_ring_capacity,
+                                       const std::string& instance_id,
+                                       const std::string& host_id)
     : service_name_(service_name)
+    , instance_id_(instance_id)
+    , host_id_(host_id)
     , state_(ConnectionState::DISCONNECTED)
     , requested_req_ring_capacity_(shmNormalizeRingCapacity(req_ring_capacity))
     , requested_resp_ring_capacity_(shmNormalizeRingCapacity(resp_ring_capacity))
@@ -37,7 +41,7 @@ ShmClientConnection::~ShmClientConnection()
 
 bool ShmClientConnection::initClient()
 {
-    std::string server_shm_name = generateShmName(service_name_);
+    std::string server_shm_name = generateShmName(service_name_, instance_id_, host_id_);
 
     // 进程内原子计数 + pid 生成唯一客户端 SHM 名，避免同进程多实例冲突
     {
@@ -186,19 +190,14 @@ int ShmClientConnection::send(const uint8_t* data, size_t length)
     if (length == 0) {
         return 0;
     }
-    if (length > MAX_MESSAGE_SIZE || length > 0x7FFFFFFF) {
+    if (length > MAX_MESSAGE_SIZE) {
         OMNI_LOG_ERROR(LOG_TAG, "send() message too large: %zu bytes", length);
         return -1;
     }
 
     ShmRingHeader* req_ring = requestRing();
     uint8_t* req_data = requestData();
-    if (!req_ring || !req_data) {
-        OMNI_LOG_ERROR(LOG_TAG, "send() missing request ring");
-        return -1;
-    }
-
-    uint32_t req_capacity = static_cast<uint32_t>(requested_req_ring_capacity_);
+    uint32_t req_capacity = ctrl_->req_ring_capacity;
     uint32_t written = shmRingSendFrame(req_ring, req_data, req_capacity,
                                         data, static_cast<uint32_t>(length),
                                         peer_notify_fd_);
@@ -222,22 +221,20 @@ int ShmClientConnection::sendAll(const uint8_t* data, size_t length,
     if (state_ != ConnectionState::CONNECTED) {
         return -1;
     }
+    if (!peerAlive()) {
+        return -1;
+    }
     if (length == 0) {
         return 0;
     }
-    if (length > MAX_MESSAGE_SIZE || length > 0x7FFFFFFF) {
+    if (length > MAX_MESSAGE_SIZE) {
         OMNI_LOG_ERROR(LOG_TAG, "sendAll() message too large: %zu bytes", length);
         return -1;
     }
 
     ShmRingHeader* req_ring = requestRing();
     uint8_t* req_data = requestData();
-    if (!req_ring || !req_data) {
-        OMNI_LOG_ERROR(LOG_TAG, "sendAll() missing request ring");
-        return -1;
-    }
-
-    const uint32_t req_capacity = static_cast<uint32_t>(requested_req_ring_capacity_);
+    const uint32_t req_capacity = ctrl_->req_ring_capacity;
     int rc = shmRingSendFrameWithinTimeout(req_ring, req_data, req_capacity,
                                            data, static_cast<uint32_t>(length),
                                            peer_notify_fd_, timeout_ms);
@@ -280,14 +277,9 @@ int ShmClientConnection::recv(uint8_t* buf, size_t buf_size)
 
     ShmRingHeader* resp_ring = responseRing();
     const uint8_t* resp_data = responseData();
-    if (!resp_ring || !resp_data) {
-        OMNI_LOG_ERROR(LOG_TAG, "recv() missing response ring");
-        return -1;
-    }
-
     size_t msg_len = 0;
     int ret = shmRingRecvFrame(resp_ring, resp_data,
-                               static_cast<uint32_t>(requested_resp_ring_capacity_),
+                               ctrl_->resp_ring_capacity,
                                buf, buf_size, msg_len);
     if (ret < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "recv() malformed response ring");
@@ -306,9 +298,9 @@ int ShmClientConnection::recv(uint8_t* buf, size_t buf_size)
 int ShmClientConnection::peekFrameSize(size_t& out_length)
 {
     out_length = 0;
-    if (state_ != ConnectionState::CONNECTED || !ctrl_) return -1;
+    if (state_ != ConnectionState::CONNECTED) return -1;
     int ret = shmInspectFrame(responseRing(), responseData(),
-                              static_cast<uint32_t>(requested_resp_ring_capacity_),
+                              ctrl_->resp_ring_capacity,
                               out_length);
     if (ret < 0) {
         OMNI_LOG_ERROR(LOG_TAG, "peekFrameSize() malformed response ring");
@@ -363,14 +355,29 @@ ShmRingHeader* ShmClientConnection::responseRing() const
 {
     if (!shm_addr_ || !ctrl_) return NULL;
     return shmResponseRingFromBase(static_cast<uint8_t*>(shm_addr_),
-                                   static_cast<uint32_t>(requested_req_ring_capacity_));
+                                   ctrl_->req_ring_capacity);
 }
 
 uint8_t* ShmClientConnection::responseData() const
 {
     if (!shm_addr_ || !ctrl_) return NULL;
     return shmResponseDataFromBase(static_cast<uint8_t*>(shm_addr_),
-                                   static_cast<uint32_t>(requested_req_ring_capacity_));
+                                   ctrl_->req_ring_capacity);
+}
+
+bool ShmClientConnection::peerAlive()
+{
+    if (!handshake_channel_) {
+        return true;
+    }
+    int hfd = platform::handshakeGetFd(handshake_channel_);
+    if (hfd < 0 || !platform::isPeerClosed(hfd)) {
+        return true;
+    }
+    OMNI_LOG_WARN(LOG_TAG, "SHM server for '%s' is gone (liveness channel closed)",
+                  service_name_.c_str());
+    state_ = ConnectionState::ERROR;
+    return false;
 }
 
 } // namespace omnibinder

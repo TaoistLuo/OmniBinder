@@ -45,6 +45,10 @@ static std::atomic<bool> g_locked{false};
 }
 
 extern "C" void omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn) {
+    // 必须成对提供：单边非空会导致分配用一个堆、释放用另一个堆的错配
+    if ((malloc_fn == nullptr) != (free_fn == nullptr)) {
+        return;
+    }
     if (malloc_fn && free_fn) {
         bool expected = false;
         if (!omnibinder::g_locked.compare_exchange_strong(expected, true)) {

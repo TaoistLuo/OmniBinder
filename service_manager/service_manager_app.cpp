@@ -151,9 +151,6 @@ void ServiceManagerApp::cleanup() {
 }
 
 void ServiceManagerApp::registerEndpointFd(int fd) {
-    if (fd < 0 || endpoint_fds_.find(fd) != endpoint_fds_.end()) {
-        return;
-    }
     endpoint_fds_.insert(fd);
     loop_.addFd(fd, EventLoop::EVENT_READ | EventLoop::EVENT_ERROR,
         [this, fd](int, uint32_t events) {
@@ -162,7 +159,7 @@ void ServiceManagerApp::registerEndpointFd(int fd) {
 }
 
 void ServiceManagerApp::onClientAccepted(int client_id, IMessageConnection* client) {
-    if (!client || clients_.find(client_id) != clients_.end()) {
+    if (clients_.find(client_id) != clients_.end()) {
         return;
     }
 
@@ -182,10 +179,6 @@ void ServiceManagerApp::onEndpointEvent(int fd, uint32_t events) {
         if (it != clients_.end()) {
             if (!flushPendingSends(it->second)) {
                 closeClient(fd);
-                return;
-            }
-            // flush 可能因发送失败重入 closeClient
-            if (clients_.find(fd) == clients_.end()) {
                 return;
             }
         }
@@ -250,6 +243,9 @@ void ServiceManagerApp::dispatchMessage(ClientConnection* conn, const Message& m
         case MessageType::MSG_LOOKUP:
             handleLookup(conn, msg);
             break;
+        case MessageType::MSG_LIST_INSTANCES:
+            handleListInstances(conn, msg);
+            break;
         case MessageType::MSG_LIST_SERVICES:
             handleListServices(conn, msg);
             break;
@@ -264,6 +260,12 @@ void ServiceManagerApp::dispatchMessage(ClientConnection* conn, const Message& m
             break;
         case MessageType::MSG_UNSUBSCRIBE_SERVICE:
             handleUnsubscribeService(conn, msg);
+            break;
+        case MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE:
+            handleSubscribeServiceInstance(conn, msg);
+            break;
+        case MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE:
+            handleUnsubscribeServiceInstance(conn, msg);
             break;
         case MessageType::MSG_PUBLISH_TOPIC:
             handlePublishTopic(conn, msg);
@@ -328,7 +330,7 @@ void ServiceManagerApp::closeClient(int fd) {
     // 清理该 fd 拥有的服务。registry fd 索引是唯一的归属权威来源：
     // 若某名称已被更新的连接重新注册，则不再索引到该 fd 下，
     // 其存活注册保持不动。
-    std::vector<std::string> removed = registry_.removeByFd(fd);
+    std::vector<ServiceIdentity> removed = registry_.removeByFd(fd);
     for (size_t i = 0; i < removed.size(); ++i) {
         notifyServiceRemoved(removed[i]);
     }
@@ -341,6 +343,11 @@ void ServiceManagerApp::closeClient(int fd) {
 
     if (conn->runtime_registered) {
         removePidFd(conn->pid, fd);
+        // 被 watch 的目标断开：该 pid 已无存活控制连接时，清除指向它的全部
+        // watch 关系，避免 pid_watchers_ / watcher_to_pids_ 随 pid churn 无限增长
+        if (pid_to_fds_.find(conn->pid) == pid_to_fds_.end()) {
+            removeTargetWatchers(conn->pid);
+        }
     }
     removeWatcherAndMaybeStopTargets(fd);
 
@@ -364,13 +371,12 @@ void ServiceManagerApp::sendMessage(ClientConnection* conn, Message& msg) {
 
     if (conn->send_offset < conn->send_buffer.size()) {
         static const size_t MAX_SEND_BUFFER = MAX_MESSAGE_SIZE;
-        if (conn->send_buffer.size() + output.size() > MAX_SEND_BUFFER) {
+        if ((conn->send_buffer.size() - conn->send_offset) + output.size() > MAX_SEND_BUFFER) {
             OMNI_LOG_ERROR(TAG, "send_buffer overflow for fd=%d (>%zuMB), disconnecting",
                            conn->fd, MAX_SEND_BUFFER / (1024*1024));
             closeClient(conn->fd);
             return;
-        }
-        conn->send_buffer.writeRaw(output.data(), output.size());
+        }        conn->send_buffer.writeRaw(output.data(), output.size());
         enableClientWriteEvents(conn);
         return;
     }
@@ -411,11 +417,11 @@ bool ServiceManagerApp::flushPendingSends(ClientConnection* conn) {
 }
 
 void ServiceManagerApp::enableClientWriteEvents(ClientConnection* conn) {
-    loop_.modifyFd(conn->fd, EventLoop::EVENT_READ | EventLoop::EVENT_WRITE);
+    loop_.modifyFd(conn->fd, EventLoop::EVENT_READ | EventLoop::EVENT_WRITE | EventLoop::EVENT_ERROR);
 }
 
 void ServiceManagerApp::disableClientWriteEvents(ClientConnection* conn) {
-    loop_.modifyFd(conn->fd, EventLoop::EVENT_READ);
+    loop_.modifyFd(conn->fd, EventLoop::EVENT_READ | EventLoop::EVENT_ERROR);
 }
 
 } // namespace omnibinder

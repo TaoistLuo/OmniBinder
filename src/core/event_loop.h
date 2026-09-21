@@ -97,6 +97,13 @@ public:
      */
     bool stopRequested() const { return stop_requested_.load(); }
 
+    /*
+     * @brief  查询事件循环后端是否初始化成功
+     * @return true 后端与唤醒 fd 均可用；false 构造失败，run()/post() 不工作
+     * @note   构造失败时 post() 一律返回 false，调用方据此快速失败
+     */
+    bool valid() const { return backend_ != NULL; }
+
     // ============================================================
     // FD 事件管理
     // ============================================================
@@ -185,9 +192,9 @@ private:
     void pollOnceInternal(int timeout_ms, bool process_functors);
 
     /*
-     * @brief  处理到期的定时器，返回距下一个定时器到期的毫秒数（-1 表示无定时器）
+     * @brief  处理到期的定时器
      */
-    int processTimers();
+    void processTimers();
 
     /*
      * @brief  计算 poll 超时值（考虑定时器）

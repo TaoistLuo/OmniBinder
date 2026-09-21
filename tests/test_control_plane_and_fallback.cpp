@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "platform/platform_test.h"
 #include <omnibinder/omnibinder.h>
 #include "transport/shm_ring.h"
 #include "transport/tcp_connection.h"
@@ -8,11 +9,8 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <signal.h>
-#ifndef _WIN32
-#include <unistd.h>
-#include <sys/socket.h>
-#endif
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -88,7 +86,9 @@ static bool connectTcp(TcpConnection& transport, const std::string& host, uint16
 
 static bool sendMessage(TcpConnection& transport, const Message& msg) {
     Buffer out;
-    msg.serialize(out);
+    if (!msg.serialize(out)) {
+        return false;
+    }
     return transport.send(out.data(), out.size()) == static_cast<int>(out.size());
 }
 
@@ -144,7 +144,9 @@ static bool recvFullMessage(IMessageConnection& transport, Message& msg, int tim
 
 static bool sendFullMessage(IMessageConnection& transport, const Message& msg, int timeout_ms) {
     Buffer out;
-    msg.serialize(out);
+    if (!msg.serialize(out)) {
+        return false;
+    }
     size_t sent = 0;
     int loops = timeout_ms / 5;
     for (int i = 0; i < loops && sent < out.size(); ++i) {
@@ -161,19 +163,17 @@ static bool sendFullMessage(IMessageConnection& transport, const Message& msg, i
     return sent == out.size();
 }
 
-static bool decodeInvokeReplyForTest(const Message& msg, int32_t& status, Buffer& response) {
-    return tryDecodeInvokeReplyForTest(msg, status, response);
-}
-
 static bool registerFakeService(TcpConnection& transport, uint32_t seq,
                                 const std::string& name, uint16_t port,
-                                const std::string& host_id) {
+                                const std::string& host_id,
+                                const std::string& instance_id = std::string()) {
     Message msg(MessageType::MSG_REGISTER, seq);
     ServiceInfo info;
     info.name = name;
     info.host = "127.0.0.1";
     info.port = port;
     info.host_id = host_id;
+    info.instance_id = instance_id;
     InterfaceInfo iface;
     iface.interface_id = fnv1a_32(name);
     iface.name = name;
@@ -261,8 +261,34 @@ static bool lookupRaw(TcpConnection& transport, uint32_t seq,
     return true;
 }
 
-static bool sendRuntimeHello(TcpConnection& transport, uint32_t seq,
-                             uint32_t pid, const std::string& process_name) {
+static bool listInstancesRaw(TcpConnection& transport, uint32_t seq,
+                             const std::string& service_name, bool& found,
+                             std::vector<ServiceInfo>& instances) {
+    Message msg(MessageType::MSG_LIST_INSTANCES, seq);
+    msg.payload.writeString(service_name);
+    if (!sendMessage(transport, msg)) return false;
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_LIST_INSTANCES_REPLY) {
+        return false;
+    }
+    BufferView payload(reply.payload.data(), reply.payload.size());
+    uint32_t count = 0;
+    if (!payload.tryReadBool(found) || !payload.tryReadUint32(count)) {
+        return false;
+    }
+    instances.clear();
+    for (uint32_t i = 0; i < count; ++i) {
+        ServiceInfo info;
+        if (!deserializeServiceInfo(payload, info)) {
+            return false;
+        }
+        instances.push_back(info);
+    }
+    return true;
+}
+
+static bool sendRuntimeHello(TcpConnection& transport, uint32_t seq, uint32_t pid, const std::string& process_name) {
     Message msg(MessageType::MSG_RUNTIME_HELLO, seq);
     RuntimeInfo info;
     info.pid = pid;
@@ -352,8 +378,8 @@ private:
 struct OwnedServerCtx {
     OmniRuntime runtime;
     OwnedService service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     OwnedServerCtx() : registered(false), should_stop(false) {}
 };
 
@@ -366,8 +392,8 @@ static void ownedServerThread(void* arg) {
         ctx->runtime.stop();
         return;
     }
-    ctx->registered = true;
-    while (!ctx->should_stop) {
+    ctx->registered.store(true);
+    while (!ctx->should_stop.load()) {
         ctx->runtime.pollOnce(20);
     }
     ctx->runtime.unregisterService(&ctx->service);
@@ -406,8 +432,8 @@ private:
 struct FallbackServerCtx {
     OmniRuntime runtime;
     FallbackService service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     FallbackServerCtx() : registered(false), should_stop(false) {}
 };
 
@@ -420,8 +446,8 @@ static void fallbackServerThread(void* arg) {
         ctx->runtime.stop();
         return;
     }
-    ctx->registered = true;
-    while (!ctx->should_stop) {
+    ctx->registered.store(true);
+    while (!ctx->should_stop.load()) {
         ctx->runtime.pollOnce(20);
     }
     ctx->runtime.unregisterService(&ctx->service);
@@ -431,8 +457,8 @@ static void fallbackServerThread(void* arg) {
 struct DelayedReadServiceCtx {
     TcpTestServer server;
     uint16_t port;
-    volatile bool ready;
-    volatile bool done;
+    std::atomic<bool> ready;
+    std::atomic<bool> done;
     DelayedReadServiceCtx() : port(0), ready(false), done(false) {}
 };
 
@@ -442,19 +468,15 @@ static void delayedReadServiceThread(void* arg) {
         return;
     }
     ctx->port = ctx->server.port();
-    ctx->ready = true;
+    ctx->ready.store(true);
 
     IMessageConnection* accepted = ctx->server.waitAccept();
     if (!accepted) {
-        ctx->done = true;
+        ctx->done.store(true);
         return;
     }
 
-    int rcvbuf = 4096;
-#ifndef _WIN32
-    setsockopt(accepted->fd(), SOL_SOCKET, SO_RCVBUF,
-               reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
-#endif
+    platform::setSocketRecvBufferSize(accepted->fd(), 4096);
     std::this_thread::sleep_for(std::chrono::microseconds(300000));
 
     Buffer input;
@@ -479,7 +501,7 @@ static void delayedReadServiceThread(void* arg) {
                             int n = accepted->send(out.data() + sent, out.size() - sent);
                             if (n < 0) {
                                 ctx->server.close();
-                                ctx->done = true;
+                                ctx->done.store(true);
                                 return;
                             }
                             if (n == 0) {
@@ -499,7 +521,7 @@ static void delayedReadServiceThread(void* arg) {
     }
 
     ctx->server.close();
-    ctx->done = true;
+    ctx->done.store(true);
 }
 
 class ControlPlaneTest : public ::testing::Test {
@@ -514,14 +536,17 @@ protected:
         ASSERT_TRUE(waitSM(SM_PORT, 30));
 
         owned_tid_ = std::thread(ownedServerThread, &owned_ctx_);
-        for (int i = 0; i < 50 && !owned_ctx_.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        ASSERT_TRUE(owned_ctx_.registered);
+        for (int i = 0; i < 50 && !owned_ctx_.registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        ASSERT_TRUE(owned_ctx_.registered.load());
     }
 
     static void TearDownTestSuite() {
-        owned_ctx_.should_stop = true;
-        owned_tid_.join();
+        owned_ctx_.should_stop.store(true);
+        if (owned_tid_.joinable()) {
+            owned_tid_.join();
+        }
         stopSM(sm_pid_);
+        sm_pid_ = 0;
     }
 };
 
@@ -745,6 +770,97 @@ TEST_F(ControlPlaneTest, PublishedTopicsQueryAndServiceScopedUnregister) {
     registrant.close();
 }
 
+TEST_F(ControlPlaneTest, ListServiceInstancesReturnsAllIdentityFields) {
+    TcpConnection registrant_a;
+    TcpConnection registrant_b;
+    TcpConnection query;
+    ASSERT_TRUE(connectTcp(registrant_a, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(registrant_b, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(registerFakeService(registrant_a, 5200, "RawMultiInstance",
+                                    12500, "raw-multi-host", "inst-a"));
+    ASSERT_TRUE(registerFakeService(registrant_b, 5201, "RawMultiInstance",
+                                    12501, "raw-multi-host", "inst-b"));
+
+    OmniRuntime probe;
+    ASSERT_EQ(probe.init("127.0.0.1", SM_PORT), 0);
+    std::vector<ServiceInfo> instances;
+    ASSERT_EQ(probe.listServiceInstances("RawMultiInstance", instances), 0);
+    ASSERT_EQ(instances.size(), 2u);
+    EXPECT_EQ(instances[0].name, "RawMultiInstance");
+    EXPECT_EQ(instances[0].instance_id, "inst-a");
+    EXPECT_EQ(instances[0].host_id, "raw-multi-host");
+    EXPECT_EQ(instances[0].host, "127.0.0.1");
+    EXPECT_EQ(instances[0].port, 12500);
+    EXPECT_EQ(instances[1].instance_id, "inst-b");
+    EXPECT_EQ(instances[1].port, 12501);
+
+    ServiceInfo first;
+    ASSERT_EQ(probe.lookupService("RawMultiInstance", first), 0);
+    EXPECT_EQ(first.instance_id, "inst-a");
+
+    std::vector<ServiceInfo> missing(1, ServiceInfo());
+    EXPECT_EQ(probe.listServiceInstances("RawNoSuchService", missing),
+              static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND));
+    EXPECT_TRUE(missing.empty());
+
+    bool found = false;
+    std::vector<ServiceInfo> raw;
+    ASSERT_TRUE(listInstancesRaw(query, 5202, "RawMultiInstance", found, raw));
+    ASSERT_TRUE(found);
+    ASSERT_EQ(raw.size(), 2u);
+    EXPECT_EQ(raw[0].instance_id, "inst-a");
+    EXPECT_EQ(raw[1].instance_id, "inst-b");
+    ASSERT_TRUE(listInstancesRaw(query, 5203, "RawNoSuchService", found, raw));
+    EXPECT_FALSE(found);
+    EXPECT_TRUE(raw.empty());
+
+    probe.stop();
+    query.close();
+    registrant_a.close();
+    registrant_b.close();
+}
+
+TEST_F(ControlPlaneTest, MalformedListInstancesRequestDegradesToNotFound) {
+    TcpConnection rogue;
+    ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", SM_PORT));
+
+    Message bad_string(MessageType::MSG_LIST_INSTANCES, 5300);
+    bad_string.payload.writeUint16(7);
+    ASSERT_TRUE(sendMessage(rogue, bad_string));
+    Message reply;
+    ASSERT_TRUE(recvMessage(rogue, reply, 2000));
+    ASSERT_EQ(reply.getType(), MessageType::MSG_LIST_INSTANCES_REPLY);
+    Buffer payload(reply.payload.data(), reply.payload.size());
+    bool found = true;
+    ASSERT_TRUE(payload.tryReadBool(found));
+    EXPECT_FALSE(found);
+    uint32_t count = 99;
+    ASSERT_TRUE(payload.tryReadUint32(count));
+    EXPECT_EQ(count, 0u);
+    EXPECT_EQ(payload.remaining(), 0u);
+
+    Message truncated_name(MessageType::MSG_LIST_INSTANCES, 5301);
+    truncated_name.payload.writeUint32(64);
+    truncated_name.payload.writeRaw("RawM", 4);
+    ASSERT_TRUE(sendMessage(rogue, truncated_name));
+    Message truncated_reply;
+    ASSERT_TRUE(recvMessage(rogue, truncated_reply, 2000));
+    ASSERT_EQ(truncated_reply.getType(), MessageType::MSG_LIST_INSTANCES_REPLY);
+    Buffer truncated_payload(truncated_reply.payload.data(), truncated_reply.payload.size());
+    found = true;
+    ASSERT_TRUE(truncated_payload.tryReadBool(found));
+    EXPECT_FALSE(found);
+
+    OmniRuntime checker;
+    ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
+    ServiceInfo info;
+    ASSERT_EQ(checker.lookupService("OwnedService", info), 0);
+    checker.stop();
+
+    rogue.close();
+}
+
 TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
     TcpConnection registrant;
     TcpConnection observer;
@@ -867,6 +983,7 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         server.releaseAccepted();
     });
+    ScopedThreadJoiner fake_sm_guard(fake_sm, [&server]() { server.close(); });
 
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", port), 0);
@@ -883,6 +1000,40 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
     server.close();
 }
 
+TEST(ControlPlaneCompatibilityTest, ListInstancesMalformedReplyRejectedSafely) {
+    const uint16_t port = 19920;
+    TcpTestServer server;
+    ASSERT_TRUE(server.start("127.0.0.1", port));
+    std::thread fake_sm([&server]() {
+        IMessageConnection* client = server.waitAccept();
+        if (!client) return;
+        Message hello;
+        if (recvFullMessage(*client, hello, 2000)) {
+            Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, hello.getSequence());
+            reply.payload.writeBool(true);
+            sendFullMessage(*client, reply, 2000);
+        }
+        Message request;
+        if (recvFullMessage(*client, request, 2000)) {
+            Message reply(MessageType::MSG_LIST_INSTANCES_REPLY, request.getSequence());
+            reply.payload.writeBool(true);
+            reply.payload.writeUint32(1);
+            sendFullMessage(*client, reply, 2000);
+        }
+        server.releaseAccepted();
+    });
+    ScopedThreadJoiner fake_sm_guard(fake_sm, [&server]() { server.close(); });
+
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", port), 0);
+    std::vector<ServiceInfo> instances;
+    EXPECT_EQ(runtime.listServiceInstances("AnyService", instances),
+              static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+    runtime.stop();
+    fake_sm.join();
+    server.close();
+}
+
 TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
 #ifdef _WIN32
     GTEST_SKIP() << "Deterministic named SHM endpoint invalidation is POSIX-only";
@@ -890,8 +1041,11 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     FallbackServerCtx fallback_ctx;
     std::thread fallback_tid;
     fallback_tid = std::thread(fallbackServerThread, &fallback_ctx);
-    for (int i = 0; i < 50 && !fallback_ctx.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    ASSERT_TRUE(fallback_ctx.registered);
+    ScopedThreadJoiner fallback_guard(fallback_tid, [&fallback_ctx]() {
+        fallback_ctx.should_stop.store(true);
+    });
+    for (int i = 0; i < 50 && !fallback_ctx.registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+    ASSERT_TRUE(fallback_ctx.registered.load());
 
     OmniRuntime probe;
     ASSERT_EQ(probe.init("127.0.0.1", SM_PORT), 0);
@@ -901,8 +1055,8 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     ASSERT_EQ(info.host_id, probe.hostId());
 
     const std::string handshake_path = shmHandshakePath(
-        generateShmName("FallbackService"));
-    ASSERT_EQ(unlink(handshake_path.c_str()), 0);
+        generateShmName("FallbackService", "", probe.hostId()));
+    ASSERT_TRUE(platform::removeFile(handshake_path));
 
     probe.clearServiceCache();
     probe.closeAllConnections();
@@ -921,7 +1075,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     EXPECT_EQ(stats.shm_connections, 0u);
 
     probe.stop();
-    fallback_ctx.should_stop = true;
+    fallback_ctx.should_stop.store(true);
     fallback_tid.join();
 #endif
 }
@@ -1022,8 +1176,9 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     DelayedReadServiceCtx delayed_ctx;
     std::thread delayed_tid;
     delayed_tid = std::thread(delayedReadServiceThread, &delayed_ctx);
-    for (int i = 0; i < 50 && !delayed_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    ASSERT_TRUE(delayed_ctx.ready);
+    ScopedThreadJoiner delayed_guard(delayed_tid, [&delayed_ctx]() { delayed_ctx.server.close(); });
+    for (int i = 0; i < 50 && !delayed_ctx.ready.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+    ASSERT_TRUE(delayed_ctx.ready.load());
 
     TcpConnection registrant;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
@@ -1048,11 +1203,7 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
 
-    int rcvbuf = 4096;
-#ifndef _WIN32
-    setsockopt(rogue.fd(), SOL_SOCKET, SO_RCVBUF,
-               reinterpret_cast<const char*>(&rcvbuf), sizeof(rcvbuf));
-#endif
+    platform::setSocketRecvBufferSize(rogue.fd(), 4096);
 
     std::vector<uint8_t> payload(512 * 1024, 0x6B);
     Message invoke(MessageType::MSG_INVOKE, 3002);
@@ -1070,7 +1221,7 @@ TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     ASSERT_EQ(reply.getType(), MessageType::MSG_INVOKE_REPLY);
     int32_t status = -1;
     Buffer response;
-    ASSERT_TRUE(decodeInvokeReplyForTest(reply, status, response));
+    ASSERT_TRUE(tryDecodeInvokeReplyForTest(reply, status, response));
     ASSERT_EQ(status, 0);
     ASSERT_EQ(response.size(), payload.size());
     EXPECT_EQ(memcmp(response.data(), payload.data(), payload.size()), 0);

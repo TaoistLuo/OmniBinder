@@ -10,10 +10,11 @@ using namespace omnibinder;
 TEST(OwnerThreadExecutorTest, InlineWhenLoopNotOwned) {
     OwnerThreadExecutor executor;
     std::atomic<bool> called(false);
-    int value = executor.invokeOnOwner([&called]() -> int {
+    int value = 0;
+    EXPECT_TRUE(executor.tryInvokeOnOwner([&called]() -> int {
         called.store(true);
         return 42;
-    });
+    }, value));
     EXPECT_TRUE(called.load());
     EXPECT_EQ(value, 42);
 }
@@ -41,10 +42,12 @@ TEST(OwnerThreadExecutorTest, CrossThreadExecutesOnOwnerLoop) {
     }
 
     std::thread worker([&]() {
-        result.store(executor.invokeOnOwner([&]() -> int {
+        int value = 0;
+        EXPECT_TRUE(executor.tryInvokeOnOwner([&]() -> int {
             worker_seen_id = std::this_thread::get_id();
             return 7;
-        }));
+        }, value));
+        result.store(value);
         done.store(true);
         loop.stop();
     });
@@ -76,9 +79,9 @@ TEST(OwnerThreadExecutorTest, VoidInvokePropagatesCompletion) {
     }
 
     std::thread worker([&]() {
-        executor.invokeOnOwner([&called]() {
+        EXPECT_TRUE(executor.tryInvokeOnOwner([&called]() {
             called.store(true);
-        });
+        }));
         loop.stop();
     });
 
@@ -88,12 +91,21 @@ TEST(OwnerThreadExecutorTest, VoidInvokePropagatesCompletion) {
     EXPECT_TRUE(called.load());
 }
 
-TEST(OwnerThreadExecutorTest, InvokeOnOwnerReturnsFuncResult) {
+TEST(OwnerThreadExecutorTest, InlineWhenLoopBoundButNoOwnerThread) {
+    // 与 InlineWhenLoopNotOwned 互补：loop_ != NULL 但尚未 setOwnerThread，
+    // 任意线程都必须就地执行（hasOwnerThread()==false 分支）
+    EventLoop loop;
     OwnerThreadExecutor executor;
-    int value = executor.invokeOnOwner([]() -> int {
-        return 42;
-    });
-    EXPECT_EQ(value, 42);
+    executor.bindLoop(&loop);
+
+    std::atomic<bool> called(false);
+    int value = 0;
+    EXPECT_TRUE(executor.tryInvokeOnOwner([&called]() -> int {
+        called.store(true);
+        return 9;
+    }, value));
+    EXPECT_TRUE(called.load());
+    EXPECT_EQ(value, 9);
 }
 
 TEST(OwnerThreadExecutorTest, InvokeOnOwnerFailsFastWhenLoopStopped) {

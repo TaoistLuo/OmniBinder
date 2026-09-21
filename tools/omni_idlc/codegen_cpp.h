@@ -43,11 +43,6 @@ public:
     bool generate(const AstFile& ast, const std::string& output_dir,
                   const std::string& filename);
 private:
-    bool validateAst(const AstFile& ast);
-    bool validateTypeSupported(const TypeRef& type, const std::string& context,
-                               bool allow_void);
-    void reportError(const std::string& message);
-
     void generateHeader(const AstFile& ast, std::ostream& os, const std::string& filename);
     void generateSource(const AstFile& ast, std::ostream& os, const std::string& filename);
     
@@ -55,12 +50,16 @@ private:
     void genTopic(const TopicDef& t, const AstFile& ast, std::ostream& os);
     void genStub(const ServiceDef& svc, std::ostream& os);
     void genProxy(const ServiceDef& svc, std::ostream& os);
+
+    void emitStructFields(const std::string& type_name, const std::vector<FieldDef>& fields,
+                          std::ostream& os);
+    void emitStructCtorAndDecls(const std::string& type_name, const std::vector<FieldDef>& fields,
+                                std::ostream& os);
     
     void genSerialize(const std::vector<FieldDef>& fields, const std::string& obj, std::ostream& os);
     void genDeserialize(const std::vector<FieldDef>& fields, const std::string& obj, std::ostream& os);
     
     std::string pkg_;
-    bool has_error_;
 };
 
 } // namespace omnic

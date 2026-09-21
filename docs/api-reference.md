@@ -111,6 +111,16 @@ public:
     // 剩余可读字节数
     size_t remaining() const noexcept;
 
+    // 返回尾部可直接写入（例如 recv 落盘）的连续区域
+    // out_writable: 本次可写字节数，保证 >= 1（容量不足时内部按需增长）
+    // 返回: 可写起始指针；分配失败返回 NULL 且 out_writable = 0
+    // 注意: 写入后必须调用 commitWritten() 提交实际写入长度，否则 size() 不前进
+    uint8_t* writableTail(size_t& out_writable) noexcept;
+
+    // 提交 writableTail() 区域实际写入的 n 字节，推进写游标
+    // 返回: true 成功；false 表示 n 越界或缓冲区已失效（writeOk() 为 false）
+    bool commitWritten(size_t n) noexcept;
+
     // 从原始数据构造（用于接收到的数据）
     void assign(const uint8_t* data, size_t length) noexcept;
 
@@ -145,7 +155,7 @@ OmniRuntime 是用户使用 OmniBinder 的主要入口，负责与 ServiceManage
 | 持续驱动 | `run()` | 线程安全，但同一时刻只允许一个线程持续驱动 event-loop |
 | 单次驱动 | `pollOnce()` | 线程安全，但不应与另一个线程中的 `run()` 或 `pollOnce()` 并发驱动同一实例 |
 | 停止 | `stop()` | 可从任意线程并发调用 |
-| 同步阻塞 | `lookupService()`、`listServices()`、`queryInterfaces()`、`invoke()`、`subscribeServiceDeath()`、`publishTopic()`、`subscribeTopic()` | 可从任意线程安全调用，但内部发送/等待/状态写入由 owner event-loop 串行处理 |
+| 同步阻塞 | `lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`、`invoke()`、`connectServiceInstance()`、`disconnectServiceInstance()`、`subscribeServiceDeath()`、`subscribeServiceInstanceDeath()`、`publishTopic()`、`subscribeTopic()` | 可从任意线程安全调用，但内部发送/等待/状态写入由 owner event-loop 串行处理 |
 | 异步/配置 | `invokeOneWay()`、`broadcast()`、`setHeartbeatInterval()`、`setDefaultTimeout()` | 可从任意线程安全调用，内部状态更新在 owner event-loop 串行处理 |
 | 回调 | `TopicCallback`、`DeathCallback` | 默认在 owner event-loop 线程执行 |
 
@@ -171,7 +181,8 @@ struct ServiceInfo {
     std::string name;           // 服务名
     std::string host;           // 主机地址
     uint16_t    port;           // TCP 端口
-    std::string host_id;        // 主机标识
+    std::string host_id;        // 主机/设备标识（同机判断与实例身份）
+    std::string instance_id;    // 实例标识：同 host_id 上同名服务的多实例区分（默认空串）
     ShmConfig   shm_config;     // SHM 容量配置
     std::vector<InterfaceInfo> interfaces;  // 接口列表
 };
@@ -214,11 +225,21 @@ struct MethodInfo {
     std::string return_type;    // 返回类型，void 表示无返回值
 };
 
-// 死亡通知回调
+// 死亡通知回调（名字级）
 typedef std::function<void(const std::string& service_name)> DeathCallback;
+
+// 实例级死亡通知回调（携带死亡实例的完整身份）
+typedef std::function<void(const std::string& service_name,
+                           const std::string& host_id,
+                           const std::string& instance_id)> DeathSourceCallback;
 
 // 话题消息回调
 typedef std::function<void(uint32_t topic_id, const Buffer& data)> TopicCallback;
+
+// 话题消息回调（携带来源实例身份，决策 D5）
+// host_id / instance_id: 发布该消息的服务实例身份
+typedef std::function<void(const std::string& host_id, const std::string& instance_id,
+                           uint32_t topic_id, const Buffer& data)> TopicSourceCallback;
 
 // 话题错误回调
 typedef std::function<void(uint32_t topic_id, ErrorCode error, const Buffer& raw_data)> TopicErrorCallback;
@@ -272,14 +293,25 @@ public:
     // service_name: 要查询的服务名
     // info: 输出参数，服务信息
     // 可从任意线程安全调用；同步等待与缓存更新由 owner event-loop 串行处理
+    // 同名多实例时返回 SM 注册表实例键 (host_id, instance_id) 字典序的第一实例；
+    // 需要枚举全部实例请使用 listServiceInstances()
     // 返回: 0 成功，负值为错误码
     int lookupService(const std::string& service_name, ServiceInfo& info);
 
-    // 列出所有在线服务
-    // services: 输出参数，服务列表
+    // 列出所有在线服务实例
+    // services: 输出参数，服务实例列表；每个实例一项（同名多实例会有多项）
     // 可从任意线程安全调用；内部控制面交互由 owner event-loop 串行处理
     // 返回: 0 成功，负值为错误码
     int listServices(std::vector<ServiceInfo>& services);
+
+    // 列出指定服务名下的全部实例（跨 host_id / instance_id）
+    // service_name: 服务名
+    // instances: 输出参数，实例列表；每项含 name / host_id / instance_id / host / port
+    // 返回: 0 成功；ERR_SERVICE_NOT_FOUND 该名称下无任何实例；负值为其它错误码
+    // 顺序为 SM 注册表实例键 (host_id, instance_id) 字典序，与 lookupService 选取的
+    // 确定性第一实例一致
+    int listServiceInstances(const std::string& service_name,
+                             std::vector<ServiceInfo>& instances);
 
     // 查询服务的接口信息
     // service_name: 服务名
@@ -311,15 +343,42 @@ public:
     // 返回: 0 成功，负值为错误码
     int connectService(const std::string& service_name);
 
+    // 连接到指定服务实例 (host_id, instance_id)
+    // service_name: 目标服务名；host_id / instance_id: 目标实例身份
+    // 返回: 0 成功；ERR_SERVICE_NOT_FOUND 无匹配实例；负值为其它错误码
+    // 通过 listServiceInstances 解析目标实例后建立直连；连接以
+    // makeServiceConnectionKey(name, host_id, instance_id) 为键。
+    // 生成 Proxy 绑定实例后，其 invoke / 单向调用 / 心跳 / 自动重连 / 断开
+    // 均以该连接键寻址该实例；连接建立时 runtime 也在该实例键上登记自动重连
+    // 与话题恢复意图。
+    int connectServiceInstance(const std::string& service_name,
+                               const std::string& host_id,
+                               const std::string& instance_id);
+
     // 断开与远程服务的连接
     // service_name: 目标服务名
     // 返回: 0 成功，负值为错误码
     int disconnectService(const std::string& service_name);
 
+    // 断开与指定服务实例 (host_id, instance_id) 的连接
+    // 与 connectServiceInstance 使用同一连接键；对同名的其它实例无影响
+    // 返回: 0 成功，负值为错误码
+    int disconnectServiceInstance(const std::string& service_name,
+                                  const std::string& host_id,
+                                  const std::string& instance_id);
+
     // 检查是否已连接到远程服务
     // service_name: 目标服务名
     // 返回: true 已连接，false 未连接
     bool isServiceConnected(const std::string& service_name) const;
+
+    // 检查是否已连接到指定服务实例
+    // name / host_id / instance_id: 目标实例身份
+    // 连接以 makeServiceConnectionKey(name, host_id, instance_id) 为键；按实例建立的
+    // 连接不能用 isServiceConnected(name) 检测（后者只命中以服务名为键的连接）
+    // 返回: true 已连接，false 未连接
+    bool isServiceInstanceConnected(const std::string& name, const std::string& host_id,
+                                    const std::string& instance_id) const;
 
     // 启用自动重连
     // service_name: 目标服务名
@@ -340,6 +399,16 @@ public:
     // 停止心跳检测
     // service_name: 目标服务名
     void stopHeartbeat(const std::string& service_name);
+
+    // 连接管理说明（数据面连接以连接键索引）：
+    // - 默认实例（未显式绑定）连接键即服务名。
+    // - 显式实例连接键为 makeServiceConnectionKey(name, host_id, instance_id)；
+    //   connectServiceInstance / disconnectServiceInstance / isServiceInstanceConnected
+    //   与生成 Proxy 的 invoke / invokeOneWay / disconnect 使用该键。
+    // - enableAutoReconnect / setReconnectInterval / startHeartbeat / stopHeartbeat 接收
+    //   的字符串就是连接键：传服务名作用于默认实例，传 makeServiceConnectionKey(...)
+    //   则作用于该实例。绑定实例的代理（含生成的 C Proxy）会自动传入实例连接键，
+    //   因此心跳与自动重连均寻址该实例。
 
     // ---- 服务调用 ----
 
@@ -372,15 +441,36 @@ public:
 
     // ---- 死亡通知 ----
 
-    // 订阅服务死亡通知
+    // 订阅服务死亡通知（名字级）
     // service_name: 要监控的服务名
     // callback: 死亡时的回调函数（默认在 owner event-loop 线程执行）
+    // 语义: 仅当该服务名已无任何存活实例（最后一个实例消失）时触发；
+    //       同名仍有实例存活时不触发
     // 返回: 0 成功，负值为错误码
     int subscribeServiceDeath(const std::string& service_name,
                               const DeathCallback& callback);
 
-    // 取消订阅
+    // 取消订阅（名字级）
     int unsubscribeServiceDeath(const std::string& service_name);
+
+    // 订阅服务实例死亡通知
+    // service_name: 服务名
+    // host_id:      目标板级主机身份
+    // instance_id:  目标实例标识
+    // callback:     死亡回调，携带 (service_name, host_id, instance_id)；
+    //               默认在 owner event-loop 线程执行
+    // 语义: 仅该实例死亡时触发，同名其它实例死亡不影响本订阅；
+    //       重复订阅同一实例为更新回调
+    // 返回: 0 成功，负值为错误码
+    int subscribeServiceInstanceDeath(const std::string& service_name,
+                                      const std::string& host_id,
+                                      const std::string& instance_id,
+                                      const DeathSourceCallback& callback);
+
+    // 取消实例级订阅（不影响名字级或同名其它实例订阅）
+    int unsubscribeServiceInstanceDeath(const std::string& service_name,
+                                        const std::string& host_id,
+                                        const std::string& instance_id);
 
     // ---- 话题/广播 ----
 
@@ -427,6 +517,39 @@ public:
     // 取消订阅话题
     int unsubscribeTopic(const std::string& topic_name);
 
+    // 话题订阅选择器：服务级（全部实例）/ 实例级（指定实例）
+    // 服务级与实例级共用 TopicSourceCallback（回调携带来源实例身份）
+    struct TopicSubscriptionSelector {
+        std::string publisher_service;  // 发布者服务名
+        std::string host_id;            // 实例级：目标 host_id
+        std::string instance_id;        // 实例级：目标实例标识
+        bool        instance_level;     // true 实例级；false 服务级
+        static TopicSubscriptionSelector service(const std::string& publisher_service);
+        static TopicSubscriptionSelector instance(const std::string& publisher_service,
+                                                  const std::string& host_id,
+                                                  const std::string& instance_id);
+    };
+
+    // 按选择器订阅话题（服务级 / 实例级，回调携带来源实例身份）
+    // selector:           订阅选择器
+    // topic_name:         话题名
+    // expected_idl_hash:  订阅者期望的 topic IDL 哈希（0 表示不校验）
+    // on_message:         收到广播时的回调（host_id/instance_id 为发布者实例身份）
+    // on_error:           订阅错误回调
+    // 返回: 0 成功；发布者哈希与期望不一致时返回 ERR_IDL_MISMATCH
+    // 注意: 服务级订阅该发布者服务的全部实例，每个实例使用独立数据面连接；
+    //       实例级仅订阅指定实例。另有仅按主题名、匹配任意服务发布的该主题的
+    //       subscribeTopic(topic_name, ...) 变体（见 2.2 节），与选择器版本并存。
+    int subscribeTopic(const TopicSubscriptionSelector& selector,
+                       const std::string& topic_name,
+                       uint32_t expected_idl_hash,
+                       const TopicSourceCallback& on_message,
+                       const TopicErrorCallback& on_error);
+
+    // 按选择器取消订阅话题（与 subscribeTopic 选择器一一对应）
+    int unsubscribeTopic(const TopicSubscriptionSelector& selector,
+                         const std::string& topic_name);
+
     // ---- 配置 ----
 
     // 设置/获取服务注册到 ServiceManager 的默认可达地址
@@ -443,6 +566,13 @@ public:
     // 该预算独立于 setDefaultTimeout，默认值 DEFAULT_REPLY_SEND_TIMEOUT（1000ms）
     void setReplySendTimeout(uint32_t ms);
 
+    // 覆盖本机 host_id（同机判断与实例身份）
+    // host_id: 指定的主机/设备标识；空串表示使用平台默认机器标识
+    // 必须在 init() 之前调用；默认取自 platform::getMachineId()（Linux /etc/machine-id）。
+    // 克隆镜像共享 machine-id 的多板设备应显式设置各设备唯一标识，否则会被误判为
+    // 同一身份而互相顶替，且 SHM 误判为同机（设计决策 D8）
+    void setHostId(const std::string& host_id);
+
     // 获取本机 host_id
     std::string hostId() const;
 
@@ -456,7 +586,8 @@ public:
     void clearServiceCache();
     void closeAllConnections();
 
-    // 兼容旧服务级诊断 API。新 CLI watch 使用 PID 级 watchPid()/unwatchPid()。
+    // 服务级诊断开关。
+    // PID 级诊断使用 watchPid()/unwatchPid()。
     int enableDiagnostic(const std::string& service_name);
     int disableDiagnostic(const std::string& service_name);
 
@@ -543,6 +674,12 @@ public:
     void setShmConfig(const ShmConfig& config);
     ShmConfig shmConfig() const;
 
+    // 实例标识：同名服务多实例时用于区分
+    // 空串表示该 host_id 上该服务的默认实例；须在 registerService() 之前调用
+    // 实例身份 (name, host_id, instance_id) 参与注册与 SHM 命名派生
+    void setInstanceId(const std::string& instance_id);
+    const std::string& instanceId() const;
+
     // 获取接口信息（由 IDL 生成的子类实现）
     virtual const InterfaceInfo& interfaceInfo() const = 0;
 
@@ -597,8 +734,6 @@ private:
 - `ERR_SERIALIZE` 表示响应序列化失败
 - 其它非 `0` 值表示业务或运行时错误
 
-旧的 `reportInvokeError()` / `consumeInvokeError()` 已移除。
-
 ### 2.4 IMessageConnection / IServerEndpoint（传输层接口）
 
 `include/omnibinder/transport.h`
@@ -645,10 +780,6 @@ struct TransportConfig {
 class IMessageConnection {
 public:
     virtual ~IMessageConnection() {}
-
-    // 发起非阻塞连接
-    // 返回: 0 立即成功，1 连接进行中，-1 失败
-    virtual int connect(const std::string& host, uint16_t port) = 0;
 
     // 发送数据（尽力而为，非阻塞）
     virtual int send(const uint8_t* data, size_t length) = 0;
@@ -917,7 +1048,7 @@ typedef enum {
 
 namespace omnibinder {
 
-// 类型别名，与旧代码兼容
+// C 枚举在 C++ 命名空间中的类型别名
 using LogLevel = omni_log_level_t;
 
 // 常量别名
@@ -980,9 +1111,9 @@ OMNI_LOG_VERBOSE(tag, ...)
 > **实现文件**：`src/core/omnibinder_c.cpp`  
 > **示例代码**：`examples/example_c/`
 
-对于 C 语言用户，提供一套完整的 C 风格 API 封装，功能与 C++ API 完全对等。
+对于 C 语言用户，提供一套完整的 C 风格 API 封装，覆盖客户端调用、服务端注册、Buffer 操作、话题订阅与死亡通知。
 
-句柄 API 对关键 NULL 参数做防御性拒绝：`omni_runtime_init`（runtime/sm_host）、`omni_runtime_invoke`（runtime/service_name/request/response）、`omni_runtime_invoke_oneway`、`omni_runtime_subscribe_death`、`omni_runtime_unsubscribe_death`、`omni_runtime_unsubscribe_topic`，以及 `omni_runtime_register_service`/`omni_runtime_broadcast`/`omni_runtime_subscribe_topic` 均返回 `-1`；`omni_service_create(NULL, ...)` 返回 `NULL`，`omni_fnv1a_32(NULL)` 返回 `0`。
+句柄 API 对关键 NULL 参数做防御性拒绝：`omni_runtime_init`（runtime/sm_host）、`omni_runtime_invoke`（runtime/service_name/request/response）、`omni_runtime_invoke_oneway`、`omni_runtime_subscribe_death`、`omni_runtime_unsubscribe_death`、`omni_runtime_subscribe_death_instance`、`omni_runtime_unsubscribe_death_instance`、`omni_runtime_unsubscribe_topic`，以及 `omni_runtime_register_service`/`omni_runtime_broadcast`/`omni_runtime_subscribe_topic` 均返回 `-1`；`omni_service_create(NULL, ...)` 返回 `NULL`，`omni_fnv1a_32(NULL)` 返回 `0`。
 
 ### 6.1 类型定义
 
@@ -1051,6 +1182,17 @@ typedef void (*omni_topic_callback_t)(uint32_t topic_id,
     const omni_buffer_t* data, void* user_data);
 
 typedef void (*omni_death_callback_t)(const char* service_name, void* user_data);
+
+/* 服务实例信息（omni_runtime_list_instances 回调参数；指针仅回调期间有效） */
+typedef struct omni_service_instance_t {
+    const char* service_name;   /* 服务名称 */
+    const char* host_id;        /* 板级主机身份 */
+    const char* instance_id;    /* 实例标识；空串表示单实例 */
+    const char* host;           /* 数据面直连可达地址 */
+    uint16_t    port;           /* 数据面直连端口 */
+} omni_service_instance_t;
+
+typedef void (*omni_instance_callback_t)(const omni_service_instance_t* info, void* user_data);
 ```
 
 ### 6.2 Buffer API
@@ -1119,6 +1261,8 @@ void        omni_runtime_set_register_host(omni_runtime_t* runtime, const char* 
 const char* omni_runtime_get_register_host(const omni_runtime_t* runtime);
 void        omni_runtime_set_heartbeat_interval(omni_runtime_t* runtime, uint32_t interval_ms);
 void        omni_runtime_set_default_timeout(omni_runtime_t* runtime, uint32_t timeout_ms);
+/* 覆盖本机 host_id（同机判断 + 实例身份）；必须在 init 之前调用，空串用平台默认 */
+void        omni_runtime_set_host_id(omni_runtime_t* runtime, const char* host_id);
 const char* omni_runtime_host_id(const omni_runtime_t* runtime);
 
 /* 服务注册/注销 */
@@ -1144,6 +1288,37 @@ void omni_runtime_set_reconnect_interval(omni_runtime_t* runtime, const char* se
 void omni_runtime_start_heartbeat(omni_runtime_t* runtime, const char* service_name, uint32_t interval_ms, uint32_t timeout_ms);
 void omni_runtime_stop_heartbeat(omni_runtime_t* runtime, const char* service_name);
 
+/* 多实例：实例发现与实例级寻址（实例身份 = service_name + host_id + instance_id） */
+/* 按服务名枚举全部实例，每个实例回调一次；info 指针仅回调期间有效 */
+int  omni_runtime_list_instances(omni_runtime_t* runtime, const char* service_name,
+         omni_instance_callback_t callback, void* user_data);
+/* 绑定并直连指定 (host_id, instance_id) 实例；无匹配返回 OMNI_ERR_SERVICE_NOT_FOUND */
+int  omni_runtime_connect_service_instance(omni_runtime_t* runtime, const char* service_name,
+         const char* host_id, const char* instance_id);
+int  omni_runtime_disconnect_service_instance(omni_runtime_t* runtime, const char* service_name,
+         const char* host_id, const char* instance_id);
+/* 查询指定实例的数据面连接状态：1 已连接，0 未连接 */
+int  omni_runtime_is_service_instance_connected(const omni_runtime_t* runtime,
+         const char* service_name, const char* host_id, const char* instance_id);
+/* 生成数据面实例连接键，供自动重连 / 重连间隔 / 心跳等按连接键寻址的 API 使用。
+ * 返回指向线程局部缓冲的字符串，在下次调用本函数前有效。 */
+const char* omni_runtime_service_connection_key(const char* service_name,
+         const char* host_id, const char* instance_id);
+/* 向指定实例发起 RPC（需先 connect_service_instance 建立数据面） */
+int  omni_runtime_invoke_instance(omni_runtime_t* runtime, const char* service_name,
+         const char* host_id, const char* instance_id,
+         uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
+         const omni_buffer_t* request, omni_buffer_t* response, uint32_t timeout_ms);
+int  omni_runtime_invoke_oneway_instance(omni_runtime_t* runtime, const char* service_name,
+         const char* host_id, const char* instance_id,
+         uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
+         const omni_buffer_t* request);
+```
+
+> C 生成代码为每个 Proxy 额外生成 `<pkg>_<Service>_proxy_connect_instance(p, host_id, instance_id)`；绑定后其业务方法经 `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance` 寻址该实例，自动重连 / 心跳经 `omni_runtime_service_connection_key(...)` 传入实例连接键。
+
+```c
+
 /* 话题 */
 int  omni_runtime_publish_topic(omni_runtime_t* runtime, const char* topic_name,
          uint32_t idl_hash);
@@ -1157,6 +1332,12 @@ int  omni_runtime_unsubscribe_topic(omni_runtime_t* runtime, const char* topic_n
 int  omni_runtime_subscribe_death(omni_runtime_t* runtime, const char* service_name,
          omni_death_callback_t callback, void* user_data);
 int  omni_runtime_unsubscribe_death(omni_runtime_t* runtime, const char* service_name);
+/* 实例级死亡通知：仅该 (service_name, host_id, instance_id) 实例死亡时触发 */
+int  omni_runtime_subscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
+         const char* host_id, const char* instance_id,
+         omni_death_callback_t callback, void* user_data);
+int  omni_runtime_unsubscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
+         const char* host_id, const char* instance_id);
 
 /* 运行时统计 */
 int  omni_runtime_get_stats(omni_runtime_t* runtime, omni_runtime_stats_t* stats);
@@ -1189,6 +1370,9 @@ void omni_service_add_method_ex(omni_service_t* svc,
 uint16_t    omni_service_port(const omni_service_t* svc);
 void        omni_service_set_register_host(omni_service_t* svc, const char* host);
 const char* omni_service_get_register_host(const omni_service_t* svc);
+
+/* 声明服务实例标识（同名多实例必须各自不同；须在 register 之前调用） */
+void        omni_service_set_instance_id(omni_service_t* svc, const char* instance_id);
 ```
 
 ### 6.5 工具函数
@@ -1298,7 +1482,7 @@ target_link_libraries(my_c_client omnibinder_static)
 
 ### 6.8 特性说明
 
-- ✅ **完整功能**：与 C++ API 功能对等
+- ✅ **完整功能**：覆盖客户端调用、服务端注册、Buffer 操作、话题订阅与死亡通知
 - ✅ **类型安全**：使用不透明句柄避免内存泄漏
 - ✅ **零拷贝**：Buffer 操作高效
 - ✅ **IDL 支持**：omni-idlc 自动生成 C 代码
@@ -1319,14 +1503,17 @@ omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runt
   -h, --host <addr>     ServiceManager 地址 (默认: 127.0.0.1)
   -p, --port <port>     ServiceManager 端口 (默认: 9900)
   --idl <file.bidl>     IDL 文件路径（启用 JSON 支持和字段展开）
+  --instance-id <id>    目标实例标识（info / call）；'' 选择默认实例
+  --host-id <id>        目标实例的板级主机身份，配合 --instance-id 精确定位
   --help                显示帮助信息
 
 命令:
-  list                  列出所有在线服务
+  list                  列出所有在线服务实例
   ps                    列出在线 runtime PID、角色、日志级别和服务
-  info <service_name>   查询服务详细信息（包括接口列表）
-  call <service_name> <method_name> [params]
-                        调用服务方法
+  info <service_name> [--instance-id <id>] [--host-id <id>]
+                        枚举服务实例并查询指定实例的详细信息（包括接口列表）
+  call <service_name> <method_name> [params] [--instance-id <id>] [--host-id <id>]
+                        调用指定实例的方法
                         params: hex 字符串（不带 --idl）或 JSON（带 --idl）
   log set --pid <pid> --level <F|E|W|I|D|V|O>
                         设置指定 runtime 的日志级别
@@ -1338,9 +1525,11 @@ omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runt
   omni-cli list
   omni-cli ps
   omni-cli info SensorService
+  omni-cli info SensorService --instance-id ttyUSB1
   omni-cli call SensorService GetLatestData
+  omni-cli call SensorService GetLatestData --instance-id ttyUSB1
   omni-cli call SensorService ResetSensor 01000000
-  
+
   # 详细模式（JSON）
   omni-cli --idl sensor_service.bidl info SensorService
   omni-cli --idl sensor_service.bidl call SensorService GetLatestData
@@ -1348,7 +1537,7 @@ omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runt
     '{"command_type":1,"target":"sensor1","value":100}'
   omni-cli watch --pid 12345 --idl sensor_service.bidl --filter GetLatestData
   omni-cli log set --pid 12345 --level D
-  
+
   # 远程连接
   omni-cli -h 192.168.1.10 -p 9900 list
 ```
@@ -1357,16 +1546,20 @@ omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runt
 
 ### 7.1 list 命令输出格式
 
+`list` 按**实例**枚举：注册表中每个 `(service_name, host_id, instance_id)` 占一行，列宽由 `formatInstanceTable` 固定。
+
 ```
 $ omni-cli list
-NAME                     HOST             PORT     STATUS
-----                     ----             ----     ------
-SensorService            192.168.1.10     8001     ONLINE
-ControlService           192.168.1.10     8002     ONLINE
-LogService               192.168.1.11     8003     ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+ControlService           (default)            0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:8002        ONLINE
 
-Total: 3 services online
+Total: 3 service instances online
 ```
+
+空 `instance_id` 显示为 `(default)`，可用 `--instance-id ''` 精确选中。
 
 ### 7.2 ps 命令输出格式
 
@@ -1378,18 +1571,21 @@ PID      ROLE     LOG   PROCESS              SERVICES
 12346    client   D     example_cpp_sensor_client -
 ```
 
-`PROCESS` 为 runtime 启动时上报的可执行文件名，列宽固定 20 字符（`%-20s`），超出宽度时不截断、原样输出。旧 runtime 已注册的进程需要重启后才会刷新。
+`PROCESS` 为 runtime 启动时上报的可执行文件名，列宽固定 20 字符（`%-20s`），超出宽度时不截断、原样输出。
 
 ### 7.3 info 命令输出格式
 
-**基础模式（不带 --idl）：**
+`info` 先按服务名枚举全部实例（表格与 `list` 相同的列），再显示所选实例的接口。可选 `--instance-id <id>` / `--host-id <id>` 定位实例；不给选择器时，单实例直接显示，多实例只枚举不擅自选择。
+
+**基础模式（不带 --idl，单实例）：**
 ```
 $ omni-cli info SensorService
 Service: SensorService
-  Host:    192.168.1.10
-  Port:    8001
-  HostID:  a1b2c3d4e5f6
-  Status:  ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+
+Instance: instance_id="" (default) host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
 
   Published Topics:
     - SensorUpdate
@@ -1402,14 +1598,28 @@ Service: SensorService
       - ResetSensor(int32) -> void  (id=0x3a4b5c6d)
 ```
 
-**详细模式（带 --idl）：**
+**多实例未指定选择器（只枚举）：**
 ```
-$ omni-cli --idl sensor_service.bidl info SensorService
+$ omni-cli info SensorService
 Service: SensorService
-  Host:    192.168.1.10
-  Port:    8001
-  HostID:  a1b2c3d4e5f6
-  Status:  ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Multiple instances found; not selecting one automatically. Use --instance-id <id> [--host-id <id>] to inspect a specific instance.
+```
+
+**指定实例 + --idl 展开字段：**
+```
+$ omni-cli --idl sensor_service.bidl info SensorService --instance-id ttyUSB1
+Service: SensorService
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 
   Published Topics:
     - SensorUpdate
@@ -1441,9 +1651,12 @@ Service: SensorService
 
 ### 7.4 call 命令输出格式
 
-**Hex 模式（不带 --idl）：**
+`call` 先按 `(host_id, instance_id)` 定位目标实例并显式打印命中目标：给出选择器时打印 `Target instance:`；不给选择器时使用确定性第一实例并打印 `No instance selector given; using deterministic first instance:`。
+
+**Hex 模式（不带 --idl，显式指定实例）：**
 ```
-$ omni-cli call SensorService GetLatestData
+$ omni-cli call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.GetLatestData() ...
   interface_id = 0x1a2b3c4d
   method_id    = 0x9c0d1e2f
@@ -1451,9 +1664,22 @@ Response (status=OK, 42 bytes, 1.23 ms):
   Hex: 01 00 00 00 00 00 00 00 80 39 40 ...
 ```
 
+**未指定实例（使用确定性第一实例）：**
+```
+$ omni-cli call SensorService ResetSensor 01000000
+No instance selector given; using deterministic first instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+  Hint: use --instance-id <id> [--host-id <id>] to target another instance.
+Calling SensorService.ResetSensor() ...
+  interface_id = 0x1a2b3c4d
+  method_id    = 0x3a4b5c6d
+  request (4 bytes)
+Response (status=OK, 0 bytes, 0.61 ms):
+```
+
 **JSON 模式（带 --idl）：**
 ```
-$ omni-cli --idl sensor_service.bidl call SensorService GetLatestData
+$ omni-cli --idl sensor_service.bidl call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.GetLatestData() ...
   interface_id = 0x1a2b3c4d
   method_id    = 0x9c0d1e2f
@@ -1469,8 +1695,9 @@ Response (status=OK, 42 bytes, 0.85 ms):
 
 **说明：**
 - 所有调用都显示耗时统计（毫秒精度）
-- JSON 模式自动格式化输出
-- 向后兼容 hex 模式
+- 实例选择器语义统一：只给 `--instance-id`（跨主机命中多个则报错需补 `--host-id`）；只给 `--host-id`（该主机同名实例多于一个则报错需补 `--instance-id`）；都给则精确匹配 `(host_id, instance_id)`
+- 未指定选择器时使用确定性第一实例（与 `list` / `info` 表格首行一致，SM 按实例键字典序返回），输出首行显式标明实际命中的实例
+- JSON 模式自动格式化输出；hex 模式直接传入二进制数据的十六进制表示
 
 ### 7.5 log/watch 诊断命令
 

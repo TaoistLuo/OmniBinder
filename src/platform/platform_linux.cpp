@@ -1,6 +1,7 @@
 #ifdef OMNIBINDER_LINUX
 
 #include "platform/platform.h"
+#include "platform/platform_test.h"
 #include "omnibinder/log.h"
 #include "omnibinder/types.h"
 
@@ -21,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 
 #include <cstring>
 #include <cstdio>
@@ -30,9 +32,7 @@
 #include <string>
 #include <algorithm>
 
-
 #include <sys/time.h>
-#include <sys/un.h>
 #include <netdb.h>
 #include <time.h>
 
@@ -193,64 +193,6 @@ int socketSend(SocketFd fd, const void* data, size_t length) {
     return ret;
 }
 
-bool socketSendAll(SocketFd fd, const void* data, size_t length,
-                   uint32_t timeout_ms, uint32_t* elapsed_ms) {
-    if (elapsed_ms) {
-        *elapsed_ms = 0;
-    }
-
-    const uint8_t* bytes = static_cast<const uint8_t*>(data);
-    int64_t start_ms = currentTimeMs();
-    int64_t deadline_ms = start_ms + static_cast<int64_t>(timeout_ms);
-    size_t sent = 0;
-    while (sent < length) {
-        int ret = socketSend(fd, bytes + sent, length - sent);
-        if (ret < 0) {
-            int err = getSocketError();
-            if (isWouldBlock(err)) {
-                int64_t now_ms = currentTimeMs();
-                if (now_ms >= deadline_ms) {
-                    break;
-                }
-
-                uint32_t remaining_ms = static_cast<uint32_t>(deadline_ms - now_ms);
-                if (!waitSocketWritable(fd, remaining_ms)) {
-                    break;
-                }
-                continue;
-            }
-
-            if (elapsed_ms) {
-                int64_t spent_ms = currentTimeMs() - start_ms;
-                *elapsed_ms = spent_ms > 0 ? static_cast<uint32_t>(spent_ms) : 0;
-            }
-            return false;
-        }
-
-        if (ret > 0) {
-            sent += static_cast<size_t>(ret);
-            continue;
-        }
-
-        int64_t now_ms = currentTimeMs();
-        if (now_ms >= deadline_ms) {
-            break;
-        }
-
-        uint32_t remaining_ms = static_cast<uint32_t>(deadline_ms - now_ms);
-        if (!waitSocketWritable(fd, remaining_ms)) {
-            break;
-        }
-    }
-
-    if (elapsed_ms) {
-        int64_t spent_ms = currentTimeMs() - start_ms;
-        *elapsed_ms = spent_ms > 0 ? static_cast<uint32_t>(spent_ms) : 0;
-    }
-
-    return sent == length;
-}
-
 int socketRecv(SocketFd fd, void* buf, size_t buf_size) {
     int ret;
     do {
@@ -326,6 +268,7 @@ bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms) {
     return (pfd.revents & POLLOUT) != 0;
 }
 
+// 测试辅助实现，非生产契约
 bool waitFdReadable(int fd, int timeout_ms) {
     struct pollfd pfd;
     memset(&pfd, 0, sizeof(pfd));
@@ -336,6 +279,46 @@ bool waitFdReadable(int fd, int timeout_ms) {
         ret = poll(&pfd, 1, timeout_ms);
     } while (ret < 0 && errno == EINTR);
     return ret > 0 && (pfd.revents & POLLIN);
+}
+
+bool checkSocketConnected(SocketFd fd, int* out_error) {
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
+        if (out_error) *out_error = errno;
+        return false;
+    }
+    if (out_error) *out_error = so_error;
+    return so_error == 0;
+}
+
+bool isPeerClosed(SocketFd fd) {
+    if (fd < 0) {
+        return false;
+    }
+    struct pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    int ret;
+    do {
+        ret = poll(&pfd, 1, 0);
+    } while (ret < 0 && errno == EINTR);
+    if (ret <= 0) {
+        return false;
+    }
+    if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+        return true;
+    }
+    if ((pfd.revents & POLLIN) == 0) {
+        return false;
+    }
+    char probe = 0;
+    ssize_t n;
+    do {
+        n = recv(fd, &probe, 1, MSG_PEEK);
+    } while (n < 0 && errno == EINTR);
+    return n == 0;
 }
 
 // ============================================================
@@ -378,6 +361,12 @@ void closeEventFd(int efd) {
 void* shmCreate(const std::string& name, size_t size, bool create, size_t* mapped_size) {
     if (mapped_size) {
         *mapped_size = 0;
+    }
+    // size==0 时 ftruncate(0) 会成功而 mmap(NULL,0) 必然失败，
+    // 提前拒绝以给出明确错误（而非误导性的 "mmap failed"）。
+    if (create && size == 0) {
+        OMNI_LOG_ERROR(LOG_TAG, "shmCreate rejected invalid size 0 for %s", name.c_str());
+        return NULL;
     }
     int flags = O_RDWR;
     if (create) {
@@ -458,7 +447,10 @@ struct handshake_channel   { int fd; int64_t deadline_ms; };
 namespace {
 
 const uint32_t HANDSHAKE_MAGIC = 0x484E4453u;
-const int64_t HANDSHAKE_TRANSACTION_TIMEOUT_MS = 500;
+// 握手在 owner 线程内同步完成，该值即最坏单次阻塞上限；本地 UDS 握手通常 <1ms，
+// 原为 500ms。单测 LinuxHandshakeFixture 约定该值须在 [300,1000)ms，故取 400ms：
+// 在满足契约的前提下收敛坏对端对 owner 循环的阻塞上限（勿再放大）。
+const int64_t HANDSHAKE_TRANSACTION_TIMEOUT_MS = 400;
 
 struct HandshakeHeader {
     uint32_t magic;
@@ -886,35 +878,26 @@ void sleepMs(uint32_t ms) {
     struct timespec ts;
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (ms % 1000) * 1000000L;
-    nanosleep(&ts, NULL);
-}
-
-
-
-
-bool checkSocketConnected(SocketFd fd, int* out_error) {
-    int so_error = 0;
-    socklen_t len = sizeof(so_error);
-    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
-        if (out_error) *out_error = errno;
-        return false;
+    // 被信号打断时按剩余时间续睡，保证至少睡满 ms
+    struct timespec remaining;
+    while (nanosleep(&ts, &remaining) != 0 && errno == EINTR) {
+        ts = remaining;
     }
-    if (out_error) *out_error = so_error;
-    return so_error == 0;
 }
 
 int64_t currentTimeUs() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return static_cast<int64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
+    // 与 currentTimeMs 同用 CLOCK_MONOTONIC，保证两者基准一致（仅用于测量时间间隔）
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
 }
+
 void getLocalTime(struct tm* out_tm, int* out_ms) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     localtime_r(&tv.tv_sec, out_tm);
     if (out_ms) *out_ms = static_cast<int>(tv.tv_usec / 1000);
 }
-
 
 void setupSignalHandlers(SignalHandler handler) {
     signal(SIGINT, handler);
@@ -929,6 +912,81 @@ void setParentDeathSignal() {
     prctl(PR_SET_PDEATHSIG, SIGTERM);
 }
 
+// 测试辅助实现，非生产契约
+bool removeFile(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+    return ::unlink(path.c_str()) == 0;
+}
+
+// 测试辅助实现，非生产契约
+bool setSocketRecvBufferSize(SocketFd fd, int bytes) {
+    int value = bytes;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
+                      reinterpret_cast<const char*>(&value), sizeof(value)) == 0;
+}
+
+// 测试辅助实现，非生产契约
+TestProcess spawnChildProcess(const char* path, const char* a1, const char* a2,
+                              const char* a3, const char* a4) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        setParentDeathSignal();
+        if (a1 && a2 && a3 && a4)
+            execl(path, path, a1, a2, a3, a4, (char*)NULL);
+        else if (a1 && a2 && a3)
+            execl(path, path, a1, a2, a3, (char*)NULL);
+        else if (a1 && a2)
+            execl(path, path, a1, a2, (char*)NULL);
+        else if (a1)
+            execl(path, path, a1, (char*)NULL);
+        else
+            execl(path, path, (char*)NULL);
+        _exit(1);
+    }
+    return static_cast<TestProcess>(pid);
+}
+
+// 测试辅助实现，非生产契约
+bool waitChildProcess(TestProcess proc, int timeout_sec, int* out_exit_code) {
+    if (proc <= 0) {
+        return false;
+    }
+    int status = 0;
+    for (int i = 0; i < timeout_sec * 10; ++i) {
+        pid_t ret = waitpid(static_cast<pid_t>(proc), &status, WNOHANG);
+        if (ret == static_cast<pid_t>(proc)) {
+            if (out_exit_code) {
+                *out_exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+            return true;
+        }
+        sleepMs(100);
+    }
+    return false;
+}
+
+// 测试辅助实现，非生产契约
+void terminateChildProcess(TestProcess proc) {
+    if (proc <= 0) {
+        return;
+    }
+    if (kill(static_cast<pid_t>(proc), 0) != 0 && errno == ESRCH) {
+        return;
+    }
+    kill(static_cast<pid_t>(proc), SIGTERM);
+    int status = 0;
+    for (int i = 0; i < 50; ++i) {
+        pid_t ret = waitpid(static_cast<pid_t>(proc), &status, WNOHANG);
+        if (ret == static_cast<pid_t>(proc) || (ret < 0 && errno == ECHILD)) {
+            return;
+        }
+        sleepMs(100);
+    }
+    kill(static_cast<pid_t>(proc), SIGKILL);
+    waitpid(static_cast<pid_t>(proc), &status, 0);
+}
 
 int handshakeGetFd(handshake_channel* ch) {
     return ch ? ch->fd : -1;

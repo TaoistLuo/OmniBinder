@@ -4,7 +4,7 @@
  * @details     定义事件循环后端的平台无关接口，用于替代 EventLoop 中直接使用 epoll/select。
  *              各平台提供具体实现：
  *              - Linux: epoll
- *              - Windows: select
+ *              - Windows: IOCP（pipe 完成事件）+ select（socket 探测）
  *              - macOS/BSD: kqueue（未来扩展）
  *
  * @author      taoist.luo
@@ -49,6 +49,10 @@ enum EventFlags : uint32_t {
     EVENT_WRITE = 0x02,
     EVENT_ERROR = 0x04,
 };
+
+// @note Windows 后端（IOCP + select 探测）目前只产生 EVENT_READ（可选 EVENT_ERROR），
+//       不产生 EVENT_WRITE；在该后端注册 EVENT_WRITE 将收不到通知。core 当前仅使用
+//       READ/ERROR，故不影响现有路径；如需跨平台可写通知需先扩展 Windows 后端。
 
 // ============================================================
 // 就绪事件

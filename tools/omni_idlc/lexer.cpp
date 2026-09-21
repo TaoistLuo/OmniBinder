@@ -23,7 +23,7 @@ bool Lexer::isAtEnd() const { return pos_ >= source_.size(); }
 void Lexer::skipWhitespaceAndComments() {
     while (!isAtEnd()) {
         char c = peek();
-        if (isspace(c)) { advance(); continue; }
+        if (std::isspace(static_cast<unsigned char>(c))) { advance(); continue; }
         if (c == '/' && pos_ + 1 < source_.size()) {
             if (source_[pos_ + 1] == '/') {
                 while (!isAtEnd() && peek() != '\n') advance();
@@ -47,7 +47,8 @@ void Lexer::skipWhitespaceAndComments() {
 Token Lexer::readIdentifierOrKeyword() {
     int l = line_, c = column_;
     std::string val;
-    while (!isAtEnd() && (isalnum(peek()) || peek() == '_')) {
+    while (!isAtEnd() &&
+           (std::isalnum(static_cast<unsigned char>(peek())) || peek() == '_')) {
         val += advance();
     }
     
@@ -79,7 +80,7 @@ Token Lexer::readIdentifierOrKeyword() {
 Token Lexer::readNumber() {
     int l = line_, c = column_;
     std::string val;
-    while (!isAtEnd() && isdigit(peek())) val += advance();
+    while (!isAtEnd() && std::isdigit(static_cast<unsigned char>(peek()))) val += advance();
     return Token(TOK_NUMBER, val, l, c);
 }
 
@@ -112,8 +113,8 @@ Token Lexer::nextToken() {
     int l = line_, c = column_;
     char ch = peek();
     
-    if (isalpha(ch) || ch == '_') return readIdentifierOrKeyword();
-    if (isdigit(ch)) return readNumber();
+    if (std::isalpha(static_cast<unsigned char>(ch)) || ch == '_') return readIdentifierOrKeyword();
+    if (std::isdigit(static_cast<unsigned char>(ch))) return readNumber();
     if (ch == '"') return readString();
     
     advance();
@@ -130,7 +131,8 @@ Token Lexer::nextToken() {
     default:
         has_error_ = true;
         char buf[64];
-        snprintf(buf, sizeof(buf), "Unexpected character '%c' at line %d:%d", ch, l, c);
+        // 位置由 Parser 统一附加，避免与 Lexer 内部前缀重复
+        snprintf(buf, sizeof(buf), "Unexpected character '%c'", ch);
         error_msg_ = buf;
         return Token(TOK_ERROR, std::string(1, ch), l, c);
     }
@@ -144,6 +146,14 @@ const char* tokenTypeToString(TokenType type) {
     case TOK_STRUCT: return "struct";
     case TOK_SERVICE: return "service"; case TOK_TOPIC: return "topic";
     case TOK_PUBLISHES: return "publishes"; case TOK_ARRAY: return "array";
+    case TOK_BOOL: return "bool"; case TOK_INT8: return "int8";
+    case TOK_UINT8: return "uint8"; case TOK_INT16: return "int16";
+    case TOK_UINT16: return "uint16"; case TOK_INT32: return "int32";
+    case TOK_UINT32: return "uint32"; case TOK_INT64: return "int64";
+    case TOK_UINT64: return "uint64"; case TOK_FLOAT32: return "float32";
+    case TOK_FLOAT64: return "float64"; case TOK_STRING_TYPE: return "string";
+    case TOK_BYTES: return "bytes"; case TOK_VOID: return "void";
+    case TOK_ERROR: return "ERROR";
     case TOK_SEMICOLON: return ";"; case TOK_LBRACE: return "{";
     case TOK_RBRACE: return "}"; case TOK_LPAREN: return "(";
     case TOK_RPAREN: return ")"; case TOK_LANGLE: return "<";

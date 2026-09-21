@@ -316,6 +316,16 @@ public:
     void BroadcastSensorUpdate(const SensorUpdate& msg);
     void PublishSystemAlert();
     void BroadcastSystemAlert(const SystemAlert& msg);
+
+    // ---- Interface info (used by the framework) ----
+    const omnibinder::InterfaceInfo& interfaceInfo() const override;
+
+protected:
+    // Called by the framework to dispatch a request to the matching method.
+    // Returns 0 on success, non-zero as an error code.
+    int onInvoke(uint32_t method_id,
+                 const omnibinder::Buffer& request,
+                 omnibinder::Buffer& response) override;
 };
 ```
 
@@ -332,16 +342,66 @@ public:
     int GetLatestData(SensorData& out);
     void ResetSensor(int32_t sensor_id);
 
+    // Service-level: all instances published by "SensorService", callback has no source.
     void SubscribeSensorUpdate(const std::function<void(const SensorUpdate&)>& callback);
+    // Service-level with source: callback also receives publisher host_id + instance_id.
+    void SubscribeSensorUpdateWithSource(
+        const std::function<void(const std::string& host_id,
+                                 const std::string& instance_id,
+                                 const SensorUpdate&)>& callback);
+    // Instance-level: only the selected instance, callback carries source identity.
+    void SubscribeSensorUpdateInstance(
+        const std::string& host_id, const std::string& instance_id,
+        const std::function<void(const std::string&, const std::string&,
+                                 const SensorUpdate&)>& callback);
+    void SubscribeSystemAlert(const std::function<void(const SystemAlert&)>& callback);
 
-    // connect(), disconnect(), isConnected(), OnServiceDied(), ... are inherited
-    // from ServiceProxyBase.
+    // connect(), connect(host_id, instance_id), setInstance(), disconnect(),
+    // isConnected(), enableAutoReconnect(), startHeartbeat(), stopHeartbeat(),
+    // OnServiceDied(), ... are inherited from ServiceProxyBase.
 };
 ```
+
+Notes on topic source identity:
+
+- `SubscribeX(cb)` is a service-level subscription (all instances published by that service); the callback has no source
+- `SubscribeXWithSource(cb)` / `SubscribeXInstance(host_id, instance_id, cb)` reuse the same runtime callback type `TopicSourceCallback`, passing `host_id` + `instance_id` as separate arguments, and **do not change the broadcast message payload**
+- a service-level subscription opens one data-plane connection per publisher instance; an instance-level subscription accepts only the selected instance
+- same-name topics published by different services do not cross-deliver (topic identity is publisher service name + topic name)
+- when a proxy is bound to an instance via `connect(host_id, instance_id)` / `setInstance()`, its method calls address the data-plane connection keyed by `makeServiceConnectionKey(name, host_id, instance_id)`; generated methods use `connectionKey()`
 
 Generated C API shape:
 
 ```c
+/* ---- Stub handler typedefs (snake_case; results returned via out pointers) ---- */
+typedef void (*demo_SensorService_set_threshold_handler_t)(
+    const struct demo_ControlCommand* cmd,
+    common_StatusResponse* result, void* user_data);
+typedef void (*demo_SensorService_get_latest_data_handler_t)(
+    struct demo_SensorData* result, void* user_data);
+typedef void (*demo_SensorService_reset_sensor_handler_t)(
+    int32_t sensor_id, void* user_data);
+
+/* runtime boundary callback (defined in omnibinder_c.h) */
+typedef int (*omni_invoke_callback_t)(uint32_t method_id,
+    const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
+
+typedef struct demo_SensorService_callbacks {
+    demo_SensorService_set_threshold_handler_t SetThreshold;
+    demo_SensorService_get_latest_data_handler_t GetLatestData;
+    demo_SensorService_reset_sensor_handler_t ResetSensor;
+    void* user_data;
+} demo_SensorService_callbacks;
+
+omni_service_t* demo_SensorService_stub_create_from_callbacks(
+    const demo_SensorService_callbacks* cbs);
+void demo_SensorService_stub_destroy(omni_service_t* svc);
+
+/* Broadcast */
+void demo_SensorService_broadcast_sensor_update(
+    omni_runtime_t* runtime, const demo_SensorUpdate* msg);
+
+/* ---- Proxy struct and functions ---- */
 typedef struct demo_SensorService_proxy {
     omni_runtime_t* runtime;
     int connected;
@@ -352,17 +412,32 @@ typedef struct demo_SensorService_proxy {
     void* _sub_ctxs[8];          /* at most 8 topic subscriptions */
     const char* _sub_topics[8];
     int _sub_ctx_count;
+    int instance_bound;
+    char instance_host_id[257];  /* MAX_SERVICE_NAME_LENGTH + 1 */
+    char instance_id[257];
 } demo_SensorService_proxy;
 
 void demo_SensorService_proxy_init(demo_SensorService_proxy* p, omni_runtime_t* runtime);
 int  demo_SensorService_proxy_connect(demo_SensorService_proxy* p);
+int  demo_SensorService_proxy_connect_instance(demo_SensorService_proxy* p,
+                                               const char* host_id, const char* instance_id);
 void demo_SensorService_proxy_disconnect(demo_SensorService_proxy* p);
 
 /* Method names are snake_case; IDL void methods also return void in the C proxy. */
 int  demo_SensorService_proxy_set_threshold(demo_SensorService_proxy* p,
                                             const struct demo_ControlCommand* cmd,
                                             common_StatusResponse* result);
+
+int  demo_SensorService_proxy_get_latest_data(demo_SensorService_proxy* p,
+                                              struct demo_SensorData* result);
+
+int  demo_SensorService_proxy_subscribe_sensor_update(
+    demo_SensorService_proxy* p,
+    void (*callback)(const demo_SensorUpdate* msg, void* user_data),
+    void* user_data);
 ```
+
+After `..._proxy_connect_instance()`, the C proxy routes its method calls through `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance`, and its auto-reconnect / heartbeat / death subscription through the instance connection key (`omni_runtime_service_connection_key(...)`) and `omni_runtime_subscribe_death_instance(...)`. The C topic subscribe helper is topic-only (no source identity).
 
 ---
 
@@ -375,6 +450,7 @@ The generated Stub/Proxy code now follows an explicit-status runtime contract:
 - the generated `onInvoke(...)` itself returns `int`
 - `0` means success
 - non-zero means an `ErrorCode` such as `ERR_DESERIALIZE` or `ERR_SERIALIZE`
+- generated serialization code checks the return value of every `Buffer::writeXxx()` call instead of assuming writes always succeed
 
 This lets the runtime propagate decode/encode failures explicitly instead of relying on hidden side channels.
 
@@ -486,6 +562,18 @@ struct ControlCommand {
     int32   command_type;
     string  target;
     int32   value;
+}
+
+struct SensorConfig {
+    int32   sensor_id;
+    float64 min_threshold;
+    float64 max_threshold;
+    int32   sample_interval_ms;
+}
+
+struct SensorList {
+    array<SensorData> sensors;
+    int32             total_count;
 }
 
 topic SensorUpdate {

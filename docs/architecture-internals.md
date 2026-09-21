@@ -133,7 +133,8 @@ OmniBinder 的内部实现分成两个平面：
 - `ConnectionManager* conn_mgr_`
 - `std::map<std::string, LocalServiceEntry*> local_services_`
 - `std::map<int, std::string> client_id_to_service_`
-- `std::map<std::string, ServiceState> services_`（服务缓存 / 死亡回调 / 重连配置 / 心跳状态统一归并）
+- `std::map<std::string, ServiceState> services_`（按**连接键**索引：默认实例键即服务名，显式实例键由 `makeServiceConnectionKey` 生成；统一归并服务缓存 / 死亡回调 / 重连配置 / 心跳状态）
+- `std::map<std::string, InstanceDeathSubscription> instance_deaths_`（实例级死亡订阅，键为 `makeServiceIdentityKey`）
 
 ### 4.3 LocalServiceEntry
 
@@ -224,9 +225,9 @@ OmniBinder 的内部实现分成两个平面：
 - 它不拥有控制面槽表：`waitForReply()` 接受调用方传入的 `PendingReplyTable&`；控制面表由 `SmControlChannel` 持有，数据面表由自身 `dataReplies()` 持有
 - 它通过外部传入的 reply-wait pump 驱动事件循环
 
-### 6.6 当前等待语义
+### 6.6 等待语义
 
-当前 `waitForReply()` 不再使用会执行 `post()` functor 的完整 `pollOnce()`。
+`waitForReply()` 并不运行完整的 `pollOnce()`（后者会执行 `post()` functor）。
 
 reply wait 期间只处理：
 
@@ -254,16 +255,17 @@ reply wait 期间只处理：
 
 ### 7.2 当前持有的数据
 
-- `topics_`（`std::map<uint32_t, TopicState>`：callback / error callback / `tcp_subscribers` / `shm_subscribers` / `published` / `owner_service` / `published_hash` / `expected_subscription_hash`）
+- `topics_`（`std::map<uint32_t, TopicState>`：每个 topic 的订阅记录（选择器 + 回调 + 期望哈希）/ `tcp_subscribers` / `shm_subscribers` / `published` / `owner_service` / `published_hash`）
 - `name_to_id_`（topic name → id 映射，topic id 经 `getTopicId()` 查询）
 
 ### 7.3 当前职责
 
-- 记录 topic callback
+- 记录 topic callback（无来源 `TopicCallback` 与带来源 `TopicSourceCallback` 并存）
 - 维护 topic name / id 映射
 - 记录已发布 topic 及其 owner service
 - 记录 publisher 侧 TCP / SHM subscriber 集合
-- 在本地 dispatch 广播回调
+- 按订阅选择器（服务级 / 实例级）过滤发布者通知，并为每个发布者实例建立独立数据面连接
+- 在本地 dispatch 广播回调：`dispatch()` 触发无来源回调，`dispatchFrom(service, host_id, instance_id, ...)` 按来源实例匹配选择器后分发
 
 ### 7.4 topic owner 语义
 
@@ -285,7 +287,7 @@ reply wait 期间只处理：
 
 ### 8.1 作用
 
-`OmniRuntime::Impl` 直接管理本地服务的数据面入口，不再经过独立的 Host 抽象层。
+`OmniRuntime::Impl` 直接管理本地服务的数据面入口。
 每个本地注册的服务对应一个 `LocalServiceEntry`，直接持有 TCP listener 和 SHM 服务端实例。
 
 ### 8.2 LocalServiceEntry 结构
@@ -305,7 +307,7 @@ struct LocalServiceEntry {
 
 ### 8.3 已内联的方法
 
-以下原属于 `ServiceHostRuntime` 的功能，现已作为 `OmniRuntime::Impl` 的私有方法实现：
+以下请求分派功能由 `OmniRuntime::Impl` 的私有方法实现：
 
 - `onServiceEndpointEvent()` — 端点级 fd 事件（accept / 握手 / 可读映射）
 - `onServiceClientReadable()` — 客户端可读回调（拆帧 + 分派）
@@ -338,16 +340,19 @@ struct LocalServiceEntry {
 ### 9.3 选择逻辑
 
 1. 拿到目标服务 `ServiceInfo`
-2. 调用 `createClientConnection(service_name, host, port, local_host_id, remote_host_id, shm_config)`
+2. 调用 `createClientConnection(service_name, host, port, local_host_id, remote_host_id, shm_config, instance_id)`
 3. 函数内部判断：同机先尝试 SHM，失败或跨机回退到 TCP
-4. 成功返回 `IMessageConnection*`（`CONNECTED` 状态），移入 `ServiceConnection` 由连接生命周期管理
+4. 成功返回 `IMessageConnection*`（`CONNECTED` 状态），以连接键存入 `ServiceConnection` 由连接生命周期管理
 5. 失败返回 `NULL`，上层返回 `ERR_CONNECT_FAILED`
+
+`ConnectionManager` 以连接键索引连接：`getOrCreateConnection(service_name, ...)` 是默认实例封装（键即服务名），`getOrCreateConnectionByKey(connection_key, service_name, ...)` 供显式实例寻址使用（键由 `makeServiceConnectionKey(name, host_id, instance_id)` 生成）。`service_name` 与 `connection_key` 分离，SHM 握手路径仍以真实服务名 + `instance_id` 派生。
 
 `createClientConnection()` 位于 `src/transport/transport_selector.{h,cpp}`，是新增传输的落点，但属**源码级、侵入式**扩展：
 新增传输还需同步改动 core 侧（`TransportType` 分支、服务端端点半创建、topic 订阅模型等），并非在此单点即可接入；当前不提供动态插件 / provider 注入 ABI。
 仅适用于与"点对点连接"模型一致的传输；总线型传输（I2C/RS-485 等）拓扑与寻址模型不同，不在当前支持范围。
 `ConnectionManager` 出站连接使用 `createClientConnection()`；本地服务 hosting 在 `OmniRuntime::Impl` 中
-直接创建 `TcpServerEndpoint` 和 `ShmServerEndpoint`（不经过 `createClientConnection()`）。
+通过 `createServerEndpoint()` 创建服务端端点（`TransportType::TCP` 与 `TransportType::SHM`），
+不经过 `createClientConnection()`。
 ServiceManager 控制面仍固定使用 TCP。
 
 ## 10. ShmClientConnection / ShmServerEndpoint
@@ -356,10 +361,9 @@ ServiceManager 控制面仍固定使用 TCP。
 
 `ShmClientConnection`（客户端）与 `ShmServerEndpoint`（服务端端点）提供同机低延迟数据面传输，底层共用 `shm_ring.h` 的 per-client ring 布局与读写函数。
 
-### 10.2 架构变更：从全局 SHM 到 per-client SHM
+### 10.2 Per-client SHM 架构
 
-旧架构使用一块全局 SHM，所有客户端共用一个 request ring，服务端按 slot 写回 response。
-新架构改为 **per-client SHM**：每个客户端创建自己独立的共享内存块，各自持有独立的 request ring 和 response ring。
+每个客户端创建自己独立的共享内存块，各自持有独立的 request ring 和 response ring。
 
 ### 10.3 Per-client SHM 内存布局
 
@@ -379,7 +383,6 @@ ServiceManager 控制面仍固定使用 TCP。
 - `resp_ring_capacity`
 - `ready_flag`
 
-不再包含 `max_clients`、`response_bitmap`、`req_lock`、`slots[32]` 等字段。
 每个 SHM 仅属于一个客户端，不存在跨客户端竞争，因此无需 spinlock。
 
 ### 10.5 服务端数据结构
@@ -406,6 +409,8 @@ ShmServerConnection:
 3. 服务端打开并映射客户端 SHM
 4. 服务端通过 UDS 回复 `[resp_eventfd, master_eventfd]`
 5. 客户端设置 `ready_flag`，握手完成
+
+服务端 UDS 监听路径由 `generateShmName(service_name, instance_id, host_id)` → `shmHandshakePath()` 派生：`host_id` 与 `instance_id` 参与哈希输入但不进入可见前缀，保证同机同名多实例、以及多板仿真（同服务名同实例、不同 `host_id`）各自派生不同路径，互不 unlink 抢占。
 
 ### 10.7 SHM 数据流模型
 
@@ -443,14 +448,17 @@ ShmServerConnection:
 负责：
 
 - 注册服务表
-- `name -> ServiceEntry`
+- `name -> (instance_key -> ServiceEntry)` 两级映射，`instance_key` 由 `makeServiceInstanceKey(host_id, instance_id)` 生成
+- handle -> 实例条目、控制 fd -> 实例条目等索引（同一 fd 同名至多一个实例）
 - fd ownership 关联
+
+同身份 `(name, host_id, instance_id)` 重复注册为后来者顶替（保留原 handle、刷新 ServiceInfo 与控制 fd，并输出被顶替的旧 fd）；异身份新增条目并存。按名查找（`findService`）返回实例键字典序第一实例，完整枚举由 `listServiceInstances` 提供。
 
 ### 11.2 HeartbeatMonitor
 
 负责：
 
-- 心跳超时检测（`missed_count` 已改为局部变量，不再持久化）
+- 心跳超时检测
 - 定期检查服务是否死亡
 
 ### 11.3 DeathNotifier
@@ -489,9 +497,16 @@ Client
   -> OmniRuntime::lookupService()
   -> SmControlChannel::sendMessage(MSG_LOOKUP)
   -> ServiceManagerApp::handleLookup()
-  -> ServiceRegistry::findService()
+  -> ServiceRegistry::findService()   // 同名多实例时返回实例键字典序第一实例
   -> 返回 ServiceInfo
-  -> OmniRuntime / ConnectionManager 使用返回的 host_id / shm_config
+  -> OmniRuntime / ConnectionManager 使用返回的 host_id / instance_id / shm_config
+
+Client（需要枚举同名全部实例时）
+  -> OmniRuntime::listServiceInstances(name)
+  -> SmControlChannel::sendMessage(MSG_LIST_INSTANCES)
+  -> ServiceManagerApp::handleListInstances()
+  -> ServiceRegistry::listServiceInstances(name)   // 实例键字典序
+  -> 返回 ServiceInfo 列表
 ```
 
 ### 12.3 服务死亡订阅数据流
@@ -619,12 +634,12 @@ Publisher
 
 ```text
 Subscriber
-  -> OmniRuntime::subscribeTopic()
+  -> OmniRuntime::subscribeTopic()（无选择器 mode 0，或 TopicSubscriptionSelector 服务级/实例级）
   -> SmControlChannel::sendMessage(MSG_SUBSCRIBE_TOPIC)
   -> ServiceManagerApp::handleSubscribeTopic()
   -> TopicManager::addSubscriber()
   -> 返回 MSG_SUBSCRIBE_TOPIC_REPLY
-  -> 仅 reply 成功后，本地 TopicRuntime 记录 callback 和 topic id
+  -> 仅 reply 成功后，本地 TopicRuntime 记录 callback/selector 和 topic id
 ```
 
 ### 14.3 publisher 信息下发数据流
@@ -632,12 +647,14 @@ Subscriber
 ```text
 ServiceManager
   -> 发现某 topic 有订阅者且已有 publisher
-  -> 向 subscriber 发送 MSG_TOPIC_PUBLISHER_NOTIFY
+  -> 按 (发布者服务名, 主题名) 与订阅选择器匹配
+  -> 向匹配的 subscriber 发送 MSG_TOPIC_PUBLISHER_NOTIFY（每个发布者实例一条）
 
 Subscriber
   -> OmniRuntime::onSMMessage()
+  -> topic_runtime_.matchSubscriptions() 过滤
   -> ensureTopicPublisherConnection()
-  -> ConnectionManager 建立到 publisher 的直连
+  -> ConnectionManager::getOrCreateConnectionByKey(makeServiceConnectionKey(pub_name, host_id, instance_id), ...)
   -> 发送 MSG_SUBSCRIBE_BROADCAST 给 publisher
 ```
 
@@ -652,8 +669,9 @@ Publisher
 
 Subscriber
   -> 收到 MSG_BROADCAST
-  -> TopicRuntime::dispatch(topic_id, data)
-  -> 执行本地 callback
+  -> 按连接登记的发布者实例身份回填来源
+  -> TopicRuntime::dispatchFrom(publisher_service, host_id, instance_id, topic_id, data)
+  -> 执行本地 callback（带来源回调可获知 host_id / instance_id）
 ```
 
 ## 15. examples / tools / tests 与实现的对应关系
@@ -686,7 +704,7 @@ Subscriber
 
 当前架构已经形成一个清晰的稳定点：
 
-- 控制面、RPC、Topic、ServiceHost 已形成清晰的 runtime 边界
+- 控制面、RPC、Topic 已形成清晰的 runtime 边界
 - `OmniRuntime` 已主要承担协调层职责
 - SHM / TCP / control plane / topic 的关键路径均已有明确边界
 - examples、工具链、性能测试和关键回归均已对应当前实现验证
@@ -713,18 +731,40 @@ Subscriber
 class OmniRuntime {
     // 连接管理
     int connectService(const std::string& service_name);
+    int connectServiceInstance(const std::string& service_name,
+                               const std::string& host_id,
+                               const std::string& instance_id);
     int disconnectService(const std::string& service_name);
+    int disconnectServiceInstance(const std::string& service_name,
+                                  const std::string& host_id,
+                                  const std::string& instance_id);
     bool isServiceConnected(const std::string& service_name) const;
-    
+    bool isServiceInstanceConnected(const std::string& service_name,
+                                    const std::string& host_id,
+                                    const std::string& instance_id) const;
+
+    // 实例发现
+    int listServiceInstances(const std::string& service_name,
+                             std::vector<ServiceInfo>& instances);
+
     // 自动重连
     void enableAutoReconnect(const std::string& service_name, bool enable = true);
     void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
-    
+
     // 心跳检测
     void startHeartbeat(const std::string& service_name, uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
     void stopHeartbeat(const std::string& service_name);
+
+    // 死亡通知（名字级 / 实例级）
+    int subscribeServiceDeath(const std::string& service_name, const DeathCallback& cb);
+    int subscribeServiceInstanceDeath(const std::string& service_name,
+                                      const std::string& host_id,
+                                      const std::string& instance_id,
+                                      const DeathSourceCallback& cb);
 };
 ```
+
+> `enableAutoReconnect` / `setReconnectInterval` / `startHeartbeat` / `stopHeartbeat` 接收的参数就是**连接键**：传服务名即作用于默认实例，传 `makeServiceConnectionKey(name, host_id, instance_id)` 即作用于该实例。生成的 Proxy（C++ / C）在绑定实例后会自动传入实例连接键，因此绑定实例的 invoke / 心跳 / 重连 / 断开都寻址该实例。
 
 ### 17.3 ServiceProxyBase 基类
 
@@ -734,6 +774,8 @@ class OmniRuntime {
 class ServiceProxyBase {
 public:
     int connect();           // 查询服务 + 建立连接 + 注册死亡通知
+    int connect(const std::string& host_id, const std::string& instance_id);  // 绑定实例后连接
+    void setInstance(const std::string& host_id, const std::string& instance_id);  // 设置下次 connect 目标
     void disconnect();       // 断开连接 + 停止心跳
     bool isConnected() const;
     void enableAutoReconnect(bool enable = true);
@@ -741,6 +783,10 @@ public:
     void startHeartbeat(uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
     void stopHeartbeat();
     void OnServiceDied(const std::function<void()>& callback);
+
+protected:
+    // 当前实例绑定的数据面连接键；生成的 Proxy 方法据此寻址
+    const std::string& connectionKey() const;
 };
 ```
 
@@ -842,12 +888,24 @@ public:
     // 业务方法（仅生成这些）
     int GetData(SensorData* out) {
         Buffer req, resp;
-        int ret = runtime_.invoke("SensorService", 0x..., 0x..., 0x..., req, resp, 0);
+        // connectionKey() 默认等于服务名；绑定实例后为实例连接键
+        int ret = runtime_.invoke(connectionKey(), 0x..., 0x..., 0x..., req, resp, 0);
         if (ret != 0) return ret;
         if (!out) return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
         // ... 反序列化 resp 到 out
         return 0;
     }
+
+    // 话题订阅：服务级 / 服务级带来源 / 实例级
+    void SubscribeSensorUpdate(const std::function<void(const SensorUpdate&)>& cb);
+    void SubscribeSensorUpdateWithSource(
+        const std::function<void(const std::string& host_id,
+                                 const std::string& instance_id,
+                                 const SensorUpdate&)>& cb);
+    void SubscribeSensorUpdateInstance(
+        const std::string& host_id, const std::string& instance_id,
+        const std::function<void(const std::string&, const std::string&,
+                                 const SensorUpdate&)>& cb);
 };
 ```
 
@@ -859,6 +917,9 @@ demo::SensorServiceProxy proxy(runtime);
 
 // 连接服务（建立连接 + 注册死亡通知）
 proxy.connect();
+
+// 或：绑定到指定实例（同名多实例场景）
+// proxy.connect(host_id, instance_id);
 
 // 启用自动重连
 proxy.enableAutoReconnect(true);

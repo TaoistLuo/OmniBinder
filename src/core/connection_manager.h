@@ -53,7 +53,9 @@ class EventLoop;
  * @brief  单个服务连接的上下文
  */
 struct ServiceConnection {
-    std::string     service_name;
+    // 连接索引键：默认实例即服务名，实例级为 makeServiceConnectionKey(...)；
+    // 与“真实服务名”可能不同，故命名 connection_key 以反映实际语义
+    std::string     connection_key;
     IMessageConnection*     transport;
     Buffer          recv_buffer;
     bool            connected;
@@ -87,14 +89,24 @@ public:
     ~ConnectionManager();
 
     /*
-     * @brief  获取或创建到指定服务的连接
+     * @brief  按实例连接键获取或创建连接
+     * @param[in]  connection_key 连接键（connections_ 的索引，见 makeServiceConnectionKey）
+     * @param[in]  service_name   真实服务名（SHM 握手路径依据；与键不同）
+     * @param[in]  host           目标主机地址
+     * @param[in]  port           目标端口
+     * @param[in]  host_id        目标板级主机身份
+     * @param[in]  shm_config     SHM ring 容量配置
+     * @param[in]  instance_id    目标实例标识（SHM 握手路径依据，空串为单实例）
+     * @note   默认实例键等于服务名，此接口主要供显式实例寻址使用
      */
-    ServiceConnection* getOrCreateConnection(
+    ServiceConnection* getOrCreateConnectionByKey(
+        const std::string& connection_key,
         const std::string& service_name,
         const std::string& host,
         uint16_t port,
         const std::string& host_id,
-        const ShmConfig& shm_config = ShmConfig());
+        const ShmConfig& shm_config = ShmConfig(),
+        const std::string& instance_id = "");
 
     /*
      * @brief  获取已有连接

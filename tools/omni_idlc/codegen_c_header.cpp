@@ -61,11 +61,6 @@ static void emitStubHandlerParams(std::ostream& os, const MethodDef& m, const st
 bool CCodeGen::generate(const AstFile& ast, const std::string& output_dir,
                         const std::string& filename) {
     pkg_ = ast.package_name;
-    has_error_ = false;
-
-    if (!validateAst(ast)) {
-        return false;
-    }
 
     std::string header_path = output_dir + "/" + filename + "_c.h";
     std::string source_path = output_dir + "/" + filename + ".c";
@@ -79,58 +74,9 @@ bool CCodeGen::generate(const AstFile& ast, const std::string& output_dir,
     return true;
 }
 
-void CCodeGen::reportError(const std::string& message) {
-    if (!has_error_) {
-        std::fprintf(stderr, "C codegen error: %s\n", message.c_str());
-        has_error_ = true;
-    }
-}
-
-bool CCodeGen::validateTypeSupported(const TypeRef& type, const std::string& context,
-                                     bool allow_void) {
-    if (type.isCustom() || isCStringLike(type)) {
-        return true;
-    }
-
-    if (type.isVoid()) {
-        if (allow_void) {
-            return true;
-        }
-        reportError(context + " uses unsupported C codegen type '" + cppTypeName(type) + "'");
-        return false;
-    }
-
-    if (type.isArray()) {
-        if (!type.element_type) {
-            reportError(context + " uses unsupported C codegen type '" + cppTypeName(type) + "'");
-            return false;
-        }
-        return validateTypeSupported(*type.element_type, context + " element type", false);
-    }
-
-    if (primitiveReadFunc(type.primitive) != NULL &&
-        primitiveWriteFunc(type.primitive) != NULL) {
-        return true;
-    }
-
-    reportError(context + " uses unsupported C codegen type '" + cppTypeName(type) + "'");
-    return false;
-}
-
-bool CCodeGen::validateAst(const AstFile& ast) {
-    return validateAstCommon(ast, [this](const TypeRef& t, const std::string& ctx, bool allow_void) {
-        return this->validateTypeSupported(t, ctx, allow_void);
-    });
-}
-
 void CCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::string& filename) {
     std::vector<TypeRef> array_types = collectArrayTypesFromAst(ast, pkg_);
-    std::string guard = filename;
-    for (size_t i = 0; i < guard.size(); ++i) {
-        if (guard[i] == '.') guard[i] = '_';
-        guard[i] = toupper(guard[i]);
-    }
-    guard += "_C_H";
+    std::string guard = sanitizeIdentifierPrefix(filename) + "_C_H";
 
     emitGeneratedFileBanner(os,
                             filename + "_c.h",
@@ -190,20 +136,22 @@ void CCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::s
     os << "#endif /* " << guard << " */\n";
 }
 
-void CCodeGen::genStruct(const StructDef& s, std::ostream& os) {
-    std::string tname = pkg_ + "_" + s.name;
-
-    os << "typedef struct " << tname << " {\n";
-    for (size_t j = 0; j < s.fields.size(); ++j) {
-        const FieldDef& f = s.fields[j];
+void CCodeGen::emitStructTypedef(const std::string& type_name,
+                                 const std::vector<FieldDef>& fields, std::ostream& os) {
+    os << "typedef struct " << type_name << " {\n";
+    for (size_t j = 0; j < fields.size(); ++j) {
+        const FieldDef& f = fields[j];
         os << "    " << cDeclaredTypeName(f.type, pkg_) << " " << f.name << ";\n";
-        if (f.type.primitive == TYPE_STRING) {
-            os << "    uint32_t " << f.name << "_len;\n";
-        } else if (f.type.primitive == TYPE_BYTES) {
+        if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
             os << "    uint32_t " << f.name << "_len;\n";
         }
     }
-    os << "} " << tname << ";\n\n";
+    os << "} " << type_name << ";\n\n";
+}
+
+void CCodeGen::genStruct(const StructDef& s, std::ostream& os) {
+    std::string tname = pkg_ + "_" + s.name;
+    emitStructTypedef(tname, s.fields, os);
 
     os << "void " << tname << "_init(" << tname << "* self);\n";
     os << "void " << tname << "_destroy(" << tname << "* self);\n";
@@ -213,22 +161,10 @@ void CCodeGen::genStruct(const StructDef& s, std::ostream& os) {
 
 void CCodeGen::genTopic(const TopicDef& t, std::ostream& os) {
     std::string tname = pkg_ + "_" + t.name;
-    uint32_t topic_id = fnv1a_hash(t.name);
-
-    os << "typedef struct " << tname << " {\n";
-    for (size_t j = 0; j < t.fields.size(); ++j) {
-        const FieldDef& f = t.fields[j];
-        os << "    " << cDeclaredTypeName(f.type, pkg_) << " " << f.name << ";\n";
-        if (f.type.primitive == TYPE_STRING) {
-            os << "    uint32_t " << f.name << "_len;\n";
-        } else if (f.type.primitive == TYPE_BYTES) {
-            os << "    uint32_t " << f.name << "_len;\n";
-        }
-    }
-    os << "} " << tname << ";\n\n";
+    emitStructTypedef(tname, t.fields, os);
 
     os << "#define " << pkg_ << "_" << t.name << "_TOPIC_ID 0x"
-       << std::hex << topic_id << std::dec << "u\n\n";
+       << std::hex << fnv1a_hash(t.name) << std::dec << "u\n\n";
 
     os << "void " << tname << "_init(" << tname << "* self);\n";
     os << "void " << tname << "_destroy(" << tname << "* self);\n";
@@ -249,7 +185,8 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         uint32_t mid = fnv1a_hash(svc.methods[i].name);
         std::string upper_name = cToSnakeCase(svc.methods[i].name);
-        for (size_t j = 0; j < upper_name.size(); ++j) upper_name[j] = toupper(upper_name[j]);
+        for (size_t j = 0; j < upper_name.size(); ++j)
+            upper_name[j] = static_cast<char>(toupper(static_cast<unsigned char>(upper_name[j])));
         os << "#define " << prefix << "_METHOD_" << upper_name
            << " 0x" << std::hex << mid << std::dec << "u\n";
     }
@@ -260,7 +197,8 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
         const MethodDef& m = svc.methods[i];
         uint32_t idl_hash = computeMethodHash(m, ast);
         std::string upper_name = cToSnakeCase(m.name);
-        for (size_t j = 0; j < upper_name.size(); ++j) upper_name[j] = toupper(upper_name[j]);
+        for (size_t j = 0; j < upper_name.size(); ++j)
+            upper_name[j] = static_cast<char>(toupper(static_cast<unsigned char>(upper_name[j])));
         os << "#define " << prefix << "_METHOD_" << upper_name << "_IDL_HASH"
            << " 0x" << std::hex << idl_hash << std::dec << "u\n";
     }
@@ -288,6 +226,10 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
         }
         if (!m.return_type.isVoid() && isCStringLike(m.return_type)) {
             os << "    /* " << m.name << ": allocate return buffer on heap, set *result_len, and the stub frees *result after reply serialization. */\n";
+        }
+        if (!m.return_type.isVoid() &&
+            (m.return_type.isArray() || m.return_type.isCustom())) {
+            os << "    /* " << m.name << ": fill *result; the stub serializes then destroys it after the reply. */\n";
         }
         os << "    " << handler_typedef << " " << m.name << ";\n";
     }
@@ -322,6 +264,8 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
 
     os << "/* ---- " << svc.name << " Proxy (Client Side) ---- */\n\n";
 
+    os << "#define " << prefix << "_PROXY_MAX_SUBSCRIPTIONS 8\n\n";
+
     os << "typedef struct " << prefix << "_proxy {\n";
     os << "    omni_runtime_t* runtime;\n";
     os << "    int connected;\n";
@@ -329,13 +273,19 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
     os << "    uint32_t reconnect_interval_ms;\n";
     os << "    void (*death_callback)(void* user_data);\n";
     os << "    void* death_user_data;\n";
-    os << "    void* _sub_ctxs[8];\n";
-    os << "    const char* _sub_topics[8];\n";
+    os << "    void* _sub_ctxs[" << prefix << "_PROXY_MAX_SUBSCRIPTIONS];\n";
+    os << "    const char* _sub_topics[" << prefix << "_PROXY_MAX_SUBSCRIPTIONS];\n";
     os << "    int _sub_ctx_count;\n";
+    os << "    int instance_bound;\n";
+    // MAX_SERVICE_NAME_LENGTH(256) + 1，容量与 SM/运行时的身份长度上限一致
+    os << "    char instance_host_id[257];\n";
+    os << "    char instance_id[257];\n";
     os << "} " << prefix << "_proxy;\n\n";
 
     os << "void " << prefix << "_proxy_init(" << prefix << "_proxy* p, omni_runtime_t* runtime);\n";
     os << "int  " << prefix << "_proxy_connect(" << prefix << "_proxy* p);\n";
+    os << "int  " << prefix << "_proxy_connect_instance(" << prefix << "_proxy* p,\n";
+    os << "    const char* host_id, const char* instance_id);\n";
     os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p);\n";
     os << "void " << prefix << "_proxy_destroy(" << prefix << "_proxy* p);\n";
     os << "int  " << prefix << "_proxy_is_connected(const " << prefix << "_proxy* p);\n";

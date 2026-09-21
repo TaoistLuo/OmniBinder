@@ -405,16 +405,35 @@ public:
     void ResetSensor(int32_t sensor_id);
 
     // ---- 订阅广播话题 ----
+    // 服务级：订阅 "SensorService" 发布的该话题全部实例，回调不带来源
     void SubscribeSensorUpdate(
         const std::function<void(const SensorUpdate&)>& callback);
+    // 服务级：同上，但回调携带发布者实例身份（host_id + instance_id）
+    void SubscribeSensorUpdateWithSource(
+        const std::function<void(const std::string& host_id,
+                                 const std::string& instance_id,
+                                 const SensorUpdate&)>& callback);
+    // 实例级：仅订阅指定实例，回调携带来源实例身份
+    void SubscribeSensorUpdateInstance(
+        const std::string& host_id, const std::string& instance_id,
+        const std::function<void(const std::string&, const std::string&,
+                                 const SensorUpdate&)>& callback);
     void SubscribeSystemAlert(
         const std::function<void(const SystemAlert&)>& callback);
 
-    // connect()/disconnect()/isConnected()/OnServiceDied() 等由 ServiceProxyBase 提供
+    // connect()/connect(host_id, instance_id)/setInstance()/disconnect()/
+    // isConnected()/OnServiceDied() 等由 ServiceProxyBase 提供
 };
-
-} // namespace demo
 ```
+
+补充说明（话题来源实例身份，决策 D5）：
+
+- `SubscribeX(cb)` 为服务级订阅（该服务发布的全部实例），回调不带来源
+- `SubscribeXWithSource(cb)` / `SubscribeXInstance(host_id, instance_id, cb)`
+  复用同一运行时回调类型 `TopicSourceCallback`，以独立参数回传 `host_id` + `instance_id`，
+  **不改变广播消息 payload**；订阅方据此区分数据来自哪个实例
+- 服务级订阅在数据面为每个发布者实例建立独立直连；实例级只接受所选实例
+- 不同服务发布的同名话题互不下发（话题身份 = 发布者服务名 + 主题名）
 
 补充说明：
 
@@ -466,12 +485,17 @@ typedef struct demo_SensorService_proxy {
     void* _sub_ctxs[8];
     const char* _sub_topics[8];
     int _sub_ctx_count;
+    int instance_bound;
+    char instance_host_id[257];   /* MAX_SERVICE_NAME_LENGTH + 1 */
+    char instance_id[257];
 } demo_SensorService_proxy;
 
 void demo_SensorService_proxy_init(
     demo_SensorService_proxy* p, omni_runtime_t* runtime);
 
 int  demo_SensorService_proxy_connect(demo_SensorService_proxy* p);
+int  demo_SensorService_proxy_connect_instance(
+    demo_SensorService_proxy* p, const char* host_id, const char* instance_id);
 void demo_SensorService_proxy_disconnect(demo_SensorService_proxy* p);
 
 /* 远程调用：方法名 snake_case；IDL void 方法在 C Proxy 中也返回 void */

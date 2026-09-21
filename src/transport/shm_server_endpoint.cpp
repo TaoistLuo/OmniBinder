@@ -17,13 +17,18 @@ namespace omnibinder {
 
 ShmServerEndpoint::ShmServerEndpoint(const std::string& service_name,
                                        size_t req_ring_capacity,
-                                       size_t resp_ring_capacity)
+                                       size_t resp_ring_capacity,
+                                       const std::string& instance_id,
+                                       const std::string& host_id)
     : service_name_(service_name)
-    , req_ring_capacity_(shmNormalizeRingCapacity(req_ring_capacity))
-    , resp_ring_capacity_(shmNormalizeRingCapacity(resp_ring_capacity))
+    , instance_id_(instance_id)
+    , host_id_(host_id)
     , handshake_listener_(NULL)
     , master_eventfd_(-1)
 {
+    // SHM ring 容量由客户端在控制块中声明，服务端不保存/使用构造参数
+    (void)req_ring_capacity;
+    (void)resp_ring_capacity;
 }
 
 ShmServerEndpoint::~ShmServerEndpoint()
@@ -36,24 +41,18 @@ int ShmServerEndpoint::start(const std::string& host, uint16_t port,
 {
     (void)host;
     (void)port;
+    (void)config;
     if (handshake_listener_ != NULL) {
         OMNI_LOG_WARN(LOG_TAG, "start() on an already started endpoint '%s'",
                       service_name_.c_str());
         return 0;
     }
 
-    if (config.req_capacity > 0 && shmIsValidRingCapacity(config.req_capacity)) {
-        req_ring_capacity_ = shmNormalizeRingCapacity(config.req_capacity);
-    }
-    if (config.resp_capacity > 0 && shmIsValidRingCapacity(config.resp_capacity)) {
-        resp_ring_capacity_ = shmNormalizeRingCapacity(config.resp_capacity);
-    }
-
-    handshake_path_ = shmHandshakePath(generateShmName(service_name_));
+    handshake_path_ = shmHandshakePath(generateShmName(service_name_, instance_id_, host_id_));
     handshake_listener_ = platform::handshakeListen(handshake_path_);
     if (!handshake_listener_) {
-        OMNI_LOG_ERROR(LOG_TAG, "Failed to create handshake listen for '%s'",
-                       service_name_.c_str());
+        OMNI_LOG_ERROR(LOG_TAG, "Failed to create handshake listen for '%s' (instance='%s')",
+                       service_name_.c_str(), instance_id_.c_str());
         handshake_path_.clear();
         return -1;
     }
@@ -68,8 +67,10 @@ int ShmServerEndpoint::start(const std::string& host, uint16_t port,
         return -1;
     }
 
-    OMNI_LOG_INFO(LOG_TAG, "Server listening on handshake '%s' (fd=%d, req_eventfd=%d)",
-                  handshake_path_.c_str(), handshakeListenFd(), master_eventfd_);
+    OMNI_LOG_INFO(LOG_TAG, "Server listening on handshake '%s' (service='%s', instance='%s', "
+                           "fd=%d, req_eventfd=%d)",
+                  handshake_path_.c_str(), service_name_.c_str(), instance_id_.c_str(),
+                  handshakeListenFd(), master_eventfd_);
     return 0;
 }
 
@@ -190,12 +191,7 @@ int ShmServerEndpoint::allocClientId()
 {
     // 进程内单调递增，与 fd 号命名空间隔离
     static std::atomic<int> s_next(SHM_CLIENT_ID_BASE);
-    int id = s_next.fetch_add(1, std::memory_order_relaxed);
-    if (id < SHM_CLIENT_ID_BASE) {
-        s_next.store(SHM_CLIENT_ID_BASE + 1, std::memory_order_relaxed);
-        id = SHM_CLIENT_ID_BASE;
-    }
-    return id;
+    return s_next.fetch_add(1, std::memory_order_relaxed);
 }
 
 // 完成一次握手：接收 SHM 名 → 打开并校验 → 回传通知句柄 → 建立私有连接
@@ -215,16 +211,10 @@ ShmServerConnection* ShmServerEndpoint::createClientFromHandshake(
     }
 
     std::string client_shm_name(name_buf, data_len);
-    if (client_shm_name.empty()) {
-        OMNI_LOG_WARN(LOG_TAG, "handshake: empty SHM name from client");
-        platform::handshakeClose(ch);
-        return NULL;
-    }
 
-    // 打开客户端 SHM
+    // 打开客户端 SHM。open 模式 size 被平台忽略（按对象实际大小映射），传 0 以免误导
     size_t mapped_size = 0;
-    void* addr = platform::shmCreate(client_shm_name, sizeof(ShmControlBlock), false,
-                                     &mapped_size);
+    void* addr = platform::shmCreate(client_shm_name, 0, false, &mapped_size);
     if (addr == NULL) {
         OMNI_LOG_WARN(LOG_TAG, "handshake: failed to open client SHM '%s'",
                       client_shm_name.c_str());

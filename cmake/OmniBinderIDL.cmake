@@ -7,9 +7,15 @@
 #       FILES <file1.bidl> [file2.bidl ...]
 #       OUTPUT_DIR <output_directory>
 #   )
+# TARGET 可传入多个目标，IDL 只生成一次并复用到全部目标，避免重复 custom command。
+
+if(DEFINED OMNIBINDER_IDL_CMAKE_INCLUDED)
+    return()
+endif()
+set(OMNIBINDER_IDL_CMAKE_INCLUDED TRUE)
 
 function(omnic_generate)
-    cmake_parse_arguments(BIDL "" "TARGET;LANGUAGE;OUTPUT_DIR" "FILES" ${ARGN})
+    cmake_parse_arguments(BIDL "" "LANGUAGE;OUTPUT_DIR" "TARGET;FILES" ${ARGN})
 
     if(NOT BIDL_TARGET)
         message(FATAL_ERROR "omnic_generate: TARGET is required")
@@ -33,7 +39,7 @@ function(omnic_generate)
     if(OMNIBINDER_HOST_IDLC)
         set(BINDERC_EXECUTABLE "${OMNIBINDER_HOST_IDLC}")
     elseif(CMAKE_CROSSCOMPILING OR OMNIBINDER_BUILD_CONTEXT STREQUAL "cross")
-        find_program(BINDERC_EXECUTABLE NAMES omni-idlc omnic)
+        find_program(BINDERC_EXECUTABLE NAMES omni-idlc)
         if(NOT BINDERC_EXECUTABLE)
             message(FATAL_ERROR
                 "Cross-compiling requires a host omni-idlc. "
@@ -43,12 +49,8 @@ function(omnic_generate)
         set(BINDERC_EXECUTABLE $<TARGET_FILE:omni-idlc>)
         set(OMNIC_GENERATOR_TARGET omni-idlc)
         set(OMNIC_GENERATOR_DEPENDS omni-idlc)
-    elseif(TARGET omnic)
-        set(BINDERC_EXECUTABLE $<TARGET_FILE:omnic>)
-        set(OMNIC_GENERATOR_TARGET omnic)
-        set(OMNIC_GENERATOR_DEPENDS omnic)
     else()
-        find_program(BINDERC_EXECUTABLE NAMES omni-idlc omnic)
+        find_program(BINDERC_EXECUTABLE NAMES omni-idlc)
         if(NOT BINDERC_EXECUTABLE)
             message(FATAL_ERROR "omni-idlc not found")
         endif()
@@ -105,11 +107,13 @@ function(omnic_generate)
         endif()
     endforeach()
 
-    # 将生成的源文件添加到目标
-    target_sources(${BIDL_TARGET} PRIVATE ${GENERATED_SOURCES} ${GENERATED_HEADERS})
-    target_include_directories(${BIDL_TARGET} PRIVATE ${BIDL_OUTPUT_DIR})
+    # 将生成的源文件复用到全部目标
+    foreach(BIDL_TGT ${BIDL_TARGET})
+        target_sources(${BIDL_TGT} PRIVATE ${GENERATED_SOURCES} ${GENERATED_HEADERS})
+        target_include_directories(${BIDL_TGT} PRIVATE ${BIDL_OUTPUT_DIR})
 
-    if(OMNIC_GENERATOR_TARGET)
-        add_dependencies(${BIDL_TARGET} ${OMNIC_GENERATOR_TARGET})
-    endif()
+        if(OMNIC_GENERATOR_TARGET)
+            add_dependencies(${BIDL_TGT} ${OMNIC_GENERATOR_TARGET})
+        endif()
+    endforeach()
 endfunction()

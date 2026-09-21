@@ -123,6 +123,13 @@ private:
      */
     void removeWatcherAndMaybeStopTargets(int watcher_fd);
     /*
+     * @brief  被 watch 的目标进程断开时，清除指向该 pid 的全部 watch 关系
+     * @param[in]  pid 已无存活控制连接的进程 pid
+     * @note   仅摘除 pid_watchers_ 与 watcher_to_pids_ 的反向索引条目，不再向已断开的
+     *         目标下发 WATCH_STOP；避免 pid churn 导致两张表无限增长
+     */
+    void removeTargetWatchers(uint32_t pid);
+    /*
      * @brief  移除一条 (watcher_fd, pid) watch 关系
      * @param[in]  watcher_fd watcher 连接 fd
      * @param[in]  pid        被关注的进程 pid
@@ -143,6 +150,9 @@ private:
     void sendHeartbeatAck(ClientConnection* conn, uint32_t seq);
     void handleLookup(ClientConnection* conn, const Message& msg);
     void sendLookupReply(ClientConnection* conn, uint32_t seq, bool found, const ServiceInfo& info);
+    void handleListInstances(ClientConnection* conn, const Message& msg);
+    void sendListInstancesReply(ClientConnection* conn, uint32_t seq, bool found,
+                                const std::vector<ServiceInfo>& instances);
     void handleListServices(ClientConnection* conn, const Message& msg);
     void sendListServicesReply(ClientConnection* conn, uint32_t seq, const std::vector<ServiceInfo>& services);
     void handleQueryInterfaces(ClientConnection* conn, const Message& msg);
@@ -151,28 +161,39 @@ private:
     void sendQueryPublishedTopicsReply(ClientConnection* conn, uint32_t seq, bool found, const std::vector<std::string>& topics);
     void handleSubscribeService(ClientConnection* conn, const Message& msg);
     void handleUnsubscribeService(ClientConnection* conn, const Message& msg);
+    void handleSubscribeServiceInstance(ClientConnection* conn, const Message& msg);
+    void handleUnsubscribeServiceInstance(ClientConnection* conn, const Message& msg);
     void handlePublishTopic(ClientConnection* conn, const Message& msg);
     void handleUnpublishTopic(ClientConnection* conn, const Message& msg);
     void handleSubscribeTopic(ClientConnection* conn, const Message& msg);
     void sendSubscribeTopicReply(ClientConnection* conn, uint32_t seq, bool success, uint32_t idl_hash = 0);
     void handleUnsubscribeTopic(ClientConnection* conn, const Message& msg);
-    void sendTopicPublisherNotify(int subscriber_fd, const std::string& topic, const ServiceInfo& pub_info);
+    void sendTopicPublisherNotify(int subscriber_fd, const std::string& topic,
+                                  const ServiceInfo& pub_info, uint32_t idl_hash);
     void onHeartbeatCheck();
-    void notifyServiceDeath(const std::string& service_name);
     /*
-     * @brief  服务摘除后的统一收尾：停止控制面心跳跟踪并通知死亡订阅者
-     * @param[in]  name 服务名称
-     * @note   显式注销 / 心跳超时 / 连接关闭三条摘除路径共用，保证收尾顺序一致
+     * @brief  服务实例摘除后通知死亡订阅者
+     * @param[in]  identity 被摘除的服务实例身份
+     * @note   实例级订阅者始终收到该实例的死亡通知；仅当该服务名下已无任何存活
+     *         实例时，名字级订阅者才收到"名字死亡"通知（见 notifyServiceRemoved）
      */
-    void notifyServiceRemoved(const std::string& name);
+    void notifyServiceInstanceDeath(const ServiceIdentity& identity);
     /*
-     * @brief  单个服务的完整摘除：移除注册表条目 + 统一收尾 + 清理其发布者
-     * @param[in]  name 服务名称
-     * @param[in]  fd   该服务控制连接 fd；-1 表示未知，仅跳过发布者清理
-     * @return true 表示注册表确实移除了该条目；false 表示该服务未注册
+     * @brief  服务实例摘除后的统一收尾：停止该实例心跳跟踪并通知死亡订阅者
+     * @param[in]  identity 被摘除的服务实例身份
+     * @note   显式注销 / 心跳超时两条摘除路径共用，保证收尾顺序一致；
+     *         实例级通知按身份下发，名字级通知仅在最后一个实例消失时下发
      */
-    bool removeServiceAndNotify(const std::string& name, int fd);
-    void sendDeathNotify(ClientConnection* conn, const std::string& service_name);
+    void notifyServiceRemoved(const ServiceIdentity& identity);
+    /*
+     * @brief  单个服务实例的完整摘除：移除注册表条目 + 统一收尾 + 清理其发布者
+     * @param[in]  identity 服务实例身份
+     * @param[in]  fd       该实例控制连接 fd；-1 表示未知，仅跳过发布者清理
+     * @return true 表示注册表确实移除了该实例；false 表示该实例未注册
+     */
+    bool removeServiceAndNotify(const ServiceIdentity& identity, int fd);
+    void sendDeathNotify(ClientConnection* conn, const ServiceIdentity& identity,
+                         MessageType type);
     void closeClient(int fd);
     void sendMessage(ClientConnection* conn, Message& msg);
     bool flushPendingSends(ClientConnection* conn);

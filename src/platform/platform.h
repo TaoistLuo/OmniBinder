@@ -70,12 +70,26 @@ bool isWouldBlock(int error_code);
 bool isConnectionReset(int error_code);
 bool waitSocketWritable(SocketFd fd, uint32_t timeout_ms);
 bool checkSocketConnected(SocketFd fd, int* out_error);
+/*
+ * @brief  非阻塞探测连接类 fd 的对端是否已关闭
+ * @param[in]  fd  连接型句柄（socket / 握手通道）
+ * @return true 对端已关闭（recv 探测到 EOF 或 HUP/ERR）；false 仍存活或无法判定
+ * @note   仅做零超时的 poll/select + MSG_PEEK，不消费任何数据；用于把
+ *         "对端进程已退出但本地仍标记为 CONNECTED" 的僵尸连接提前判死。
+ */
+bool isPeerClosed(SocketFd fd);
 
 // ============================================================
 // EventFd — 生产代码使用
 // ============================================================
 
 int  createEventFd();
+/*
+ * @brief  创建命名跨进程通知句柄
+ * @param[in]  name 句柄名（用于跨进程传递）
+ * @note   Linux 忽略 name（eventfd 为匿名对象，靠 UDS SCM_RIGHTS 传递）；
+ *         Windows 用 name 派生 Named Pipe 名。
+ */
 int  createNamedEventFd(const std::string& name);
 bool eventFdNotify(int efd);
 bool eventFdConsume(int efd);
@@ -146,6 +160,13 @@ int  handshakeGetListenerFd(handshake_listener* listener);
 // ============================================================
 
 std::string getMachineId();
+/*
+ * @brief  单调/墙钟域说明
+ * @note   currentTimeMs / currentTimeUs 仅用于测量时间间隔与超时预算，不保证是
+ *         墙钟时间：Linux 下两者均为 CLOCK_MONOTONIC（同一基准，可直接比较）；
+ *         Windows 下两者均为 GetSystemTimeAsFileTime（墙钟）。需要可显示的墙钟
+ *         时间请使用 getLocalTime()，不要依赖这两个函数。
+ */
 int64_t     currentTimeMs();
 int64_t     currentTimeUs();
 std::string getHostName();
@@ -161,22 +182,17 @@ void        sleepMs(uint32_t ms);
 typedef void (*SignalHandler)(int);
 void setupSignalHandlers(SignalHandler handler);
 
+/*
+ * @brief  设置"父进程死亡时本进程自动收 SIGTERM"（Linux prctl；Windows 无对应机制，空实现）
+ * @note   真实平台能力：父进程异常退出后，子进程不再残留为孤儿
+ */
+void setParentDeathSignal();
+
 // ============================================================
 // 原子操作 — 生产代码使用
 // ============================================================
 
 void memoryBarrier();
-
-// ============================================================
-// 测试辅助 — 仅测试代码引用
-// ============================================================
-
-bool waitFdReadable(int fd, int timeout_ms);
-/*
- * @brief  设置"父进程死亡时本进程自动收 SIGTERM"（Linux prctl；Windows 无对应机制，空实现）
- * @note   用于测试框架：父测试进程被 ctest 超时杀掉后，子 service_manager 不再残留为孤儿
- */
-void setParentDeathSignal();
 
 } // namespace platform
 } // namespace omnibinder

@@ -193,10 +193,14 @@ class FreertosSelectBackend : public EventBackend {
     SemaphoreHandle_t wake_sem_;
     // fd_set + select 逻辑
 public:
-    FreertosSelectBackend() { wake_sem_ = xSemaphoreCreateBinary(); }
-    void wakeup() override { xSemaphoreGive(wake_sem_); }
-    int poll(int timeout_ms) override {
-        // 用 select 监听所有 fd，配合信号量超时
+    bool init() override { wake_sem_ = xSemaphoreCreateBinary(); return wake_sem_ != NULL; }
+    void destroy() override { /* 释放资源 */ }
+    bool addFd(int fd, uint32_t events) override { /* 记录 fd 与事件 */ return true; }
+    bool modifyFd(int fd, uint32_t events) override { /* 更新事件 */ return true; }
+    bool removeFd(int fd) override { /* 摘除 fd */ return true; }
+    int poll(ReadyEvent* events, int max_events, int timeout_ms) override {
+        // 用 select 监听所有 fd，配合信号量超时，填充 events 并返回就绪数量
+        return 0;
     }
 };
 ```

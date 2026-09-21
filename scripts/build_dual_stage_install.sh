@@ -7,10 +7,14 @@ CROSS_BUILD_DIR="${ROOT_DIR}/build-cross"
 INSTALL_DIR="${ROOT_DIR}/install"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 JOBS="${JOBS:-$(nproc)}"
-TOOLCHAIN_FILE_DEFAULT="${ROOT_DIR}/cmake/toolchains/arm-linux-gnueabihf.cmake"
 TOOLCHAIN_FILE="${TOOLCHAIN_FILE:-}"
 
 host_env=(env -u CC -u CXX -u AR -u RANLIB -u STRIP -u LD -u PKG_CONFIG_SYSROOT_DIR -u PKG_CONFIG_PATH -u CROSS_COMPILE -u SDKTARGETSYSROOT -u OECORE_TARGET_SYSROOT -u OECORE_NATIVE_SYSROOT)
+
+if [[ -z "${CC:-}" || -z "${CXX:-}" ]]; then
+  printf 'Cross stage requires CC and CXX in the current environment.\n' >&2
+  exit 1
+fi
 
 "${host_env[@]}" cmake -S "${ROOT_DIR}" -B "${HOST_BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
@@ -36,16 +40,8 @@ cross_cmake_args=(
   -DOMNIBINDER_HOST_IDLC="${INSTALL_DIR}/bin_host/omni-idlc"
 )
 
-if [[ -z "${CC:-}" || -z "${CXX:-}" ]]; then
-  printf 'Cross stage requires CC and CXX in the current environment.\n' >&2
-  exit 1
-fi
-
 if [[ -n "${TOOLCHAIN_FILE}" ]]; then
   cross_cmake_args+=( -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" )
-elif [[ -f "${TOOLCHAIN_FILE_DEFAULT}" ]]; then
-  printf 'Using default toolchain file: %s\n' "${TOOLCHAIN_FILE_DEFAULT}"
-  cross_cmake_args+=( -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE_DEFAULT}" )
 fi
 
 cmake "${cross_cmake_args[@]}"

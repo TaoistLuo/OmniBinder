@@ -9,25 +9,10 @@
 namespace omnibinder {
 
 // ============================================================
-// 容量与布局
+// 仅本文件使用的纯原语（头文件不再导出）
+//   ring 位置推进 / 对齐 / 各区域偏移 / 底层 ring 读写
 // ============================================================
-
-bool shmIsValidRingCapacity(size_t capacity)
-{
-    return capacity >= SHM_MIN_RING_CAPACITY
-        && capacity <= static_cast<size_t>(std::numeric_limits<uint32_t>::max());
-}
-
-size_t shmNormalizeRingCapacity(size_t capacity)
-{
-    if (capacity == 0) {
-        return SHM_MIN_RING_CAPACITY;
-    }
-    if (capacity < SHM_MIN_RING_CAPACITY) {
-        return SHM_MIN_RING_CAPACITY;
-    }
-    return capacity;
-}
+namespace {
 
 uint32_t shmAdvancePos(uint32_t pos, uint32_t delta, uint32_t capacity)
 {
@@ -39,7 +24,7 @@ uint32_t shmAdvancePos(uint32_t pos, uint32_t delta, uint32_t capacity)
 
 size_t shmAlignUp(size_t value, size_t alignment)
 {
-    return alignment == 0 ? value : ((value + alignment - 1) / alignment) * alignment;
+    return ((value + alignment - 1) / alignment) * alignment;
 }
 
 size_t shmRequestRingOffset()
@@ -62,6 +47,105 @@ size_t shmResponseDataOffset(size_t req_ring_capacity)
     return shmResponseRingOffset(req_ring_capacity) + sizeof(ShmRingHeader);
 }
 
+uint32_t shmRingAvailableRead(const ShmRingHeader* ring, uint32_t cap)
+{
+    if (!ring || cap < SHM_MIN_RING_CAPACITY || ring->capacity != cap) return 0;
+    uint32_t w = ring->write_pos.load(std::memory_order_acquire);
+    uint32_t r = ring->read_pos.load(std::memory_order_acquire);
+    if (w >= cap || r >= cap) {
+        return 0;
+    }
+    if (w >= r) {
+        return w - r;
+    }
+    return cap - r + w;
+}
+
+uint32_t shmRingAvailableWrite(const ShmRingHeader* ring, uint32_t capacity)
+{
+    if (!ring || capacity < SHM_MIN_RING_CAPACITY || ring->capacity != capacity
+        || ring->write_pos.load(std::memory_order_acquire) >= capacity
+        || ring->read_pos.load(std::memory_order_acquire) >= capacity) {
+        return 0;
+    }
+    uint32_t used = shmRingAvailableRead(ring, capacity);
+    return capacity - 1 - used;
+}
+
+uint32_t shmRingWriteFrame(ShmRingHeader* ring, uint8_t* ring_data,
+                           const uint8_t* data, uint32_t length,
+                           uint32_t capacity)
+{
+    uint32_t total = static_cast<uint32_t>(sizeof(uint32_t)) + length;
+    if (shmRingAvailableWrite(ring, capacity) < total) return 0;
+
+    uint32_t pos = ring->write_pos.load(std::memory_order_relaxed);
+    uint32_t first = (static_cast<uint32_t>(sizeof(uint32_t)) < capacity - pos)
+        ? static_cast<uint32_t>(sizeof(uint32_t)) : (capacity - pos);
+    memcpy(ring_data + pos, &length, first);
+    if (first < sizeof(uint32_t)) {
+        memcpy(ring_data, reinterpret_cast<const uint8_t*>(&length) + first,
+               sizeof(uint32_t) - first);
+    }
+    pos = shmAdvancePos(pos, static_cast<uint32_t>(sizeof(uint32_t)), capacity);
+    first = (length < capacity - pos) ? length : (capacity - pos);
+    memcpy(ring_data + pos, data, first);
+    if (first < length) memcpy(ring_data, data + first, length - first);
+    ring->write_pos.store(shmAdvancePos(pos, length, capacity), std::memory_order_release);
+    return total;
+}
+
+uint32_t shmRingRead(ShmRingHeader* ring, const uint8_t* ring_data,
+                     uint8_t* buf, uint32_t length, uint32_t capacity)
+{
+    if (!ring || !ring_data || !buf || ring->capacity != capacity
+        || ring->read_pos.load(std::memory_order_relaxed) >= capacity) {
+        return 0;
+    }
+    uint32_t avail = shmRingAvailableRead(ring, capacity);
+    uint32_t to_read = (length < avail) ? length : avail;
+    if (to_read == 0) {
+        return 0;
+    }
+
+    uint32_t r = ring->read_pos.load(std::memory_order_relaxed);
+    uint32_t cap = capacity;
+
+    uint32_t first = (to_read < cap - r) ? to_read : (cap - r);
+    memcpy(buf, ring_data + r, first);
+
+    if (first < to_read) {
+        memcpy(buf + first, ring_data, to_read - first);
+    }
+
+    ring->read_pos.store(shmAdvancePos(r, to_read, cap), std::memory_order_release);
+
+    return to_read;
+}
+
+} // namespace
+
+// ============================================================
+// 容量与布局
+// ============================================================
+
+bool shmIsValidRingCapacity(size_t capacity)
+{
+    return capacity >= SHM_MIN_RING_CAPACITY
+        && capacity <= static_cast<size_t>(std::numeric_limits<uint32_t>::max());
+}
+
+size_t shmNormalizeRingCapacity(size_t capacity)
+{
+    if (capacity == 0) {
+        return SHM_MIN_RING_CAPACITY;
+    }
+    if (capacity < SHM_MIN_RING_CAPACITY) {
+        return SHM_MIN_RING_CAPACITY;
+    }
+    return capacity;
+}
+
 size_t calculateShmSize(size_t req_ring_capacity, size_t resp_ring_capacity)
 {
     req_ring_capacity = shmNormalizeRingCapacity(req_ring_capacity);
@@ -77,13 +161,27 @@ size_t calculateShmSize(size_t req_ring_capacity, size_t resp_ring_capacity)
     return offset + resp_ring_capacity;
 }
 
-std::string generateShmName(const std::string& service_name)
+std::string generateShmName(const std::string& service_name,
+                            const std::string& instance_id,
+                            const std::string& host_id)
 {
     // 截断前缀 + FNV-1a 哈希，生成有界长度且唯一的 SHM 名称，
     // 避免服务名接近 MAX_SERVICE_NAME_LENGTH（256）时被截断。
+    // host_id / instance_id 只在哈希输入中出现、不进入可见前缀：既保证同机
+    // 同名不同实例或不同 host_id 派生不同的 SHM 名 / 握手路径，又不会因
+    // 字段任意长度或字符超出 POSIX SHM 名与 UDS 路径限制。
     const size_t kMaxPrefix = 48;
     std::string prefix = service_name.substr(0, kMaxPrefix);
-    uint32_t hash = fnv1a_32(service_name);
+    std::string hash_input = service_name;
+    if (!host_id.empty()) {
+        hash_input += '\x1f';
+        hash_input += host_id;
+    }
+    if (!instance_id.empty()) {
+        hash_input += '\x1f';
+        hash_input += instance_id;
+    }
+    uint32_t hash = fnv1a_32(hash_input);
 
     std::ostringstream os;
     os << "/binder_" << prefix << "_" << std::hex << hash;
@@ -128,92 +226,11 @@ uint8_t* shmResponseDataFromBase(uint8_t* base, uint32_t req_capacity)
 // ring 读写
 // ============================================================
 
-uint32_t shmRingAvailableRead(const ShmRingHeader* ring, uint32_t cap)
-{
-    if (!ring || cap < SHM_MIN_RING_CAPACITY || ring->capacity != cap) return 0;
-    uint32_t w = ring->write_pos.load(std::memory_order_acquire);
-    uint32_t r = ring->read_pos.load(std::memory_order_acquire);
-    if (w >= cap || r >= cap) {
-        return 0;
-    }
-    if (w >= r) {
-        return w - r;
-    }
-    return cap - r + w;
-}
-
-uint32_t shmRingAvailableWrite(const ShmRingHeader* ring, uint32_t capacity)
-{
-    if (!ring || capacity < SHM_MIN_RING_CAPACITY || ring->capacity != capacity
-        || ring->write_pos.load(std::memory_order_acquire) >= capacity
-        || ring->read_pos.load(std::memory_order_acquire) >= capacity) {
-        return 0;
-    }
-    uint32_t used = shmRingAvailableRead(ring, capacity);
-    return capacity - 1 - used;
-}
-
-uint32_t shmRingWrite(ShmRingHeader* ring, uint8_t* ring_data,
-                      const uint8_t* data, uint32_t length, uint32_t capacity)
-{
-    if (!ring || !ring_data || !data || ring->capacity != capacity
-        || ring->write_pos.load(std::memory_order_relaxed) >= capacity) {
-        return 0;
-    }
-    uint32_t avail = shmRingAvailableWrite(ring, capacity);
-    uint32_t to_write = (length < avail) ? length : avail;
-    if (to_write == 0) {
-        return 0;
-    }
-
-    uint32_t w = ring->write_pos.load(std::memory_order_relaxed);
-    uint32_t cap = capacity;
-
-    uint32_t first = (to_write < cap - w) ? to_write : (cap - w);
-    memcpy(ring_data + w, data, first);
-
-    if (first < to_write) {
-        memcpy(ring_data, data + first, to_write - first);
-    }
-
-    ring->write_pos.store(shmAdvancePos(w, to_write, cap), std::memory_order_release);
-
-    return to_write;
-}
-
-uint32_t shmRingWriteFrame(ShmRingHeader* ring, uint8_t* ring_data,
-                           const uint8_t* data, uint32_t length,
-                           uint32_t capacity)
-{
-    if (!ring || !ring_data || !data || ring->capacity != capacity
-        || ring->write_pos.load(std::memory_order_relaxed) >= capacity) {
-        return 0;
-    }
-    uint32_t total = static_cast<uint32_t>(sizeof(uint32_t)) + length;
-    if (shmRingAvailableWrite(ring, capacity) < total) return 0;
-
-    uint32_t pos = ring->write_pos.load(std::memory_order_relaxed);
-    uint32_t first = (static_cast<uint32_t>(sizeof(uint32_t)) < capacity - pos)
-        ? static_cast<uint32_t>(sizeof(uint32_t)) : (capacity - pos);
-    memcpy(ring_data + pos, &length, first);
-    if (first < sizeof(uint32_t)) {
-        memcpy(ring_data, reinterpret_cast<const uint8_t*>(&length) + first,
-               sizeof(uint32_t) - first);
-    }
-    pos = shmAdvancePos(pos, static_cast<uint32_t>(sizeof(uint32_t)), capacity);
-    first = (length < capacity - pos) ? length : (capacity - pos);
-    memcpy(ring_data + pos, data, first);
-    if (first < length) memcpy(ring_data, data + first, length - first);
-    ring->write_pos.store(shmAdvancePos(pos, length, capacity), std::memory_order_release);
-    return total;
-}
-
 uint32_t shmRingSendFrame(ShmRingHeader* ring, uint8_t* ring_data, uint32_t capacity,
                           const uint8_t* frame, uint32_t length, int notify_fd)
 {
     if (!ring || !ring_data || !frame || ring->capacity != capacity
-        || ring->write_pos.load(std::memory_order_relaxed) >= capacity
-        || length > 0x7FFFFFFFu) {
+        || ring->write_pos.load(std::memory_order_relaxed) >= capacity) {
         return 0;
     }
 
@@ -241,7 +258,14 @@ int shmRingSendFrameWithinTimeout(ShmRingHeader* ring, uint8_t* ring_data, uint3
                                   const uint8_t* frame, uint32_t length, int notify_fd,
                                   uint32_t timeout_ms)
 {
-    if (!ring || !ring_data || length > 0x7FFFFFFFu) {
+    if (!ring || !ring_data || !frame) {
+        return -1;
+    }
+    // ring 元数据非法（容量不匹配/游标越界）属永久性错误：直接判为不可写入，
+    // 不能与「ring 满」一样重试到 timeout。
+    if (ring->capacity != capacity
+        || ring->write_pos.load(std::memory_order_relaxed) >= capacity
+        || ring->read_pos.load(std::memory_order_relaxed) >= capacity) {
         return -1;
     }
     uint32_t total_needed = static_cast<uint32_t>(sizeof(uint32_t)) + length;
@@ -290,34 +314,6 @@ int shmRingRecvFrame(ShmRingHeader* ring, const uint8_t* ring_data, uint32_t cap
 
     out_length = frame_size;
     return static_cast<int>(msg_len);
-}
-
-uint32_t shmRingRead(ShmRingHeader* ring, const uint8_t* ring_data,
-                     uint8_t* buf, uint32_t length, uint32_t capacity)
-{
-    if (!ring || !ring_data || !buf || ring->capacity != capacity
-        || ring->read_pos.load(std::memory_order_relaxed) >= capacity) {
-        return 0;
-    }
-    uint32_t avail = shmRingAvailableRead(ring, capacity);
-    uint32_t to_read = (length < avail) ? length : avail;
-    if (to_read == 0) {
-        return 0;
-    }
-
-    uint32_t r = ring->read_pos.load(std::memory_order_relaxed);
-    uint32_t cap = capacity;
-
-    uint32_t first = (to_read < cap - r) ? to_read : (cap - r);
-    memcpy(buf, ring_data + r, first);
-
-    if (first < to_read) {
-        memcpy(buf + first, ring_data, to_read - first);
-    }
-
-    ring->read_pos.store(shmAdvancePos(r, to_read, cap), std::memory_order_release);
-
-    return to_read;
 }
 
 int shmInspectFrame(const ShmRingHeader* ring, const uint8_t* ring_data,
@@ -382,9 +378,7 @@ bool shmValidateMappedLayout(void* addr, size_t mapped_size,
     ShmRingHeader* req_ring = shmRequestRingFromBase(static_cast<uint8_t*>(addr));
     ShmRingHeader* resp_ring = shmResponseRingFromBase(static_cast<uint8_t*>(addr),
                                                        req_capacity);
-    if (ctrl->req_ring_capacity != req_capacity
-        || ctrl->resp_ring_capacity != resp_capacity
-        || req_ring->capacity != req_capacity
+    if (req_ring->capacity != req_capacity
         || resp_ring->capacity != resp_capacity
         || req_ring->read_pos.load(std::memory_order_relaxed) >= req_ring->capacity
         || req_ring->write_pos.load(std::memory_order_relaxed) >= req_ring->capacity

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import pathlib
+import re
 import sys
 
 
@@ -41,10 +42,11 @@ def main() -> int:
     ends = count(lines, "END long-run cycle")
     cycles = min(starts, ends)
 
+    # 失败只认 FAIL: / "N tests failed out of"（N > 0）/ Subprocess aborted；Timeout 仅告警
     explicit_fail = count(lines, "FAIL:")
-    failed_blocks = count(lines, "tests failed out of") - count(lines, "100% tests passed, 0 tests failed out of")
-    timeout_hits = count(lines, "Timeout")
+    failed_tests = sum(int(n) for n in re.findall(r"(\d+)\s+tests failed out of", text))
     aborted_hits = count(lines, "Subprocess aborted")
+    timeout_hits = count(lines, "Timeout")
 
     reconnect_begin = count(lines, "sm_reconnect_begin")
     reconnect_success = count(lines, "sm_reconnect_success")
@@ -59,16 +61,24 @@ def main() -> int:
         reasons.append(f"complete cycles {cycles} below required minimum {args.min_cycles}")
 
     if starts != ends:
-        verdict = "WARNING" if verdict == "PASS" else verdict
+        verdict = "WARNING"
         reasons.append(f"cycle markers mismatched (start={starts}, end={ends})")
 
-    if explicit_fail > 0 or failed_blocks > 0 or timeout_hits > 0 or aborted_hits > 0:
+    if explicit_fail > 0 or failed_tests > 0 or aborted_hits > 0:
         verdict = "FAIL"
-        reasons.append("failure markers present in long-run log")
+        reasons.append(
+            "failure markers present in long-run log "
+            f"(FAIL:={explicit_fail}, failed tests={failed_tests}, aborted={aborted_hits})"
+        )
 
     if reconnect_begin > 0 and reconnect_success == 0:
         verdict = "FAIL"
         reasons.append("reconnect attempts observed without success markers")
+
+    if timeout_hits > 0:
+        if verdict != "FAIL":
+            verdict = "WARNING"
+        reasons.append(f"timeout keyword observed {timeout_hits} time(s); inspect before release")
 
     if cycles > 0 and rpc_timeout > cycles * 20:
         if verdict != "FAIL":

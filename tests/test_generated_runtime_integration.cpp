@@ -76,12 +76,12 @@ static std::string toolchainValue(const char* env_name, const char* fallback) {
 
 static std::string cxxToolchain() {
     return toolchainValue("OMNI_TEST_CXX", "g++") + " -std=c++11 "
-        + toolchainValue("OMNI_TEST_CXX_FLAGS", "") + " ";
+        + toolchainValue("OMNI_TEST_CXX_FLAGS", "") + " -UNDEBUG ";
 }
 
 static std::string cToolchain() {
     return toolchainValue("OMNI_TEST_CC", "cc") + " -std=c99 "
-        + toolchainValue("OMNI_TEST_C_FLAGS", "") + " ";
+        + toolchainValue("OMNI_TEST_C_FLAGS", "") + " -UNDEBUG ";
 }
 
 static std::string replaceAll(std::string input, const std::string& from, const std::string& to) {
@@ -200,6 +200,7 @@ static bool registerFakeService(TcpConnection& transport, uint32_t seq, const st
 static pid_t startSM(uint16_t port) {
     pid_t pid = fork();
     if (pid == 0) {
+        omnibinder::platform::setParentDeathSignal();
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%u", port);
         execl("__SERVICE_MANAGER__", "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
@@ -215,11 +216,16 @@ static void stopSM(pid_t pid) {
         int status = 0;
         for (int i = 0; i < 20; ++i) {
             pid_t ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) return;
+            if (ret == pid) break;
             std::this_thread::sleep_for(std::chrono::microseconds(100000));
         }
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+        }
+        for (int i = 0; i < g_sm_count; ++i) {
+            if (g_sm_pids[i] == pid) g_sm_pids[i] = 0;
+        }
     }
 }
 
@@ -389,7 +395,6 @@ int main() {
     input.id = 77;
     demo::Item result;
     int ret = reply_proxy.echoItem(input, result);
-    fprintf(stderr, "DEBUG: echoItem ret=%d\\n", ret);
     assert(ret == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_runtime.stop();
     reg_runtime.stop();
@@ -572,6 +577,7 @@ static bool registerFakeService(omnibinder::TcpConnection& transport, uint32_t s
 static pid_t startSM(uint16_t port) {
     pid_t pid = fork();
     if (pid == 0) {
+        omnibinder::platform::setParentDeathSignal();
         char port_str[16];
         snprintf(port_str, sizeof(port_str), "%u", port);
         execl("__SERVICE_MANAGER__", "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
@@ -587,11 +593,16 @@ static void stopSM(pid_t pid) {
         int status = 0;
         for (int i = 0; i < 20; ++i) {
             pid_t ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) return;
+            if (ret == pid) break;
             std::this_thread::sleep_for(std::chrono::microseconds(100000));
         }
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+        if (waitpid(pid, &status, WNOHANG) == 0) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+        }
+        for (int i = 0; i < g_sm_count; ++i) {
+            if (g_sm_pids[i] == pid) g_sm_pids[i] = 0;
+        }
     }
 }
 
@@ -779,7 +790,7 @@ int main() {
     struct demo_Item result;
     demo_Item_init(&result);
     int ret = demo_ItemService_proxy_echo_item(&reply_proxy, &input, &result);
-    assert(ret == -501);
+    assert(ret == OMNI_ERR_DESERIALIZE);
     demo_Item_destroy(&input);
     demo_Item_destroy(&result);
     omni_runtime_stop(client_runtime);
@@ -819,7 +830,7 @@ int main() {
     struct demo_Item status_result;
     demo_Item_init(&status_result);
     ret = demo_ItemService_proxy_echo_item(&status_proxy, &status_input, &status_result);
-    assert(ret == -501);
+    assert(ret == OMNI_ERR_DESERIALIZE);
     demo_Item_destroy(&status_input);
     demo_Item_destroy(&status_result);
     omni_runtime_stop(client_status_runtime);
@@ -859,7 +870,7 @@ int main() {
     struct demo_Item length_result;
     demo_Item_init(&length_result);
     ret = demo_ItemService_proxy_echo_item(&length_proxy, &length_input, &length_result);
-    assert(ret == -501);
+    assert(ret == OMNI_ERR_DESERIALIZE);
     demo_Item_destroy(&length_input);
     demo_Item_destroy(&length_result);
     omni_runtime_stop(client_length_runtime);
@@ -897,10 +908,77 @@ protected:
         return std::string(OMNI_BUILD_DIR) + "/target/lib/libomnibinder.a";
     }
 
+    static void compileCppHarness() {
+        std::string cmd = cxxToolchain() + getIncludeFlags() +
+            " " + shellQuote(cpp_harness_path_) +
+            " " + shellQuote(dir_ + "/guarded.cpp") +
+            " " + shellQuote(getLibPath()) +
+            " -lpthread -lrt -o " + shellQuote(dir_ + "/generated_cpp_harness");
+        ASSERT_TRUE(runCommand(cmd));
+    }
+
+    static void compileCHarness() {
+        std::string c_object = dir_ + "/guarded_c99.o";
+        std::string compile_c = cToolchain() + getIncludeFlags() +
+            " -c " + shellQuote(dir_ + "/guarded.c") + " -o " + shellQuote(c_object);
+        ASSERT_TRUE(runCommand(compile_c));
+        std::string cmd = cxxToolchain() + getIncludeFlags() +
+            " " + shellQuote(c_harness_path_) +
+            " " + shellQuote(c_object) +
+            " " + shellQuote(getLibPath()) +
+            " -lpthread -lrt -o " + shellQuote(dir_ + "/generated_c_harness");
+        ASSERT_TRUE(runCommand(cmd));
+    }
+
+    static void compileArrayGuards() {
+        const std::string cpp_source =
+            "#include \"guarded.h\"\n"
+            "static int rejected(const uint8_t* data, size_t size) {\n"
+            "  omnibinder::Buffer buf(data, size); demo::ArrayPayload value;\n"
+            "  return value.deserialize(buf) ? 0 : 1;\n"
+            "}\n"
+            "int main() {\n"
+            "  const uint8_t huge[] = {0xff,0xff,0xff,0xff};\n"
+            "  const uint8_t tiny[] = {2,0,0,0,1,0,0,0};\n"
+            "  return (rejected(huge, sizeof(huge)) && rejected(tiny, sizeof(tiny))) ? 0 : 1;\n"
+            "}\n";
+        const std::string cpp_path = dir_ + "/array_guard_cpp.cpp";
+        writeFile(cpp_path, cpp_source);
+        std::string cpp_cmd = cxxToolchain() + getIncludeFlags() +
+            " " + shellQuote(cpp_path) + " " + shellQuote(dir_ + "/guarded.cpp") +
+            " " + shellQuote(getLibPath()) + " -lpthread -lrt -o " +
+            shellQuote(dir_ + "/array_guard_cpp");
+        ASSERT_TRUE(runCommand(cpp_cmd));
+
+        const std::string c_source =
+            "#include \"guarded_c.h\"\n"
+            "static int rejected(const uint8_t* data, size_t size) {\n"
+            "  omni_buffer_t* buf = omni_buffer_create_from(data, size);\n"
+            "  demo_ArrayPayload value; int ok; demo_ArrayPayload_init(&value);\n"
+            "  ok = demo_ArrayPayload_deserialize(&value, buf);\n"
+            "  demo_ArrayPayload_destroy(&value); omni_buffer_destroy(buf); return !ok;\n"
+            "}\n"
+            "int main(void) {\n"
+            "  const uint8_t huge[] = {0xff,0xff,0xff,0xff};\n"
+            "  const uint8_t tiny[] = {2,0,0,0,1,0,0,0};\n"
+            "  return (rejected(huge, sizeof(huge)) && rejected(tiny, sizeof(tiny))) ? 0 : 1;\n"
+            "}\n";
+        const std::string c_path = dir_ + "/array_guard_c.c";
+        writeFile(c_path, c_source);
+        std::string compile_guard_c = cToolchain() + getIncludeFlags() +
+            " -c " + shellQuote(c_path) + " -o " + shellQuote(dir_ + "/array_guard_c.o");
+        ASSERT_TRUE(runCommand(compile_guard_c));
+        std::string c_cmd = cxxToolchain() + shellQuote(dir_ + "/array_guard_c.o") +
+            " " + shellQuote(dir_ + "/guarded_c99.o") + " " + shellQuote(getLibPath()) +
+            " -lpthread -lrt -o " + shellQuote(dir_ + "/array_guard_c");
+        ASSERT_TRUE(runCommand(c_cmd));
+    }
+
     static void SetUpTestSuite() {
         // 只清理本测试使用的 19961-19964 端口：原模式 '--port 1996' 会误杀
         // 并发的 test_heartbeat_reconnect 生命周期 SM（19966），导致 -j4 下必然失败
-        system("pkill -f 'service_manager --port 1996[1-4]' 2>/dev/null || true");
+        int pkill_rc = system("pkill -f 'service_manager --port 1996[1-4]' 2>/dev/null || true");
+        (void)pkill_rc;
         std::this_thread::sleep_for(std::chrono::microseconds(200000));
 
         char dir_template[] = "/tmp/omnibinder_generated_runtime_XXXXXX";
@@ -952,10 +1030,20 @@ protected:
         c_harness_path_ = dir_ + "/generated_c_harness.cpp";
         writeFile(cpp_harness_path_, cpp_harness);
         writeFile(c_harness_path_, c_harness);
+
+        // 所有编译在 SetUpTestSuite 内一次性完成，用例只负责运行：
+        // 消除"Run* 依赖同二进制前一个 Compile* 产物"的顺序耦合，
+        // 使 --gtest_shuffle / 单用例 filter 也能独立通过。
+        compileCppHarness();
+        compileCHarness();
+        compileArrayGuards();
     }
 
     static void TearDownTestSuite() {
-        unlink(idl_path_.c_str());
+        if (!dir_.empty()) {
+            int cleanup_rc = system(("rm -rf " + dir_).c_str());
+            (void)cleanup_rc;
+        }
     }
 };
 
@@ -964,30 +1052,8 @@ std::string GeneratedRuntimeTest::idl_path_;
 std::string GeneratedRuntimeTest::cpp_harness_path_;
 std::string GeneratedRuntimeTest::c_harness_path_;
 
-TEST_F(GeneratedRuntimeTest, CompileGeneratedCppRuntimeHarness) {
-    std::string cmd = cxxToolchain() + getIncludeFlags() +
-        " " + shellQuote(cpp_harness_path_) +
-        " " + shellQuote(dir_ + "/guarded.cpp") +
-        " " + shellQuote(getLibPath()) +
-        " -lpthread -lrt -o " + shellQuote(dir_ + "/generated_cpp_harness");
-    ASSERT_TRUE(runCommand(cmd));
-}
-
 TEST_F(GeneratedRuntimeTest, RunGeneratedCppRuntimeHarness) {
     ASSERT_TRUE(runCommand(shellQuote(dir_ + "/generated_cpp_harness")));
-}
-
-TEST_F(GeneratedRuntimeTest, CompileGeneratedCRuntimeHarness) {
-    std::string c_object = dir_ + "/guarded_c99.o";
-    std::string compile_c = cToolchain() + getIncludeFlags() +
-        " -c " + shellQuote(dir_ + "/guarded.c") + " -o " + shellQuote(c_object);
-    ASSERT_TRUE(runCommand(compile_c));
-    std::string cmd = cxxToolchain() + getIncludeFlags() +
-        " " + shellQuote(c_harness_path_) +
-        " " + shellQuote(c_object) +
-        " " + shellQuote(getLibPath()) +
-        " -lpthread -lrt -o " + shellQuote(dir_ + "/generated_c_harness");
-    ASSERT_TRUE(runCommand(cmd));
 }
 
 TEST_F(GeneratedRuntimeTest, RunGeneratedCRuntimeHarness) {
@@ -995,47 +1061,6 @@ TEST_F(GeneratedRuntimeTest, RunGeneratedCRuntimeHarness) {
 }
 
 TEST_F(GeneratedRuntimeTest, GeneratedArrayDeserializersRejectHostileCounts) {
-    const std::string cpp_source =
-        "#include \"guarded.h\"\n"
-        "static int rejected(const uint8_t* data, size_t size) {\n"
-        "  omnibinder::Buffer buf(data, size); demo::ArrayPayload value;\n"
-        "  return value.deserialize(buf) ? 0 : 1;\n"
-        "}\n"
-        "int main() {\n"
-        "  const uint8_t huge[] = {0xff,0xff,0xff,0xff};\n"
-        "  const uint8_t tiny[] = {2,0,0,0,1,0,0,0};\n"
-        "  return (rejected(huge, sizeof(huge)) && rejected(tiny, sizeof(tiny))) ? 0 : 1;\n"
-        "}\n";
-    const std::string cpp_path = dir_ + "/array_guard_cpp.cpp";
-    writeFile(cpp_path, cpp_source);
-    std::string cpp_cmd = cxxToolchain() + getIncludeFlags() +
-        " " + shellQuote(cpp_path) + " " + shellQuote(dir_ + "/guarded.cpp") +
-        " " + shellQuote(getLibPath()) + " -lpthread -lrt -o " +
-        shellQuote(dir_ + "/array_guard_cpp");
-    ASSERT_TRUE(runCommand(cpp_cmd));
     ASSERT_TRUE(runCommand(shellQuote(dir_ + "/array_guard_cpp")));
-
-    const std::string c_source =
-        "#include \"guarded_c.h\"\n"
-        "static int rejected(const uint8_t* data, size_t size) {\n"
-        "  omni_buffer_t* buf = omni_buffer_create_from(data, size);\n"
-        "  demo_ArrayPayload value; int ok; demo_ArrayPayload_init(&value);\n"
-        "  ok = demo_ArrayPayload_deserialize(&value, buf);\n"
-        "  demo_ArrayPayload_destroy(&value); omni_buffer_destroy(buf); return !ok;\n"
-        "}\n"
-        "int main(void) {\n"
-        "  const uint8_t huge[] = {0xff,0xff,0xff,0xff};\n"
-        "  const uint8_t tiny[] = {2,0,0,0,1,0,0,0};\n"
-        "  return (rejected(huge, sizeof(huge)) && rejected(tiny, sizeof(tiny))) ? 0 : 1;\n"
-        "}\n";
-    const std::string c_path = dir_ + "/array_guard_c.c";
-    writeFile(c_path, c_source);
-    std::string compile_guard_c = cToolchain() + getIncludeFlags() +
-        " -c " + shellQuote(c_path) + " -o " + shellQuote(dir_ + "/array_guard_c.o");
-    ASSERT_TRUE(runCommand(compile_guard_c));
-    std::string c_cmd = cxxToolchain() + shellQuote(dir_ + "/array_guard_c.o") +
-        " " + shellQuote(dir_ + "/guarded_c99.o") + " " + shellQuote(getLibPath()) +
-        " -lpthread -lrt -o " + shellQuote(dir_ + "/array_guard_c");
-    ASSERT_TRUE(runCommand(c_cmd));
     ASSERT_TRUE(runCommand(shellQuote(dir_ + "/array_guard_c")));
 }

@@ -318,7 +318,7 @@ cmake --build . -j$(nproc)
 - `eventfd`
 - POSIX SHM
 
-> **非 Linux 目标**（Android、FreeRTOS、裸机等）：这些特性由 `platform.h` 抽象层提供等价实现。
+> **非 Linux 目标**（Android、FreeRTOS、裸机等）：需要自行在 `platform.h` 抽象层下实现这些能力（当前仓库仅提供 Linux 与 Windows 实现）。
 > 若平台不支持 SHM（如 FreeRTOS），`transport_selector` 自动回退 TCP。详见[平台适配指南](platform-porting.md)。
 
 如果目标系统裁掉了这些能力，则当前 SHM 路径和部分控制路径无法正常工作。

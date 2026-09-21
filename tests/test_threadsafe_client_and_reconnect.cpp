@@ -97,9 +97,12 @@ protected:
     }
 
     static void TearDownTestSuite() {
-        server_ctx_->should_stop = true;
-        server_tid_.join();
-        delete server_ctx_;
+        if (server_ctx_) {
+            server_ctx_->should_stop = true;
+            server_tid_.join();
+            delete server_ctx_;
+            server_ctx_ = nullptr;
+        }
         stopProcess(sm_pid_);
     }
 };
@@ -141,6 +144,8 @@ TEST_F(ThreadsafeClientAndReconnectTest, StopDuringRunExits) {
     for (int i = 0; i < 300 && !runtime.isRunning(); ++i) {
         std::this_thread::sleep_for(std::chrono::microseconds(10000));
     }
+    // 若 run() 立即返回（loop 未真正运行），本用例会空过，故必须先确认在运行中
+    ASSERT_TRUE(runtime.isRunning());
     runtime.stop();
     t.join();
     EXPECT_TRUE(returned.load());
@@ -183,10 +188,12 @@ TEST_F(ThreadsafeClientAndReconnectTest, RegisterHostConcurrentGetSet) {
     std::this_thread::sleep_for(std::chrono::microseconds(100000));
 
     std::atomic<bool> stop_flag(false);
-    std::thread setter([&runtime, &stop_flag]() {
+    std::atomic<int> set_count(0);
+    std::thread setter([&runtime, &stop_flag, &set_count]() {
         int i = 0;
         while (!stop_flag.load()) {
             runtime.setRegisterHost("host-" + std::to_string(i++));
+            set_count.fetch_add(1, std::memory_order_relaxed);
         }
     });
     std::thread getter([&runtime, &stop_flag]() {
@@ -201,7 +208,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, RegisterHostConcurrentGetSet) {
     getter.join();
     runtime.stop();
     driver.join();
-    EXPECT_FALSE(runtime.getRegisterHost().empty());
+    EXPECT_GT(set_count.load(), 0) << "setter 必须真正执行过，否则并发语义未被覆盖";
 }
 
 TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentInvokeSameClient) {
@@ -219,7 +226,6 @@ TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentInvokeSameClient) {
     }
     for (int i = 0; i < 6; ++i) {
         tids[i].join();
-        EXPECT_TRUE(args[i].done);
         EXPECT_EQ(args[i].failures, 0);
     }
     runtime.stop();

@@ -69,12 +69,21 @@ enum class MessageType : uint16_t {
     MSG_LIST_SERVICES_REPLY   = 0x0013,
     MSG_QUERY_INTERFACES      = 0x0014,
     MSG_QUERY_INTERFACES_REPLY= 0x0015,
+    // 按服务名列出全部实例（跨 host_id / instance_id）
+    MSG_LIST_INSTANCES        = 0x0016,
+    MSG_LIST_INSTANCES_REPLY  = 0x0017,
 
     // 控制通道 - 死亡通知
+    // 名字级：MSG_SUBSCRIBE_SERVICE / MSG_UNSUBSCRIBE_SERVICE / MSG_DEATH_NOTIFY
+    // 实例级：MSG_SUBSCRIBE_SERVICE_INSTANCE / MSG_UNSUBSCRIBE_SERVICE_INSTANCE /
+    //         MSG_DEATH_NOTIFY_INSTANCE（仅指定实例死亡时下发）
     MSG_SUBSCRIBE_SERVICE     = 0x0020,
     MSG_SUBSCRIBE_SERVICE_REPLY = 0x0021,
     MSG_UNSUBSCRIBE_SERVICE   = 0x0022,
     MSG_DEATH_NOTIFY          = 0x0023,
+    MSG_DEATH_NOTIFY_INSTANCE = 0x0024,
+    MSG_SUBSCRIBE_SERVICE_INSTANCE = 0x0025,
+    MSG_UNSUBSCRIBE_SERVICE_INSTANCE = 0x0026,
 
     // 控制通道 - 话题
     MSG_PUBLISH_TOPIC         = 0x0030,
@@ -143,6 +152,9 @@ struct MessageHeader {
 
 const size_t MESSAGE_HEADER_SIZE = 16;
 
+static_assert(MESSAGE_HEADER_SIZE == sizeof(MessageHeader),
+              "MESSAGE_HEADER_SIZE must equal sizeof(MessageHeader)");
+
 // ============================================================
 // 完整消息（头 + 载荷）
 // ============================================================
@@ -197,11 +209,105 @@ const char* messageTypeToString(MessageType type);
 // ============================================================
 // 辅助函数：序列化/反序列化 ServiceInfo 到 Buffer
 // ============================================================
+/* @brief 序列化服务信息（含实例身份、SHM 配置与接口列表）到 Buffer
+ * @param[in]  info 服务信息
+ * @param[out] buf  输出缓冲
+ * @return true 成功；false 写入失败（缓冲写失败） */
 bool serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
+
+// ============================================================
+// 服务实例身份线格式（MSG_DEATH_NOTIFY / MSG_DEATH_NOTIFY_INSTANCE /
+// 实例级死亡订阅请求共用）：service_name + host_id + instance_id
+// ============================================================
+/* @brief 序列化服务实例身份 payload
+ * @param[out] buf          输出缓冲
+ * @param[in]  name         服务名称
+ * @param[in]  host_id      板级主机身份
+ * @param[in]  instance_id  实例标识
+ * @return true 成功 */
+bool writeServiceIdentityPayload(Buffer& buf, const std::string& name,
+                                 const std::string& host_id,
+                                 const std::string& instance_id);
+
+/* @brief 反序列化服务实例身份 payload
+ * @param[in]  buf          输入缓冲
+ * @param[out] name         服务名称
+ * @param[out] host_id      板级主机身份
+ * @param[out] instance_id  实例标识
+ * @return true 成功；畸形/截断/超长/尾随字节返回 false 且不改动输出参数
+ * @note   tryReadString 自带边界检查，恶意长度前缀不会越界读；本函数在此之上
+ *         追加非空与长度上限校验，作为 MSG_DEATH_NOTIFY 的防御性入口。 */
+template <typename BufT>
+bool readServiceIdentityPayload(BufT& buf, std::string& name,
+                                std::string& host_id, std::string& instance_id) {
+    std::string decoded_name;
+    std::string decoded_host_id;
+    std::string decoded_instance_id;
+    if (!buf.tryReadString(decoded_name)
+        || !buf.tryReadString(decoded_host_id)
+        || !buf.tryReadString(decoded_instance_id)) {
+        return false;
+    }
+    if (decoded_name.empty()
+        || decoded_name.size() > MAX_SERVICE_NAME_LENGTH
+        || decoded_host_id.size() > MAX_SERVICE_NAME_LENGTH
+        || decoded_instance_id.size() > MAX_SERVICE_NAME_LENGTH
+        || buf.remaining() != 0) {
+        return false;
+    }
+    name.swap(decoded_name);
+    host_id.swap(decoded_host_id);
+    instance_id.swap(decoded_instance_id);
+    return true;
+}
 
 bool serializePublishedTopicsReply(bool found,
                                    const std::vector<std::string>& topics,
                                    Buffer& buf);
+
+// ============================================================
+// 话题订阅选择器线格式
+//   uint8  mode: 0=仅主题名（任意服务）/ 1=服务级 / 2=实例级
+//   [mode>=1] string publisher_service
+//   [mode==2] string host_id + string instance_id
+// ============================================================
+const uint8_t TOPIC_SUB_MODE_TOPIC_ONLY = 0u;
+const uint8_t TOPIC_SUB_MODE_SERVICE    = 1u;
+const uint8_t TOPIC_SUB_MODE_INSTANCE   = 2u;
+
+/* @brief 序列化话题订阅选择器
+ * @param[in]   mode              订阅粒度（TOPIC_SUB_MODE_*）
+ * @param[in]   publisher_service 发布者服务名（mode>=1）
+ * @param[in]   host_id           目标实例 host_id（mode==2）
+ * @param[in]   instance_id       目标实例标识（mode==2）
+ * @param[out]  buf               输出缓冲
+ * @return true 成功 */
+bool writeTopicSubscriptionSelector(Buffer& buf, uint8_t mode,
+                                    const std::string& publisher_service,
+                                    const std::string& host_id,
+                                    const std::string& instance_id);
+
+/* @brief 反序列化话题订阅选择器（读取失败或 mode 非法返回 false） */
+template <typename BufT>
+bool readTopicSubscriptionSelector(BufT& buf, uint8_t& mode,
+                                   std::string& publisher_service,
+                                   std::string& host_id,
+                                   std::string& instance_id) {
+    if (!buf.tryReadUint8(mode) || mode > TOPIC_SUB_MODE_INSTANCE) {
+        return false;
+    }
+    publisher_service.clear();
+    host_id.clear();
+    instance_id.clear();
+    if (mode >= TOPIC_SUB_MODE_SERVICE && !buf.tryReadString(publisher_service)) {
+        return false;
+    }
+    if (mode == TOPIC_SUB_MODE_INSTANCE
+        && (!buf.tryReadString(host_id) || !buf.tryReadString(instance_id))) {
+        return false;
+    }
+    return true;
+}
 
 template <typename BufT>
 bool deserializePublishedTopicsReply(BufT& buf, bool& found,
@@ -247,88 +353,126 @@ bool deserializePublishedTopicsReply(BufT& buf, bool& found,
     return true;
 }
 
+/* @brief 序列化运行时信息到 Buffer
+ * @param[in]  info 运行时信息
+ * @param[out] buf  输出缓冲
+ * @return true 成功；false 写入失败 */
 bool serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf);
 
+/* @brief 反序列化运行时信息
+ * @param[in]  buf  输入缓冲
+ * @param[out] info 运行时信息
+ * @return true 成功；false 畸形/截断/内存不足，且不改动 info */
 template <typename BufT>
 bool deserializeRuntimeInfo(BufT& buf, RuntimeInfo& info) {
-    uint16_t service_count = 0;
-    if (!(buf.tryReadUint32(info.pid)
-        && buf.tryReadString(info.process_name)
-        && buf.tryReadString(info.role)
-        && buf.tryReadUint32(info.log_level)
-        && buf.tryReadUint32(info.diag_capabilities)
-        && buf.tryReadUint16(service_count))) {
-        return false;
-    }
-    info.services.clear();
-    for (uint16_t i = 0; i < service_count; ++i) {
-        std::string service;
-        if (!buf.tryReadString(service)) {
+    try {
+        RuntimeInfo decoded;
+        uint16_t service_count = 0;
+        if (!(buf.tryReadUint32(decoded.pid)
+            && buf.tryReadString(decoded.process_name)
+            && buf.tryReadString(decoded.role)
+            && buf.tryReadUint32(decoded.log_level)
+            && buf.tryReadUint32(decoded.diag_capabilities)
+            && buf.tryReadUint16(service_count))) {
             return false;
         }
-        info.services.push_back(service);
+        for (uint16_t i = 0; i < service_count; ++i) {
+            std::string service;
+            if (!buf.tryReadString(service)) {
+                return false;
+            }
+            decoded.services.push_back(service);
+        }
+        info = decoded;
+        return true;
+    } catch (const std::bad_alloc&) {
+        // 内存耗尽：返回失败而非崩溃（无异常传播原则）
+        return false;
     }
-    return true;
 }
 
+/* @brief 反序列化接口信息（前置声明，供 deserializeServiceInfo 使用）
+ * @param[in]  buf  输入缓冲
+ * @param[out] info 接口信息
+ * @return true 成功；false 畸形/截断/内存不足，且不改动 info */
+template <typename BufT>
+bool deserializeInterfaceInfo(BufT& buf, InterfaceInfo& info);
+
+/* @brief 反序列化服务信息（含实例身份、SHM 配置与接口列表）
+ * @param[in]  buf  输入缓冲
+ * @param[out] info 服务信息
+ * @return true 成功；false 畸形/截断/内存不足，且不改动 info */
 template <typename BufT>
 bool deserializeServiceInfo(BufT& buf, ServiceInfo& info) {
-    uint16_t iface_count = 0;
-    uint32_t req_ring_capacity = 0;
-    uint32_t resp_ring_capacity = 0;
-    if (!buf.tryReadString(info.name)
-        || !buf.tryReadString(info.host)
-        || !buf.tryReadUint16(info.port)
-        || !buf.tryReadString(info.host_id)
-        || !buf.tryReadUint32(req_ring_capacity)
-        || !buf.tryReadUint32(resp_ring_capacity)
-        || !buf.tryReadUint16(iface_count)) {
-        return false;
-    }
-    info.shm_config.req_ring_capacity = req_ring_capacity;
-    info.shm_config.resp_ring_capacity = resp_ring_capacity;
     try {
-        info.interfaces.resize(iface_count);
+        ServiceInfo decoded;
+        uint16_t iface_count = 0;
+        uint32_t req_ring_capacity = 0;
+        uint32_t resp_ring_capacity = 0;
+        if (!buf.tryReadString(decoded.name)
+            || !buf.tryReadString(decoded.host)
+            || !buf.tryReadUint16(decoded.port)
+            || !buf.tryReadString(decoded.host_id)
+            || !buf.tryReadString(decoded.instance_id)
+            || !buf.tryReadUint32(req_ring_capacity)
+            || !buf.tryReadUint32(resp_ring_capacity)
+            || !buf.tryReadUint16(iface_count)) {
+            return false;
+        }
+        decoded.shm_config.req_ring_capacity = req_ring_capacity;
+        decoded.shm_config.resp_ring_capacity = resp_ring_capacity;
+        decoded.interfaces.resize(iface_count);
+        for (uint16_t i = 0; i < iface_count; ++i) {
+            if (!deserializeInterfaceInfo(buf, decoded.interfaces[i])) {
+                return false;
+            }
+        }
+        info = decoded;
+        return true;
     } catch (const std::bad_alloc&) {
         // 内存耗尽：返回失败而非崩溃（无异常传播原则）
         return false;
     }
-    for (uint16_t i = 0; i < iface_count; ++i) {
-        if (!deserializeInterfaceInfo(buf, info.interfaces[i])) {
-            return false;
-        }
-    }
-    return true;
 }
 
+/* @brief 序列化接口信息到 Buffer
+ * @param[in]  info 接口信息
+ * @param[out] buf  输出缓冲
+ * @return true 成功；false 写入失败 */
 bool serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf);
 
+/* @brief 反序列化接口信息
+ * @param[in]  buf  输入缓冲
+ * @param[out] info 接口信息
+ * @return true 成功；false 畸形/截断/内存不足，且不改动 info */
 template <typename BufT>
 bool deserializeInterfaceInfo(BufT& buf, InterfaceInfo& info) {
-    uint16_t method_count = 0;
-    if (!buf.tryReadUint32(info.interface_id)
-        || !buf.tryReadString(info.name)
-        || !buf.tryReadUint16(method_count)) {
-        return false;
-    }
     try {
-        info.methods.resize(method_count);
+        InterfaceInfo decoded;
+        uint16_t method_count = 0;
+        if (!buf.tryReadUint32(decoded.interface_id)
+            || !buf.tryReadString(decoded.name)
+            || !buf.tryReadUint16(method_count)) {
+            return false;
+        }
+        decoded.methods.resize(method_count);
+        for (uint16_t i = 0; i < method_count; ++i) {
+            if (!buf.tryReadUint32(decoded.methods[i].method_id)
+                || !buf.tryReadString(decoded.methods[i].name)
+                || !buf.tryReadString(decoded.methods[i].param_types)
+                || !buf.tryReadString(decoded.methods[i].return_type)) {
+                return false;
+            }
+            if (!buf.tryReadUint32(decoded.methods[i].idl_hash)) {
+                return false;
+            }
+        }
+        info = decoded;
+        return true;
     } catch (const std::bad_alloc&) {
         // 内存耗尽：返回失败而非崩溃（无异常传播原则）
         return false;
     }
-    for (uint16_t i = 0; i < method_count; ++i) {
-        if (!buf.tryReadUint32(info.methods[i].method_id)
-            || !buf.tryReadString(info.methods[i].name)
-            || !buf.tryReadString(info.methods[i].param_types)
-            || !buf.tryReadString(info.methods[i].return_type)) {
-            return false;
-        }
-        if (!buf.tryReadUint32(info.methods[i].idl_hash)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 } // namespace omnibinder

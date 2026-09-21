@@ -68,11 +68,25 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - **主动连接管理** — Proxy 提供 `connect()`/`disconnect()` 主动建立/断开服务连接
 - **自动重连** — 服务恢复后自动重连（可配指数退避策略）
 - **心跳检测** — 定期心跳及时发现服务异常，超时自动触发重连
+- **多实例服务身份** — 同名服务用不同 `instance_id` 并存，实例身份为 `(service_name, host_id, instance_id)`；支持按实例发现、寻址、订阅与死亡通知
 - **传输层自动选择** — 同机通信自动使用共享内存 (SHM)，跨机通信走 TCP
 - **服务级 SHM 配置** — 默认使用小容量 SHM ring（当前 `4KB / 4KB`），特殊服务可按需放大 request / response 容量
 - **IDL 代码生成** — 通过 `.bidl` 接口定义文件自动生成 Stub/Proxy 代码
 - **零外部依赖** — 通过平台抽象层屏蔽 OS 差异，无需第三方库。核心库编译后仅约 **500KB**（strip 后），适合资源受限环境
 - **命令行工具** — `omni-cli` 支持运行时查询服务、调用接口，支持 JSON 格式输入输出
+
+### 多实例服务说明
+
+同一块板上可以运行多个**同名**服务实例（例如两个 `SensorService` 分别绑定 `ttyUSB0` / `ttyUSB1`）：
+
+- 每个实例必须显式声明**不同的 `instance_id`**（C++ `Service::setInstanceId()`，C `omni_service_set_instance_id()`）。实例身份为 `(service_name, host_id, instance_id)`，**完全相同身份会被视为同一实例而互相顶替（后来者接管）**；默认空 `instance_id` 表示该板上该服务的单实例。
+- 客户端可用 `listServiceInstances()` / `omni_runtime_list_instances()` 枚举某服务名下的全部实例，再用 `connectServiceInstance()` / `omni_runtime_connect_service_instance()` / 生成 Proxy 的 `connect(host_id, instance_id)` / `_proxy_connect_instance()` 绑定到指定实例。
+- 每块板必须具有**唯一 `host_id`**：量产镜像常克隆 `/etc/machine-id`，会让多板共享同一 `host_id`，导致被误判为同一身份互相顶替、且 SHM 误判为同机。请在启动时通过 `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()` 显式设置各设备唯一标识（MAC / 芯片 ID / 序列号）。
+- 同一话题下允许多个同名服务实例并存发布：服务级订阅收到全部实例的数据并可按来源实例身份区分，实例级订阅只接收指定实例。
+
+> **已知边界（同身份活实例顶替 churn）**：顶替只发生在**完全相同身份** `(service_name, host_id, instance_id)` 上。如果两个**都还在运行**的进程声明了完全相同的身份，SM 会让后来者接管并关闭先来的控制连接；被顶替的活实例会自动重连并重新注册，于是两者可能反复互相顶替（takeover churn）。这是**已接受的边界行为，不是缺陷**：运维必须保证同板同名服务各自声明**不同**的 `instance_id`，绝不能让两个活实例使用完全相同的身份。
+
+运行示例见[示例文档](docs/examples.md)的“单板运行两个同名服务实例”一节。
 
 ### 线程模型说明
 
@@ -109,27 +123,27 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 
 | 测试项 | 样本数 | 去极值均值 | 95% 情况 | 说明 |
 |--------|--------|-----------|-----------|------|
-| RPC EchoBytes (0 bytes) | 1000 | 27.7 us | 46 us | 空 payload，主要反映协议与调度开销 |
-| RPC EchoBytes (64 bytes) | 1000 | 28.5 us | 45 us | 常见小 payload RPC |
-| RPC EchoBytes (256 bytes) | 1000 | 28.9 us | 45 us | 常见小 payload RPC |
-| RPC EchoBytes (1024 bytes) | 1000 | 31.1 us | 47 us | 1KB 级 payload |
-| RPC EchoBytes (4096 bytes) | 1000 | 41.7 us | 55 us | 4KB payload，测试服务显式放大 SHM ring |
-| RPC EchoBytes (8192 bytes) | 1000 | 52.8 us | 70 us | 8KB payload，测试服务显式放大 SHM ring |
-| RPC EchoInt32 | 1000 | 13.3 us | 40 us | 小基础类型 RPC |
-| RPC EchoStruct | 1000 | 19.0 us | 39 us | 结构体 RPC |
-| RPC Add (2 x int32) | 1000 | 14.0 us | 36 us | 小计算型 RPC |
-| Topic pub/sub (0 bytes) | 1000 | 4.0 us | 9 us | 空广播 payload |
-| Topic pub/sub (64 bytes) | 1000 | 4.4 us | 10 us | 小广播数据 |
-| Topic pub/sub (256 bytes) | 1000 | 4.1 us | 10 us | 常见小广播数据 |
-| Topic pub/sub (1024 bytes) | 1000 | 4.7 us | 11 us | 1KB 广播数据 |
-| Topic pub/sub (4096 bytes) | 1000 | 8.1 us | 15 us | 4KB 广播数据 |
-| Topic pub/sub (8192 bytes) | 1000 | 11.1 us | 20 us | 8KB 广播数据 |
+| RPC EchoBytes (0 bytes) | 1000 | 24.8 us | 44 us | 空 payload，主要反映协议与调度开销 |
+| RPC EchoBytes (64 bytes) | 1000 | 26.3 us | 47 us | 常见小 payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 26.2 us | 46 us | 常见小 payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 28.0 us | 49 us | 1KB 级 payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 38.0 us | 62 us | 4KB payload，测试服务显式放大 SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 57.4 us | 79 us | 8KB payload，测试服务显式放大 SHM ring |
+| RPC EchoInt32 | 1000 | 13.1 us | 43 us | 小基础类型 RPC |
+| RPC EchoStruct | 1000 | 15.0 us | 40 us | 结构体 RPC |
+| RPC Add (2 x int32) | 1000 | 16.1 us | 43 us | 小计算型 RPC |
+| Topic pub/sub (0 bytes) | 1000 | 5.2 us | 12 us | 空广播 payload |
+| Topic pub/sub (64 bytes) | 1000 | 5.6 us | 11 us | 小广播数据 |
+| Topic pub/sub (256 bytes) | 1000 | 5.2 us | 11 us | 常见小广播数据 |
+| Topic pub/sub (1024 bytes) | 1000 | 6.2 us | 12 us | 1KB 广播数据 |
+| Topic pub/sub (4096 bytes) | 1000 | 9.7 us | 18 us | 4KB 广播数据 |
+| Topic pub/sub (8192 bytes) | 1000 | 13.6 us | 23 us | 8KB 广播数据 |
 
 从报告中的完整数据看：
 
-- **0~1024 bytes 常见 RPC** 在当前 WSL2 环境下的去极值均值约为 **27.7~31.1 us**
-- **4096~8192 bytes payload RPC** 在显式放大 SHM ring 的测试配置下，约为 **41.7~52.8 us**
-- **Topic pub/sub** 约为 **4.0~11.1 us**（单向广播，无 RPC 往返开销）
+- **0~1024 bytes 常见 RPC** 在当前 WSL2 环境下的去极值均值约为 **24.8~28.0 us**
+- **4096~8192 bytes payload RPC** 在显式放大 SHM ring 的测试配置下，约为 **38.0~57.4 us**
+- **Topic pub/sub** 约为 **5.2~13.6 us**（单向广播，无 RPC 往返开销）
 
 > **性能说明**：数据在 WSL2 上采集，受虚拟化抖动影响，绝对数值仅供参考——裸金属 Linux 上延迟更低更稳定。
 > "去极值均值"是去掉最低/最高各 1% 后的均值，能更准确反映典型性能（排除 OS 调度抖动污染）。

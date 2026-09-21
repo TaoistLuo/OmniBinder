@@ -49,11 +49,15 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    uint16_t sm_port = 19910;
+    uint16_t sm_port = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) {
             sm_port = static_cast<uint16_t>(atoi(argv[++i]));
         }
+    }
+    if (sm_port == 0) {
+        fprintf(stderr, "SERVER: --sm-port is required\n");
+        return 1;
     }
 
     omnibinder::setLogLevel(omnibinder::LOG_ERROR);

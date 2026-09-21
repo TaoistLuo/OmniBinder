@@ -4,6 +4,8 @@
 #include <omnibinder/service.h>
 #include <thread>
 #include <chrono>
+#include <atomic>
+#include <cstring>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -35,8 +37,8 @@ private:
 struct RuntimeStatsServerCtx {
     OmniRuntime runtime;
     StatsService service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     RuntimeStatsServerCtx() : registered(false), should_stop(false) {}
 };
 
@@ -46,8 +48,8 @@ static void rtStatsServerThread(void* arg) {
     if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
     if (ret != 0) return;
-    ctx->registered = true;
-    while (!ctx->should_stop) ctx->runtime.pollOnce(50);
+    ctx->registered.store(true);
+    while (!ctx->should_stop.load()) ctx->runtime.pollOnce(50);
     ctx->runtime.unregisterService(&ctx->service);
     ctx->runtime.stop();
 }
@@ -70,9 +72,12 @@ protected:
     }
 
     static void TearDownTestSuite() {
-        server_ctx_->should_stop = true;
-        server_tid_.join();
-        delete server_ctx_;
+        if (server_ctx_) {
+            server_ctx_->should_stop = true;
+            server_tid_.join();
+            delete server_ctx_;
+            server_ctx_ = nullptr;
+        }
         stopProcess(sm_pid_);
     }
 };
@@ -131,6 +136,24 @@ TEST_F(RuntimeStatsTest, FailedCallUpdatesStats) {
 TEST_F(RuntimeStatsTest, ResetStatsClearsCounters) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+
+    // 先制造非零计数，证明 reset 真的清零，而非"本来就为 0"掩盖 reset 空实现
+    {
+        Buffer req, resp;
+        const char* payload = "pre-reset";
+        req.writeRaw(payload, strlen(payload));
+        ASSERT_EQ(runtime.connectService("StatsService"), 0);
+        ASSERT_EQ(runtime.invoke("StatsService", IFACE_ID, METHOD_ECHO, 0, req, resp, 3000), 0);
+    }
+    {
+        Buffer req, resp;
+        req.writeRaw("bad", 3);
+        EXPECT_NE(runtime.invoke("MissingService", IFACE_ID, METHOD_ECHO, 0, req, resp, 1000), 0);
+    }
+    RuntimeStats before;
+    ASSERT_EQ(runtime.getStats(before), 0);
+    ASSERT_GT(before.total_rpc_calls, 0u);
+
     runtime.resetStats();
     RuntimeStats stats;
     ASSERT_EQ(runtime.getStats(stats), 0);

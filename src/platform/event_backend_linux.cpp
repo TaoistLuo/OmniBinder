@@ -23,6 +23,10 @@ public:
     }
     
     bool init() override {
+        if (epoll_fd_ >= 0) {
+            // 幂等：重复 init 直接复用已有 epoll fd，避免旧 fd 泄漏
+            return true;
+        }
         epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
         if (epoll_fd_ < 0) {
             OMNI_LOG_ERROR(LOG_TAG, "epoll_create1 failed: %s", strerror(errno));
@@ -100,11 +104,9 @@ public:
 
 private:
     static uint32_t toEpollEvents(uint32_t events) {
-        uint32_t epoll_events = 0;
+        uint32_t epoll_events = EPOLLHUP | EPOLLERR;
         if (events & EVENT_READ)  epoll_events |= EPOLLIN;
         if (events & EVENT_WRITE) epoll_events |= EPOLLOUT;
-        if (events & EVENT_ERROR) epoll_events |= EPOLLERR;
-        epoll_events |= EPOLLHUP | EPOLLERR;
         return epoll_events;
     }
     

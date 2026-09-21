@@ -32,7 +32,9 @@ void OmniRuntime::Impl::emitDiagHook(LocalServiceEntry* entry, uint8_t direction
                                      const Message& msg) {
     if (entry && entry->diag_enabled && entry->diag_topic_id != 0) {
         Buffer diag_buf;
-        diag_serialize_event(diag_buf, direction, msg);
+        if (!diag_serialize_event(diag_buf, direction, msg)) {
+            return;
+        }
         broadcastInternal(entry->diag_topic_id, diag_buf);
     }
 }
@@ -157,7 +159,7 @@ void OmniRuntime::Impl::handleServiceClientMessage(const std::string& name, int 
     case MessageType::MSG_BROADCAST: {
         // 防御分支：正常拓扑下广播由发布者发往订阅者，服务端不会收到；
         // 仍与客户端直连路径共用同一解码+诊断+分发 helper
-        if (!dispatchBroadcastMessage(msg)) {
+        if (!dispatchBroadcastMessage(msg, std::string(), std::string(), std::string())) {
             OMNI_LOG_WARN(LOG_TAG,
                           "malformed_broadcast transport=server service=%s client=%d seq=%u err=%d",
                           name.c_str(), client_id, msg.getSequence(),
@@ -172,14 +174,18 @@ void OmniRuntime::Impl::handleServiceClientMessage(const std::string& name, int 
     }
 }
 
-bool OmniRuntime::Impl::dispatchBroadcastMessage(const Message& msg) {
+bool OmniRuntime::Impl::dispatchBroadcastMessage(const Message& msg,
+                                                 const std::string& publisher_service,
+                                                 const std::string& host_id,
+                                                 const std::string& instance_id) {
     uint32_t topic_id = 0;
     Buffer data;
     if (!decodeBroadcastPayload(msg, topic_id, data)) {
         return false;
     }
     emitDiagEvent(DIAG_EVENT_BROADCAST, msg);
-    topic_runtime_.dispatch(topic_id, data);
+    // 空发布者身份（防御路径）退化为空选择器：匹配任意发布者，与旧全量分发等价
+    topic_runtime_.dispatchFrom(publisher_service, host_id, instance_id, topic_id, data);
     return true;
 }
 
@@ -242,6 +248,12 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name, int cli
     emitDiagHook(entry, DIAG_EVENT_REQUEST, msg);
     emitDiagEvent(DIAG_EVENT_REQUEST, msg);
 
+    // emitDiagHook 可能经话题分发执行用户回调并注销服务（约束 1）：调用前重查
+    it = local_services_.find(service_name);
+    if (it == local_services_.end() || it->second != entry) return;
+    service = entry->service;
+    if (!service) return;
+
     InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label,
                                                       service_name.c_str());
 
@@ -249,29 +261,18 @@ void OmniRuntime::Impl::onInvokeRequest(const std::string& service_name, int cli
     // 返回后必须重新判活，避免访问已释放的 entry 字段。
     if (!isEntryAlive(service_name, entry)) return;
 
-    if (result.status == InvokeDispatchStatus::SUCCESS) {
-        Message reply = makeInvokeSuccessReply(msg.getSequence(), result.response);
-        emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
-        // emitDiagHook 可能经话题分发执行用户回调并注销服务（约束 1）
-        if (!isEntryAlive(service_name, entry)) return;
-        std::map<int, IMessageConnection*>::iterator tit = entry->clients.find(client_id);
-        IMessageConnection* transport = (tit != entry->clients.end()) ? tit->second : NULL;
-        if (transport && !sendOnFd(transport, reply)) {
-            OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s client=%d seq=%u status=0",
-                          service_name.c_str(), client_id, msg.getSequence());
-        }
-    } else {
-        Message reply = makeInvokeErrorReply(msg.getSequence(),
-                                             static_cast<ErrorCode>(result.error_code));
-        emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
-        if (!isEntryAlive(service_name, entry)) return;
-        std::map<int, IMessageConnection*>::iterator tit = entry->clients.find(client_id);
-        IMessageConnection* transport = (tit != entry->clients.end()) ? tit->second : NULL;
-        if (transport && !sendOnFd(transport, reply)) {
-            OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s client=%d seq=%u status=%d",
-                          service_name.c_str(), client_id, msg.getSequence(),
-                          result.error_code);
-        }
+    Message reply = (result.status == InvokeDispatchStatus::SUCCESS)
+        ? makeInvokeSuccessReply(msg.getSequence(), result.response)
+        : makeInvokeErrorReply(msg.getSequence(),
+                               static_cast<ErrorCode>(result.error_code));
+    emitDiagHook(entry, DIAG_EVENT_RESPONSE, reply);
+    // emitDiagHook 可能经话题分发执行用户回调并注销服务（约束 1）
+    if (!isEntryAlive(service_name, entry)) return;
+    std::map<int, IMessageConnection*>::iterator tit = entry->clients.find(client_id);
+    IMessageConnection* transport = (tit != entry->clients.end()) ? tit->second : NULL;
+    if (transport && !sendOnFd(transport, reply)) {
+        OMNI_LOG_WARN(LOG_TAG, "invoke_reply_send_failed service=%s client=%d seq=%u status=%d",
+                      service_name.c_str(), client_id, msg.getSequence(), result.error_code);
     }
 }
 
@@ -280,10 +281,17 @@ void OmniRuntime::Impl::onInvokeOneWayRequest(const std::string& service_name,
                                               const char* transport_label) {
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(service_name);
     if (it == local_services_.end()) return;
-    Service* service = it->second->service;
+    LocalServiceEntry* entry = it->second;
+    Service* service = entry->service;
     if (!service) return;
-    emitDiagHook(it->second, DIAG_EVENT_ONE_WAY, msg);
+    emitDiagHook(entry, DIAG_EVENT_ONE_WAY, msg);
     emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
+
+    // emitDiagHook 可能经话题分发执行用户回调并注销服务（约束 1）：调用前重查
+    it = local_services_.find(service_name);
+    if (it == local_services_.end() || it->second != entry) return;
+    service = entry->service;
+    if (!service) return;
 
     InvokeDispatchResult result = dispatchLocalInvoke(service, msg, transport_label,
                                                       service_name.c_str());
@@ -316,7 +324,7 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
     }
 
     if (interface_id == OMNI_DIAG_IFACE_ID) {
-        return dispatchDiagInvoke(service, service_name, request);
+        return dispatchDiagInvoke(service_name, request);
     }
 
     InvokeDispatchResult result;
@@ -367,17 +375,14 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchLocalInvoke(Service* service, co
     return result;
 }
 
-InvokeDispatchResult OmniRuntime::Impl::dispatchDiagInvoke(Service* service,
-                                                           const char* service_name,
+InvokeDispatchResult OmniRuntime::Impl::dispatchDiagInvoke(const char* service_name,
                                                            const Buffer& request) {
     InvokeDispatchResult result;
     result.status = InvokeDispatchStatus::SUCCESS;
     result.error_code = 0;
 
-    LocalServiceEntry* entry = nullptr;
-    for (auto& kv : local_services_) {
-        if (kv.second->service == service) { entry = kv.second; break; }
-    }
+    std::map<std::string, LocalServiceEntry*>::iterator eit = local_services_.find(service_name);
+    LocalServiceEntry* entry = (eit != local_services_.end()) ? eit->second : NULL;
     if (!entry) {
         result.status = InvokeDispatchStatus::INVOKE_FAILED;
         result.error_code = static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
@@ -385,7 +390,7 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchDiagInvoke(Service* service,
     }
 
     bool enable = (request.size() >= 1 && request.data()[0] != 0);
-    if (!enable && diag_active_count_ == 0) {
+    if (!enable && diag_.active_count == 0) {
         result.response.writeUint8(0);
         return result;
     }
@@ -404,24 +409,22 @@ InvokeDispatchResult OmniRuntime::Impl::dispatchDiagInvoke(Service* service,
         }
         // publishTopicInternal 会阻塞等待 SM reply，期间可能经 SM 消息触发用户回调
         // 注销本服务（约束 1），返回后须重查 entry 存活
-        entry = nullptr;
-        for (auto& kv : local_services_) {
-            if (kv.second->service == service) { entry = kv.second; break; }
-        }
+        eit = local_services_.find(service_name);
+        entry = (eit != local_services_.end()) ? eit->second : NULL;
         if (tid != 0 && entry) {
             entry->diag_topic_id = tid;
             entry->diag_enabled = true;
-            diag_active_count_++;
+            diag_.active_count++;
             OMNI_LOG_INFO(LOG_TAG, "diag_enabled service=%s topic=%s topic_id=0x%08x",
                           service_name, diag_topic.c_str(), entry->diag_topic_id);
             result.response.writeUint8(0);
         } else {
             result.status = InvokeDispatchStatus::INVOKE_FAILED;
-            result.error_code = -1;
+            result.error_code = static_cast<int>(ErrorCode::ERR_UNKNOWN);
         }
     } else if (!enable) {
-        if (entry->diag_enabled && diag_active_count_ > 0) {
-            diag_active_count_--;
+        if (entry->diag_enabled && diag_.active_count > 0) {
+            diag_.active_count--;
         }
         entry->diag_enabled = false;
         entry->diag_topic_id = 0;
@@ -452,7 +455,19 @@ void OmniRuntime::Impl::onDirectMessage(const std::string& service_name, Message
 
     switch (type) {
     case MessageType::MSG_BROADCAST: {
-        if (!dispatchBroadcastMessage(msg)) {
+        // 按连接携带的发布者实例身份回填来源（决策 D5）：连接上登记了 ServiceInfo 时
+        // 使用其 name / host_id / instance_id，未登记（防御路径）则退化为旧式全量分发
+        std::string publisher_service;
+        std::string source_host_id;
+        std::string source_instance_id;
+        ServiceState* state = findServiceState(service_name);
+        if (state && state->has_info) {
+            publisher_service = state->info.name;
+            source_host_id = state->info.host_id;
+            source_instance_id = state->info.instance_id;
+        }
+        if (!dispatchBroadcastMessage(msg, publisher_service, source_host_id,
+                                      source_instance_id)) {
             OMNI_LOG_WARN(LOG_TAG,
                           "malformed_broadcast transport=direct seq=%u err=%d",
                           msg.getSequence(), static_cast<int>(ErrorCode::ERR_DESERIALIZE));
@@ -476,7 +491,7 @@ void OmniRuntime::Impl::onDirectMessage(const std::string& service_name, Message
 
 void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
     OMNI_LOG_WARN(LOG_TAG, "Direct connection to %s lost", service_name.c_str());
-    stats_.connection_errors++;
+    diag_.stats.connection_errors++;
 
     // 断开前拷贝该连接绑定的话题：handleServiceLost 会移除连接并调度重连，
     // 重连成功后按此重放订阅。notifyError 会执行用户回调且可能修改
@@ -489,6 +504,16 @@ void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
     if (rc_state && rc_state->has_reconnect) {
         topics = rc_state->reconnect.topic_subscriptions;
     }
+    // 断开的发布者实例身份：仅通知匹配该来源的订阅错误回调，避免实例级订阅
+    // 因无关发布者掉线收到假 ERR_CONNECTION_CLOSED
+    std::string pub_service;
+    std::string pub_host_id;
+    std::string pub_instance_id;
+    if (rc_state && rc_state->has_info) {
+        pub_service = rc_state->info.name;
+        pub_host_id = rc_state->info.host_id;
+        pub_instance_id = rc_state->info.instance_id;
+    }
 
     handleServiceLost(service_name);
 
@@ -497,7 +522,8 @@ void OmniRuntime::Impl::onDirectDisconnect(const std::string& service_name) {
     for (size_t i = 0; i < topics.size(); ++i) {
         OMNI_LOG_WARN(LOG_TAG, "Topic subscription '%s' lost with publisher connection %s",
                       topics[i].c_str(), service_name.c_str());
-        topic_runtime_.notifyError(fnv1a_32(topics[i]), ErrorCode::ERR_CONNECTION_CLOSED);
+        topic_runtime_.notifyError(fnv1a_32(topics[i]), pub_service, pub_host_id,
+                                   pub_instance_id, ErrorCode::ERR_CONNECTION_CLOSED);
     }
 }
 

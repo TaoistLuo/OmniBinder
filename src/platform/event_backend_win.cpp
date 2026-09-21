@@ -244,12 +244,11 @@ private:
         DWORD bytes; ULONG_PTR key; OVERLAPPED* ov;
         while (count < max_events) {
             if (!GetQueuedCompletionStatus(iocp_, &bytes, &key, &ov, 0)) {
-                if (GetLastError() == WAIT_TIMEOUT) break;
+                if (GetLastError() == WAIT_TIMEOUT || ov == NULL) break;
                 continue;
             }
             int fd = static_cast<int>(key);
             if (fd == 0 && key == IOCP_WAKEUP_KEY) {
-                drainWakeup();
                 events[count].fd     = IOCP_WAKEUP_FD;
                 events[count].events = EVENT_READ;
                 return count + 1;
@@ -280,13 +279,6 @@ private:
         if (ev != fd_events_.end() && (ev->second & EVENT_READ))
             postPipeRead(fd);
         return 1;
-    }
-
-    void drainWakeup() {
-        DWORD bytes; ULONG_PTR key; OVERLAPPED* ov;
-        while (GetQueuedCompletionStatus(iocp_, &bytes, &key, &ov, 0)) {
-            if (key != IOCP_WAKEUP_KEY) break;
-        }
     }
 
     // ── Socket 探测（基于 select，非阻塞）───────

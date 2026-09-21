@@ -9,6 +9,24 @@
 
 namespace omnibinder {
 
+namespace {
+
+TopicRuntime::SubscriptionSelector toRuntimeSelector(
+    const TopicSubscriptionSelector& selector) {
+    TopicRuntime::SubscriptionSelector runtime_selector;
+    runtime_selector.publisher_service = selector.publisher_service;
+    runtime_selector.host_id = selector.host_id;
+    runtime_selector.instance_id = selector.instance_id;
+    runtime_selector.instance_level = selector.instance_level;
+    return runtime_selector;
+}
+
+uint8_t selectorWireMode(const TopicSubscriptionSelector& selector) {
+    return selector.instance_level ? TOPIC_SUB_MODE_INSTANCE : TOPIC_SUB_MODE_SERVICE;
+}
+
+} // namespace
+
 // ============================================================
 // 死亡通知
 // ============================================================
@@ -40,6 +58,64 @@ int OmniRuntime::Impl::subscribeServiceDeathInternal(const std::string& service_
     ServiceState& svc_state = ensureServiceState(service_name);
     svc_state.death_cb = callback;
     svc_state.has_death = true;
+    return 0;
+}
+
+int OmniRuntime::Impl::subscribeServiceInstanceDeath(const std::string& name,
+                                                     const std::string& host_id,
+                                                     const std::string& instance_id,
+                                                     const DeathSourceCallback& callback) {
+    return callSerialized([this, &name, &host_id, &instance_id, &callback]() -> int {
+        return subscribeServiceInstanceDeathInternal(name, host_id, instance_id, callback);
+    });
+}
+
+int OmniRuntime::Impl::subscribeServiceInstanceDeathInternal(
+    const std::string& name, const std::string& host_id,
+    const std::string& instance_id, const DeathSourceCallback& callback) {
+    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE, allocSequence());
+    if (!writeServiceIdentityPayload(msg.payload, name, host_id, instance_id)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+
+    Message reply;
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) return ret;
+
+    bool accepted = false;
+    if (!decodeBoolReplyPayload(reply, accepted)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
+    if (!accepted) {
+        return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
+    }
+
+    const std::string key = makeServiceIdentityKey(ServiceIdentity(name, host_id, instance_id));
+    InstanceDeathSubscription& sub = instance_deaths_[key];
+    sub.name = name;
+    sub.host_id = host_id;
+    sub.instance_id = instance_id;
+    sub.callback = callback;
+    return 0;
+}
+
+int OmniRuntime::Impl::unsubscribeServiceInstanceDeath(const std::string& name,
+                                                      const std::string& host_id,
+                                                      const std::string& instance_id) {
+    return callSerialized([this, &name, &host_id, &instance_id]() -> int {
+        return unsubscribeServiceInstanceDeathInternal(name, host_id, instance_id);
+    });
+}
+
+int OmniRuntime::Impl::unsubscribeServiceInstanceDeathInternal(
+    const std::string& name, const std::string& host_id,
+    const std::string& instance_id) {
+    Message msg(MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE, allocSequence());
+    if (!writeServiceIdentityPayload(msg.payload, name, host_id, instance_id)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+    sendToSM(msg);
+    instance_deaths_.erase(makeServiceIdentityKey(ServiceIdentity(name, host_id, instance_id)));
     return 0;
 }
 
@@ -92,6 +168,7 @@ int OmniRuntime::Impl::publishTopicInternal(const std::string& topic_name, uint3
         pub_info.host = listenerAdvertiseHost();
         pub_info.port = entry->port;
         if (entry->service) {
+            pub_info.instance_id = entry->service->instanceId();
             pub_info.shm_config = entry->service->shmConfig();
         }
     } else {
@@ -139,7 +216,7 @@ int OmniRuntime::Impl::broadcastInternal(uint32_t topic_id, const Buffer& data) 
     }
 
     // 诊断 BROADCAST 钩子（diag topic 跳过，防止递归）
-    if (diag_active_count_ > 0 && !isDiagDataTopic(topic_id)) {
+    if (diag_.active_count > 0 && !isDiagDataTopic(topic_id)) {
         // 先拷贝服务名再遍历：emitDiagHook 内部会广播，广播的 TCP 部分写失败路径
         // 会执行断连用户回调并可能注销服务，持 local_services_ 迭代器会失效（约束 2）
         std::vector<std::string> diag_service_names;
@@ -245,46 +322,90 @@ int OmniRuntime::Impl::subscribeTopic(const std::string& topic_name, uint32_t ex
                                        const TopicCallback& on_message,
                                        const TopicErrorCallback& on_error) {
     return callSerialized([this, &topic_name, expected_idl_hash, &on_message, &on_error]() -> int {
-        int ret = subscribeTopicInternal(topic_name, expected_idl_hash, on_message);
-        if (ret == 0) {
-            topic_runtime_.setErrorCallback(topic_name, on_error);
-        }
-        return ret;
+        // 普通订阅 = 默认空选择器（匹配任意发布者）；回调适配为携带来源身份的签名
+        const TopicSubscriptionSelector selector;
+        const TopicSourceCallback source_cb =
+            [&on_message](const std::string&, const std::string&, uint32_t topic_id,
+                          const Buffer& data) {
+                if (on_message) {
+                    on_message(topic_id, data);
+                }
+            };
+        return subscribeTopicInternal(selector, topic_name, expected_idl_hash, source_cb,
+                                      on_error);
     });
 }
 
-int OmniRuntime::Impl::subscribeTopicInternal(const std::string& topic_name,
-                                             uint32_t expected_idl_hash,
-                                             const TopicCallback& callback) {
+int OmniRuntime::Impl::unsubscribeTopic(const std::string& topic_name) {
+    return callSerialized([this, &topic_name]() -> int {
+        return unsubscribeTopicInternal(TopicSubscriptionSelector(), topic_name);
+    });
+}
+
+// ============================================================
+// 话题订阅（普通订阅 = 默认空选择器；选择器订阅 = 服务级 / 实例级）
+// ============================================================
+
+int OmniRuntime::Impl::subscribeTopic(const TopicSubscriptionSelector& selector,
+                                      const std::string& topic_name,
+                                      uint32_t expected_idl_hash,
+                                      const TopicSourceCallback& on_message,
+                                      const TopicErrorCallback& on_error) {
+    return callSerialized(
+        [this, &selector, &topic_name, expected_idl_hash, &on_message, &on_error]() -> int {
+            return subscribeTopicInternal(selector, topic_name, expected_idl_hash,
+                                          on_message, on_error);
+        });
+}
+
+int OmniRuntime::Impl::subscribeTopicInternal(
+    const TopicSubscriptionSelector& selector, const std::string& topic_name,
+    uint32_t expected_idl_hash, const TopicSourceCallback& callback,
+    const TopicErrorCallback& on_error) {
+    if (selector.publisher_service.empty() && selector.instance_level) {
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+    }
+    const TopicRuntime::SubscriptionSelector runtime_selector =
+        toRuntimeSelector(selector);
+
     // 期望哈希必须在发起 SM 请求前登记：SM 可能在应答之后紧接推送
     // MSG_TOPIC_PUBLISHER_NOTIFY，且两者可能在同一次 socket 读取中被连续分发，
     // 通知处理需要能查到期望哈希才能完成严格校验
-    topic_runtime_.setExpectedSubscriptionHash(topic_name, expected_idl_hash);
+    topic_runtime_.setExpectedSubscriptionHash(topic_name, runtime_selector,
+                                               expected_idl_hash);
 
     Message msg(MessageType::MSG_SUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic_name);
-    
+    // 空选择器（普通订阅）不写选择器字段，保持既有线协议
+    if (!selector.publisher_service.empty()
+        && !writeTopicSubscriptionSelector(msg.payload, selectorWireMode(selector),
+                                           selector.publisher_service, selector.host_id,
+                                           selector.instance_id)) {
+        topic_runtime_.forgetSubscription(topic_name, runtime_selector);
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+
     Message reply;
     int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) {
-        topic_runtime_.forgetSubscription(topic_name);
+        topic_runtime_.forgetSubscription(topic_name, runtime_selector);
         return ret;
     }
 
     Buffer reply_payload(reply.payload.data(), reply.payload.size());
     bool accepted = false;
     if (!reply_payload.tryReadBool(accepted)) {
-        topic_runtime_.forgetSubscription(topic_name);
+        topic_runtime_.forgetSubscription(topic_name, runtime_selector);
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (!accepted) {
-        topic_runtime_.forgetSubscription(topic_name);
+        topic_runtime_.forgetSubscription(topic_name, runtime_selector);
         return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
     }
     uint32_t publisher_idl_hash = 0;
     if (reply_payload.remaining() >= sizeof(uint32_t)
         && !reply_payload.tryReadUint32(publisher_idl_hash)) {
-        topic_runtime_.forgetSubscription(topic_name);
+        topic_runtime_.forgetSubscription(topic_name, runtime_selector);
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
 
@@ -295,27 +416,40 @@ int OmniRuntime::Impl::subscribeTopicInternal(const std::string& topic_name,
         OMNI_LOG_WARN(LOG_TAG,
                       "topic_idl_mismatch topic=%s expected_hash=0x%08x publisher_hash=0x%08x",
                       topic_name.c_str(), expected_idl_hash, publisher_idl_hash);
-        unsubscribeTopicInternal(topic_name);
+        unsubscribeTopicInternal(selector, topic_name);
         return static_cast<int>(ErrorCode::ERR_IDL_MISMATCH);
     }
 
-    topic_runtime_.rememberSubscription(topic_name, callback, expected_idl_hash);
+    topic_runtime_.rememberSubscription(topic_name, runtime_selector, callback,
+                                        expected_idl_hash);
+    topic_runtime_.setErrorCallback(topic_name, runtime_selector, on_error);
     return 0;
 }
 
-int OmniRuntime::Impl::unsubscribeTopic(const std::string& topic_name) {
-    return callSerialized([this, &topic_name]() -> int {
-        return unsubscribeTopicInternal(topic_name);
+int OmniRuntime::Impl::unsubscribeTopic(const TopicSubscriptionSelector& selector,
+                                        const std::string& topic_name) {
+    return callSerialized([this, &selector, &topic_name]() -> int {
+        return unsubscribeTopicInternal(selector, topic_name);
     });
 }
 
-int OmniRuntime::Impl::unsubscribeTopicInternal(const std::string& topic_name) {
+int OmniRuntime::Impl::unsubscribeTopicInternal(
+    const TopicSubscriptionSelector& selector, const std::string& topic_name) {
+    const TopicRuntime::SubscriptionSelector runtime_selector =
+        toRuntimeSelector(selector);
+
     Message msg(MessageType::MSG_UNSUBSCRIBE_TOPIC, allocSequence());
     msg.payload.writeString(topic_name);
+    if (!selector.publisher_service.empty()
+        && !writeTopicSubscriptionSelector(msg.payload, selectorWireMode(selector),
+                                           selector.publisher_service, selector.host_id,
+                                           selector.instance_id)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
     sendToSM(msg);
-    topic_runtime_.forgetSubscription(topic_name);
+    topic_runtime_.forgetSubscription(topic_name, runtime_selector);
     // 同步移除连接上的订阅绑定：否则直连重连会重放已取消的订阅
-    removeTopicSubscriptionBinding(topic_name);
+    removeTopicSubscriptionBindingForSelector(runtime_selector, topic_name);
     return 0;
 }
 

@@ -50,14 +50,35 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
             host = argv[++i];
         } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-            port = static_cast<uint16_t>(atoi(argv[++i]));
-        } else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
-            log_level = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "--heartbeat-timeout") == 0 && i + 1 < argc) {
-            int value = atoi(argv[++i]);
-            if (value > 0) {
-                heartbeat_timeout_ms = static_cast<uint32_t>(value);
+            // 严格解析并校验范围，避免 atoi 静默回绕（70000 -> 4464、非数字 -> 0 随机端口）
+            char* end = NULL;
+            long value = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value < 1 || value > 65535) {
+                fprintf(stderr, "Invalid port: %s (expected 1..65535)\n", argv[i]);
+                printUsage(argv[0]);
+                return 1;
             }
+            port = static_cast<uint16_t>(value);
+        } else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
+            char* end = NULL;
+            long value = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0'
+                || value < 0 || value > static_cast<long>(OMNI_LOG_OFF)) {
+                fprintf(stderr, "Invalid log level: %s (expected 0..%d)\n",
+                        argv[i], static_cast<int>(OMNI_LOG_OFF));
+                printUsage(argv[0]);
+                return 1;
+            }
+            log_level = static_cast<int>(value);
+        } else if (strcmp(argv[i], "--heartbeat-timeout") == 0 && i + 1 < argc) {
+            char* end = NULL;
+            long value = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || value <= 0 || value > 2147483647L) {
+                fprintf(stderr, "Invalid heartbeat timeout: %s (expected >0 ms)\n", argv[i]);
+                printUsage(argv[0]);
+                return 1;
+            }
+            heartbeat_timeout_ms = static_cast<uint32_t>(value);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printUsage(argv[0]);
             return 0;
@@ -68,10 +89,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 设置日志级别（上限对齐 LogLevel 枚举最大值 OMNI_LOG_OFF=6）
-    if (log_level >= 0 && log_level <= static_cast<int>(OMNI_LOG_OFF)) {
-        omnibinder::setLogLevel(static_cast<omnibinder::LogLevel>(log_level));
-    }
+    // 设置日志级别（解析时已校验在 [0, OMNI_LOG_OFF] 范围内）
+    omnibinder::setLogLevel(static_cast<omnibinder::LogLevel>(log_level));
 
     OMNI_LOG_INFO(TAG, "OmniBinder ServiceManager starting...");
     OMNI_LOG_INFO(TAG, "Host: %s, Port: %u, LogLevel: %d", host.c_str(), port, log_level);

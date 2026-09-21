@@ -19,6 +19,7 @@
 #include <vector>
 #include <string>
 #include <atomic>
+#include <algorithm>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -29,6 +30,14 @@ static const uint32_t IFACE_ID = fnv1a_32("CalcService");
 static const uint16_t SM_PORT = 19902;
 
 static const char* g_program_path = nullptr;
+
+// 校验同机数据面确实走了 SHM：否则 SHM 故障静默降级 TCP 时用例照过，掩盖缺陷
+static void expectShmTransport(OmniRuntime& c) {
+    RuntimeStats stats;
+    EXPECT_EQ(c.getStats(stats), 0);
+    EXPECT_GE(stats.shm_connections, 1u) << "同机调用必须走 SHM";
+    EXPECT_EQ(stats.tcp_connections, 0u) << "同机调用不得回退 TCP";
+}
 
 // ============================================================
 // 测试服务：CalcService
@@ -83,6 +92,13 @@ static void serverThread(void* arg) {
     if (ret != 0) { fprintf(stderr, "Server: init failed (%d)\n", ret); return; }
     ret = ctx->runtime.registerService(&ctx->service);
     if (ret != 0) { fprintf(stderr, "Server: register failed (%d)\n", ret); ctx->runtime.stop(); return; }
+    if (ctx->runtime.publishTopic("zeta/topic") != 0
+        || ctx->runtime.publishTopic("alpha/topic") != 0) {
+        fprintf(stderr, "Server: publishTopic failed\n");
+        ctx->runtime.unregisterService(&ctx->service);
+        ctx->runtime.stop();
+        return;
+    }
     ctx->registered = true;
     while (!ctx->should_stop) {
         ctx->runtime.pollOnce(20);
@@ -101,7 +117,8 @@ protected:
     static std::thread srv_tid_;
 
     static void SetUpTestSuite() {
-        unlink("/dev/shm/binder_CalcService");
+        // 旧全局 SHM 命名（binder_<service>）已废弃，当前为 per-client SHM；
+        // 如仍有残留由平台层 shmUnlink 负责，测试不再硬编码 /dev/shm 路径。
 
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19902", "--log-level", "3");
         ASSERT_GT(sm_pid_, 0);
@@ -115,8 +132,10 @@ protected:
     }
 
     static void TearDownTestSuite() {
-        srv_.should_stop = true;
-        srv_tid_.join();
+        if (srv_tid_.joinable()) {
+            srv_.should_stop = true;
+            srv_tid_.join();
+        }
 
         // 验证注销后服务已消失
         std::this_thread::sleep_for(std::chrono::microseconds(200000));
@@ -143,11 +162,58 @@ TEST_F(FullIntegrationTest, ServiceHasTcpPort) {
     ASSERT_GT(srv_.service.port(), 0);
 }
 
-TEST_F(FullIntegrationTest, ServiceHasShmInRegistry) {
+TEST_F(FullIntegrationTest, ListServices) {
+    OmniRuntime c;
+    ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0);
+    std::vector<ServiceInfo> services;
+    ASSERT_EQ(c.listServices(services), 0);
+    ASSERT_GE(services.size(), 1u);
+    bool found = false;
+    for (size_t i = 0; i < services.size(); ++i) {
+        if (services[i].name == "CalcService") { found = true; break; }
+    }
+    EXPECT_TRUE(found);
+    c.stop();
+}
+
+TEST_F(FullIntegrationTest, LookupNonExistent) {
     OmniRuntime c;
     ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0);
     ServiceInfo info;
-    ASSERT_EQ(c.lookupService("CalcService", info), 0);
+    EXPECT_NE(c.lookupService("NonExistentService", info), 0);
+    c.stop();
+}
+
+TEST_F(FullIntegrationTest, QueryInterfaces) {
+    OmniRuntime c;
+    ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0);
+    std::vector<InterfaceInfo> ifaces;
+    ASSERT_EQ(c.queryInterfaces("CalcService", ifaces), 0);
+    ASSERT_EQ(ifaces.size(), 1u);
+    EXPECT_EQ(ifaces[0].name, "CalcService");
+    EXPECT_EQ(ifaces[0].interface_id, IFACE_ID);
+    bool found_add = false, found_echo = false;
+    for (size_t i = 0; i < ifaces[0].methods.size(); ++i) {
+        if (ifaces[0].methods[i].name == "Add") found_add = true;
+        if (ifaces[0].methods[i].name == "Echo") found_echo = true;
+    }
+    EXPECT_TRUE(found_add);
+    EXPECT_TRUE(found_echo);
+    c.stop();
+}
+
+TEST_F(FullIntegrationTest, QueryPublishedTopics) {
+    OmniRuntime c;
+    ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0);
+    std::vector<std::string> topics(1, "stale");
+    ASSERT_EQ(c.queryPublishedTopics("CalcService", topics), 0);
+    // 其它用例可能在同一服务上再发布话题（如 calc_result），故断言包含而非精确计数
+    EXPECT_NE(std::find(topics.begin(), topics.end(), "alpha/topic"), topics.end());
+    EXPECT_NE(std::find(topics.begin(), topics.end(), "zeta/topic"), topics.end());
+    EXPECT_EQ(std::find(topics.begin(), topics.end(), "stale"), topics.end());
+    EXPECT_EQ(c.queryPublishedTopics("NonExistentService", topics),
+              static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND));
+    EXPECT_TRUE(topics.empty());
     c.stop();
 }
 
@@ -183,6 +249,7 @@ TEST_F(FullIntegrationTest, InvokeViaShmAdd) {
     ASSERT_EQ(c.connectService("CalcService"), 0);
     ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ADD, 0, req, resp, 5000), 0) << "invoke add failed";
     EXPECT_EQ(mustRead<int32_t>(resp, &Buffer::tryReadInt32), 300);
+    expectShmTransport(c);
     c.stop();
 }
 
@@ -194,6 +261,7 @@ TEST_F(FullIntegrationTest, InvokeViaShmEcho) {
     ASSERT_EQ(c.connectService("CalcService"), 0);
     ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ECHO, 0, req, resp, 5000), 0) << "invoke echo failed";
     EXPECT_EQ(mustReadString(resp), "SHM echo test");
+    expectShmTransport(c);
     c.stop();
 }
 
@@ -221,6 +289,7 @@ TEST_F(FullIntegrationTest, InvokeViaShmLargeEchoThenSmall) {
     ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ECHO, 0,
                        small_request, small_response, 5000), 0);
     EXPECT_EQ(mustReadString(small_response), "after-large");
+    expectShmTransport(c);
     c.stop();
 }
 
@@ -245,7 +314,6 @@ TEST_F(FullIntegrationTest, InterfaceMismatchOnewayIsRejected) {
     ASSERT_EQ(c.connectService("CalcService"), 0);
     EXPECT_EQ(c.invokeOneWay("CalcService", IFACE_ID + 1, METHOD_ADD, 0, req), 0);
     for (int i = 0; i < 10; ++i) {
-        srv_.runtime.pollOnce(20);
         std::this_thread::sleep_for(std::chrono::microseconds(10000));
     }
     EXPECT_EQ(srv_.service.invokeCount(), before);
@@ -360,10 +428,9 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
         }, nullptr);
     ASSERT_EQ(ret, 0) << "subscribeTopic failed";
 
-    // 等待订阅关系传播
+    // 等待订阅关系传播（服务端由 serverThread 独占驱动，主线程不得再 pollOnce）
     for (int i = 0; i < 20; i++) {
         sub.pollOnce(50);
-        srv_.runtime.pollOnce(10);
     }
 
     // 广播数据
@@ -375,7 +442,6 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
     // 等待订阅者收到数据
     for (int i = 0; i < 50 && !received; i++) {
         sub.pollOnce(50);
-        srv_.runtime.pollOnce(10);
     }
 
     ASSERT_TRUE(received) << "topic callback not received";
@@ -393,7 +459,6 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
 
     for (int i = 0; i < 30 && !received; i++) {
         sub.pollOnce(50);
-        srv_.runtime.pollOnce(10);
     }
 
     EXPECT_FALSE(received) << "topic callback should not be delivered after unsubscribe";
@@ -491,7 +556,15 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
 // ============================================================
 
 TEST_F(FullIntegrationTest, InvokeCountAccumulated) {
-    ASSERT_GT(srv_.service.invokeCount(), 0);
+    OmniRuntime c;
+    ASSERT_EQ(c.init("127.0.0.1", SM_PORT), 0);
+    const int before = srv_.service.invokeCount();
+    Buffer req; req.writeInt32(3); req.writeInt32(4);
+    Buffer resp;
+    ASSERT_EQ(c.connectService("CalcService"), 0);
+    ASSERT_EQ(c.invoke("CalcService", IFACE_ID, METHOD_ADD, 0, req, resp, 5000), 0);
+    EXPECT_GT(srv_.service.invokeCount(), before);
+    c.stop();
 }
 
 int main(int argc, char** argv) {

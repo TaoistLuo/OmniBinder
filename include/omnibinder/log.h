@@ -113,7 +113,7 @@ void omni_log_print(omni_log_level_t level, const char* tag,
 /* ============================================================
  * C++ 兼容层 — 保留原有 namespace + enum class 风格
  *
- * 以下代码仅在 C++ 编译时生效。所有包装函数均为 inline，编译后
+ * 以下代码仅在 C++ 编译时生效。除 logPrint 外，包装函数均为 inline，编译后
  * 与直接使用 C API 完全一致（零额外开销）。
  * ============================================================ */
 #ifdef __cplusplus
@@ -132,15 +132,6 @@ constexpr LogLevel LOG_DEBUG   = OMNI_LOG_DEBUG;
 constexpr LogLevel LOG_VERBOSE = OMNI_LOG_VERBOSE;
 constexpr LogLevel LOG_OFF     = OMNI_LOG_OFF;
 
-/* @brief 与旧实现兼容的静态级别访问器 */
-inline LogLevel& globalLogLevel() {
-    return g_omni_log_level;
-}
-
-inline const char* logLevelStr(LogLevel level) {
-    return omni_log_level_str(level);
-}
-
 /* @brief 包装函数 — 编译后与直接调用 C API 无差异 */
 inline void setLogLevel(LogLevel level) {
     omni_log_set_level(level);
@@ -150,6 +141,7 @@ inline void enableTimestamp(bool enable) {
     omni_log_enable_timestamp(enable ? 1 : 0);
 }
 
+/* @brief C++ 风格日志打印（对应 C 的 omni_log_print，定义在 log.cpp） */
 void logPrint(LogLevel level, const char* tag, const char* fmt, ...);
 
 } /* namespace omnibinder */

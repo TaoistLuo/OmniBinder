@@ -128,6 +128,11 @@ void Buffer::reserve(size_t new_capacity) noexcept {
 }
 
 void Buffer::resize(size_t new_size) noexcept {
+    // 镜像 setWritePosition 的校验：写游标不得回退到读游标之前，
+    // 否则 remaining()/compact() 会下溢（write_pos_ - read_pos_ 变为巨大值）
+    if (new_size < read_pos_) {
+        return;
+    }
     if (new_size > capacity_) {
         reserve(new_size);
         if (write_failed_) return;

@@ -2,18 +2,22 @@
 
 中文 | [English](omni-tool-usage.en.md)
 
-> **版本**：1.0.0  
-> **更新日期**：2026-03-05
+> **版本**：1.1.0  
+> **更新日期**：2026-09-21
 
 ## 概述
 
-`omni-cli` 是 OmniBinder 的命令行调试工具，用于查询在线服务和运行时、查看接口定义、调用服务方法、调整运行时日志级别，以及按 PID 观察业务接口输入/输出。
+`omni-cli` 是 OmniBinder 的命令行调试工具，用于查询在线服务实例和运行时、查看接口定义、调用服务方法、调整运行时日志级别，以及按 PID 观察业务接口输入/输出。
+
+**服务身份模型**：一个服务名可以同时存在多个实例，实例身份为 `(service_name, host_id, instance_id)`。
+`instance_id` 为空串表示该 `host_id` 上该服务的**默认实例**。
+`omni-cli` 的 `list` / `info` / `call` 全部以实例为单位工作：单一实例只是"同名实例只有一行"的特例。
 
 **主要功能**：
-- 列出所有在线服务
+- 列出所有在线服务实例（服务名 / `instance_id` / `host_id` / `host:port`）
 - 列出所有在线 runtime / PID
-- 查看服务接口和方法签名
-- 调用服务方法（支持 hex 和 JSON 格式）
+- 枚举某个服务名下的全部实例，并查看接口和方法签名
+- 按 `(host_id, instance_id)` 调用指定实例的方法（支持 hex 和 JSON 格式）
 - 显示调用耗时统计
 - 按 PID 设置运行时日志级别
 - 按 PID watch IDL 业务接口输入/输出
@@ -35,16 +39,24 @@ omni-cli [options] <command> [args]
 | `-h, --host <addr>` | ServiceManager 地址 | 127.0.0.1 |
 | `-p, --port <port>` | ServiceManager 端口 | 9900 |
 | `--idl <file.bidl>` | IDL 文件路径（启用 JSON 支持） | 无 |
+| `--instance-id <id>` | 目标实例标识（`info` / `call`）；`--instance-id ''` 选择默认实例 | 无（见各命令） |
+| `--host-id <id>` | 目标实例的板级主机身份，配合 `--instance-id` 精确定位 | 无（见各命令） |
 | `--help` | 显示帮助信息 | - |
+
+> `--instance-id` / `--host-id` 是**实例选择器**，语义统一：
+> - 只给 `--instance-id`：在该服务名下匹配唯一 `instance_id`；若跨多个 `host_id` 命中多个实例则报错，需补 `--host-id`。
+> - 只给 `--host-id`：匹配该 `host_id` 上唯一实例；若该主机上同名实例多于一个则报错，需补 `--instance-id`。
+> - 两者都给：精确匹配 `(host_id, instance_id)`。
+> - 都不给：`call` 使用**确定性第一实例**并在输出中显式说明；`info` 在多实例时只枚举、不擅自选一个。
 
 ### 可用命令
 
 | 命令 | 说明 |
 |------|------|
-| `list` | 列出所有在线服务 |
+| `list` | 列出所有在线服务实例 |
 | `ps` | 列出在线 runtime PID、角色、日志级别和服务 |
-| `info <service>` | 查看服务详细信息 |
-| `call <service> <method> [params]` | 调用服务方法 |
+| `info <service> [--instance-id <id>] [--host-id <id>]` | 枚举服务名下的实例并查看指定实例的接口 |
+| `call <service> <method> [params] [--instance-id <id>] [--host-id <id>]` | 调用指定实例的方法 |
 | `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | 设置指定 runtime 日志级别 |
 | `watch --pid <pid> --idl <file.bidl> [--filter <name>]` | 观察指定 PID 的业务接口 I/O |
 
@@ -52,25 +64,41 @@ omni-cli [options] <command> [args]
 
 ## 命令详解
 
-### 1. list - 列出服务
+### 1. list - 列出服务实例
 
-列出所有在线服务及其基本信息。
+列出所有在线服务**实例**及其基本信息。注册表中的每个
+`(service_name, host_id, instance_id)` 占一行；一个服务名只有一个实例时，
+就是同名多行展示中的一行。
 
 **语法**：
 ```bash
 omni-cli list
 ```
 
+**输出列**：
+
+| 列 | 含义 |
+|------|------|
+| `NAME` | 服务名 |
+| `INSTANCE_ID` | 实例标识；空 `instance_id` 显示为 `(default)` |
+| `HOST_ID` | 板级主机身份（同机判断与实例身份的一部分） |
+| `ENDPOINT` | 数据面直连地址 `host:port` |
+| `STATUS` | 当前为 `ONLINE` |
+
 **示例**：
 ```bash
 $ omni-cli list
-NAME                     HOST             PORT     STATUS
-----                     ----             ----     ------
-SensorService            127.0.0.1        35451    ONLINE
-NavigationService        192.168.1.100    8002     ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+NavigationService        (default)            0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:8002        ONLINE
 
-Total: 2 services online
+Total: 3 service instances online
 ```
+
+> 同名不同 `instance_id` 的实例会并列出现；某实例的 `instance_id` 为空时显示
+> `(default)`，可用 `--instance-id ''` 精确选中它。
 
 ---
 
@@ -92,31 +120,35 @@ PID      ROLE     LOG   PROCESS              SERVICES
 12346    client   I     example_cpp_sensor_client    -
 ```
 
-`PROCESS` 列来自 runtime 启动时上报的可执行文件名。该列的格式宽度为最小 20 字符；更长的名称会完整输出，不会截断，因此后面的 `SERVICES` 列会向右移动。如果进程是在旧版本 runtime 下注册的，需要重启该进程后才会刷新为真实进程名。
+`PROCESS` 列来自 runtime 启动时上报的可执行文件名。该列的格式宽度为最小 20 字符；更长的名称会完整输出，不会截断，因此后面的 `SERVICES` 列会向右移动。
 
 ---
 
-### 3. info - 查看服务信息
+### 3. info - 查看服务实例
 
-查看服务的接口和方法定义。支持两种模式：
-
-#### 3.1 基础模式（不指定 IDL）
-
-显示方法签名的类型名称。
+按服务名**枚举其全部实例**，并查看所选实例的接口和方法定义。
 
 **语法**：
 ```bash
-omni-cli info <service_name>
+omni-cli info <service_name> [--instance-id <id>] [--host-id <id>]
 ```
 
-**示例**：
+**行为**：
+1. 先枚举该服务名下的所有实例（表格与 `list` 相同的列）。
+2. 若给出 `--instance-id` / `--host-id`，解析出唯一目标实例并显示其接口。
+3. 若未给出选择器：
+   - 只有一个实例：直接显示该实例的接口，并在 `Instance:` 行标明是哪一个。
+   - 有多个实例：**只枚举不擅自选择**，提示用 `--instance-id`/`--host-id` 指定要查看的实例。
+
+**示例 1：单一实例（未指定选择器）**
 ```bash
 $ omni-cli info SensorService
 Service: SensorService
-  Host:    127.0.0.1
-  Port:    35451
-  HostID:  0cee7b0ae232461ba25df5376b29b46b
-  Status:  ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            (default)            0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+
+Instance: instance_id="" (default) host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
 
   Published Topics:
     - SensorUpdate
@@ -129,23 +161,28 @@ Service: SensorService
       - ResetSensor(int32) -> void  (id=0x7f2b95ee)
 ```
 
-#### 3.2 详细模式（指定 IDL）
-
-展开结构体的完整字段定义。
-
-**语法**：
+**示例 2：同名多实例（未指定选择器，只枚举）**
 ```bash
-omni-cli --idl <file.bidl> info <service_name>
+$ omni-cli info SensorService
+Service: SensorService
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Multiple instances found; not selecting one automatically. Use --instance-id <id> [--host-id <id>] to inspect a specific instance.
 ```
 
-**示例**：
+**示例 3：选中指定实例（可加 `--idl` 展开字段）**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl info SensorService
+$ omni-cli --idl examples/sensor_service.bidl info SensorService --instance-id ttyUSB1
 Service: SensorService
-  Host:    127.0.0.1
-  Port:    35451
-  HostID:  0cee7b0ae232461ba25df5376b29b46b
-  Status:  ONLINE
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 
   Published Topics:
     - SensorUpdate
@@ -171,57 +208,66 @@ Service: SensorService
 ```
 
 **说明**：
+- 实例身份行始终标明显式选中的 `(instance_id, host_id, endpoint)`，不存在"静默命中某个实例"。
 - IDL 文件中的 `import` 依赖会自动递归加载
 - 跨包类型（如 `common.StatusResponse`）也能正确展开
-- `Published Topics` 来自独立的运行时查询：没有发布话题时显示 `(none)`；服务查询成功但话题查询失败时显示 `(unavailable: <原因>)`，随后仍继续显示接口。服务本身不存在时则直接报错。
+- `Published Topics` 来自独立的运行时查询（按服务名）：没有发布话题时显示 `(none)`；服务查询成功但话题查询失败时显示 `(unavailable: <原因>)`，随后仍继续显示接口。服务名不存在时则直接报错。
 - `--idl` 使用与 `omni-idlc` 相同的严格语义校验，校验失败时会在连接 ServiceManager 前退出。
 
 ---
 
-### 4. call - 调用服务方法
+### 4. call - 调用指定实例的方法
 
-调用服务的指定方法。支持两种输入格式：
+调用某个服务实例的方法。实例选择器是一等参数：先枚举该服务名下的实例，
+按 `(host_id, instance_id)` 定位目标后用 `connectServiceInstance` 建立数据面直连。
+支持两种输入格式。
+
+**语法**：
+```bash
+omni-cli call <service> <method> [params] [--instance-id <id>] [--host-id <id>]
+```
+
+**实例选择语义**：
+- 给出 `--instance-id`（可选 `--host-id`）：调用精确匹配的实例；无匹配或歧义（跨主机同名实例）时明确报错。
+- 不给任何选择器：调用**确定性第一实例**（与 `list` 首行一致），并在输出首行显式说明实际命中的是哪个实例。
 
 #### 4.1 Hex 模式（不指定 IDL）
 
 使用十六进制字符串作为输入，输出也是十六进制。
 
-**语法**：
 ```bash
-omni-cli call <service> <method> [hex_params]
-```
-
-**示例**：
-```bash
-# 带参数调用
-$ omni-cli call SensorService ResetSensor 01000000
-Calling SensorService.ResetSensor() ...
-  interface_id = 0xa112646d
-  method_id    = 0x7f2b95ee
-  request (4 bytes)
-Response (status=OK, 0 bytes, 0.61 ms):
-
-# 无参数调用
-$ omni-cli call SensorService GetLatestData
+# 显式指定实例（无参数方法）
+$ omni-cli call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.GetLatestData() ...
   interface_id = 0xa112646d
   method_id    = 0x61564c6c
 Response (status=OK, 38 bytes, 0.75 ms):
   Hex: 01 00 00 00 00 00 00 00 80 39 40 ...
+
+# 未指定实例：使用确定性第一实例并明确提示
+$ omni-cli call SensorService ResetSensor 01000000
+No instance selector given; using deterministic first instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+  Hint: use --instance-id <id> [--host-id <id>] to target another instance.
+Calling SensorService.ResetSensor() ...
+  interface_id = 0xa112646d
+  method_id    = 0x7f2b95ee
+  request (4 bytes)
+Response (status=OK, 0 bytes, 0.61 ms):
 ```
 
 #### 4.2 JSON 模式（指定 IDL）
 
 使用 IDL 类型信息编码参数；可解码的非 `void` 响应显示为格式化 JSON，否则回退为 hex（解码失败时同时显示警告）。
 
-**语法**：
 ```bash
-omni-cli --idl <file.bidl> call <service> <method> [json_params]
+omni-cli --idl <file.bidl> call <service> <method> [json_params] [--instance-id <id>] [--host-id <id>]
 ```
 
 **示例 1：无参数方法**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
+$ omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.GetLatestData() ...
   interface_id = 0xa112646d
   method_id    = 0x61564c6c
@@ -238,7 +284,8 @@ Response (status=OK, 38 bytes, 0.81 ms):
 **示例 2：结构体参数**
 ```bash
 $ omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
-  '{"command_type":1,"target":"sensor1","value":100}'
+  '{"command_type":1,"target":"sensor1","value":100}' --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.SetThreshold() ...
   interface_id = 0xa112646d
   method_id    = 0x2214744e
@@ -252,7 +299,8 @@ Response (status=OK, 10 bytes, 0.47 ms):
 
 **示例 3：基础类型参数**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1
+$ omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1 --instance-id ttyUSB0
+Target instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
 Calling SensorService.ResetSensor() ...
   interface_id = 0xa112646d
   method_id    = 0x7f2b95ee
@@ -263,10 +311,11 @@ Response (status=OK, 0 bytes, 0.58 ms):
 **说明**：
 - `{` 开头的对象或 `[` 开头的数组按 JSON 解析；已知基础类型参数按 IDL 类型解析裸命令行文本
 - 字符串基础类型使用原始参数，例如 `EchoString hello`；`EchoString '"hello"'` 会把双引号也作为字符串内容
-- 非基础类型参数如果不以 `{` 或 `[` 开头，则按 hex 解析（向后兼容）
+- 非基础类型参数如果不以 `{` 或 `[` 开头，则按 hex 解析
 - struct 输入必须提供所有声明字段；当前 JSON codec 不支持 `bytes`（包括包含 `bytes` 的数组/结构体）
 - JSON 数字经轻量 number 表示处理，超出 IEEE-754 精确整数范围的 `int64`/`uint64` 不保证精确
 - 响应时间以毫秒为单位显示
+- 目标实例的接口列表来自实例发现结果，因此单实例与多实例走同一条方法解析路径
 
 ---
 
@@ -318,6 +367,83 @@ omni-cli watch --pid <pid> --idl <file.bidl> [--filter <name>]
 ```bash
 omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatestData
 ```
+
+---
+
+## 多实例实例寻址工作示例
+
+场景：同一块板上运行**两个同名实例** `SensorService`，分别绑定 `ttyUSB0` / `ttyUSB1`
+（服务端在注册前调用 `Service::setInstanceId("ttyUSB0")` / `setInstanceId("ttyUSB1")`）。
+两者同 `host_id`、不同 `instance_id`，在 ServiceManager 中并存。
+
+**1. 启动 ServiceManager 与两个实例**
+
+```bash
+./build/target/bin/service_manager -p 9900
+# 两个实例进程（伪代码，实际由业务服务调用 setInstanceId）
+#   SensorService(instance_id="ttyUSB0")  -> 注册并广播
+#   SensorService(instance_id="ttyUSB1")  -> 注册并广播
+```
+
+**2. `list` 显示两个实例**
+
+```bash
+$ omni-cli list
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Total: 2 service instances online
+```
+
+**3. `info` 枚举并按 `instance_id` 定位**
+
+```bash
+$ omni-cli info SensorService
+Service: SensorService
+NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
+------------------------ -------------------- -------------------------------- --------------------- ------
+SensorService            ttyUSB0              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35451       ONLINE
+SensorService            ttyUSB1              0cee7b0ae232461ba25df5376b29b46b 127.0.0.1:35452       ONLINE
+
+Multiple instances found; not selecting one automatically. Use --instance-id <id> [--host-id <id>] to inspect a specific instance.
+
+$ omni-cli info SensorService --instance-id ttyUSB1
+# （表格同上）
+Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+  ...接口与方法定义...
+```
+
+**4. 分别调用两个实例**
+
+```bash
+# 只调 ttyUSB0
+$ omni-cli call SensorService GetLatestData --instance-id ttyUSB0
+Target instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+Calling SensorService.GetLatestData() ...
+Response (status=OK, 38 bytes, 0.75 ms):
+  Hex: 01 00 00 00 ...
+
+# 只调 ttyUSB1（跨主机同名时再加 --host-id 消歧）
+$ omni-cli call SensorService GetLatestData --instance-id ttyUSB1
+Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
+Calling SensorService.GetLatestData() ...
+Response (status=OK, 38 bytes, 0.74 ms):
+  Hex: 02 00 00 00 ...
+```
+
+**5. 不带选择器时命中确定性第一实例并明确提示**
+
+```bash
+$ omni-cli call SensorService GetLatestData
+No instance selector given; using deterministic first instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
+  Hint: use --instance-id <id> [--host-id <id>] to target another instance.
+Calling SensorService.GetLatestData() ...
+```
+
+> "确定性第一实例"与 `list` / `info` 表格首行一致（ServiceManager 按实例键字典序返回），
+> 因此同一条命令的输出可复现，不会随机命中某个实例。
 
 ---
 
@@ -481,5 +607,5 @@ omni-cli --idl sensor_service.bidl info SensorService
 
 ---
 
-**文档版本**：1.0.0  
-**最后更新**：2026-03-05
+**文档版本**：1.1.0  
+**最后更新**：2026-09-21

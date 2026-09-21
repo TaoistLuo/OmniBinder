@@ -7,6 +7,7 @@
 #include "omnibinder/message.h"
 #include "omnibinder/types.h"
 #include "platform/platform.h"
+#include "platform/platform_test.h"
 #include "tcp_test_server.h"
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <functional>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -79,87 +81,51 @@ inline std::string mustReadStringFrom(const Buffer& source) {
 
 // ============================================================
 // 进程管理（跨平台）
+//
+// 平台差异全部下沉到 platform.h 的测试辅助抽象
+// （spawnChildProcess / waitChildProcess / terminateChildProcess），
+// 本文件不再直接 fork/kill/waitpid。
 // ============================================================
 typedef intptr_t TestPid;
 
 inline TestPid startProcess(const char* path,
                              const char* a1 = nullptr, const char* a2 = nullptr,
                              const char* a3 = nullptr, const char* a4 = nullptr) {
-#ifdef _WIN32
-    std::string cmd = std::string(path);
-    if (a1) { cmd += " "; cmd += a1; }
-    if (a2) { cmd += " "; cmd += a2; }
-    if (a3) { cmd += " "; cmd += a3; }
-    if (a4) { cmd += " "; cmd += a4; }
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
-    memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
-        return 0;
-    CloseHandle(pi.hThread);
-    return reinterpret_cast<TestPid>(pi.hProcess);
-#else
-    pid_t pid = fork();
-    if (pid == 0) {
-        // 父进程（测试进程）无论正常/异常/被超时杀掉，子进程自动收 SIGTERM，
-        // 彻底避免 ctest 超时后留下孤儿的 service_manager（平台差异见 platform.h）
-        platform::setParentDeathSignal();
-        if (a1 && a2 && a3 && a4)
-            execl(path, path, a1, a2, a3, a4, (char*)NULL);
-        else if (a1 && a2 && a3)
-            execl(path, path, a1, a2, a3, (char*)NULL);
-        else if (a1 && a2)
-            execl(path, path, a1, a2, (char*)NULL);
-        else if (a1)
-            execl(path, path, a1, (char*)NULL);
-        else
-            execl(path, path, (char*)NULL);
-        _exit(1);
-    }
-    return static_cast<TestPid>(pid);
-#endif
+    return static_cast<TestPid>(
+        platform::spawnChildProcess(path, a1, a2, a3, a4));
 }
 
 inline void stopProcess(TestPid pid) {
-    if (pid <= 0) return;
-#ifdef _WIN32
-    TerminateProcess(reinterpret_cast<HANDLE>(pid), 0);
-    WaitForSingleObject(reinterpret_cast<HANDLE>(pid), 5000);
-    CloseHandle(reinterpret_cast<HANDLE>(pid));
-#else
-    // SIGTERM 优雅退出；超时后 SIGKILL 兜底，避免测试进程卡在
-    // 阻塞 waitpid 而被 ctest 超时杀掉，留下孤儿子进程。
-    kill(static_cast<pid_t>(pid), SIGTERM);
-    int status = 0;
-    for (int i = 0; i < 50; ++i) {
-        pid_t ret = waitpid(static_cast<pid_t>(pid), &status, WNOHANG);
-        if (ret == static_cast<pid_t>(pid)) return;
-        platform::sleepMs(100);
-    }
-    kill(static_cast<pid_t>(pid), SIGKILL);
-    waitpid(static_cast<pid_t>(pid), &status, 0);
-#endif
+    platform::terminateChildProcess(static_cast<platform::TestProcess>(pid));
 }
 
-inline bool waitForProcess(TestPid pid, int timeout_sec = 10) {
-    if (pid <= 0) return false;
-#ifdef _WIN32
-    DWORD ret = WaitForSingleObject(reinterpret_cast<HANDLE>(pid),
-                                     static_cast<DWORD>(timeout_sec) * 1000);
-    return ret == WAIT_OBJECT_0;
-#else
-    for (int i = 0; i < timeout_sec * 10; ++i) {
-        int status = 0;
-        if (waitpid(static_cast<pid_t>(pid), &status, WNOHANG) > 0)
-            return true;
-        platform::sleepMs(100);
+// ============================================================
+// 线程 RAII guard — 早退时先执行可选清理（如置 stop 标志/关 listener），再 join
+// 避免 ASSERT 提前 return 后 joinable thread 析构触发 std::terminate / 挂起
+// ============================================================
+class ScopedThreadJoiner {
+public:
+    explicit ScopedThreadJoiner(std::thread& thread,
+                                const std::function<void()>& before_join = std::function<void()>())
+        : thread_(&thread), before_join_(before_join) {
     }
-    return false;
-#endif
-}
+
+    ~ScopedThreadJoiner() {
+        if (before_join_) {
+            before_join_();
+        }
+        if (thread_ && thread_->joinable()) {
+            thread_->join();
+        }
+    }
+
+private:
+    ScopedThreadJoiner(const ScopedThreadJoiner&);
+    ScopedThreadJoiner& operator=(const ScopedThreadJoiner&);
+
+    std::thread* thread_;
+    std::function<void()> before_join_;
+};
 
 // ============================================================
 // socket 辅助函数

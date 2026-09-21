@@ -48,11 +48,13 @@ namespace omnibinder {
 // 传输类型与连接状态
 // ============================================================
 
+/* @brief 传输类型：同机共享内存 / 跨机 TCP */
 enum class TransportType {
     TCP,
     SHM,
 };
 
+/* @brief 数据面连接状态 */
 enum class ConnectionState {
     DISCONNECTED,
     CONNECTING,
@@ -84,6 +86,7 @@ class IServerEndpoint;
 // 按需将 fd() 注册为读写事件；sendAll 在超时预算内等待可写/空间。
 // ============================================================
 
+/* @brief 双向消息连接接口（TCP 字节流或 SHM 成帧，不区分方向） */
 class IMessageConnection {
 public:
     virtual ~IMessageConnection() {}
@@ -155,6 +158,7 @@ public:
 // 一条 IMessageConnection 交给 core；core 只用 IMessageConnection 读写数据。
 // ============================================================
 
+/* @brief 服务端托管端点接口（TCP 监听/accept 或 SHM 握手/ring，与传输种类无关） */
 class IServerEndpoint {
 public:
     typedef std::function<void(int client_id, IMessageConnection* client)> AcceptCallback;

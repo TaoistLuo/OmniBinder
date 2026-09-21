@@ -61,6 +61,59 @@ private:
 static const char* g_program_path = nullptr;
 
 // ============================================================
+// P3 实例寻址 — 子进程服务（EchoInstance 回显自身 instance_id）
+// ============================================================
+static const uint16_t INSTANCE_SM_PORT      = 19972;
+static const uint32_t INSTANCE_IFACE_ID     = fnv1a_32("InstanceAddrSvc");
+static const uint32_t INSTANCE_METHOD_ECHO  = fnv1a_32("EchoInstance");
+static const char*    INSTANCE_SERVICE_NAME = "InstanceAddrSvc";
+
+class InstanceEchoService : public Service {
+public:
+    InstanceEchoService(const std::string& name, const std::string& instance_id)
+        : Service(name), instance_id_(instance_id) {
+        iface_.interface_id = INSTANCE_IFACE_ID;
+        iface_.name         = INSTANCE_SERVICE_NAME;
+        iface_.methods.push_back(MethodInfo(INSTANCE_METHOD_ECHO, "EchoInstance"));
+    }
+    const char* serviceName() const override { return INSTANCE_SERVICE_NAME; }
+    const InterfaceInfo& interfaceInfo() const override { return iface_; }
+protected:
+    int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
+        (void)request;
+        if (method_id != INSTANCE_METHOD_ECHO) {
+            return static_cast<int>(ErrorCode::ERR_METHOD_NOT_FOUND);
+        }
+        if (!response.writeString(instance_id_)) {
+            return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+        }
+        return 0;
+    }
+private:
+    std::string instance_id_;
+    InterfaceInfo iface_;
+};
+
+// 通过基类 connectionKey() 寻址数据面：默认实例键=服务名，实例绑定键=身份键
+class InstanceEchoProxy : public ServiceProxyBase {
+public:
+    InstanceEchoProxy(OmniRuntime& runtime, const std::string& service_name)
+        : ServiceProxyBase(runtime, service_name) {}
+    int EchoInstance(std::string& out) {
+        Buffer req;
+        Buffer resp;
+        int ret = runtime_.invoke(connectionKey(), INSTANCE_IFACE_ID,
+                                  INSTANCE_METHOD_ECHO, 0, req, resp, 3000);
+        if (ret != 0) return ret;
+        Buffer buf(resp.data(), resp.size());
+        if (!buf.tryReadString(out)) {
+            return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+        }
+        return 0;
+    }
+};
+
+// ============================================================
 // 等待辅助函数 — 基于 pollOnce，不用 sleep()
 // ============================================================
 static bool waitServiceRegistered(OmniRuntime& rt, const std::string& name,
@@ -84,6 +137,17 @@ static bool tryEchoRpc(OmniRuntime& rt, const std::string& svc_name,
     Buffer resp_buf(resp.data(), resp.size());
     if (!resp_buf.tryReadString(result)) return false;
     return (result == payload);
+}
+
+static bool waitInstanceCount(OmniRuntime& rt, const std::string& name, size_t want) {
+    for (int i = 0; i < 100; ++i) {
+        std::vector<ServiceInfo> instances;
+        if (rt.listServiceInstances(name, instances) == 0 && instances.size() >= want) {
+            return true;
+        }
+        rt.pollOnce(50);
+    }
+    return false;
 }
 
 // ============================================================
@@ -151,6 +215,43 @@ protected:
 };
 
 TestPid HeartbeatLifecycleTest::sm_pid_ = 0;
+
+// ============================================================
+// P3 实例寻址 fixture — 独立 SM，验证同服务名两实例可分别绑定
+// ============================================================
+class InstanceAddressingTest : public ::testing::Test {
+protected:
+    static TestPid sm_pid_;
+    TestPid child_a_;
+    TestPid child_b_;
+
+    void SetUp() override {
+        child_a_ = 0;
+        child_b_ = 0;
+    }
+
+    void TearDown() override {
+        if (child_a_ > 0) { stopProcess(child_a_); child_a_ = 0; }
+        if (child_b_ > 0) { stopProcess(child_b_); child_b_ = 0; }
+    }
+
+    static void SetUpTestSuite() {
+        sm_pid_ = startProcess("./target/bin/service_manager",
+                                "--port", "19972", "--log-level", "3");
+        ASSERT_GT(sm_pid_, 0) << "Failed to start instance-addressing ServiceManager";
+        ASSERT_TRUE(waitPortReady(INSTANCE_SM_PORT, 30))
+            << "Timed out waiting for instance ServiceManager port " << INSTANCE_SM_PORT;
+    }
+
+    static void TearDownTestSuite() {
+        if (sm_pid_ > 0) {
+            stopProcess(sm_pid_);
+            sm_pid_ = 0;
+        }
+    }
+};
+
+TestPid InstanceAddressingTest::sm_pid_ = 0;
 
 /* @brief 查询 SM 注册状态（绕过 runtime 的 lookupService 缓存）
  * @param[in] rt OmniRuntime 实例
@@ -681,8 +782,290 @@ TEST_F(HeartbeatLifecycleTest, ConnectionWithSiblingServiceSurvivesTimeout) {
     rt.stop();
 }
 
+// ============================================================
+// P3 Test 1 — TwoClientsReachBoundInstance
+//
+// @brief   两个客户端分别绑定同名服务的两个实例，各自 RPC 命中正确实例
+// @details 启动 inst-a / inst-b 两个子进程服务；两个 Proxy 分别
+//          connect(host_id, instance_id)，各自 EchoInstance 必须回显
+//          自己绑定的实例 id（而非默认第一实例）。
+// ============================================================
+TEST_F(InstanceAddressingTest, TwoClientsReachBoundInstance) {
+    child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
+    child_b_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-b");
+    ASSERT_GT(child_a_, 0) << "Failed to start inst-a child";
+    ASSERT_GT(child_b_, 0) << "Failed to start inst-b child";
+
+    OmniRuntime rt;
+    ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 2))
+        << "Both instances should register under the same service name";
+
+    std::vector<ServiceInfo> instances;
+    ASSERT_EQ(rt.listServiceInstances(INSTANCE_SERVICE_NAME, instances), 0);
+    ASSERT_EQ(instances.size(), 2u);
+    std::string host_a, host_b;
+    for (size_t i = 0; i < instances.size(); ++i) {
+        if (instances[i].instance_id == "inst-a") host_a = instances[i].host_id;
+        if (instances[i].instance_id == "inst-b") host_b = instances[i].host_id;
+    }
+    ASSERT_FALSE(host_a.empty());
+    ASSERT_FALSE(host_b.empty());
+
+    InstanceEchoProxy proxy_a(rt, INSTANCE_SERVICE_NAME);
+    InstanceEchoProxy proxy_b(rt, INSTANCE_SERVICE_NAME);
+    ASSERT_EQ(proxy_a.connect(host_a, "inst-a"), 0) << "bind inst-a failed";
+    ASSERT_EQ(proxy_b.connect(host_b, "inst-b"), 0) << "bind inst-b failed";
+
+    for (int i = 0; i < 5; ++i) {
+        std::string got_a;
+        std::string got_b;
+        ASSERT_EQ(proxy_a.EchoInstance(got_a), 0);
+        EXPECT_EQ(got_a, "inst-a") << "proxy bound to inst-a reached the wrong instance";
+        ASSERT_EQ(proxy_b.EchoInstance(got_b), 0);
+        EXPECT_EQ(got_b, "inst-b") << "proxy bound to inst-b reached the wrong instance";
+    }
+
+    proxy_a.disconnect();
+    proxy_b.disconnect();
+    rt.stop();
+}
+
+// ============================================================
+// P3 Test 2 — UnknownInstanceReturnsNotFound
+//
+// @brief   绑定不存在的实例返回明确错误，不建立连接
+// ============================================================
+TEST_F(InstanceAddressingTest, UnknownInstanceReturnsNotFound) {
+    child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
+    ASSERT_GT(child_a_, 0);
+
+    OmniRuntime rt;
+    ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 1));
+
+    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
+    EXPECT_EQ(proxy.connect(rt.hostId(), "missing-instance"),
+              static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND));
+    EXPECT_FALSE(proxy.isConnected());
+
+    rt.stop();
+}
+
+// ============================================================
+// P3 Test 3 — EmptyInstanceIdResolvesDeterministically
+//
+// @brief   不指定实例的默认路径行为不变：命中确定性第一实例
+// @details connect()/invoke() 连接键仍为服务名本身，与 P1/P2 语义一致。
+// ============================================================
+TEST_F(InstanceAddressingTest, EmptyInstanceIdResolvesDeterministically) {
+    child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
+    child_b_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-b");
+    ASSERT_GT(child_a_, 0);
+    ASSERT_GT(child_b_, 0);
+
+    OmniRuntime rt;
+    ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 2));
+
+    std::vector<ServiceInfo> instances;
+    ASSERT_EQ(rt.listServiceInstances(INSTANCE_SERVICE_NAME, instances), 0);
+    ASSERT_EQ(instances.size(), 2u);
+
+    ServiceInfo first;
+    ASSERT_EQ(rt.lookupService(INSTANCE_SERVICE_NAME, first), 0);
+    EXPECT_EQ(first.instance_id, instances[0].instance_id)
+        << "lookupService must stay aligned with listServiceInstances first entry";
+
+    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
+    ASSERT_EQ(proxy.connect(), 0);
+    std::string got;
+    ASSERT_EQ(proxy.EchoInstance(got), 0);
+    EXPECT_EQ(got, instances[0].instance_id)
+        << "default (no instance) path must reach the deterministic first instance";
+
+    proxy.disconnect();
+    rt.stop();
+}
+
+// ============================================================
+// Fix 1 回归 — BoundProxyReconnectDisableIsInstanceKeyed
+//
+// @brief   实例绑定 Proxy 的自动重连开关必须作用于实例连接键
+// @details 绑定 inst-a 后关闭自动重连，杀死并重启 inst-a。旧实现把开关作用到
+//          服务名键，实例键仍默认启用重连，服务恢复后会自动重连；修复后开关
+//          命中实例键，服务恢复也不重连。
+// ============================================================
+TEST_F(InstanceAddressingTest, BoundProxyReconnectDisableIsInstanceKeyed) {
+    child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
+    ASSERT_GT(child_a_, 0) << "Failed to start inst-a child";
+
+    OmniRuntime rt;
+    ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 1));
+
+    std::vector<ServiceInfo> instances;
+    ASSERT_EQ(rt.listServiceInstances(INSTANCE_SERVICE_NAME, instances), 0);
+    ASSERT_EQ(instances.size(), 1u);
+    const std::string host_a = instances[0].host_id;
+    ASSERT_FALSE(host_a.empty());
+
+    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
+    ASSERT_EQ(proxy.connect(host_a, "inst-a"), 0);
+    ASSERT_TRUE(rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a"));
+
+    // 短心跳窗口：绑定实例的心跳必须作用在实例连接键上。旧实现作用到服务名键，
+    // 每拍都会打 "[E][ConnMgr] No connection to <name>"（可由 stderr 断言佐证）
+    proxy.startHeartbeat(100, 1000);
+    for (int i = 0; i < 8; ++i) {
+        rt.pollOnce(50);
+    }
+    EXPECT_TRUE(rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a"))
+        << "bound-proxy heartbeat must not tear down the instance connection";
+
+    proxy.enableAutoReconnect(false);
+
+    stopProcess(child_a_);
+    child_a_ = 0;
+
+    bool lost = false;
+    for (int i = 0; i < 80 && !lost; ++i) {
+        if (!rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a")) {
+            lost = true;
+        } else {
+            rt.pollOnce(50);
+        }
+    }
+    ASSERT_TRUE(lost) << "data connection to the killed instance should drop";
+
+    child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
+    ASSERT_GT(child_a_, 0) << "Failed to restart inst-a child";
+
+    // 覆盖默认 1s 起指数退避的多次重试窗口；旧实现会在此期间重连成功
+    bool reconnected = false;
+    for (int i = 0; i < 160 && !reconnected; ++i) {
+        if (rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a")) {
+            reconnected = true;
+        } else {
+            rt.pollOnce(50);
+        }
+    }
+    EXPECT_FALSE(reconnected)
+        << "auto reconnect must stay disabled for a bound proxy (instance-keyed)";
+
+    rt.stop();
+}
+
+// ============================================================
+// P4b Test 1 — InstanceDeathNotifiesOnlyTargetInstance
+//
+// @brief   实例级死亡通知只命中目标实例，名字级通知仅在最后一个实例消失时触发
+// @details 启动 inst-a / inst-b；同一 runtime 同时注册实例级（a、b）与名字级订阅。
+//          杀死 inst-a：仅 a 的实例级回调触发并携带其身份；b 的实例级与名字级均不触发。
+//          再杀死 inst-b（最后一个）：b 的实例级与名字级回调均触发。
+// ============================================================
+TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
+    child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
+    child_b_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-b");
+    ASSERT_GT(child_a_, 0) << "Failed to start inst-a child";
+    ASSERT_GT(child_b_, 0) << "Failed to start inst-b child";
+
+    OmniRuntime rt;
+    ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 2));
+
+    std::vector<ServiceInfo> instances;
+    ASSERT_EQ(rt.listServiceInstances(INSTANCE_SERVICE_NAME, instances), 0);
+    ASSERT_EQ(instances.size(), 2u);
+    std::string host_a;
+    std::string host_b;
+    for (size_t i = 0; i < instances.size(); ++i) {
+        if (instances[i].instance_id == "inst-a") host_a = instances[i].host_id;
+        if (instances[i].instance_id == "inst-b") host_b = instances[i].host_id;
+    }
+    ASSERT_FALSE(host_a.empty());
+    ASSERT_FALSE(host_b.empty());
+
+    std::atomic<int> a_fires(0);
+    std::atomic<int> b_fires(0);
+    std::atomic<int> name_fires(0);
+    std::string fired_name;
+    std::string fired_host;
+    std::string fired_instance;
+
+    ASSERT_EQ(rt.subscribeServiceInstanceDeath(INSTANCE_SERVICE_NAME, host_a, "inst-a",
+        [&](const std::string& n, const std::string& h, const std::string& i) {
+            fired_name = n;
+            fired_host = h;
+            fired_instance = i;
+            a_fires.fetch_add(1, std::memory_order_release);
+        }), 0);
+    ASSERT_EQ(rt.subscribeServiceInstanceDeath(INSTANCE_SERVICE_NAME, host_b, "inst-b",
+        [&](const std::string&, const std::string&, const std::string&) {
+            b_fires.fetch_add(1, std::memory_order_release);
+        }), 0);
+    ASSERT_EQ(rt.subscribeServiceDeath(INSTANCE_SERVICE_NAME,
+        [&](const std::string&) {
+            name_fires.fetch_add(1, std::memory_order_release);
+        }), 0);
+
+    stopProcess(child_a_);
+    child_a_ = 0;
+
+    for (int i = 0; i < 120 && a_fires.load(std::memory_order_acquire) == 0; ++i) {
+        rt.pollOnce(50);
+    }
+    EXPECT_GE(a_fires.load(std::memory_order_acquire), 1)
+        << "instance-a subscriber should fire when inst-a dies";
+    EXPECT_EQ(fired_name, INSTANCE_SERVICE_NAME);
+    EXPECT_EQ(fired_host, host_a);
+    EXPECT_EQ(fired_instance, "inst-a")
+        << "death callback must carry the dead instance identity";
+    EXPECT_EQ(b_fires.load(std::memory_order_acquire), 0)
+        << "instance-b subscriber must not fire for inst-a's death";
+    EXPECT_EQ(name_fires.load(std::memory_order_acquire), 0)
+        << "name-level subscriber must not fire while inst-b is still alive";
+
+    bool b_alive = false;
+    for (int i = 0; i < 40 && !b_alive; ++i) {
+        std::vector<ServiceInfo> now;
+        if (rt.listServiceInstances(INSTANCE_SERVICE_NAME, now) == 0
+            && now.size() == 1u && now[0].instance_id == "inst-b") {
+            b_alive = true;
+        } else {
+            rt.pollOnce(50);
+        }
+    }
+    EXPECT_TRUE(b_alive) << "the surviving instance must remain registered";
+
+    stopProcess(child_b_);
+    child_b_ = 0;
+
+    for (int i = 0; i < 120 && name_fires.load(std::memory_order_acquire) == 0; ++i) {
+        rt.pollOnce(50);
+    }
+    EXPECT_GE(name_fires.load(std::memory_order_acquire), 1)
+        << "name-level subscriber should fire when the last instance dies";
+    EXPECT_GE(b_fires.load(std::memory_order_acquire), 1)
+        << "instance-b subscriber should fire when inst-b dies";
+
+    rt.stop();
+}
+
 int main(int argc, char** argv) {
     g_program_path = argv[0];
+
+    if (argc >= 4 && strcmp(argv[1], "--child-instance-service") == 0) {
+        uint16_t port = (uint16_t)atoi(argv[2]);
+        std::string instance_id = argv[3];
+        OmniRuntime rt;
+        if (rt.init("127.0.0.1", port) != 0) return 1;
+        InstanceEchoService svc(INSTANCE_SERVICE_NAME, instance_id);
+        svc.setInstanceId(instance_id);
+        if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
+        while (true) { rt.pollOnce(100); }
+        return 0;
+    }
 
     if (argc >= 3 && strcmp(argv[1], "--child-service") == 0) {
         uint16_t port = (uint16_t)atoi(argv[2]);

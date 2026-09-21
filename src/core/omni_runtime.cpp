@@ -44,12 +44,11 @@ int OmniRuntime::lookupService(const std::string& name, ServiceInfo& info) {
 int OmniRuntime::listServices(std::vector<ServiceInfo>& services) {
     return impl_->listServices(services);
 }
+int OmniRuntime::listServiceInstances(const std::string& name, std::vector<ServiceInfo>& out) {
+    return impl_->listServiceInstances(name, out);
+}
 int OmniRuntime::queryInterfaces(const std::string& name, std::vector<InterfaceInfo>& ifaces) {
     return impl_->queryInterfaces(name, ifaces);
-}
-int OmniRuntime::queryPublishedTopics(const std::string& name,
-                                      std::vector<std::string>& topics) {
-    return impl_->queryPublishedTopics(name, topics);
 }
 int OmniRuntime::queryPublishedTopics(const std::string& name,
                                       std::vector<std::string>& topics,
@@ -60,11 +59,23 @@ int OmniRuntime::queryPublishedTopics(const std::string& name,
 int OmniRuntime::connectService(const std::string& name) {
     return impl_->connectService(name);
 }
+int OmniRuntime::connectServiceInstance(const std::string& name, const std::string& host_id,
+                                        const std::string& instance_id) {
+    return impl_->connectServiceInstance(name, host_id, instance_id);
+}
 int OmniRuntime::disconnectService(const std::string& name) {
     return impl_->disconnectService(name);
 }
+int OmniRuntime::disconnectServiceInstance(const std::string& name, const std::string& host_id,
+                                           const std::string& instance_id) {
+    return impl_->disconnectServiceInstance(name, host_id, instance_id);
+}
 bool OmniRuntime::isServiceConnected(const std::string& name) const {
     return impl_->isServiceConnected(name);
+}
+bool OmniRuntime::isServiceInstanceConnected(const std::string& name, const std::string& host_id,
+                                             const std::string& instance_id) const {
+    return impl_->isServiceInstanceConnected(name, host_id, instance_id);
 }
 void OmniRuntime::enableAutoReconnect(const std::string& name, bool enable) {
     impl_->enableAutoReconnect(name, enable);
@@ -96,10 +107,18 @@ int OmniRuntime::subscribeServiceDeath(const std::string& name, const DeathCallb
 int OmniRuntime::unsubscribeServiceDeath(const std::string& name) {
     return impl_->unsubscribeServiceDeath(name);
 }
-
-int OmniRuntime::publishTopic(const std::string& topic) {
-    return impl_->publishTopic(topic, 0);
+int OmniRuntime::subscribeServiceInstanceDeath(const std::string& name,
+                                               const std::string& host_id,
+                                               const std::string& instance_id,
+                                               const DeathSourceCallback& cb) {
+    return impl_->subscribeServiceInstanceDeath(name, host_id, instance_id, cb);
 }
+int OmniRuntime::unsubscribeServiceInstanceDeath(const std::string& name,
+                                                 const std::string& host_id,
+                                                 const std::string& instance_id) {
+    return impl_->unsubscribeServiceInstanceDeath(name, host_id, instance_id);
+}
+
 int OmniRuntime::publishTopic(const std::string& topic, uint32_t idl_hash) {
     return impl_->publishTopic(topic, idl_hash);
 }
@@ -117,12 +136,23 @@ int OmniRuntime::subscribeTopic(const std::string& topic, uint32_t expected_idl_
 int OmniRuntime::unsubscribeTopic(const std::string& topic) {
     return impl_->unsubscribeTopic(topic);
 }
+int OmniRuntime::subscribeTopic(const TopicSubscriptionSelector& selector,
+                                const std::string& topic, uint32_t expected_idl_hash,
+                                const TopicSourceCallback& on_msg,
+                                const TopicErrorCallback& on_err) {
+    return impl_->subscribeTopic(selector, topic, expected_idl_hash, on_msg, on_err);
+}
+int OmniRuntime::unsubscribeTopic(const TopicSubscriptionSelector& selector,
+                                  const std::string& topic) {
+    return impl_->unsubscribeTopic(selector, topic);
+}
 
 void OmniRuntime::setRegisterHost(const std::string& host) { impl_->setRegisterHost(host); }
 std::string OmniRuntime::getRegisterHost() const { return impl_->getRegisterHost(); }
 void OmniRuntime::setHeartbeatInterval(uint32_t ms) { impl_->setHeartbeatInterval(ms); }
 void OmniRuntime::setDefaultTimeout(uint32_t ms) { impl_->setDefaultTimeout(ms); }
 void OmniRuntime::setReplySendTimeout(uint32_t ms) { impl_->setReplySendTimeout(ms); }
+void OmniRuntime::setHostId(const std::string& host_id) { impl_->setHostId(host_id); }
 std::string OmniRuntime::hostId() const { return impl_->hostId(); }
 int OmniRuntime::getStats(RuntimeStats& stats) { return impl_->getStats(stats); }
 int OmniRuntime::resetStats() { return impl_->resetStats(); }
@@ -155,12 +185,7 @@ OmniRuntime::Impl::Impl()
     , conn_mgr_(NULL)
     , register_host_()
     , reply_send_timeout_ms_(DEFAULT_REPLY_SEND_TIMEOUT)
-    , diag_active_count_(0)
-    , pid_(0)
-    , process_name_()
-    , diag_watch_active_(false)
-    , diag_data_service_(NULL)
-    , diag_watch_topic_id_(0)
+    , diag_()
 {
 }
 
@@ -200,9 +225,9 @@ OmniRuntime::Impl::~Impl() {
     }
     local_services_.clear();
     client_id_to_service_.clear();
-    if (diag_data_service_) {
-        delete diag_data_service_;
-        diag_data_service_ = NULL;
+    if (diag_.data_service) {
+        delete diag_.data_service;
+        diag_.data_service = NULL;
     }
     
     sm_channel_.clearReplies();
@@ -234,11 +259,18 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     }
     
     platform::netInit();
-    host_id_ = platform::getMachineId();
+    host_id_ = host_id_override_.empty() ? platform::getMachineId() : host_id_override_;
     sm_host_ = sm_host;
     sm_port_ = sm_port;
     
     loop_ = new EventLoop();
+    if (!loop_->valid()) {
+        OMNI_LOG_ERROR(LOG_TAG, "Failed to initialize event-loop backend");
+        delete loop_;
+        loop_ = NULL;
+        platform::netCleanup();
+        return static_cast<int>(ErrorCode::ERR_INTERNAL);
+    }
     owner_executor_.bindLoop(loop_);
     
     int connect_err = 0;
@@ -246,6 +278,7 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     if (!control_transport) {
         delete loop_;
         loop_ = NULL;
+        platform::netCleanup();
         return connect_err;
     }
     sm_channel_.resetTransport(control_transport);
@@ -268,8 +301,8 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     
     initialized_ = true;
     sm_reconnect_needed_ = false;
-    pid_ = static_cast<uint32_t>(platform::getPid());
-    process_name_ = runtimeProcessName();
+    diag_.pid = static_cast<uint32_t>(platform::getPid());
+    diag_.process_name = runtimeProcessName();
 
     // hello 失败不阻塞 init（SM 可能随后恢复），但保留重连标志，
     // 让后续心跳路径重试 hello + 控制面状态恢复

@@ -1,10 +1,11 @@
 /**************************************************************************************************
  * @file        omnibinder.h
  * @brief       公共头文件
- * @details     OmniBinder 框架的统一入口头文件，包含所有公共 API 头文件
- *              （types、error、log、buffer、message、transport、service、runtime），
- *              使用者只需 #include "omnibinder/omnibinder.h" 即可访问全部功能。
- *              同时提供 version() 和 versionNumbers() 版本查询接口。
+ * @details     OmniBinder 框架的 C++ 统一入口头文件，聚合常用公共 API：
+ *              types、error、log、buffer、service、runtime。
+ *              内部协议/传输头（message、transport）与 Proxy 基类（proxy_base.h）
+ *              不在此聚合，需要时请直接 #include 对应头文件。
+ *              同时提供 version()/versionNumbers() 版本查询接口及自定义内存分配器声明。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -39,8 +40,6 @@
 #include "omnibinder/error.h"
 #include "omnibinder/log.h"
 #include "omnibinder/buffer.h"
-#include "omnibinder/message.h"
-#include "omnibinder/transport.h"
 #include "omnibinder/service.h"
 #include "omnibinder/runtime.h"
 
@@ -86,7 +85,12 @@ typedef void  (*OmniFreeFn)(void* ptr);
  *       } */
 extern "C" void omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
 
+/* @brief 从注册的自定义 allocator（或系统 malloc）分配内存
+ * @param[in] size 请求字节数
+ * @return 分配到的内存指针；失败返回 NULL */
 extern "C" void* omni_malloc(size_t size);
+/* @brief 释放由 omni_malloc / omni_realloc* 分配的内存
+ * @param[in] ptr 待释放指针（可为 NULL，此时为空操作） */
 extern "C" void  omni_free(void* ptr);
 /* @brief 安全 realloc 变体
  * @param[in] old_size 旧分配大小

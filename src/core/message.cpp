@@ -50,6 +50,11 @@ bool Message::serialize(Buffer& output) const {
     if (payload.size() > std::numeric_limits<uint32_t>::max()) {
         return false;
     }
+    // 接收端按"整帧（header + payload）<= MAX_MESSAGE_SIZE"校验，发送侧保持一致，
+    // 否则接收端会拒绝本函数产出的合法帧
+    if (payload.size() > MAX_MESSAGE_SIZE - MESSAGE_HEADER_SIZE) {
+        return false;
+    }
     // 更新 length 字段
     MessageHeader h = header;
     h.length = static_cast<uint32_t>(payload.size());
@@ -76,6 +81,9 @@ bool Message::serialize(Buffer& output) const {
 bool Message::serializeInPlace() {
     const size_t len = payload.size();
     if (len > std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    if (len > MAX_MESSAGE_SIZE - MESSAGE_HEADER_SIZE) {
         return false;
     }
     payload.reserve(MESSAGE_HEADER_SIZE + len);
@@ -121,7 +129,7 @@ bool Message::validateHeader(const MessageHeader& hdr) {
     if (hdr.magic != OMNI_MAGIC) {
         return false;
     }
-    if (hdr.length > MAX_MESSAGE_SIZE) {
+    if (hdr.length > MAX_MESSAGE_SIZE - MESSAGE_HEADER_SIZE) {
         return false;
     }
     return true;
@@ -163,10 +171,15 @@ const char* messageTypeToString(MessageType type) {
     case MessageType::MSG_LIST_SERVICES_REPLY:     return "LIST_SERVICES_REPLY";
     case MessageType::MSG_QUERY_INTERFACES:        return "QUERY_INTERFACES";
     case MessageType::MSG_QUERY_INTERFACES_REPLY:  return "QUERY_INTERFACES_REPLY";
+    case MessageType::MSG_LIST_INSTANCES:          return "LIST_INSTANCES";
+    case MessageType::MSG_LIST_INSTANCES_REPLY:    return "LIST_INSTANCES_REPLY";
     case MessageType::MSG_SUBSCRIBE_SERVICE:       return "SUBSCRIBE_SERVICE";
     case MessageType::MSG_SUBSCRIBE_SERVICE_REPLY: return "SUBSCRIBE_SERVICE_REPLY";
     case MessageType::MSG_UNSUBSCRIBE_SERVICE:     return "UNSUBSCRIBE_SERVICE";
     case MessageType::MSG_DEATH_NOTIFY:            return "DEATH_NOTIFY";
+    case MessageType::MSG_DEATH_NOTIFY_INSTANCE:   return "DEATH_NOTIFY_INSTANCE";
+    case MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE:   return "SUBSCRIBE_SERVICE_INSTANCE";
+    case MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE: return "UNSUBSCRIBE_SERVICE_INSTANCE";
     case MessageType::MSG_PUBLISH_TOPIC:           return "PUBLISH_TOPIC";
     case MessageType::MSG_PUBLISH_TOPIC_REPLY:     return "PUBLISH_TOPIC_REPLY";
     case MessageType::MSG_SUBSCRIBE_TOPIC:         return "SUBSCRIBE_TOPIC";
@@ -201,6 +214,9 @@ bool serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf) {
         || !buf.writeUint32(info.diag_capabilities)) {
         return false;
     }
+    if (info.services.size() > 0xFFFFu) {
+        return false;
+    }
     uint16_t service_count = static_cast<uint16_t>(info.services.size());
     if (!buf.writeUint16(service_count)) {
         return false;
@@ -222,12 +238,16 @@ bool serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
         || !buf.writeString(info.host)
         || !buf.writeUint16(info.port)
         || !buf.writeString(info.host_id)
+        || !buf.writeString(info.instance_id)
         || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.req_ring_capacity))
         || !buf.writeUint32(static_cast<uint32_t>(info.shm_config.resp_ring_capacity))) {
         return false;
     }
 
     // 接口列表
+    if (info.interfaces.size() > 0xFFFFu) {
+        return false;
+    }
     uint16_t iface_count = static_cast<uint16_t>(info.interfaces.size());
     if (!buf.writeUint16(iface_count)) {
         return false;
@@ -238,6 +258,14 @@ bool serializeServiceInfo(const ServiceInfo& info, Buffer& buf) {
         }
     }
     return true;
+}
+
+bool writeServiceIdentityPayload(Buffer& buf, const std::string& name,
+                                 const std::string& host_id,
+                                 const std::string& instance_id) {
+    return buf.writeString(name)
+        && buf.writeString(host_id)
+        && buf.writeString(instance_id);
 }
 
 bool serializePublishedTopicsReply(bool found,
@@ -274,12 +302,35 @@ bool serializePublishedTopicsReply(bool found,
     return buf.writeRaw(encoded.data(), encoded.size());
 }
 
+bool writeTopicSubscriptionSelector(Buffer& buf, uint8_t mode,
+                                    const std::string& publisher_service,
+                                    const std::string& host_id,
+                                    const std::string& instance_id) {
+    if (mode > TOPIC_SUB_MODE_INSTANCE) {
+        return false;
+    }
+    if (!buf.writeUint8(mode)) {
+        return false;
+    }
+    if (mode >= TOPIC_SUB_MODE_SERVICE && !buf.writeString(publisher_service)) {
+        return false;
+    }
+    if (mode == TOPIC_SUB_MODE_INSTANCE
+        && (!buf.writeString(host_id) || !buf.writeString(instance_id))) {
+        return false;
+    }
+    return true;
+}
+
 bool serializeInterfaceInfo(const InterfaceInfo& info, Buffer& buf) {
     if (!buf.writeUint32(info.interface_id)
         || !buf.writeString(info.name)) {
         return false;
     }
 
+    if (info.methods.size() > 0xFFFFu) {
+        return false;
+    }
     uint16_t method_count = static_cast<uint16_t>(info.methods.size());
     if (!buf.writeUint16(method_count)) {
         return false;

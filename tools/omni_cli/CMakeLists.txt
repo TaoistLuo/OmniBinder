@@ -6,6 +6,7 @@ add_executable(omni-cli
     simple_json.cpp
     type_resolver.cpp
     type_codec.cpp
+    watch_monitor.cpp
 )
 
 target_link_libraries(omni-cli PRIVATE

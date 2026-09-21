@@ -11,6 +11,26 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
+/* 实例发现回调的上下文：打印全部实例，并记录 --instance 指定实例的 host_id */
+typedef struct instance_lookup {
+    const char* want_instance_id;
+    char found_host_id[128];
+    char found_instance_id[128];
+    int found;
+} instance_lookup;
+
+static void on_instance(const omni_service_instance_t* info, void* user_data) {
+    instance_lookup* lookup = (instance_lookup*)user_data;
+    printf("  host_id=%s instance_id=%s host=%s port=%u\n",
+           info->host_id, info->instance_id, info->host, info->port);
+    if (lookup && lookup->want_instance_id && !lookup->found
+        && strcmp(info->instance_id, lookup->want_instance_id) == 0) {
+        snprintf(lookup->found_host_id, sizeof(lookup->found_host_id), "%s", info->host_id);
+        snprintf(lookup->found_instance_id, sizeof(lookup->found_instance_id), "%s", info->instance_id);
+        lookup->found = 1;
+    }
+}
+
 static char* dup_cstr(const char* s, uint32_t* len_out) {
     size_t len = strlen(s);
     char* out = (char*)omni_malloc(len + 1);
@@ -97,12 +117,14 @@ static void on_service_died(void* user_data) {
 
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
+    const char* instance_id = NULL;
     uint16_t sm_port = 9900;
     int i;
 
     for (i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--sm-host") == 0 && i + 1 < argc) sm_host = argv[++i];
         else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) sm_port = (uint16_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--instance") == 0 && i + 1 < argc) instance_id = argv[++i];
     }
 
     signal(SIGINT, signal_handler);
@@ -120,10 +142,36 @@ int main(int argc, char* argv[]) {
 
     demo_SensorService_proxy proxy;
     demo_SensorService_proxy_init(&proxy, runtime);
-    if (demo_SensorService_proxy_connect(&proxy) != 0) {
-        fprintf(stderr, "SensorService not found\n");
-        omni_runtime_destroy(runtime);
-        return 1;
+
+    instance_lookup lookup;
+    memset(&lookup, 0, sizeof(lookup));
+    lookup.want_instance_id = instance_id;
+    printf("Discovered SensorService instance(s):\n");
+    omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
+
+    if (instance_id) {
+        if (!lookup.found) {
+            fprintf(stderr, "No SensorService instance with instance_id='%s'\n", instance_id);
+            demo_SensorService_proxy_destroy(&proxy);
+            omni_runtime_destroy(runtime);
+            return 1;
+        }
+        if (demo_SensorService_proxy_connect_instance(&proxy,
+                lookup.found_host_id, lookup.found_instance_id) != 0) {
+            fprintf(stderr, "SensorService instance not found\n");
+            demo_SensorService_proxy_destroy(&proxy);
+            omni_runtime_destroy(runtime);
+            return 1;
+        }
+        printf("Connected to SensorService instance_id=%s\n", instance_id);
+    } else {
+        if (demo_SensorService_proxy_connect(&proxy) != 0) {
+            fprintf(stderr, "SensorService not found\n");
+            demo_SensorService_proxy_destroy(&proxy);
+            omni_runtime_destroy(runtime);
+            return 1;
+        }
+        printf("Connected to SensorService\n");
     }
 
     printf("--- Primitive RPCs ---\n");

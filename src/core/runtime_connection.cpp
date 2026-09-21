@@ -3,17 +3,45 @@
 #include "omnibinder/log.h"
 
 #include <algorithm>
+#include <sstream>
 
 #define LOG_TAG "OmniRuntimeConnection"
 
 namespace omnibinder {
 
-OmniRuntime::Impl::ServiceState* OmniRuntime::Impl::findServiceState(const std::string& name) {
+std::string makeServiceInstanceKey(const std::string& host_id,
+                                   const std::string& instance_id) {
+    std::ostringstream os;
+    os << host_id.size() << '|' << host_id << '|' << instance_id;
+    return os.str();
+}
+
+std::string makeServiceIdentityKey(const ServiceIdentity& identity) {
+    std::ostringstream os;
+    os << identity.name.size() << '|' << identity.name << '|'
+       << identity.host_id.size() << '|' << identity.host_id << '|'
+       << identity.instance_id;
+    return os.str();
+}
+
+std::string makeServiceConnectionKey(const std::string& name,
+                                     const std::string& host_id,
+                                     const std::string& instance_id) {
+    // 默认实例（未显式指定 host_id / instance_id）的连接键即服务名本身，
+    // 与 connectService/disconnectService 及 connectServiceInstance 的默认路径一致；
+    // 否则在服务名后追加无歧义的实例键，同名不同实例互不覆盖。
+    if (host_id.empty() && instance_id.empty()) {
+        return name;
+    }
+    return name + '\x1f' + makeServiceInstanceKey(host_id, instance_id);
+}
+
+ServiceState* OmniRuntime::Impl::findServiceState(const std::string& name) {
     std::map<std::string, ServiceState>::iterator it = services_.find(name);
     return it == services_.end() ? NULL : &it->second;
 }
 
-OmniRuntime::Impl::ServiceState& OmniRuntime::Impl::ensureServiceState(const std::string& name) {
+ServiceState& OmniRuntime::Impl::ensureServiceState(const std::string& name) {
     return services_[name];
 }
 
@@ -38,17 +66,44 @@ int OmniRuntime::Impl::connectService(const std::string& service_name) {
     });
 }
 
+int OmniRuntime::Impl::connectServiceInstance(const std::string& service_name,
+                                              const std::string& host_id,
+                                              const std::string& instance_id) {
+    return callSerialized([this, &service_name, &host_id, &instance_id]() -> int {
+        return connectServiceInstanceInternal(service_name, host_id, instance_id);
+    });
+}
+
 int OmniRuntime::Impl::disconnectService(const std::string& service_name) {
     return callSerialized([this, &service_name]() -> int {
         return disconnectServiceInternal(service_name);
     });
 }
 
-bool OmniRuntime::Impl::isServiceConnected(const std::string& service_name) {
-    return callSerialized([this, &service_name]() -> bool {
-        if (!conn_mgr_) return false;
-        return conn_mgr_->getConnection(service_name) != NULL;
+int OmniRuntime::Impl::disconnectServiceInstance(const std::string& service_name,
+                                                 const std::string& host_id,
+                                                 const std::string& instance_id) {
+    return callSerialized([this, &service_name, &host_id, &instance_id]() -> int {
+        return disconnectServiceInternal(
+            makeServiceConnectionKey(service_name, host_id, instance_id));
     });
+}
+
+bool OmniRuntime::Impl::isServiceConnected(const std::string& service_name) {
+    return callSerialized([this, &service_name]() -> int {
+        if (!conn_mgr_) return 0;
+        return conn_mgr_->getConnection(service_name) != NULL ? 1 : 0;
+    }) != 0;
+}
+
+bool OmniRuntime::Impl::isServiceInstanceConnected(const std::string& service_name,
+                                                   const std::string& host_id,
+                                                   const std::string& instance_id) {
+    return callSerialized([this, &service_name, &host_id, &instance_id]() -> int {
+        if (!conn_mgr_) return 0;
+        return conn_mgr_->getConnection(
+            makeServiceConnectionKey(service_name, host_id, instance_id)) != NULL ? 1 : 0;
+    }) != 0;
 }
 
 int OmniRuntime::Impl::connectServiceInternal(const std::string& service_name,
@@ -56,11 +111,18 @@ int OmniRuntime::Impl::connectServiceInternal(const std::string& service_name,
     ServiceInfo info;
     int ret = lookupServiceInfo(service_name, info);
     if (ret != 0) return ret;
+    return connectResolvedConnection(service_name, info, explicit_connect, NULL);
+}
 
-    ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-        service_name, info.host, info.port, info.host_id, info.shm_config);
+int OmniRuntime::Impl::connectResolvedConnection(const std::string& connection_key,
+                                                 const ServiceInfo& info,
+                                                 bool explicit_connect,
+                                                 const ServiceIdentity* identity) {
+    ServiceConnection* conn = conn_mgr_->getOrCreateConnectionByKey(
+        connection_key, info.name, info.host, info.port, info.host_id, info.shm_config,
+        info.instance_id);
     if (!conn) {
-        OMNI_LOG_ERROR(LOG_TAG, "connectService failed for %s", service_name.c_str());
+        OMNI_LOG_ERROR(LOG_TAG, "connectService failed for %s", connection_key.c_str());
         return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
 
@@ -68,14 +130,47 @@ int OmniRuntime::Impl::connectServiceInternal(const std::string& service_name,
     // 需要该记录才能在恢复流程中重建直连（约束 6：恢复必须覆盖数据面）。
     // explicit_connect 区分用户显式连接与话题订阅附带的连接，后者在订阅
     // 全部取消后可整体回收
-    ServiceState& conn_state = ensureServiceState(service_name);
+    ServiceState& conn_state = ensureServiceState(connection_key);
+    conn_state.info = info;
+    conn_state.has_info = true;
     conn_state.has_reconnect = true;
-    ReconnectConfig& config = conn_state.reconnect;  // 默认 enabled=true
+    ReconnectConfig& config = conn_state.reconnect;
     if (explicit_connect) {
         config.explicit_connect = true;
     }
-    OMNI_LOG_INFO(LOG_TAG, "connectService success for %s", service_name.c_str());
+    // 显式实例绑定：断线 / SM 重连后按身份经 listServiceInstances 重新解析
+    // 目标实例，而非按服务名 lookup（后者只会命中确定性第一实例）
+    if (identity) {
+        config.has_instance = true;
+        config.bound_service = identity->name;
+        config.bound_host_id = identity->host_id;
+        config.bound_instance_id = identity->instance_id;
+    } else {
+        config.has_instance = false;
+    }
+    OMNI_LOG_INFO(LOG_TAG, "connectService success for %s", connection_key.c_str());
     return 0;
+}
+
+int OmniRuntime::Impl::connectServiceInstanceInternal(const std::string& name,
+                                                     const std::string& host_id,
+                                                     const std::string& instance_id) {
+    std::vector<ServiceInfo> instances;
+    int ret = listServiceInstancesInternal(name, instances);
+    if (ret != 0) {
+        return ret;  // ERR_SERVICE_NOT_FOUND 等
+    }
+    for (size_t i = 0; i < instances.size(); ++i) {
+        if (instances[i].host_id != host_id || instances[i].instance_id != instance_id) {
+            continue;
+        }
+        ServiceIdentity identity(name, host_id, instance_id);
+        return connectResolvedConnection(makeServiceConnectionKey(name, host_id, instance_id),
+                                         instances[i], true, &identity);
+    }
+    OMNI_LOG_WARN(LOG_TAG, "connectServiceInstance no match name=%s host_id=%s instance_id=%s",
+                  name.c_str(), host_id.c_str(), instance_id.c_str());
+    return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
 }
 
 int OmniRuntime::Impl::disconnectServiceInternal(const std::string& service_name) {
@@ -142,13 +237,22 @@ void OmniRuntime::Impl::tryReconnectService(const std::string& service_name) {
     // 自动生成的 "topic_pub_" 连接名没有对应注册服务，只能走此路径
     int ret = static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     if (config.has_topic_endpoint) {
-        ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-            service_name, config.topic_endpoint.host, config.topic_endpoint.port,
-            config.topic_endpoint.host_id, config.topic_endpoint.shm_config);
+        const ServiceInfo& ep = config.topic_endpoint;
+        const std::string transport_name = ep.name.empty() ? service_name : ep.name;
+        ServiceConnection* conn = conn_mgr_->getOrCreateConnectionByKey(
+            service_name, transport_name, ep.host, ep.port, ep.host_id, ep.shm_config,
+            ep.instance_id);
         ret = conn ? 0 : static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
     if (ret != 0) {
-        ret = connectServiceInternal(service_name, false);
+        if (config.has_instance) {
+            // 显式实例绑定：按身份重新解析，不能走按名 lookup（约束 6）
+            ret = connectServiceInstanceInternal(config.bound_service,
+                                                 config.bound_host_id,
+                                                 config.bound_instance_id);
+        } else {
+            ret = connectServiceInternal(service_name, false);
+        }
     }
 
     if (ret == 0) {
@@ -224,6 +328,11 @@ void OmniRuntime::Impl::scheduleReconnect(const std::string& service_name, uint3
 
 void OmniRuntime::Impl::startHeartbeat(const std::string& service_name, uint32_t interval_ms, uint32_t timeout_ms) {
     callSerialized([this, &service_name, interval_ms, timeout_ms]() {
+        // 未 init 时 loop_ 为 NULL：resumeHeartbeat 会 addTimer 崩溃（约束 5：
+        // 生命周期状态显式检查）。无 owner 时 callSerialized 内联执行此路径
+        if (!loop_) {
+            return;
+        }
         ServiceState& svc_state = ensureServiceState(service_name);
         svc_state.has_heartbeat = true;
         HeartbeatState& state = svc_state.heartbeat;
@@ -280,6 +389,7 @@ bool OmniRuntime::Impl::handleServiceLost(const std::string& service_name) {
 }
 
 void OmniRuntime::Impl::resumeHeartbeat(const std::string& service_name) {
+    if (!loop_) return;
     ServiceState* svc_state = findServiceState(service_name);
     if (!svc_state || !svc_state->has_heartbeat) return;
     HeartbeatState& state = svc_state->heartbeat;
@@ -414,19 +524,42 @@ bool OmniRuntime::Impl::resubscribeTopicPublisher(const std::string& pub_name,
 
 void OmniRuntime::Impl::removeTopicSubscriptionBinding(const std::string& topic_name,
                                                        const std::string& keep_pub_name) {
+    clearTopicSubscriptionBindings(topic_name,
+        [&keep_pub_name](const std::string& key, const ServiceState&) -> bool {
+            return !keep_pub_name.empty() && key == keep_pub_name;
+        });
+}
+
+void OmniRuntime::Impl::removeTopicSubscriptionBindingForSelector(
+    const TopicRuntime::SubscriptionSelector& selector, const std::string& topic_name) {
+    clearTopicSubscriptionBindings(topic_name,
+        [&selector](const std::string&, const ServiceState& st) -> bool {
+            if (!st.reconnect.has_topic_endpoint) {
+                return true;
+            }
+            const ServiceInfo& endpoint = st.reconnect.topic_endpoint;
+            return !selector.matches(endpoint.name, endpoint.host_id, endpoint.instance_id);
+        });
+}
+
+void OmniRuntime::Impl::clearTopicSubscriptionBindings(
+    const std::string& topic_name,
+    const std::function<bool(const std::string&, const ServiceState&)>& should_skip) {
     std::vector<std::string> to_clear;
     for (std::map<std::string, ServiceState>::iterator it = services_.begin();
          it != services_.end(); ++it) {
         ServiceState& st = it->second;
-        if (!st.has_reconnect) {
-            continue;
-        }
-        if (!keep_pub_name.empty() && it->first == keep_pub_name) {
+        if (!st.has_reconnect || should_skip(it->first, st)) {
             continue;
         }
         ReconnectConfig& config = st.reconnect;
         std::vector<std::string>& topics = config.topic_subscriptions;
         topics.erase(std::remove(topics.begin(), topics.end(), topic_name), topics.end());
+        // 该连接上仍存在其它选择器订阅同一话题时保留绑定：否则重连重放会丢失
+        // 仍在生效的订阅（普通订阅与选择器订阅共用同一连接键）
+        if (std::find(topics.begin(), topics.end(), topic_name) != topics.end()) {
+            continue;
+        }
         // 仅由话题订阅建立的连接：最后一个订阅移除后已无恢复意图，整体回收
         if (topics.empty() && !config.explicit_connect) {
             if (config.timer_id > 0) {
@@ -438,8 +571,17 @@ void OmniRuntime::Impl::removeTopicSubscriptionBinding(const std::string& topic_
     for (size_t i = 0; i < to_clear.size(); ++i) {
         ServiceState* st = findServiceState(to_clear[i]);
         if (st) {
+            // 话题连接在 ensureTopicPublisherConnection 中置 has_info=true，必须一并
+            // 清除，否则 eraseServiceStateIfUnused 因 has_info 为真而删不掉条目
             st->has_reconnect = false;
             st->reconnect = ReconnectConfig();
+            st->has_info = false;
+            st->info = ServiceInfo();
+            // 连接仅由话题订阅建立，最后一个订阅移除后必须从数据面回收，
+            // 否则连接与事件循环注册残留（约束 3）
+            if (conn_mgr_) {
+                conn_mgr_->removeConnection(to_clear[i]);
+            }
             eraseServiceStateIfUnused(to_clear[i]);
         }
     }
@@ -451,21 +593,26 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
         return false;
     }
     std::string pub_name = !pub_info.name.empty() ? pub_info.name : topicPublisherServiceName(topic_name);
-    ServiceConnection* conn = conn_mgr_->getOrCreateConnection(
-        pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config);
+
+    // 每个发布者实例使用独立连接键：服务级订阅下同名的多个发布者实例各占一条直连，
+    // 订阅方按连接区分来源实例。已显式 connectServiceInstance 的实例复用同一连接。
+    const std::string conn_key =
+        makeServiceConnectionKey(pub_name, pub_info.host_id, pub_info.instance_id);
+
+    ServiceConnection* conn = conn_mgr_->getOrCreateConnectionByKey(
+        conn_key, pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config,
+        pub_info.instance_id);
     if (!conn) {
         return false;
     }
 
-    // 发布者切换（同一话题换服务实例）时，先摘除旧发布者连接上的同名绑定，
-    // 否则旧连接断开会向已非发布者的服务重放订阅
-    removeTopicSubscriptionBinding(topic_name, pub_name);
-
     // 把订阅意图绑定到发布者连接：记录话题并保存 SM 最新端点，掉线后由
     // tryReconnectService 重建直连并重放 MSG_SUBSCRIBE_BROADCAST（约束 6）。
-    // 无论发布者使用真实服务名还是自动生成连接名，绑定语义一致
-    ServiceState& pub_state = ensureServiceState(pub_name);
+    // 连接上同时登记发布者实例信息，供收包时回填来源身份（决策 D5）
+    ServiceState& pub_state = ensureServiceState(conn_key);
     pub_state.has_reconnect = true;
+    pub_state.info = pub_info;
+    pub_state.has_info = true;
     ReconnectConfig& config = pub_state.reconnect;
     config.has_topic_endpoint = true;
     config.topic_endpoint = pub_info;
@@ -474,10 +621,10 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
         config.topic_subscriptions.push_back(topic_name);
     }
 
-    OMNI_LOG_INFO(LOG_TAG, "Topic %s uses %s data path to publisher %s",
+    OMNI_LOG_INFO(LOG_TAG, "Topic %s uses %s data path to publisher %s (instance=%s)",
                     topic_name.c_str(), dataChannelKindName(conn->transport->type()),
-                    pub_name.c_str());
-    return sendTopicBroadcastSubscription(pub_name, topic_name);
+                    conn_key.c_str(), pub_info.instance_id.c_str());
+    return sendTopicBroadcastSubscription(conn_key, topic_name);
 }
 
 } // namespace omnibinder

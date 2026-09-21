@@ -3,6 +3,7 @@
 #include "transport/tcp_connection.h"
 #include "transport/transport_selector.h"
 #include "platform/platform.h"
+#include "platform/platform_test.h"
 
 using namespace omnibinder;
 
@@ -42,7 +43,8 @@ TEST_F(TransportTest, TcpEcho) {
     int sent = client.send(reinterpret_cast<const uint8_t*>(msg), strlen(msg));
     ASSERT_EQ(sent, static_cast<int>(strlen(msg)));
 
-    platform::sleepMs(50);
+    ASSERT_TRUE(platform::waitFdReadable(accepted->fd(), 2000))
+        << "server side should become readable after client send";
 
     char buf[256] = {0};
     int recvd = accepted->recv(reinterpret_cast<uint8_t*>(buf), sizeof(buf));

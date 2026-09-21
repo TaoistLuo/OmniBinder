@@ -43,9 +43,12 @@ def main() -> int:
     soak_count = count_occurrences(lines, "All soak rounds passed.")
     recovery_count = count_occurrences(lines, "All disconnect recovery rounds passed.")
 
-    ctest_full_pass = len(re.findall(r"100% tests passed, 0 tests failed out of", text))
+    ctest_full_pass = count_occurrences(lines, "100% tests passed, 0 tests failed out of")
     explicit_failures = count_occurrences(lines, "FAIL:")
-    ctest_failed = len(re.findall(r"tests failed out of", text)) - ctest_full_pass
+    # 只有 "N tests failed out of"（N > 0）才算失败块；"0 tests failed" 的通过行不计入
+    ctest_failed = len(re.findall(r"[1-9]\d*\s+tests failed out of", text))
+
+    tail = max(args.tail, 0)
 
     print("=== OmniBinder Long-run Summary ===")
     print(f"Log file: {log_path}")
@@ -67,7 +70,7 @@ def main() -> int:
 
     print("[Failure Signals]")
     print(f"Explicit FAIL lines: {explicit_failures}")
-    print(f"CTest failure blocks: {max(ctest_failed, 0)}")
+    print(f"CTest failure blocks: {ctest_failed}")
     print()
 
     print("[Keyword Counts]")
@@ -75,9 +78,10 @@ def main() -> int:
         print(f"{keyword}: {count_occurrences(lines, keyword)}")
     print()
 
-    print(f"[Last {args.tail} lines]")
-    for line in lines[-args.tail:]:
-        print(line)
+    print(f"[Last {tail} lines]")
+    if tail > 0:
+        for line in lines[-tail:]:
+            print(line)
 
     return 0
 

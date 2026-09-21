@@ -60,10 +60,14 @@ public:
      * @param[in]  service_name       目标服务名（派生服务端 SHM 名与握手路径）
      * @param[in]  req_ring_capacity  请求 ring 容量，0/过小值按默认规范化
      * @param[in]  resp_ring_capacity 响应 ring 容量，0/过小值按默认规范化
+     * @param[in]  instance_id        目标实例标识；空串为单实例（需与服务端一致）
+     * @param[in]  host_id            目标板级主机身份；参与服务端握手路径派生（需与服务端一致）
      */
     explicit ShmClientConnection(const std::string& service_name,
                                 size_t req_ring_capacity = SHM_DEFAULT_REQ_RING_CAPACITY,
-                                size_t resp_ring_capacity = SHM_DEFAULT_RESP_RING_CAPACITY);
+                                size_t resp_ring_capacity = SHM_DEFAULT_RESP_RING_CAPACITY,
+                                const std::string& instance_id = "",
+                                const std::string& host_id = "");
 
     virtual ~ShmClientConnection();
 
@@ -97,12 +101,17 @@ private:
     bool initClient();
     void cleanup();
 
+    // 通过保留的握手通道探测服务端是否已退出；已退出则置 ERROR 并返回 false
+    bool peerAlive();
+
     ShmRingHeader* requestRing() const;
     uint8_t*       requestData() const;
     ShmRingHeader* responseRing() const;
     uint8_t*       responseData() const;
 
     std::string     service_name_;          // 目标服务名（握手路径依据）
+    std::string     instance_id_;           // 目标实例标识（握手路径依据）
+    std::string     host_id_;               // 目标板级主机身份（握手路径依据）
     std::string     shm_name_;              // 本客户端的唯一 SHM 名
     ConnectionState state_;
     size_t          requested_req_ring_capacity_;

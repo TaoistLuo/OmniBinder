@@ -218,6 +218,7 @@ void demo_SensorService_impl_request_latest_data_async(const demo_AsyncRequest* 
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
     const char* register_host = NULL;
+    const char* instance_id = NULL;
     uint16_t sm_port = 9900;
     int i;
 
@@ -225,6 +226,7 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--sm-host") == 0 && i + 1 < argc) sm_host = argv[++i];
         else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) sm_port = (uint16_t)atoi(argv[++i]);
         else if (strcmp(argv[i], "--register-host") == 0 && i + 1 < argc) register_host = argv[++i];
+        else if (strcmp(argv[i], "--instance-id") == 0 && i + 1 < argc) instance_id = argv[++i];
     }
 
     signal(SIGINT, signal_handler);
@@ -235,6 +237,9 @@ int main(int argc, char* argv[]) {
     printf("ServiceManager: %s:%u\n", sm_host, sm_port);
     if (register_host) {
         printf("RegisterHost: %s\n", register_host);
+    }
+    if (instance_id) {
+        printf("InstanceId: %s\n", instance_id);
     }
 
     omni_runtime_t* runtime = omni_runtime_create();
@@ -248,6 +253,10 @@ int main(int argc, char* argv[]) {
     }
 
     omni_service_t* svc = demo_SensorService_stub_create(runtime);
+    /* 同名多实例必须声明不同的 instance_id，否则后注册者会顶替先注册者 */
+    if (instance_id) {
+        omni_service_set_instance_id(svc, instance_id);
+    }
     if (omni_runtime_register_service(runtime, svc) != 0) {
         fprintf(stderr, "Failed to register service\n");
         demo_SensorService_stub_destroy(svc);
@@ -258,7 +267,9 @@ int main(int argc, char* argv[]) {
     omni_runtime_publish_topic(runtime, "SensorUpdate", demo_SensorUpdate_TOPIC_IDL_HASH);
     omni_runtime_publish_topic(runtime, "AsyncResultReady", demo_AsyncResultReady_TOPIC_IDL_HASH);
 
-    printf("SensorService registered on port %u\n\n", omni_service_port(svc));
+    printf("SensorService registered on port %u (host_id=%s, instance_id=%s)\n\n",
+           omni_service_port(svc), omni_runtime_host_id(runtime),
+           instance_id ? instance_id : "");
 
     int counter = 0;
     while (g_running) {

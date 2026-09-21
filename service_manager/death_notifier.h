@@ -35,6 +35,7 @@
 #ifndef OMNIBINDER_DEATH_NOTIFIER_H
 #define OMNIBINDER_DEATH_NOTIFIER_H
 
+#include "omnibinder/types.h"
 #include <string>
 #include <map>
 #include <set>
@@ -75,17 +76,35 @@ public:
     bool unsubscribe(int subscriber_fd, const std::string& target_service);
 
     /*
-     * @brief  通知服务死亡，返回需要通知的订阅者
-     * @param[in]  dead_service_name 死亡服务名称
-     * @return 需要通知的订阅者 fd 列表
-     * @note   同时移除该死亡服务的全部订阅关系
+     * @brief  订阅指定服务实例的死亡通知
+     * @param[in]  subscriber_fd 订阅者控制连接 fd
+     * @param[in]  identity      目标实例身份 (name, host_id, instance_id)
+     * @return true 表示订阅成功；重复订阅返回 false
      */
-    std::vector<int> notify(const std::string& dead_service_name);
+    bool subscribeInstance(int subscriber_fd, const ServiceIdentity& identity);
+
+    /*
+     * @brief  取消订阅指定服务实例的死亡通知
+     * @param[in]  subscriber_fd 订阅者控制连接 fd
+     * @param[in]  identity      目标实例身份
+     * @return true 表示订阅已找到并移除
+     */
+    bool unsubscribeInstance(int subscriber_fd, const ServiceIdentity& identity);
+
+    /*
+     * @brief  某一服务实例死亡，收集需要通知的订阅者（去重）
+     * @param[in]  identity   死亡实例身份
+     * @param[in]  name_gone  该服务名下是否已无存活实例；true 时名字级订阅者也纳入
+     * @return 需要通知的订阅者 fd 列表
+     * @note   始终移除该实例的实例级订阅；name_gone 为 true 时同时移除该名称的
+     *         名字级订阅（名字真正消失，通知一次即可，保持原有去重语义）。
+     */
+    std::vector<int> notifyInstanceDeath(const ServiceIdentity& identity, bool name_gone);
 
     /*
      * @brief  移除该订阅者的全部订阅关系
      * @param[in]  subscriber_fd 订阅者控制连接 fd
-     * @note   订阅者断开连接时调用
+     * @note   订阅者断开连接时调用；同时清理名字级与实例级订阅
      */
     void removeSubscriber(int subscriber_fd);
 
@@ -105,11 +124,20 @@ public:
 
 private:
 
+    void eraseInstanceSubscription(int fd, const std::string& instance_key);
+    void eraseNameSubscription(int fd, const std::string& service_name);
+
     // target_service -> 订阅者 fd 集合
     std::map<std::string, std::set<int>> service_to_subscribers_;
 
     // subscriber_fd -> 目标服务集合
     std::map<int, std::set<std::string>> subscriber_to_services_;
+
+    // makeServiceIdentityKey(identity) -> 订阅者 fd 集合
+    std::map<std::string, std::set<int>> instance_to_subscribers_;
+
+    // subscriber_fd -> 实例键集合
+    std::map<int, std::set<std::string>> subscriber_to_instances_;
 };
 
 } // namespace omnibinder

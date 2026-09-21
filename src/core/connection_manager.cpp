@@ -21,15 +21,17 @@ ConnectionManager::~ConnectionManager() {
     closeAll();
 }
 
-ServiceConnection* ConnectionManager::getOrCreateConnection(
+ServiceConnection* ConnectionManager::getOrCreateConnectionByKey(
+    const std::string& connection_key,
     const std::string& service_name,
     const std::string& host,
     uint16_t port,
     const std::string& host_id,
-    const ShmConfig& shm_config)
+    const ShmConfig& shm_config,
+    const std::string& instance_id)
 {
     // 检查是否已有连接
-    std::map<std::string, ServiceConnection*>::iterator it = connections_.find(service_name);
+    std::map<std::string, ServiceConnection*>::iterator it = connections_.find(connection_key);
     if (it != connections_.end()) {
         if (it->second->connected) {
             return it->second;
@@ -44,39 +46,37 @@ ServiceConnection* ConnectionManager::getOrCreateConnection(
     }
 
     ServiceConnection* conn = new ServiceConnection();
-    conn->service_name = service_name;
+    conn->connection_key = connection_key;
 
     conn->transport = createClientConnection(service_name, host, port,
-                                      local_host_id_, host_id, shm_config);
+                                      local_host_id_, host_id, shm_config, instance_id);
     if (!conn->transport) {
         delete conn;
         return NULL;
     }
 
-    // 无效 fd 的传输不可用：不保留无效连接，避免无事件注册的僵尸连接
+    // 无效 fd 的传输不可用：不保留无效连接，避免无事件注册的僵尸连接。
+    // ~ServiceConnection 会 close 并 delete transport，无需手工清理
     if (conn->transport->fd() < 0) {
         OMNI_LOG_WARN(LOG_TAG, "Invalid transport fd for %s, connection rejected",
-                      service_name.c_str());
-        conn->transport->close();
-        delete conn->transport;
-        conn->transport = NULL;
+                      connection_key.c_str());
         delete conn;
         return NULL;
     }
 
     conn->connected = true;
-    connections_[service_name] = conn;
+    connections_[connection_key] = conn;
 
     // 注册到 EventLoop
     int fd = conn->transport->fd();
     loop_.addFd(fd, EventLoop::EVENT_READ,
-        [this, service_name](int fd, uint32_t events) {
+        [this, connection_key](int fd, uint32_t events) {
             (void)events;
-            this->onConnectionData(service_name, fd);
+            this->onConnectionData(connection_key, fd);
         });
 
     OMNI_LOG_INFO(LOG_TAG, "Connected to %s via %s (fd=%d)",
-                    service_name.c_str(),
+                    connection_key.c_str(),
                     dataChannelKindName(conn->transport->type()),
                     conn->transport->fd());
 
@@ -153,7 +153,7 @@ bool ConnectionManager::sendRawWithDeadline(ServiceConnection* conn, const uint8
         if (now >= static_cast<int64_t>(deadline_ms)) {
             OMNI_LOG_WARN(LOG_TAG,
                           "data_send_deadline_expired service=%s bytes=%zu",
-                          conn->service_name.c_str(), length);
+                          conn->connection_key.c_str(), length);
             return false;
         }
         timeout_ms = static_cast<uint32_t>(deadline_ms - now);
@@ -162,7 +162,7 @@ bool ConnectionManager::sendRawWithDeadline(ServiceConnection* conn, const uint8
     if (conn->transport->sendAll(data, length, timeout_ms, NULL) != 0) {
         OMNI_LOG_WARN(LOG_TAG,
                       "data_send_incomplete service=%s transport=%s bytes=%zu timeout_ms=%u",
-                      conn->service_name.c_str(),
+                      conn->connection_key.c_str(),
                       dataChannelKindName(conn->transport->type()),
                       length, timeout_ms);
         return false;
@@ -191,7 +191,7 @@ bool ConnectionManager::sendRawWithinTimeout(ServiceConnection* conn,
     if (ret != 0) {
         OMNI_LOG_WARN(LOG_TAG,
                       "data_send_incomplete service=%s transport=%s bytes=%zu timeout_ms=%u elapsed_ms=%u",
-                      conn->service_name.c_str(),
+                      conn->connection_key.c_str(),
                       dataChannelKindName(conn->transport->type()),
                       length, timeout_ms, elapsed);
         return false;
@@ -248,7 +248,7 @@ bool ConnectionManager::failConnection(ServiceConnection* conn) {
     }
     // 回调前保存 service_name 副本：onDirectDisconnect 内部会 removeConnection
     // 删除 conn，回调后 conn 已释放，不能再解引用其成员（约束 1）
-    std::string svc = conn->service_name;
+    std::string svc = conn->connection_key;
     if (disconnect_cb_) {
         disconnect_cb_(svc);
     }
@@ -282,12 +282,12 @@ void ConnectionManager::onConnectionData(const std::string& service_name, int fd
                           service_name.c_str(),
                           dataChannelKindName(conn->transport->type()),
                           static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED));
-            if (!failConnection(conn)) return;
+            failConnection(conn);
             return;
         }
 
         if (message_cb_) {
-            message_cb_(conn->service_name, msg);
+            message_cb_(conn->connection_key, msg);
             // 回调可能 removeConnection 删除该连接：重新判活（约束 1）
             std::map<std::string, ServiceConnection*>::iterator current =
                 connections_.find(service_name);

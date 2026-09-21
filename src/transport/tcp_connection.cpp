@@ -25,7 +25,14 @@ TcpConnection::TcpConnection(platform::SocketFd connected_fd)
     , remote_port_(0)
 {
     if (fd_ != platform::INVALID_SOCKET_FD) {
-        platform::setNonBlocking(fd_);
+        if (!platform::setNonBlocking(fd_)) {
+            OMNI_LOG_ERROR(LOG_TAG, "Failed to set accepted fd=%d non-blocking",
+                           static_cast<int>(fd_));
+            platform::closeSocket(fd_);
+            fd_ = platform::INVALID_SOCKET_FD;
+            state_ = ConnectionState::ERROR;
+            return;
+        }
         platform::setTcpNoDelay(fd_);
         platform::setKeepAlive(fd_);
         state_ = ConnectionState::CONNECTED;

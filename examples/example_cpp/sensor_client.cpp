@@ -45,10 +45,12 @@ static demo::SensorArrayBundle makeBundle() {
 
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
+    const char* instance_id = NULL;
     uint16_t sm_port = 9900;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--sm-host") == 0 && i + 1 < argc) sm_host = argv[++i];
         else if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) sm_port = (uint16_t)atoi(argv[++i]);
+        else if (strcmp(argv[i], "--instance") == 0 && i + 1 < argc) instance_id = argv[++i];
     }
 
     signal(SIGINT, signalHandler);
@@ -63,13 +65,43 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    std::vector<omnibinder::ServiceInfo> instances;
+    if (runtime.listServiceInstances("SensorService", instances) == 0) {
+        std::printf("Discovered %zu SensorService instance(s):\n", instances.size());
+        for (size_t i = 0; i < instances.size(); ++i) {
+            std::printf("  [%zu] host_id=%s instance_id=%s host=%s port=%u\n",
+                        i, instances[i].host_id.c_str(), instances[i].instance_id.c_str(),
+                        instances[i].host.c_str(), instances[i].port);
+        }
+    } else {
+        std::printf("No SensorService instance discovered yet\n");
+    }
+
     demo::SensorServiceProxy proxy(runtime);
-    if (proxy.connect() != 0) {
+    int connect_ret = 0;
+    if (instance_id) {
+        bool found = false;
+        for (size_t i = 0; i < instances.size(); ++i) {
+            if (instances[i].instance_id == instance_id) {
+                connect_ret = proxy.connect(instances[i].host_id, instances[i].instance_id);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std::fprintf(stderr, "No SensorService instance with instance_id='%s'\n", instance_id);
+            return 1;
+        }
+    } else {
+        connect_ret = proxy.connect();
+    }
+    if (connect_ret != 0) {
         std::fprintf(stderr, "SensorService not found\n");
         return 1;
     }
 
-    std::printf("Connected to SensorService\n\n");
+    std::printf("Connected to SensorService%s%s\n\n",
+                instance_id ? " instance_id=" : "", instance_id ? instance_id : "");
 
     std::printf("--- Primitive RPCs ---\n");
     // 调用布尔回显 RPC，确认基础 bool 参数与返回值传递正常。

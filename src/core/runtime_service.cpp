@@ -10,6 +10,38 @@
 
 namespace omnibinder {
 
+namespace {
+
+// 反序列化 "count + N 条 T" 回复体。count 来自网络，先按剩余字节数做上限校验，
+// 避免畸形/损坏报文触发超大 reserve；分配失败返回错误码而非崩溃（无异常传播）
+template <typename T, typename ReadFn>
+int decodeCountedVector(BufferView& rbuf, ReadFn read_one, std::vector<T>& out) {
+    uint32_t count = 0;
+    if (!rbuf.tryReadUint32(count)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
+    if (count > rbuf.remaining() / 32) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
+    std::vector<T> decoded;
+    try {
+        decoded.reserve(count);
+    } catch (const std::bad_alloc&) {
+        return static_cast<int>(ErrorCode::ERR_OUT_OF_MEMORY);
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        T item;
+        if (!read_one(rbuf, item)) {
+            return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+        }
+        decoded.push_back(item);
+    }
+    out.swap(decoded);
+    return 0;
+}
+
+} // namespace
+
 // ============================================================
 // 服务注册
 // ============================================================
@@ -41,21 +73,31 @@ int OmniRuntime::Impl::registerServiceInternal(Service* service) {
     }
 
     ShmConfig shm_config = service->shmConfig();
-    initializeServiceShm(name, entry,
+    initializeServiceShm(name, service->instanceId(), entry,
         shm_config.req_ring_capacity,
         shm_config.resp_ring_capacity);
 
     ret = registerServiceWithManager(name, service, entry, advertise_host);
     if (ret != 0) {
+        // 应答丢失/超时时 SM 侧可能已完成登记，而本地端点随后关闭；best-effort
+        // 撤销该登记，避免客户端被引导连到已关闭端口（SM 按 fd+name 校验，只影响
+        // 本控制连接，未登记时安全空操作）
+        Message unregister(MessageType::MSG_UNREGISTER, allocSequence());
+        if (unregister.payload.writeString(name)) {
+            sendToSM(unregister);
+        }
         cleanupPendingServiceRegistration(name, entry);
         delete entry;
         return ret;
     }
 
     local_services_[name] = entry;
+    // 先缓存日志所需的 port：onStart() 是用户回调重入点，可能 unregisterService
+    // 释放 entry（约束 1/2），回调返回后不得再解引用 entry
+    const uint16_t registered_port = entry->port;
     service->onStart();
     OMNI_LOG_INFO(LOG_TAG, "Registered service %s on port %u",
-                    name.c_str(), entry->port);
+                    name.c_str(), registered_port);
     return 0;
 }
 
@@ -101,12 +143,15 @@ std::string OmniRuntime::Impl::resolveRegisterHost(Service* service,
     return normalizeAdvertiseHost(listener_host);
 }
 
-void OmniRuntime::Impl::initializeServiceShm(const std::string& name, LocalServiceEntry* entry,
+void OmniRuntime::Impl::initializeServiceShm(const std::string& name,
+                                              const std::string& instance_id,
+                                              LocalServiceEntry* entry,
                                               size_t req_ring_capacity, size_t resp_ring_capacity) {
     // SHM 端点：每个客户端创建自己的 SHM，服务端通过握手打开；
     // 容量为 0 时由 SHM 传输使用默认值。
     TransportConfig config(req_ring_capacity, resp_ring_capacity);
-    IServerEndpoint* shm = createServerEndpoint(name, TransportType::SHM, config);
+    IServerEndpoint* shm = createServerEndpoint(name, TransportType::SHM, config, instance_id,
+                                                host_id_);
     if (!shm) {
         OMNI_LOG_WARN(LOG_TAG, "createServerEndpoint(SHM) failed for service %s", name.c_str());
         return;
@@ -180,6 +225,7 @@ int OmniRuntime::Impl::sendRegisterToManager(const std::string& name, Service* s
     svc_info.host = advertise_host;
     svc_info.port = port;
     svc_info.host_id = host_id_;
+    svc_info.instance_id = service->instanceId();
     svc_info.shm_config = service->shmConfig();
     svc_info.interfaces.push_back(service->interfaceInfo());
     if (!serializeServiceInfo(svc_info, msg.payload)) {
@@ -268,7 +314,9 @@ int OmniRuntime::Impl::unregisterServiceInternal(Service* service) {
     }
     
     Message msg(MessageType::MSG_UNREGISTER, allocSequence());
-    msg.payload.writeString(name);
+    if (!msg.payload.writeString(name)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
     sendToSM(msg);
     
     LocalServiceEntry* entry = it->second;
@@ -308,24 +356,23 @@ int OmniRuntime::Impl::lookupServiceInfo(const std::string& service_name, Servic
     }
 
     Message msg(MessageType::MSG_LOOKUP, allocSequence());
-    msg.payload.writeString(service_name);
+    if (!msg.payload.writeString(service_name)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
 
     Message reply;
     int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
 
+    // 单次解析：bool + ServiceInfo 顺序读取，避免先 decodeBool 再用 BufferView
+    // 重读同一字段的两遍解析风格
+    BufferView rbuf(reply.payload.data(), reply.payload.size());
     bool found = false;
-    if (!decodeBoolReplyPayload(reply, found)) {
+    if (!rbuf.tryReadBool(found)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (!found) {
         return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
-    }
-
-    BufferView rbuf(reply.payload.data(), reply.payload.size());
-    bool ignored_found = false;
-    if (!rbuf.tryReadBool(ignored_found)) {
-        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (!deserializeServiceInfo(rbuf, info)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
@@ -343,44 +390,53 @@ int OmniRuntime::Impl::listServices(std::vector<ServiceInfo>& services) {
     });
 }
 
+int OmniRuntime::Impl::listServiceInstances(const std::string& name,
+                                            std::vector<ServiceInfo>& out) {
+    return callSerialized([this, &name, &out]() -> int {
+        return listServiceInstancesInternal(name, out);
+    });
+}
+
 int OmniRuntime::Impl::listServicesInternal(std::vector<ServiceInfo>& services) {
     Message msg(MessageType::MSG_LIST_SERVICES, allocSequence());
-    
+
     Message reply;
     int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
-    
-    uint32_t count = 0;
-    if (!decodeUint32ReplyPayload(reply, count)) {
-        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+
+    BufferView rbuf(reply.payload.data(), reply.payload.size());
+    return decodeCountedVector(rbuf,
+        [](BufferView& b, ServiceInfo& v) -> bool { return deserializeServiceInfo(b, v); },
+        services);
+}
+
+int OmniRuntime::Impl::listServiceInstancesInternal(const std::string& name,
+                                                    std::vector<ServiceInfo>& out) {
+    Message msg(MessageType::MSG_LIST_INSTANCES, allocSequence());
+    if (!msg.payload.writeString(name)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
     }
-    // 容错：count 来自网络，必须与剩余 payload 字节匹配（每个 ServiceInfo 至少
-    // 含若干固定字段），否则畸形/损坏报文会导致 reserve 超大内存崩溃
-    if (count > reply.payload.size() / 32) {
-        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
-    }
-    services.clear();
-    try {
-        services.reserve(count);
-    } catch (const std::bad_alloc&) {
-        // 内存耗尽：返回错误而非崩溃（无异常传播原则）
-        return static_cast<int>(ErrorCode::ERR_OUT_OF_MEMORY);
+
+    Message reply;
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) return ret;
+    if (reply.getType() != MessageType::MSG_LIST_INSTANCES_REPLY) {
+        return static_cast<int>(ErrorCode::ERR_PROTOCOL_ERROR);
     }
 
     BufferView rbuf(reply.payload.data(), reply.payload.size());
-    uint32_t ignored_count = 0;
-    if (!rbuf.tryReadUint32(ignored_count)) {
+    bool found = false;
+    if (!rbuf.tryReadBool(found)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
-    
-    for (uint32_t i = 0; i < count; ++i) {
-        ServiceInfo info;
-        if (!deserializeServiceInfo(rbuf, info)) {
-            return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
-        }
-        services.push_back(info);
+    if (!found) {
+        out.clear();
+        return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
     }
-    return 0;
+
+    return decodeCountedVector(rbuf,
+        [](BufferView& b, ServiceInfo& v) -> bool { return deserializeServiceInfo(b, v); },
+        out);
 }
 
 int OmniRuntime::Impl::queryInterfaces(const std::string& service_name,
@@ -393,45 +449,26 @@ int OmniRuntime::Impl::queryInterfaces(const std::string& service_name,
 int OmniRuntime::Impl::queryInterfacesInternal(const std::string& service_name,
                                               std::vector<InterfaceInfo>& interfaces) {
     Message msg(MessageType::MSG_QUERY_INTERFACES, allocSequence());
-    msg.payload.writeString(service_name);
+    if (!msg.payload.writeString(service_name)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
     
     Message reply;
     int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
     
+    // 单次解析：bool + count + InterfaceInfo 顺序读取
+    BufferView rbuf(reply.payload.data(), reply.payload.size());
     bool found = false;
-    if (!decodeBoolReplyPayload(reply, found)) {
+    if (!rbuf.tryReadBool(found)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (!found) {
         return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
     }
-
-    BufferView rbuf(reply.payload.data(), reply.payload.size());
-    bool ignored_found = false;
-    if (!rbuf.tryReadBool(ignored_found)) {
-        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
-    }
-    uint32_t count = 0;
-    if (!rbuf.tryReadUint32(count)) {
-        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
-    }
-    interfaces.clear();
-    try {
-        interfaces.reserve(count);
-    } catch (const std::bad_alloc&) {
-        // 内存耗尽：返回错误而非崩溃（无异常传播原则）
-        return static_cast<int>(ErrorCode::ERR_OUT_OF_MEMORY);
-    }
-    
-    for (uint32_t i = 0; i < count; ++i) {
-        InterfaceInfo info;
-        if (!deserializeInterfaceInfo(rbuf, info)) {
-            return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
-        }
-        interfaces.push_back(info);
-    }
-    return 0;
+    return decodeCountedVector(rbuf,
+        [](BufferView& b, InterfaceInfo& v) -> bool { return deserializeInterfaceInfo(b, v); },
+        interfaces);
 }
 
 int OmniRuntime::Impl::queryPublishedTopics(const std::string& service_name,

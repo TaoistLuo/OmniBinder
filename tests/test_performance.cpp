@@ -1,11 +1,11 @@
 #include "perf_service.bidl.h"
 #include <omnibinder/omnibinder.h>
 #include "platform/platform.h"
+#include "platform/platform_test.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <csignal>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -17,80 +17,22 @@
 #include <sstream>
 #include <iomanip>
 
-#ifndef _WIN32
-#include <unistd.h>
-#include <sys/wait.h>
-#else
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#ifdef ERROR
-#undef ERROR
-#endif
-#ifdef IGNORE
-#undef IGNORE
-#endif
-#endif
-
 using namespace omnibinder;
 
 namespace {
 
-typedef intptr_t TestPid;
+// 进程管理统一走 platform.h 测试抽象（spawnChildProcess / terminateChildProcess），
+// 平台差异内聚在 platform 层，本文件不再出现平台宏分支或 POSIX 直调。
+typedef omnibinder::platform::TestProcess TestPid;
 
 TestPid startProcess(const char* binary, const char* a1 = nullptr,
                      const char* a2 = nullptr, const char* a3 = nullptr,
                      const char* a4 = nullptr) {
-#ifdef _WIN32
-    std::string cmd = "\"" + std::string(binary) + "\"";
-    if (a1) { cmd += " "; cmd += a1; }
-    if (a2) { cmd += " "; cmd += a2; }
-    if (a3) { cmd += " "; cmd += a3; }
-    if (a4) { cmd += " "; cmd += a4; }
-    STARTUPINFOA si = {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
-        return -1;
-    CloseHandle(pi.hThread);
-    return reinterpret_cast<TestPid>(pi.hProcess);
-#else
-    pid_t pid = fork();
-    if (pid == 0) {
-        if (a1 && a2 && a3 && a4)
-            execl(binary, binary, a1, a2, a3, a4, (char*)NULL);
-        else if (a1 && a2 && a3)
-            execl(binary, binary, a1, a2, a3, (char*)NULL);
-        else if (a1 && a2)
-            execl(binary, binary, a1, a2, (char*)NULL);
-        else if (a1)
-            execl(binary, binary, a1, (char*)NULL);
-        else
-            execl(binary, binary, (char*)NULL);
-        _exit(1);
-    }
-    return static_cast<TestPid>(pid);
-#endif
+    return omnibinder::platform::spawnChildProcess(binary, a1, a2, a3, a4);
 }
 
 void stopProcess(TestPid pid) {
-    if (pid <= 0) return;
-#ifdef _WIN32
-    TerminateProcess(reinterpret_cast<HANDLE>(pid), 0);
-    WaitForSingleObject(reinterpret_cast<HANDLE>(pid), 5000);
-    CloseHandle(reinterpret_cast<HANDLE>(pid));
-#else
-    kill(static_cast<pid_t>(pid), SIGTERM);
-    int status = 0;
-    for (int i = 0; i < 50; ++i) {
-        if (waitpid(static_cast<pid_t>(pid), &status, WNOHANG) > 0) return;
-        platform::sleepMs(100);
-    }
-    kill(static_cast<pid_t>(pid), SIGKILL);
-    waitpid(static_cast<pid_t>(pid), &status, 0);
-#endif
+    omnibinder::platform::terminateChildProcess(pid);
 }
 
 bool waitPortReady(uint16_t port, int timeout_sec) {
@@ -114,13 +56,8 @@ const char* findBinary(const char* name) {
     static char full[512];
     for (int i = 0; paths[i]; ++i) {
         snprintf(full, sizeof(full), "%s%s", paths[i], name);
-#ifdef _WIN32
-        if (GetFileAttributesA(full) != INVALID_FILE_ATTRIBUTES) return full;
-        snprintf(full, sizeof(full), "%s%s.exe", paths[i], name);
-        if (GetFileAttributesA(full) != INVALID_FILE_ATTRIBUTES) return full;
-#else
-        if (access(full, X_OK) == 0) return full;
-#endif
+        std::ifstream probe(full);
+        if (probe.good()) return full;
     }
     return nullptr;
 }
@@ -154,8 +91,17 @@ struct LatencyStats {
         return sorted.size() % 2 ? sorted[sorted.size()/2]
                                   : (sorted[sorted.size()/2-1] + sorted[sorted.size()/2]) / 2.0;
     }
-    double p95() const { ensureSorted(); return sorted.empty() ? 0 : sorted[sorted.size()*95/100]; }
-    double p99() const { ensureSorted(); return sorted.empty() ? 0 : sorted[sorted.size()*99/100]; }
+    // nearest-rank 百分位：idx = ceil(n*p/100) - 1（避免 n*p/100 截断导致口径偏移 1）
+    double percentile(double p) const {
+        ensureSorted();
+        if (sorted.empty()) return 0;
+        size_t rank = static_cast<size_t>((sorted.size() * static_cast<size_t>(p) + 99) / 100);
+        if (rank == 0) rank = 1;
+        if (rank > sorted.size()) rank = sorted.size();
+        return sorted[rank - 1];
+    }
+    double p95() const { return percentile(95); }
+    double p99() const { return percentile(99); }
     double stddev() const {
         if (samples_us.size() < 2) return 0;
         double m = avg(), sum = 0;
@@ -458,6 +404,13 @@ int main(int argc, char* argv[]) {
             }
             stats[i].print();
             all.push_back(stats[i]);
+        }
+
+        // 报告宣称同机走 SHM：若实际回退到 TCP，性能数字会被误标为 SHM，必须显式告警
+        RuntimeStats transport_stats;
+        if (rt.getStats(transport_stats) == 0 && transport_stats.shm_connections == 0) {
+            fprintf(stderr, "WARNING: same-host SHM expected but shm_connections=0 (tcp=%u)\n",
+                    transport_stats.tcp_connections);
         }
     }
 

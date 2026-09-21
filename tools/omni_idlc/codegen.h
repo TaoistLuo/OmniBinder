@@ -39,8 +39,21 @@
 #include <sstream>
 #include <ostream>
 #include <set>
+#include <cctype>
 
 namespace omnic {
+
+/* @brief 把文件基名转成合法的 C 标识符片段（非字母数字一律替换为下划线并大写）
+ * @note  用于生成头文件 include guard：仅替换 '.' 会让含 '-' 等字符的基名
+ *        （如 sensor-a.bidl）产出非法 guard 宏，多个头文件可能折叠成同一宏而互相吞并 */
+inline std::string sanitizeIdentifierPrefix(const std::string& name) {
+    std::string out = name;
+    for (size_t i = 0; i < out.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(out[i]);
+        out[i] = static_cast<char>(std::isalnum(c) ? std::toupper(c) : '_');
+    }
+    return out;
+}
 
 /* @brief FNV-1a 32 位哈希
  * @param[in] str 输入字符串
@@ -90,7 +103,7 @@ inline void emitGeneratedFileBanner(std::ostream& os,
     os << " * @file        " << generated_name << "\n";
     os << " * @brief       " << brief << "\n";
     os << " * @details     " << details << "\n";
-    os << " *              Source IDL: " << source_idl << ".bidl\n";
+    os << " *              Source IDL: " << source_idl << "\n";
     os << " *              This file is auto-generated. DO NOT EDIT MANUALLY.\n";
     os << " *\n";
     os << " * Copyright (c) 2025 taoist.luo (https://github.com/TaoistLuo/OmniBinder)\n";
@@ -142,15 +155,6 @@ inline size_t minimumWireSize(const TypeRef& type) {
     }
 }
 
-/* @brief 递归计算 TypeRef 的哈希
- * @param[in] t 类型引用
- * @param[in] ast 类型所属的 AST
- * @param[in,out] visited 已访问类型集合（防止递归环）
- * @return 类型哈希
- * @note 只使用类型信息，不使用字段名/参数名
- */
-uint32_t hashTypeRef(const TypeRef& t, const AstFile& ast,
-                     std::set<std::string>& visited);
 /* @brief 计算单个方法的哈希
  * @param[in] m 方法定义
  * @param[in] ast 方法所属的 AST
@@ -228,7 +232,12 @@ inline uint32_t hashTypeRef(const TypeRef& t, const AstFile& ast,
             fqn = ast.package_name + "." + t.custom_name;
         }
         uint32_t hash = fnv1a_hash(fqn);
-        if (visited.find(fqn) == visited.end()) {
+        const bool same_package = t.package_name.empty() ||
+                                  t.package_name == ast.package_name;
+        // 跨包类型只哈希 FQN：codegen 层拿不到被导入包的 AST，无法展开其字段布局，
+        // 因此导入 struct 的布局变更不会改变本哈希（已知限制）。同包类型按字段展开，
+        // 且必须校验包名，避免同名跨包类型被误当作本包 struct 混入字段。
+        if (same_package && visited.find(fqn) == visited.end()) {
             visited.insert(fqn);
             for (size_t i = 0; i < ast.structs.size(); ++i) {
                 if (ast.structs[i].name == t.custom_name) {
@@ -264,56 +273,6 @@ inline uint32_t computeTopicHash(const TopicDef& t, const AstFile& ast) {
         hash = fnv1a_combine(hash, hashTypeRef(t.fields[i].type, ast, visited));
     }
     return hash;
-}
-
-/* @brief AST 类型校验的共享遍历
- * @param[in] ast 待校验的 AST
- * @param[in] validate 校验回调，签名为 bool(const TypeRef&, const std::string&, bool)
- * @return 校验通过返回 true
- * @note C / C++ codegen 严格共用同一份实现；validate 返回 false 即整体失败并停止
- */
-template <typename ValidateFn>
-inline bool validateAstCommon(const AstFile& ast, ValidateFn validate) {
-    for (size_t i = 0; i < ast.structs.size(); ++i) {
-        const StructDef& s = ast.structs[i];
-        for (size_t j = 0; j < s.fields.size(); ++j) {
-            const FieldDef& f = s.fields[j];
-            if (!validate(f.type, "struct '" + s.name + "' field '" + f.name + "'", false)) {
-                return false;
-            }
-        }
-    }
-
-    for (size_t i = 0; i < ast.topics.size(); ++i) {
-        const TopicDef& t = ast.topics[i];
-        for (size_t j = 0; j < t.fields.size(); ++j) {
-            const FieldDef& f = t.fields[j];
-            if (!validate(f.type, "topic '" + t.name + "' field '" + f.name + "'", false)) {
-                return false;
-            }
-        }
-    }
-
-    for (size_t i = 0; i < ast.services.size(); ++i) {
-        const ServiceDef& svc = ast.services[i];
-        for (size_t j = 0; j < svc.methods.size(); ++j) {
-            const MethodDef& m = svc.methods[j];
-            if (!validate(m.return_type,
-                          "service '" + svc.name + "' method '" + m.name + "' return type",
-                          true)) {
-                return false;
-            }
-            if (m.has_param
-                && !validate(m.param.type,
-                             "service '" + svc.name + "' method '" + m.name
-                                 + "' parameter '" + m.param.name + "'",
-                             false)) {
-                return false;
-            }
-        }
-    }
-
-    return true;
 }
 
 } // namespace omnic

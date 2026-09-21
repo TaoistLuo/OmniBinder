@@ -58,12 +58,24 @@ protected:
     }
 
     static void TearDownTestSuite() {
-        server_rt_->stop();
-        server_thread_->join();
-        delete server_thread_;
+        if (server_rt_) {
+            server_rt_->stop();
+        }
+        if (server_thread_) {
+            if (server_thread_->joinable()) {
+                server_thread_->join();
+            }
+            delete server_thread_;
+            server_thread_ = nullptr;
+        }
         delete svc_;
+        svc_ = nullptr;
         delete server_rt_;
-        stopProcess(sm_pid_);
+        server_rt_ = nullptr;
+        if (sm_pid_ > 0) {
+            stopProcess(sm_pid_);
+            sm_pid_ = 0;
+        }
     }
 };
 
@@ -73,6 +85,7 @@ ThreadSafetyTestService* ThreadSafetyTest::svc_ = nullptr;
 std::thread* ThreadSafetyTest::server_thread_ = nullptr;
 
 static void concurrentLookup(OmniRuntime& runtime, int thread_id, int iterations) {
+    (void)thread_id;
     for (int i = 0; i < iterations; i++) {
         ServiceInfo info;
         int ret = runtime.lookupService("TestService", info);
@@ -84,11 +97,22 @@ static void concurrentLookup(OmniRuntime& runtime, int thread_id, int iterations
 
 static void concurrentInvoke(OmniRuntime& runtime, int thread_id, int iterations) {
     for (int i = 0; i < iterations; i++) {
+        if (runtime.connectService("TestService") != 0) {
+            failure_count++;
+            continue;
+        }
+        const int32_t payload = thread_id * 1000 + i;
         Buffer request, response;
-        request.writeInt32(thread_id * 1000 + i);
-        ASSERT_EQ(runtime.connectService("TestService"), 0);
+        request.writeInt32(payload);
         int ret = runtime.invoke("TestService", IFACE_ID, METHOD_ECHO, 0, request, response, 5000);
-        if (ret == 0) success_count++;
+        bool ok = (ret == 0);
+        if (ok) {
+            // 解码回显内容并比对请求 payload：跨线程应答错配必须暴露为失败
+            Buffer decoded(response.data(), response.size());
+            int32_t echoed = 0;
+            ok = decoded.tryReadInt32(echoed) && echoed == payload;
+        }
+        if (ok) success_count++;
         else failure_count++;
         std::this_thread::sleep_for(std::chrono::microseconds(rand() % 100));
     }

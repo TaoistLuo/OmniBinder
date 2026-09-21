@@ -56,7 +56,7 @@ const int SHM_CLIENT_ID_BASE = 0x40000000;
 // ============================================================
 // ShmServerConnection — 服务端持有的单个客户端连接（私有）
 //
-// 具体定义位于 shm_server_transport.cpp，不对外暴露。
+// 具体定义位于 shm_server_connection.h，不对外暴露。
 // 它把该客户端的请求/响应 ring 适配为 IMessageConnection：
 //   - recv/peekFrameSize 读请求 ring（客户端→服务端）
 //   - send              写响应 ring 并通知客户端 resp eventfd
@@ -72,12 +72,16 @@ public:
     /*
      * @brief  创建 SHM 服务端端点（未启动）
      * @param[in]  service_name       服务名（派生握手通道路径）
-     * @param[in]  req_ring_capacity  请求 ring 默认容量
-     * @param[in]  resp_ring_capacity 响应 ring 默认容量
+     * @param[in]  req_ring_capacity  保留参数（SHM 实际容量以客户端控制块为准，此处未使用）
+     * @param[in]  resp_ring_capacity 保留参数（SHM 实际容量以客户端控制块为准，此处未使用）
+     * @param[in]  instance_id        实例标识；同名不同实例派生不同握手路径（空串为单实例）
+     * @param[in]  host_id            板级主机身份；参与握手路径派生（空串兼容旧调用）
      */
     explicit ShmServerEndpoint(const std::string& service_name,
                                 size_t req_ring_capacity = SHM_DEFAULT_REQ_RING_CAPACITY,
-                                size_t resp_ring_capacity = SHM_DEFAULT_RESP_RING_CAPACITY);
+                                size_t resp_ring_capacity = SHM_DEFAULT_RESP_RING_CAPACITY,
+                                const std::string& instance_id = "",
+                                const std::string& host_id = "");
     virtual ~ShmServerEndpoint();
 
     // 禁止拷贝
@@ -110,6 +114,12 @@ public:
      */
     int requestEventFd() const { return master_eventfd_; }
 
+    /*
+     * @brief  握手通道路径（测试/诊断用）
+     * @return 已启动时的 UDS 路径；未启动时为空串
+     */
+    const std::string& handshakePath() const { return handshake_path_; }
+
 private:
     ShmServerConnection* createClientFromHandshake(platform::handshake_channel* ch);
     void acceptHandshakeClients();
@@ -117,8 +127,8 @@ private:
     static int allocClientId();
 
     std::string     service_name_;
-    size_t          req_ring_capacity_;
-    size_t          resp_ring_capacity_;
+    std::string     instance_id_;
+    std::string     host_id_;
 
     platform::handshake_listener* handshake_listener_;
     std::string                   handshake_path_;

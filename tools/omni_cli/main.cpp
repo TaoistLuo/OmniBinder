@@ -1,50 +1,25 @@
 #include <omnibinder/omnibinder.h>
+#include <omnibinder/message.h>
 #include "simple_json.h"
 #include "type_codec.h"
 #include "type_resolver.h"
 #include "info_formatter.h"
+#include "watch_monitor.h"
 #include "lexer.h"
 #include "parser.h"
 #include "semantic_validator.h"
-#include "codegen.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
-#include <cstdarg>
 #include <fstream>
 #include <sstream>
 #include <chrono>
-#include <csignal>
 #include <map>
 #include <vector>
-#include <deque>
 
 // 全局 IDL 解析上下文
 static omnic::ParseContext* g_parse_ctx = NULL;
 static std::string g_idl_package;
-
-static void appendFormat(char* buf, size_t size, int& offset, const char* fmt, ...) {
-    if (!buf || size == 0 || offset < 0) {
-        return;
-    }
-    size_t pos = static_cast<size_t>(offset);
-    if (pos >= size) {
-        pos = size - 1;
-    }
-    va_list ap;
-    va_start(ap, fmt);
-    int written = vsnprintf(buf + pos, size - pos, fmt, ap);
-    va_end(ap);
-    if (written < 0) {
-        return;
-    }
-    size_t available = size - pos;
-    if (static_cast<size_t>(written) >= available) {
-        offset = static_cast<int>(size - 1);
-    } else {
-        offset = static_cast<int>(pos + static_cast<size_t>(written));
-    }
-}
 
 static void printUsage(const char* prog) {
     printf("Usage: %s [options] <command> [args]\n\n", prog);
@@ -52,13 +27,22 @@ static void printUsage(const char* prog) {
     printf("  -h, --host <addr>   ServiceManager address (default: 127.0.0.1)\n");
     printf("  -p, --port <port>   ServiceManager port (default: 9900)\n");
     printf("  --idl <file.bidl>   IDL file for JSON I/O/watch support\n");
+    printf("  --instance-id <id>  Target service instance (info/call)\n");
+    printf("                      instance_id is part of the service identity; '' selects\n");
+    printf("                      the default instance of a name\n");
+    printf("  --host-id <id>      Target host_id, combined with --instance-id (info/call)\n");
     printf("  --help              Show this help\n\n");
+    printf("Service identity: a service name may have many instances; an instance is\n");
+    printf("  (service_name, host_id, instance_id). `list` enumerates instances.\n\n");
     printf("Commands:\n");
-    printf("  list                List all online services\n");
+    printf("  list                List all online service instances\n");
     printf("  ps                  List online runtimes for --pid commands\n");
-    printf("  info <service>      Show service details and interfaces\n");
+    printf("  info <service>      Enumerate service instances and show interfaces\n");
+    printf("                      select one with --instance-id [--host-id]\n");
     printf("  call <service> <method> [params]\n");
-    printf("                      Call a service method\n");
+    printf("                      Call a method on a specific instance\n");
+    printf("                      --instance-id [--host-id] selects it; without a selector\n");
+    printf("                      the deterministic first instance is used and reported\n");
     printf("                      params: hex string (without --idl) or JSON (with --idl)\n");
     printf("  log set --pid <pid> --level <F|E|W|I|D|V|O>\n");
     printf("                      Set a runtime log level by PID\n");
@@ -66,6 +50,49 @@ static void printUsage(const char* prog) {
     printf("                      Watch diagnostic data from a runtime PID\n");
 }
 
+/* @brief 将 ServiceInfo 列表转换为与 omnibinder 解耦的实例视图列表
+ * @param[in] infos 服务实例信息列表
+ * @return 实例视图列表
+ */
+static std::vector<omni_cli::ServiceInstanceView> toInstanceViews(
+        const std::vector<omnibinder::ServiceInfo>& infos) {
+    std::vector<omni_cli::ServiceInstanceView> views;
+    views.reserve(infos.size());
+    for (size_t i = 0; i < infos.size(); ++i) {
+        omni_cli::ServiceInstanceView view;
+        view.name = infos[i].name;
+        view.host_id = infos[i].host_id;
+        view.instance_id = infos[i].instance_id;
+        view.host = infos[i].host;
+        view.port = infos[i].port;
+        views.push_back(view);
+    }
+    return views;
+}
+
+/* @brief 按 (host_id, instance_id) 从实例信息列表中定位对应条目
+ * @param[in] infos    服务实例信息列表
+ * @param[in] selected 已解析的目标实例
+ * @return 匹配项指针；未找到返回 NULL
+ */
+static const omnibinder::ServiceInfo* findSelectedInfo(
+        const std::vector<omnibinder::ServiceInfo>& infos,
+        const omni_cli::ServiceInstanceView& selected) {
+    for (size_t i = 0; i < infos.size(); ++i) {
+        if (infos[i].host_id == selected.host_id
+            && infos[i].instance_id == selected.instance_id) {
+            return &infos[i];
+        }
+    }
+    return NULL;
+}
+
+/* @brief 列出全部在线服务实例
+ * @param[in,out] runtime OmniRuntime 实例
+ * @return 成功返回 0，失败返回 1
+ * @note listServices 返回注册表中每个 (name, host_id, instance_id) 一条，
+ *       同名多实例即多行；单一实例只是同一展示的一行特例。
+ */
 static int cmdList(omnibinder::OmniRuntime& runtime) {
     std::vector<omnibinder::ServiceInfo> services;
     int ret = runtime.listServices(services);
@@ -73,17 +100,10 @@ static int cmdList(omnibinder::OmniRuntime& runtime) {
         fprintf(stderr, "Error: %s\n", omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
         return 1;
     }
-    
-    printf("%-24s %-16s %-8s %s\n", "NAME", "HOST", "PORT", "STATUS");
-    printf("%-24s %-16s %-8s %s\n", "----", "----", "----", "------");
-    for (size_t i = 0; i < services.size(); ++i) {
-        printf("%-24s %-16s %-8u %s\n",
-               services[i].name.c_str(),
-               services[i].host.c_str(),
-               services[i].port,
-               "ONLINE");
-    }
-    printf("\nTotal: %zu services online\n", services.size());
+
+    std::vector<omni_cli::ServiceInstanceView> instances = toInstanceViews(services);
+    printf("%s", omni_cli::formatInstanceTable(instances).c_str());
+    printf("\nTotal: %zu service instances online\n", instances.size());
     return 0;
 }
 
@@ -192,19 +212,39 @@ static void printFieldSchema(const omnic::TypeRef& type, const std::string& pack
     printf("%s%s\n", indentStr.c_str(), omni_cli::primitiveTypeName(type.primitive));
 }
 
-static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
-    omnibinder::ServiceInfo info;
-    int ret = runtime.lookupService(service_name, info);
+static int resolveServiceInstance(const std::vector<omnibinder::ServiceInfo>& infos,
+                                  const std::vector<omni_cli::ServiceInstanceView>& instances,
+                                  const omni_cli::InstanceSelector& selector,
+                                  omni_cli::ServiceInstanceView& selected,
+                                  const omnibinder::ServiceInfo*& info);
+
+static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name,
+                   const omni_cli::InstanceSelector& selector) {
+    std::vector<omnibinder::ServiceInfo> infos;
+    int ret = runtime.listServiceInstances(service_name, infos);
     if (ret != 0) {
         fprintf(stderr, "Error: %s\n", omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
         return 1;
     }
-    
-    printf("Service: %s\n", info.name.c_str());
-    printf("  Host:    %s\n", info.host.c_str());
-    printf("  Port:    %u\n", info.port);
-    printf("  HostID:  %s\n", info.host_id.c_str());
-    printf("  Status:  ONLINE\n\n");
+
+    std::vector<omni_cli::ServiceInstanceView> instances = toInstanceViews(infos);
+    printf("Service: %s\n", omni_cli::escapeForTerminal(service_name).c_str());
+    printf("%s", omni_cli::formatInstanceTable(instances).c_str());
+    printf("\n");
+
+    const bool explicit_selection = selector.host_id_set || selector.instance_id_set;
+    if (!explicit_selection && instances.size() > 1) {
+        printf("%s", omni_cli::formatInstanceSelectionHint().c_str());
+        return 0;
+    }
+
+    omni_cli::ServiceInstanceView selected;
+    const omnibinder::ServiceInfo* info = NULL;
+    if (resolveServiceInstance(infos, instances, selector, selected, info) != 0) {
+        return 1;
+    }
+
+    printf("%s\n\n", omni_cli::formatInstanceIdentity(selected).c_str());
 
     std::vector<std::string> published_topics;
     const uint32_t topics_query_timeout_ms = 1000;
@@ -217,9 +257,9 @@ static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
     }
     printf("%s", omni_cli::formatPublishedTopicsSection(
         published_topics, topics_unavailable).c_str());
-    
-    for (size_t i = 0; i < info.interfaces.size(); ++i) {
-        const omnibinder::InterfaceInfo& iface = info.interfaces[i];
+
+    for (size_t i = 0; i < info->interfaces.size(); ++i) {
+        const omnibinder::InterfaceInfo& iface = info->interfaces[i];
         printf("  Interface: %s (id=0x%08x)\n", iface.name.c_str(), iface.interface_id);
         printf("    Methods:\n");
         
@@ -262,6 +302,17 @@ static int cmdInfo(omnibinder::OmniRuntime& runtime, const char* service_name) {
     return 0;
 }
 
+/* @brief 判断字符是否为十六进制数字
+ * @param[in] c 待判断字符
+ * @return 是十六进制数字返回其值（0-15），否则返回 -1
+ */
+static int hexDigitValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 /* @brief 将 hex 字符串转换为字节流
  * @param[in] hex hex 字符串
  * @param[out] buf 输出 Buffer
@@ -271,11 +322,10 @@ static bool hexToBytes(const char* hex, omnibinder::Buffer& buf) {
     size_t len = strlen(hex);
     if (len % 2 != 0) return false;
     for (size_t i = 0; i < len; i += 2) {
-        char byte_str[3] = { hex[i], hex[i + 1], '\0' };
-        char* end = NULL;
-        unsigned long val = strtoul(byte_str, &end, 16);
-        if (end != byte_str + 2 || val > 255) return false;
-        buf.writeUint8(static_cast<uint8_t>(val));
+        int high = hexDigitValue(hex[i]);
+        int low = hexDigitValue(hex[i + 1]);
+        if (high < 0 || low < 0) return false;
+        buf.writeUint8(static_cast<uint8_t>((high << 4) | low));
     }
     return true;
 }
@@ -290,23 +340,6 @@ static void printHexDump(const uint8_t* data, size_t len) {
         printf("%02x ", data[i]);
     }
     printf("\n");
-}
-
-static uint16_t readLe16(const uint8_t* data) {
-    return static_cast<uint16_t>(data[0])
-        | (static_cast<uint16_t>(data[1]) << 8);
-}
-
-static uint32_t readLe32(const uint8_t* data) {
-    return static_cast<uint32_t>(data[0])
-        | (static_cast<uint32_t>(data[1]) << 8)
-        | (static_cast<uint32_t>(data[2]) << 16)
-        | (static_cast<uint32_t>(data[3]) << 24);
-}
-
-static bool isInvokeRequestType(uint16_t type) {
-    return type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE)
-        || type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_ONEWAY);
 }
 
 static uint32_t parseLogLevelCode(const char* text, bool& ok) {
@@ -324,61 +357,54 @@ static uint32_t parseLogLevelCode(const char* text, bool& ok) {
     }
 }
 
+/* @brief 严格解析十进制无符号 32 位整数
+ * @param[in] text 文本
+ * @param[out] value 解析结果
+ * @return 成功返回 true
+ * @note 仅接受纯数字，拒绝空白/正负号/超范围
+ */
 static bool parseUint32Arg(const char* text, uint32_t& value) {
     if (!text || !text[0]) {
         return false;
     }
-    char* end = NULL;
-    unsigned long parsed = strtoul(text, &end, 10);
-    if (end == text || *end != '\0' || parsed > 0xFFFFFFFFul) {
-        return false;
+    unsigned long long acc = 0;
+    for (const char* p = text; *p; ++p) {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+        acc = acc * 10ull + static_cast<unsigned long long>(*p - '0');
+        if (acc > 0xFFFFFFFFull) {
+            return false;
+        }
     }
-    value = static_cast<uint32_t>(parsed);
+    value = static_cast<uint32_t>(acc);
     return true;
 }
 
-static std::string typeRefCliName(const omnic::TypeRef& type) {
-    if (type.primitive == omnic::TYPE_CUSTOM) {
-        if (!type.package_name.empty()) {
-            return type.package_name + "::" + type.custom_name;
-        }
-        return type.custom_name;
+/* @brief 解析 <service> 的目标实例：选择唯一实例并校验其存活
+ * @param[in] infos     服务实例信息列表
+ * @param[in] instances 实例视图列表
+ * @param[in] selector  实例选择器
+ * @param[out] selected 选中的实例视图
+ * @param[out] info     选中的实例信息指针
+ * @return 成功返回 0，失败返回 1
+ */
+static int resolveServiceInstance(const std::vector<omnibinder::ServiceInfo>& infos,
+                                  const std::vector<omni_cli::ServiceInstanceView>& instances,
+                                  const omni_cli::InstanceSelector& selector,
+                                  omni_cli::ServiceInstanceView& selected,
+                                  const omnibinder::ServiceInfo*& info) {
+    std::string selection_error;
+    if (omni_cli::selectInstance(instances, selector, selected, selection_error) != 0) {
+        fprintf(stderr, "Error: %s\n", selection_error.c_str());
+        return 1;
     }
-    if (type.primitive == omnic::TYPE_VOID) {
-        return "void";
+    info = findSelectedInfo(infos, selected);
+    if (!info) {
+        fprintf(stderr, "Error: selected instance disappeared\n");
+        return 1;
     }
-    if (type.primitive == omnic::TYPE_ARRAY || type.element_type) {
-        return "";
-    }
-    return omni_cli::primitiveTypeName(type.primitive);
-}
-
-static void buildIdlMethodMap(std::map<uint64_t, const omnibinder::MethodInfo*>& method_map,
-                              std::deque<omnibinder::MethodInfo>& method_storage) {
-    method_map.clear();
-    method_storage.clear();
-    if (!g_parse_ctx) {
-        return;
-    }
-    for (std::map<std::string, omnic::AstFile>::const_iterator pit = g_parse_ctx->loaded_packages.begin();
-         pit != g_parse_ctx->loaded_packages.end(); ++pit) {
-        const omnic::AstFile& ast = pit->second;
-        for (size_t si = 0; si < ast.services.size(); ++si) {
-            const omnic::ServiceDef& svc = ast.services[si];
-            uint32_t iface_id = omnic::fnv1a_hash(ast.package_name + "." + svc.name);
-            for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
-                const omnic::MethodDef& m = svc.methods[mi];
-                uint32_t method_id = omnic::fnv1a_hash(m.name);
-                std::string param_type = m.has_param ? typeRefCliName(m.param.type) : "";
-                std::string return_type = typeRefCliName(m.return_type);
-                omnibinder::MethodInfo info(method_id, m.name, param_type, return_type);
-                info.idl_hash = omnic::computeMethodHash(m, ast);
-                method_storage.push_back(info);
-                uint64_t key = (static_cast<uint64_t>(iface_id) << 32) | method_id;
-                method_map[key] = &method_storage.back();
-            }
-        }
-    }
+    return 0;
 }
 
 /* @brief 解析并校验 log set 的 <pid> + <level> 参数，然后调用运行时接口
@@ -409,19 +435,32 @@ static int cmdLogSet(omnibinder::OmniRuntime& runtime, const char* pid_text, con
 }
 
 static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
-                   const char* method_name, const char* params) {
-    // 查找服务
-    omnibinder::ServiceInfo info;
-    int ret = runtime.lookupService(service_name, info);
+                   const char* method_name, const char* params,
+                   const omni_cli::InstanceSelector& selector) {
+    // 按实例模型解析目标：未指定选择器时使用确定性第一实例，并在输出中说明
+    std::vector<omnibinder::ServiceInfo> infos;
+    int ret = runtime.listServiceInstances(service_name, infos);
     if (ret != 0) {
-        fprintf(stderr, "Error: Cannot find service '%s': %s\n",
+        fprintf(stderr, "Error: Cannot list instances of service '%s': %s\n",
                 service_name, omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
         return 1;
     }
-    ret = runtime.connectService(service_name);
+
+    std::vector<omni_cli::ServiceInstanceView> instances = toInstanceViews(infos);
+    omni_cli::ServiceInstanceView selected;
+    const omnibinder::ServiceInfo* info = NULL;
+    const bool explicit_selection = selector.host_id_set || selector.instance_id_set;
+    if (resolveServiceInstance(infos, instances, selector, selected, info) != 0) {
+        return 1;
+    }
+
+    printf("%s\n", omni_cli::formatCallTargetNotice(selected, explicit_selection).c_str());
+
+    ret = runtime.connectServiceInstance(service_name, selected.host_id, selected.instance_id);
     if(ret != 0){
-        fprintf(stderr, "Error: Cannot connect service '%s': %s\n",
-                service_name, omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
+        fprintf(stderr, "Error: Cannot connect service '%s' (instance_id=\"%s\" host_id=\"%s\"): %s\n",
+                service_name, selected.instance_id.c_str(), selected.host_id.c_str(),
+                omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
         return 1;
     }
 
@@ -432,8 +471,8 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     std::string return_type_name;
     bool found = false;
 
-    for (size_t i = 0; i < info.interfaces.size() && !found; ++i) {
-        const omnibinder::InterfaceInfo& iface = info.interfaces[i];
+    for (size_t i = 0; i < info->interfaces.size() && !found; ++i) {
+        const omnibinder::InterfaceInfo& iface = info->interfaces[i];
         for (size_t j = 0; j < iface.methods.size(); ++j) {
             if (iface.methods[j].name == method_name) {
                 iface_id = iface.interface_id;
@@ -510,9 +549,11 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     // 记录开始时间
     auto start_time = std::chrono::steady_clock::now();
 
-    // 调用方法
+    // 调用方法：连接键与 connectServiceInstance 一致，确保命中该实例
     omnibinder::Buffer response;
-    ret = runtime.invoke(info.name.c_str(), iface_id, method_id, 0, request, response);
+    const std::string connection_key = omnibinder::makeServiceConnectionKey(
+        service_name, selected.host_id, selected.instance_id);
+    ret = runtime.invoke(connection_key, iface_id, method_id, 0, request, response);
     
     // 记录结束时间
     auto end_time = std::chrono::steady_clock::now();
@@ -558,368 +599,12 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     return 0;
 }
 
-static volatile bool g_watch_running = true;
-static void watch_sigint_handler(int) { g_watch_running = false; }
-
-/**
- * @brief watch 诊断事件头
- * @details 对应 DIAG_EVENT_WIRE_HEADER_SIZE 布局
+/* @brief 判断参数是否形如负数字面量（作为位置参数而非选项）
+ * @param[in] arg 参数
+ * @return 是负数形式返回 true
  */
-struct DiagEventHeader {
-    uint8_t  direction;
-    uint64_t ts_us;
-    uint16_t orig_type;
-    uint32_t orig_seq;
-    uint32_t orig_len;
-};
-
-/**
- * @brief watch 期间跨事件累积的状态
- * @details 包含 IDL 方法表、请求时间戳和待回复方法
- */
-struct WatchState {
-    WatchState() : pid(0), filter(NULL) {}
-    uint32_t pid;
-    const char* filter;
-    std::map<uint64_t, const omnibinder::MethodInfo*> method_map;
-    std::deque<omnibinder::MethodInfo> method_storage;
-    std::map<uint32_t, uint64_t> req_timestamps;
-    std::map<uint32_t, const omnibinder::MethodInfo*> pending_methods;
-};
-
-/**
- * @brief 单个诊断事件解析出的语义信息
- */
-struct WatchEventInfo {
-    WatchEventInfo()
-        : method(NULL), param_len(0), resp_len(0), resp_status(0), name("?") {}
-    const omnibinder::MethodInfo* method;
-    uint32_t param_len;
-    uint32_t resp_len;
-    int32_t  resp_status;
-    std::string name;
-};
-
-static bool parseDiagEventHeader(const omnibinder::Buffer& data, DiagEventHeader& hdr) {
-    const size_t diag_hdr = omnibinder::DIAG_EVENT_WIRE_HEADER_SIZE;
-    if (data.size() < diag_hdr) {
-        return false;
-    }
-    const uint8_t* p = data.data();
-    hdr.direction = p[0];
-    hdr.ts_us = 0;
-    for (int i = 0; i < 8; ++i) {
-        hdr.ts_us |= static_cast<uint64_t>(p[1 + i]) << (8 * i);
-    }
-    hdr.orig_type = readLe16(p + 9);
-    hdr.orig_seq  = readLe32(p + 11);
-    hdr.orig_len  = readLe32(p + 15);
-    return true;
-}
-
-static std::string watchedSourceName(uint32_t pid) {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "pid%u", pid);
-    return std::string(buf);
-}
-
-static const char* diagDirectionLabel(uint8_t direction) {
-    switch (direction) {
-    case omnibinder::DIAG_EVENT_REQUEST:   return "REQUEST  ";
-    case omnibinder::DIAG_EVENT_RESPONSE:  return "RESPONSE ";
-    case omnibinder::DIAG_EVENT_ONE_WAY:   return "ONE_WAY  ";
-    case omnibinder::DIAG_EVENT_SUBSCRIBE: return "SUBSCRIBE";
-    case omnibinder::DIAG_EVENT_BROADCAST: return "BROADCAST";
-    default: return "?";
-    }
-}
-
-/* @brief 记录 REQUEST 时间戳并匹配 RESPONSE 耗时
- * @param[in,out] state watch 状态
- * @param[in] ev 诊断事件头
- * @return 本次事件耗时（us，0 表示无配对）
- */
-static uint64_t trackWatchLatency(WatchState& state, const DiagEventHeader& ev) {
-    if (ev.direction == omnibinder::DIAG_EVENT_REQUEST) {
-        state.req_timestamps[ev.orig_seq] = ev.ts_us;
-        return 0;
-    }
-    if (ev.direction == omnibinder::DIAG_EVENT_RESPONSE) {
-        std::map<uint32_t, uint64_t>::iterator it = state.req_timestamps.find(ev.orig_seq);
-        if (it != state.req_timestamps.end()) {
-            uint64_t latency_us = ev.ts_us - it->second;
-            state.req_timestamps.erase(it);
-            return latency_us;
-        }
-    }
-    return 0;
-}
-
-/* @brief 从 IDL 方法表解析方法名、请求参数长度、回复状态码
- * @param[in,out] state watch 状态
- * @param[in] ev 诊断事件头
- * @param[in] data 事件数据
- * @return 解析出的语义信息
- */
-static WatchEventInfo resolveWatchEvent(WatchState& state, const DiagEventHeader& ev,
-                                        const omnibinder::Buffer& data) {
-    WatchEventInfo info;
-    const size_t diag_hdr = omnibinder::DIAG_EVENT_WIRE_HEADER_SIZE;
-    if (g_parse_ctx && ev.orig_len > 0 && data.size() >= diag_hdr + ev.orig_len) {
-        const uint8_t* payload = data.data() + diag_hdr;
-        if (isInvokeRequestType(ev.orig_type) && ev.orig_len >= 16) {
-            uint32_t iface_id = readLe32(payload);
-            uint32_t meth_id  = readLe32(payload + 8);
-            info.param_len = readLe32(payload + 12);
-            if (info.param_len > ev.orig_len - 16) {
-                info.param_len = 0;
-            }
-            std::map<uint64_t, const omnibinder::MethodInfo*>::iterator mit =
-                state.method_map.find((static_cast<uint64_t>(iface_id) << 32) | meth_id);
-            if (mit != state.method_map.end()) {
-                info.method = mit->second;
-                info.name = mit->second->name;
-                state.pending_methods[ev.orig_seq] = mit->second;
-            }
-        } else if (ev.orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_REPLY)
-                   && ev.direction == omnibinder::DIAG_EVENT_RESPONSE && ev.orig_len >= 8) {
-            info.resp_status = static_cast<int32_t>(readLe32(payload));
-            info.resp_len = readLe32(payload + 4);
-            if (info.resp_len > ev.orig_len - 8) {
-                info.resp_len = 0;
-            }
-            std::map<uint32_t, const omnibinder::MethodInfo*>::iterator pm_it =
-                state.pending_methods.find(ev.orig_seq);
-            if (pm_it != state.pending_methods.end()) {
-                info.method = pm_it->second;
-                info.name = info.method->name;
-                state.pending_methods.erase(pm_it);
-            }
-        }
-    }
-    if (ev.direction == omnibinder::DIAG_EVENT_BROADCAST) {
-        info.name = "broadcast";
-    } else if (ev.direction == omnibinder::DIAG_EVENT_SUBSCRIBE) {
-        info.name = "subscribe";
-    }
-    return info;
-}
-
-/* @brief 按 IDL 类型解码 payload
- * @param[in,out] buf 数据 Buffer
- * @param[in] type 目标类型
- * @param[in] package 类型所属包
- * @param[in] type_name 类型名
- * @param[out] out 解码输出
- * @return 成功返回 true
- * @note 结构体输出 JSON，标量输出 "type: value"
- */
-static bool decodeWatchValue(omnibinder::Buffer& buf, const omnic::TypeRef& type,
-                             const std::string& package, const std::string& type_name,
-                             std::string& out) {
-    type_codec::TypeCodec codec(*g_parse_ctx);
-    simple_json::Value json_out;
-    if (!codec.decodeFromBuffer(buf, type, package, json_out)) {
-        return false;
-    }
-    if (type.primitive == omnic::TYPE_CUSTOM) {
-        out = json_out.toString(true, 1);
-    } else {
-        out = type_name + ": " + json_out.toString(false, 0);
-    }
-    return true;
-}
-
-/* @brief 输出 hex 预览
- * @param[in] line 日志行前缀
- * @param[in] payload 字节数据
- * @param[in] len 数据长度
- * @param[in] max_bytes 最大打印字节数
- * @param[in] show_ellipsis 是否在截断时追加 "..."
- */
-static void logWatchHex(const char* line, const uint8_t* payload, uint32_t len,
-                        uint32_t max_bytes, bool show_ellipsis) {
-    char hex[256];
-    int off = 0;
-    uint32_t shown = len > max_bytes ? max_bytes : len;
-    for (uint32_t i = 0; i < shown; ++i) {
-        appendFormat(hex, sizeof(hex), off, "%02x ", payload[i]);
-    }
-    if (show_ellipsis && len > max_bytes) {
-        appendFormat(hex, sizeof(hex), off, "...");
-    }
-    OMNI_LOG_INFO("Watch", "%s \n  HEX: %s", line, hex);
-}
-
-/* @brief 输出 REQUEST 事件的参数解码明细
- * @param[in] info 事件语义信息
- * @param[in] payload 事件 payload
- * @param[in] source_name 来源名称
- * @param[in] line 日志行前缀
- */
-static void logWatchRequestDetail(const WatchEventInfo& info, const uint8_t* payload,
-                                  const std::string& source_name, const char* line) {
-    char detail[512];
-    int off = snprintf(detail, sizeof(detail), "  %s.%s(", source_name.c_str(),
-                       info.method->name.c_str());
-    if (!info.method->param_types.empty() && info.param_len > 0) {
-        omnic::TypeRef param_type;
-        if (omni_cli::findTypeRef(g_parse_ctx, info.method->param_types, g_idl_package, param_type)) {
-            omnibinder::Buffer param_buf;
-            param_buf.assign(payload + 16, info.param_len);
-            std::string text;
-            if (decodeWatchValue(param_buf, param_type, g_idl_package,
-                                 info.method->param_types, text)) {
-                appendFormat(detail, sizeof(detail), off, "%s", text.c_str());
-            } else {
-                appendFormat(detail, sizeof(detail), off, "...");
-            }
-        } else {
-            appendFormat(detail, sizeof(detail), off, "...");
-        }
-    }
-    appendFormat(detail, sizeof(detail), off, ")");
-    OMNI_LOG_INFO("Watch", "%s  \n%s", line, detail);
-}
-
-/* @brief 输出 RESPONSE 事件的状态码与返回值解码明细
- * @param[in] ev 诊断事件头
- * @param[in] info 事件语义信息
- * @param[in] payload 事件 payload
- * @param[in] line 日志行前缀
- */
-static void logWatchReplyDetail(const DiagEventHeader& ev, const WatchEventInfo& info,
-                                const uint8_t* payload, const char* line) {
-    char detail[512];
-    int off = snprintf(detail, sizeof(detail), "  -> status=%d", info.resp_status);
-    if (info.resp_len > 0 && info.resp_len <= ev.orig_len - 8 && info.method &&
-        !info.method->return_type.empty() && info.method->return_type != "void") {
-        omnic::TypeRef ret_type;
-        if (omni_cli::findTypeRef(g_parse_ctx, info.method->return_type, g_idl_package, ret_type)) {
-            omnibinder::Buffer resp_buf;
-            resp_buf.assign(payload + 8, info.resp_len);
-            std::string text;
-            if (decodeWatchValue(resp_buf, ret_type, g_idl_package,
-                                 info.method->return_type, text)) {
-                appendFormat(detail, sizeof(detail), off, " %s", text.c_str());
-            }
-        }
-    }
-    OMNI_LOG_INFO("Watch", "%s  \n%s", line, detail);
-}
-
-/* @brief 输出 BROADCAST 事件的 topic 解码明细
- * @param[in] ev 诊断事件头
- * @param[in] payload 事件 payload
- * @param[in] line 日志行前缀
- * @note 无法解码时回退 hex
- */
-static void logWatchBroadcastDetail(const DiagEventHeader& ev, const uint8_t* payload,
-                                    const char* line) {
-    uint32_t data_len = readLe32(payload + 4);
-    if (data_len == 0 || data_len > ev.orig_len - 8) {
-        return;
-    }
-    omnibinder::Buffer data_buf;
-    data_buf.assign(payload + 8, data_len);
-    for (std::map<std::string, omnic::AstFile>::const_iterator pit =
-             g_parse_ctx->loaded_packages.begin();
-         pit != g_parse_ctx->loaded_packages.end(); ++pit) {
-        const omnic::AstFile& ast = pit->second;
-        for (size_t k = 0; k < ast.topics.size(); ++k) {
-            const omnic::TopicDef& tdef = ast.topics[k];
-            omnic::StructDef synth;
-            synth.name = tdef.name;
-            synth.fields = tdef.fields;
-            g_parse_ctx->loaded_packages[pit->first].structs.push_back(synth);
-            omnic::TypeRef msg_type;
-            msg_type.primitive = omnic::TYPE_CUSTOM;
-            msg_type.custom_name = tdef.name;
-            std::string text;
-            bool decoded = decodeWatchValue(data_buf, msg_type, pit->first, tdef.name, text);
-            g_parse_ctx->loaded_packages[pit->first].structs.pop_back();
-            if (decoded) {
-                OMNI_LOG_INFO("Watch", "%s\n  %s %s", line, tdef.name.c_str(), text.c_str());
-                return;
-            }
-        }
-    }
-    logWatchHex(line, payload + 8, data_len, 64, false);
-}
-
-/* @brief 处理单条诊断事件
- * @param[in,out] state watch 状态
- * @param[in] data 事件数据
- * @note 流程：解析头部 -> 过滤 -> 格式化输出
- */
-static void handleWatchEvent(WatchState& state, const omnibinder::Buffer& data) {
-    DiagEventHeader ev;
-    if (!parseDiagEventHeader(data, ev)) {
-        return;
-    }
-    std::string source_name = watchedSourceName(state.pid);
-    uint64_t latency_us = trackWatchLatency(state, ev);
-    WatchEventInfo info = resolveWatchEvent(state, ev, data);
-    if (state.filter && state.filter[0] && info.name != "?" &&
-        strcmp(info.name.c_str(), state.filter) != 0) {
-        return;
-    }
-
-    char line[512];
-    int off = snprintf(line, sizeof(line), "%s %s.%s() seq=%u len=%u",
-                       diagDirectionLabel(ev.direction), source_name.c_str(),
-                       info.name.c_str(), ev.orig_seq, ev.orig_len);
-    if (ev.direction == omnibinder::DIAG_EVENT_RESPONSE && latency_us > 0) {
-        if (latency_us >= 1000) {
-            appendFormat(line, sizeof(line), off, " (%.2f ms)", latency_us / 1000.0);
-        } else {
-            appendFormat(line, sizeof(line), off, " (%llu us)", (unsigned long long)latency_us);
-        }
-    }
-
-    const size_t diag_hdr = omnibinder::DIAG_EVENT_WIRE_HEADER_SIZE;
-    const bool has_payload = ev.orig_len > 0 && data.size() >= diag_hdr + ev.orig_len;
-    if (g_parse_ctx && has_payload) {
-        const uint8_t* payload = data.data() + diag_hdr;
-        if (isInvokeRequestType(ev.orig_type) && ev.orig_len >= 16 && info.method) {
-            logWatchRequestDetail(info, payload, source_name, line);
-        } else if (ev.orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_INVOKE_REPLY)
-                   && ev.direction == omnibinder::DIAG_EVENT_RESPONSE && ev.orig_len >= 8) {
-            logWatchReplyDetail(ev, info, payload, line);
-        } else if (ev.orig_type == static_cast<uint16_t>(omnibinder::MessageType::MSG_BROADCAST)
-                   && ev.orig_len >= 8) {
-            logWatchBroadcastDetail(ev, payload, line);
-        } else {
-            logWatchHex(line, payload, ev.orig_len, 64, false);
-        }
-    } else if (has_payload) {
-        logWatchHex(line, data.data() + diag_hdr, ev.orig_len, 128, true);
-    }
-}
-
-static int cmdWatch(omnibinder::OmniRuntime& runtime, uint32_t pid, const char* filter) {
-    WatchState state;
-    state.pid = pid;
-    state.filter = filter;
-    buildIdlMethodMap(state.method_map, state.method_storage);
-
-    int ret = runtime.watchPid(pid, [&state](const omnibinder::Buffer& data) {
-        handleWatchEvent(state, data);
-    });
-    if (ret != 0) {
-        fprintf(stderr, "Error: Failed to start watch for pid=%u (status=%d)\n", pid, ret);
-        return 1;
-    }
-    printf("Watching pid=%u. Press Ctrl+C to stop.\n", pid);
-
-    signal(SIGINT, watch_sigint_handler);
-    signal(SIGTERM, watch_sigint_handler);
-    while (g_watch_running) {
-        runtime.pollOnce(100);
-    }
-    runtime.unwatchPid(pid);
-    printf("\nDiagnostic watch stopped.\n");
-    return 0;
+static bool looksLikeNegativeNumber(const char* arg) {
+    return arg && arg[0] == '-' && arg[1] >= '0' && arg[1] <= '9';
 }
 
 int main(int argc, char* argv[]) {
@@ -929,33 +614,101 @@ int main(int argc, char* argv[]) {
     const char* pid_arg = NULL;
     const char* level_arg = NULL;
     const char* diag_filter = NULL;
+    const char* instance_id_arg = NULL;
+    const char* host_id_arg = NULL;
     const char* positional[5] = {NULL, NULL, NULL, NULL, NULL};
     int pos_count = 0;
     
-    // 解析命令行参数
+    // 解析命令行参数；未知选项显式报错，避免被静默吞成位置参数
     for (int i = 1; i < argc; ++i) {
-        if ((strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--host") == 0) && i + 1 < argc) {
+        const char* arg = argv[i];
+        const bool needs_value = strcmp(arg, "-h") == 0 || strcmp(arg, "--host") == 0
+            || strcmp(arg, "-p") == 0 || strcmp(arg, "--port") == 0
+            || strcmp(arg, "--idl") == 0 || strcmp(arg, "--pid") == 0
+            || strcmp(arg, "--level") == 0 || strcmp(arg, "--filter") == 0
+            || strcmp(arg, "--instance-id") == 0 || strcmp(arg, "--host-id") == 0;
+        if (needs_value && i + 1 >= argc) {
+            fprintf(stderr, "Error: option %s requires a value\n", arg);
+            return 1;
+        }
+        if (strcmp(arg, "-h") == 0 || strcmp(arg, "--host") == 0) {
             host = argv[++i];
-        } else if ((strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--port") == 0) && i + 1 < argc) {
-            port = static_cast<uint16_t>(atoi(argv[++i]));
-        } else if (strcmp(argv[i], "--idl") == 0 && i + 1 < argc) {
+        } else if (strcmp(arg, "-p") == 0 || strcmp(arg, "--port") == 0) {
+            uint32_t parsed_port = 0;
+            if (!parseUint32Arg(argv[++i], parsed_port) || parsed_port < 1 || parsed_port > 65535) {
+                fprintf(stderr, "Error: invalid --port value: %s (expected 1..65535)\n", argv[i]);
+                return 1;
+            }
+            port = static_cast<uint16_t>(parsed_port);
+        } else if (strcmp(arg, "--idl") == 0) {
             idl_file = argv[++i];
-        } else if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
+        } else if (strcmp(arg, "--pid") == 0) {
             pid_arg = argv[++i];
-        } else if (strcmp(argv[i], "--level") == 0 && i + 1 < argc) {
+        } else if (strcmp(arg, "--level") == 0) {
             level_arg = argv[++i];
-        } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+        } else if (strcmp(arg, "--filter") == 0) {
             diag_filter = argv[++i];
-        } else if (strcmp(argv[i], "--help") == 0) {
+        } else if (strcmp(arg, "--instance-id") == 0) {
+            instance_id_arg = argv[++i];
+        } else if (strcmp(arg, "--host-id") == 0) {
+            host_id_arg = argv[++i];
+        } else if (strcmp(arg, "--help") == 0) {
             printUsage(argv[0]);
             return 0;
+        } else if (arg[0] == '-' && arg[1] != '\0' && !looksLikeNegativeNumber(arg)) {
+            fprintf(stderr, "Error: Unknown option: %s\n", arg);
+            return 1;
         } else if (pos_count < 5) {
-            positional[pos_count++] = argv[i];
+            positional[pos_count++] = arg;
+        } else {
+            fprintf(stderr, "Error: too many arguments\n");
+            return 1;
         }
     }
     
     if (pos_count == 0) {
         printUsage(argv[0]);
+        return 1;
+    }
+
+    // 分发前先校验命令/子命令/必需参数，避免未知命令或选项被静默吞掉后再去连 ServiceManager
+    const char* command = positional[0];
+    uint32_t watch_pid = 0;
+    if (strcmp(command, "list") == 0 || strcmp(command, "ps") == 0) {
+        if (pos_count > 1) {
+            fprintf(stderr, "Error: '%s' takes no arguments\n", command);
+            return 1;
+        }
+    } else if (strcmp(command, "info") == 0) {
+        if (!positional[1]) {
+            fprintf(stderr, "Error: 'info' requires a service name\n");
+            return 1;
+        }
+    } else if (strcmp(command, "call") == 0) {
+        if (!positional[1] || !positional[2]) {
+            fprintf(stderr, "Error: 'call' requires <service> <method> [params]\n");
+            return 1;
+        }
+    } else if (strcmp(command, "watch") == 0) {
+        if (!pid_arg) {
+            fprintf(stderr, "Error: 'watch' requires --pid <pid>\n");
+            return 1;
+        }
+        if (!idl_file) {
+            fprintf(stderr, "Error: 'watch' requires --idl <file.bidl>\n");
+            return 1;
+        }
+        if (!parseUint32Arg(pid_arg, watch_pid) || watch_pid == 0) {
+            fprintf(stderr, "Error: invalid --pid value: %s\n", pid_arg);
+            return 1;
+        }
+    } else if (strcmp(command, "log") == 0) {
+        if (!positional[1] || strcmp(positional[1], "set") != 0 || !pid_arg || !level_arg) {
+            fprintf(stderr, "Error: usage: log set --pid <pid> --level <F|E|W|I|D|V|O>\n");
+            return 1;
+        }
+    } else {
+        fprintf(stderr, "Unknown command: %s\n", command);
         return 1;
     }
     
@@ -1000,8 +753,16 @@ int main(int argc, char* argv[]) {
         g_idl_package = ast.package_name;
     }
     
-    const char* command = positional[0];
-    
+    omni_cli::InstanceSelector instance_selector;
+    if (host_id_arg) {
+        instance_selector.host_id_set = true;
+        instance_selector.host_id = host_id_arg;
+    }
+    if (instance_id_arg) {
+        instance_selector.instance_id_set = true;
+        instance_selector.instance_id = instance_id_arg;
+    }
+
     omnibinder::OmniRuntime runtime;
     int ret = runtime.init(host, port);
     if (ret != 0) {
@@ -1017,45 +778,13 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(command, "ps") == 0) {
         result = cmdPs(runtime);
     } else if (strcmp(command, "info") == 0) {
-        if (!positional[1]) {
-            fprintf(stderr, "Error: 'info' requires a service name\n");
-            result = 1;
-        } else {
-            result = cmdInfo(runtime, positional[1]);
-        }
+        result = cmdInfo(runtime, positional[1], instance_selector);
     } else if (strcmp(command, "call") == 0) {
-        if (!positional[1] || !positional[2]) {
-            fprintf(stderr, "Error: 'call' requires <service> <method> [params]\n");
-            result = 1;
-        } else {
-            result = cmdCall(runtime, positional[1], positional[2], positional[3]);
-        }
+        result = cmdCall(runtime, positional[1], positional[2], positional[3], instance_selector);
     } else if (strcmp(command, "watch") == 0) {
-        if (!pid_arg) {
-            fprintf(stderr, "Error: 'watch' requires --pid <pid>\n");
-            result = 1;
-        } else if (!g_parse_ctx) {
-            fprintf(stderr, "Error: 'watch' requires --idl <file.bidl>\n");
-            result = 1;
-        } else {
-            uint32_t pid = 0;
-            if (!parseUint32Arg(pid_arg, pid) || pid == 0) {
-                fprintf(stderr, "Error: invalid --pid value: %s\n", pid_arg);
-                result = 1;
-            } else {
-                result = cmdWatch(runtime, pid, diag_filter);
-            }
-        }
+        result = omni_cli::runWatchMonitor(runtime, watch_pid, diag_filter, *g_parse_ctx, g_idl_package);
     } else if (strcmp(command, "log") == 0) {
-        if (!positional[1] || strcmp(positional[1], "set") != 0 || !pid_arg || !level_arg) {
-            fprintf(stderr, "Error: usage: log set --pid <pid> --level <F|E|W|I|D|V|O>\n");
-            result = 1;
-        } else {
-            result = cmdLogSet(runtime, pid_arg, level_arg);
-        }
-    } else {
-        fprintf(stderr, "Unknown command: %s\n", command);
-        result = 1;
+        result = cmdLogSet(runtime, pid_arg, level_arg);
     }
     
     runtime.stop();
