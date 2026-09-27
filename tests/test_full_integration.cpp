@@ -75,13 +75,31 @@ private:
 };
 
 // ============================================================
+// 回归测试服务：接口序列化后不足 32 字节（name="A"、零方法）
+// 用于验证 decodeCountedVector 不再用固定的 /32 上限误判小接口
+// ============================================================
+class ShortIfaceService : public Service {
+public:
+    ShortIfaceService() : Service("ShortIfaceSvc") {
+        iface_.interface_id = fnv1a_32("A");
+        iface_.name = "A";  // 4(id) + 4(len) + 1("A") + 2(method_count) = 11 字节
+    }
+    const char* serviceName() const override { return "ShortIfaceSvc"; }
+    const InterfaceInfo& interfaceInfo() const override { return iface_; }
+protected:
+    int onInvoke(uint32_t, const Buffer&, Buffer&) override { return 0; }
+private:
+    InterfaceInfo iface_;
+};
+
+// ============================================================
 // 服务端线程
 // ============================================================
 struct ServerContext {
     OmniRuntime runtime;
     CalcService service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     uint16_t sm_port;
     ServerContext() : registered(false), should_stop(false), sm_port(0) {}
 };
@@ -159,7 +177,11 @@ std::thread FullIntegrationTest::srv_tid_;
 // ============================================================
 
 TEST_F(FullIntegrationTest, ServiceHasTcpPort) {
-    ASSERT_GT(srv_.service.port(), 0);
+    // 经线程安全 API 获取该服务端口：Service::port() 由 owner 线程在 registerService
+    // 内写入，主测试线程直读会与 owner 线程构成数据竞争（TSan 可捕获）。改用注册表查询
+    ServiceInfo info;
+    ASSERT_EQ(srv_.runtime.lookupService("CalcService", info), 0);
+    ASSERT_GT(info.port, 0);
 }
 
 TEST_F(FullIntegrationTest, ListServices) {
@@ -200,6 +222,32 @@ TEST_F(FullIntegrationTest, QueryInterfaces) {
     EXPECT_TRUE(found_add);
     EXPECT_TRUE(found_echo);
     c.stop();
+}
+
+// ============================================================
+// 回归 #5：queryInterfaces 不得误拒小接口
+//
+// @brief  序列化后不足 32 字节的接口必须能通过 queryInterfaces 取回
+// @details 修复前 decodeCountedVector 用固定的 count > remaining/32 上限校验，
+//          11 字节的接口（count=1）被判为 ERR_DESERIALIZE；修复后按接口单元
+//          最小长度（InterfaceInfo=10）校验，正常返回。
+// ============================================================
+TEST_F(FullIntegrationTest, QuerySmallSerializedInterfaceSucceeds) {
+    OmniRuntime provider;
+    ASSERT_EQ(provider.init("127.0.0.1", SM_PORT), 0);
+
+    ShortIfaceService svc;
+    ASSERT_EQ(provider.registerService(&svc), 0);
+
+    std::vector<InterfaceInfo> ifaces;
+    ASSERT_EQ(provider.queryInterfaces("ShortIfaceSvc", ifaces), 0);
+    ASSERT_EQ(ifaces.size(), 1u);
+    EXPECT_EQ(ifaces[0].name, "A");
+    EXPECT_EQ(ifaces[0].interface_id, fnv1a_32("A"));
+    EXPECT_TRUE(ifaces[0].methods.empty());
+
+    provider.unregisterService(&svc);
+    provider.stop();
 }
 
 TEST_F(FullIntegrationTest, QueryPublishedTopics) {
@@ -328,7 +376,7 @@ TEST_F(FullIntegrationTest, ThreeClientsConcurrentInvoke) {
     struct ClientResult {
         int ret;
         int32_t result;
-        volatile bool done;
+        std::atomic<bool> done;
     };
 
     ClientResult results[3];
@@ -416,8 +464,8 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
     ret = sub.init("127.0.0.1", SM_PORT);
     ASSERT_EQ(ret, 0) << "subscriber init failed";
 
-    volatile bool received = false;
-    volatile int32_t received_value = 0;
+    std::atomic<bool> received(false);
+    std::atomic<int32_t> received_value(0);
 
     ret = sub.subscribeTopic(TOPIC_NAME,
         [&received, &received_value](uint32_t tid, const Buffer& data) {
@@ -466,6 +514,79 @@ TEST_F(FullIntegrationTest, PublishAndSubscribeTopic) {
 }
 
 // ============================================================
+// 回归 #3：同话题多选择器订阅，取消其一不得拆掉另一条仍生效的绑定
+//
+// @brief  服务级 + 实例级订阅同一发布者实例，取消实例级后服务级仍收到广播
+// @details 两种选择器命中同一发布者时共用同一条数据面连接。修复前
+//          clearTopicSubscriptionBindings 在 erase 之后用 find 复查同话题，
+//          恒为 false，于取消实例级订阅时把整条连接回收，服务级订阅静默失效。
+// ============================================================
+TEST_F(FullIntegrationTest, SameTopicMultiSelectorUnsubscribeKeepsServiceLevel) {
+    static const char* TOPIC_NAME = "regression/multi_selector";
+    uint32_t topic_id = fnv1a_32(TOPIC_NAME);
+    ASSERT_EQ(srv_.runtime.publishTopic(TOPIC_NAME), 0);
+
+    OmniRuntime sub;
+    ASSERT_EQ(sub.init("127.0.0.1", SM_PORT), 0);
+
+    ServiceInfo pub_info;
+    ASSERT_EQ(sub.lookupService("CalcService", pub_info), 0);
+
+    const TopicSubscriptionSelector service_selector =
+        TopicSubscriptionSelector::service("CalcService");
+    const TopicSubscriptionSelector instance_selector =
+        TopicSubscriptionSelector::instance("CalcService", pub_info.host_id, pub_info.instance_id);
+
+    std::atomic<int> service_hits(0);
+    std::atomic<int> instance_hits(0);
+
+    ASSERT_EQ(sub.subscribeTopic(service_selector, TOPIC_NAME, 0,
+        [&service_hits](const std::string&, const std::string&, uint32_t, const Buffer&) {
+            service_hits.fetch_add(1, std::memory_order_release);
+        }, nullptr), 0);
+    ASSERT_EQ(sub.subscribeTopic(instance_selector, TOPIC_NAME, 0,
+        [&instance_hits](const std::string&, const std::string&, uint32_t, const Buffer&) {
+            instance_hits.fetch_add(1, std::memory_order_release);
+        }, nullptr), 0);
+
+    // 等待 SM 发布者通知到达并建立数据面直连
+    for (int i = 0; i < 20; ++i) sub.pollOnce(20);
+
+    Buffer first;
+    first.writeInt32(1);
+    ASSERT_EQ(srv_.runtime.broadcast(topic_id, first), 0);
+    for (int i = 0; i < 50
+         && (service_hits.load(std::memory_order_acquire) == 0
+             || instance_hits.load(std::memory_order_acquire) == 0); ++i) {
+        sub.pollOnce(20);
+    }
+    ASSERT_GE(service_hits.load(std::memory_order_acquire), 1)
+        << "service-level subscription must receive before unsubscribe";
+    ASSERT_GE(instance_hits.load(std::memory_order_acquire), 1)
+        << "instance-level subscription must receive before unsubscribe";
+
+    // 仅取消实例级选择器
+    ASSERT_EQ(sub.unsubscribeTopic(instance_selector, TOPIC_NAME), 0);
+    const int service_before = service_hits.load(std::memory_order_acquire);
+    const int instance_before = instance_hits.load(std::memory_order_acquire);
+
+    Buffer second;
+    second.writeInt32(2);
+    ASSERT_EQ(srv_.runtime.broadcast(topic_id, second), 0);
+    for (int i = 0; i < 50
+         && service_hits.load(std::memory_order_acquire) == service_before; ++i) {
+        sub.pollOnce(20);
+    }
+
+    EXPECT_GT(service_hits.load(std::memory_order_acquire), service_before)
+        << "service-level subscription must survive instance-level unsubscribe";
+    EXPECT_EQ(instance_hits.load(std::memory_order_acquire), instance_before)
+        << "instance-level subscription must stop after unsubscribe";
+
+    sub.stop();
+}
+
+// ============================================================
 // 测试组 5：死亡通知
 // ============================================================
 
@@ -491,7 +612,7 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
     ASSERT_TRUE(found) << "EphemeralService not found";
 
     // 订阅死亡通知
-    volatile bool death_received = false;
+    std::atomic<bool> death_received(false);
     int ret = watcher.subscribeServiceDeath("EphemeralService",
         [&death_received](const std::string& name) {
             (void)name;
@@ -530,7 +651,7 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
     }
     ASSERT_TRUE(found) << "EphemeralService2 not found";
 
-    volatile bool death_received = false;
+    std::atomic<bool> death_received(false);
     int ret = watcher.subscribeServiceDeath("EphemeralService2",
         [&death_received](const std::string& name) {
             (void)name;

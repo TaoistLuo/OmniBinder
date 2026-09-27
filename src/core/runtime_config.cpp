@@ -13,6 +13,10 @@ namespace omnibinder {
 // ============================================================
 
 void OmniRuntime::Impl::setHeartbeatInterval(uint32_t ms) {
+    // 0 会让周期定时器失去重排能力（等价于静默关闭心跳），与 setDefaultTimeout 一致地忽略
+    if (ms == 0) {
+        return;
+    }
     callSerialized([this, ms]() {
         heartbeat_interval_ms_ = ms;
         if (loop_ && initialized_ && heartbeat_timer_id_ > 0) {

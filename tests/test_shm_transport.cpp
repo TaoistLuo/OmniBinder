@@ -15,16 +15,6 @@
 #include <vector>
 #include <sstream>
 
-#ifndef _WIN32
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
-
 using namespace omnibinder;
 
 /* @brief RAII 辅助：后台线程在服务端端点上接受 handshake 连接并完成每次不透明句柄交换
@@ -257,8 +247,9 @@ static bool waitForFrame(IMessageConnection* client, uint32_t timeout_ms = 2000)
     return false;
 }
 
-// Linux 专属：直接驱动 AF_UNIX + SCM_RIGHTS 裸线格式（分片头/EOF/畸形帧），
-// 验证握手通道的字节级契约；平台抽象层无法表达"半帧/伪造 fd"等非法线格式，故保留 POSIX 直调。
+// Linux 专属：直接驱动握手通道的裸线格式（分片头/EOF/畸形帧/伪造 fd），验证字节级
+// 契约。裸线原语已由 platform_test.h 抽象（createPipe/sendRawMessageWithFd/waitFdEvents
+// /fdIsNonblocking），测试内不再直调 POSIX。
 #ifndef _WIN32
 namespace {
 
@@ -270,97 +261,42 @@ struct TestHandshakeHeader {
     uint32_t fd_count;
 };
 
-std::string listenerPath(int listener_fd)
-{
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    socklen_t addr_len = sizeof(addr);
-    if (getsockname(listener_fd, reinterpret_cast<struct sockaddr*>(&addr), &addr_len) != 0) {
-        return std::string();
-    }
-    return std::string(addr.sun_path);
-}
-
-int connectRawHandshakePeer(int listener_fd)
-{
-    std::string path = listenerPath(listener_fd);
-    if (path.empty()) return -1;
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    memcpy(addr.sun_path, path.c_str(), path.size() + 1);
-    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-bool sendRawBytes(int fd, const void* data, size_t length)
-{
-    const char* bytes = static_cast<const char*>(data);
-    while (length > 0) {
-        ssize_t sent = send(fd, bytes, length, MSG_NOSIGNAL);
-        if (sent > 0) {
-            bytes += sent;
-            length -= static_cast<size_t>(sent);
-        } else if (sent < 0 && errno == EINTR) {
-            continue;
-        } else {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool sendRawHeaderWithFd(int fd, const TestHandshakeHeader& header, int sent_fd)
-{
-    struct iovec iov;
-    iov.iov_base = const_cast<TestHandshakeHeader*>(&header);
-    iov.iov_len = sizeof(header);
-    char control[CMSG_SPACE(sizeof(int))];
-    memset(control, 0, sizeof(control));
-    struct msghdr msg;
-    memset(&msg, 0, sizeof(msg));
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = control;
-    msg.msg_controllen = sizeof(control);
-    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-    memcpy(CMSG_DATA(cmsg), &sent_fd, sizeof(sent_fd));
-    ssize_t result;
-    do {
-        result = sendmsg(fd, &msg, MSG_NOSIGNAL);
-    } while (result < 0 && errno == EINTR);
-    return result == static_cast<ssize_t>(sizeof(header));
-}
-
 class LinuxHandshakeFixture : public ::testing::Test {
 protected:
     void SetUp() override
     {
         static std::atomic<uint32_t> sequence(0);
         std::ostringstream path;
-        path << "/tmp/omni_handshake_test_" << getpid() << "_" << sequence++ << ".sock";
-        listener_ = platform::handshakeListen(path.str());
+        path << "/tmp/omni_handshake_test_" << platform::getPid() << "_" << sequence++ << ".sock";
+        path_ = path.str();
+        listener_ = platform::handshakeListen(path_);
         ASSERT_NE(listener_, static_cast<platform::handshake_listener*>(NULL));
     }
 
     void TearDown() override
     {
+        closePeer();
         platform::handshakeCloseListener(listener_);
     }
 
-    platform::handshake_channel* acceptRawPeer(int* peer_fd)
+    int peerFd() const
     {
-        *peer_fd = connectRawHandshakePeer(platform::handshakeGetListenerFd(listener_));
-        if (*peer_fd < 0) return NULL;
+        return peer_channel_ ? platform::handshakeGetFd(peer_channel_) : -1;
+    }
+
+    platform::handshake_channel* acceptRawPeer()
+    {
+        peer_channel_ = platform::handshakeConnect(path_);
+        if (!peer_channel_) return NULL;
         return platform::handshakeAccept(listener_);
+    }
+
+    void closePeer()
+    {
+        if (peer_channel_) {
+            platform::handshakeClose(peer_channel_);
+            peer_channel_ = NULL;
+        }
     }
 
     bool receive(platform::handshake_channel* channel)
@@ -373,61 +309,57 @@ protected:
     }
 
     platform::handshake_listener* listener_;
+    platform::handshake_channel* peer_channel_ = NULL;
+    std::string path_;
 };
 
 TEST_F(LinuxHandshakeFixture, NoBytesTimesOutAndAcceptedFdIsNonblocking)
 {
-    int peer_fd = -1;
-    platform::handshake_channel* channel = acceptRawPeer(&peer_fd);
+    platform::handshake_channel* channel = acceptRawPeer();
     ASSERT_NE(channel, static_cast<platform::handshake_channel*>(NULL));
-    int flags = fcntl(platform::handshakeGetFd(channel), F_GETFL, 0);
-    ASSERT_GE(flags, 0);
-    EXPECT_NE(flags & O_NONBLOCK, 0);
+    EXPECT_TRUE(platform::fdIsNonblocking(platform::handshakeGetFd(channel)));
     int64_t started = platform::currentTimeMs();
     EXPECT_FALSE(receive(channel));
     EXPECT_GE(platform::currentTimeMs() - started, 300);
     EXPECT_LT(platform::currentTimeMs() - started, 1000);
-    close(peer_fd);
+    closePeer();
     platform::handshakeClose(channel);
 }
 
 TEST_F(LinuxHandshakeFixture, PartialHeaderUsesOriginalDeadline)
 {
-    int peer_fd = -1;
-    platform::handshake_channel* channel = acceptRawPeer(&peer_fd);
+    platform::handshake_channel* channel = acceptRawPeer();
     ASSERT_NE(channel, static_cast<platform::handshake_channel*>(NULL));
     TestHandshakeHeader header = {TEST_HANDSHAKE_MAGIC, 0, 0};
-    ASSERT_TRUE(sendRawBytes(peer_fd, &header, sizeof(header) - 1));
+    ASSERT_TRUE(platform::socketSendAll(peerFd(), &header, sizeof(header) - 1, 1000));
     platform::sleepMs(300);
     int64_t started = platform::currentTimeMs();
     EXPECT_FALSE(receive(channel));
     EXPECT_LT(platform::currentTimeMs() - started, 400);
-    close(peer_fd);
+    closePeer();
     platform::handshakeClose(channel);
 }
 
 TEST_F(LinuxHandshakeFixture, CompleteHeaderAndPartialPayloadTimesOut)
 {
-    int peer_fd = -1;
-    platform::handshake_channel* channel = acceptRawPeer(&peer_fd);
+    platform::handshake_channel* channel = acceptRawPeer();
     ASSERT_NE(channel, static_cast<platform::handshake_channel*>(NULL));
     TestHandshakeHeader header = {TEST_HANDSHAKE_MAGIC, 8, 0};
-    ASSERT_TRUE(sendRawBytes(peer_fd, &header, sizeof(header)));
+    ASSERT_TRUE(platform::socketSendAll(peerFd(), &header, sizeof(header), 1000));
     const char partial[] = "part";
-    ASSERT_TRUE(sendRawBytes(peer_fd, partial, sizeof(partial) - 1));
+    ASSERT_TRUE(platform::socketSendAll(peerFd(), partial, sizeof(partial) - 1, 1000));
     int64_t started = platform::currentTimeMs();
     EXPECT_FALSE(receive(channel));
     EXPECT_LT(platform::currentTimeMs() - started, 1000);
-    close(peer_fd);
+    closePeer();
     platform::handshakeClose(channel);
 }
 
 TEST_F(LinuxHandshakeFixture, EofFailsImmediately)
 {
-    int peer_fd = -1;
-    platform::handshake_channel* channel = acceptRawPeer(&peer_fd);
+    platform::handshake_channel* channel = acceptRawPeer();
     ASSERT_NE(channel, static_cast<platform::handshake_channel*>(NULL));
-    close(peer_fd);
+    closePeer();
     int64_t started = platform::currentTimeMs();
     EXPECT_FALSE(receive(channel));
     EXPECT_LT(platform::currentTimeMs() - started, 100);
@@ -436,23 +368,19 @@ TEST_F(LinuxHandshakeFixture, EofFailsImmediately)
 
 TEST_F(LinuxHandshakeFixture, MalformedFrameClosesReceivedRights)
 {
-    int peer_fd = -1;
-    platform::handshake_channel* channel = acceptRawPeer(&peer_fd);
+    platform::handshake_channel* channel = acceptRawPeer();
     ASSERT_NE(channel, static_cast<platform::handshake_channel*>(NULL));
     int pipe_fds[2];
-    ASSERT_EQ(pipe(pipe_fds), 0);
+    ASSERT_TRUE(platform::createPipe(pipe_fds));
     TestHandshakeHeader header = {0, 0, 1};
-    ASSERT_TRUE(sendRawHeaderWithFd(peer_fd, header, pipe_fds[0]));
-    close(pipe_fds[0]);
+    ASSERT_TRUE(platform::sendRawMessageWithFd(peerFd(), &header, sizeof(header), pipe_fds[0]));
+    platform::closeSocket(pipe_fds[0]);
     EXPECT_FALSE(receive(channel));
-    struct pollfd pfd;
-    memset(&pfd, 0, sizeof(pfd));
-    pfd.fd = pipe_fds[1];
-    pfd.events = POLLOUT;
-    ASSERT_EQ(poll(&pfd, 1, 100), 1);
-    EXPECT_NE(pfd.revents & POLLERR, 0);
-    close(pipe_fds[1]);
-    close(peer_fd);
+    uint32_t events = platform::waitFdEvents(
+        pipe_fds[1], platform::TEST_FD_WRITABLE | platform::TEST_FD_ERROR, 100);
+    EXPECT_NE(events & platform::TEST_FD_ERROR, 0u);
+    platform::closeSocket(pipe_fds[1]);
+    closePeer();
     platform::handshakeClose(channel);
 }
 
@@ -657,25 +585,35 @@ TEST_F(ShmTransportTest, ServerLoopReadableCallbackConsumesFrames) {
     client.close();
 }
 
-// Linux 专属：依赖 POSIX fork/waitpid 制造客户端进程突然死亡（Windows 无等价能力）
+// Linux 专属：依赖 fork 制造客户端进程突然死亡（Windows 无等价能力）；
+// fork/退出/回收均走 platform_test.h 抽象（spawnChildFunction/exitChildProcess）。
 #ifndef _WIN32
+namespace {
+
+void abruptDeathChildEntry()
+{
+    ShmClientConnection client("abrupt_liveness_test");
+    int result = client.connect("", 0);
+    platform::exitChildProcess(result == 0 ? 0 : 1);
+}
+
+} // namespace
+
 TEST_F(ShmTransportTest, AbruptPeerDeathReclaimsAndAllowsReconnect) {
     ShmServerEndpoint server("abrupt_liveness_test");
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     ShmServerLoop owner(server);
 
-    pid_t child = fork();
-    ASSERT_GE(child, 0);
-    if (child == 0) {
-        ShmClientConnection client("abrupt_liveness_test");
-        int result = client.connect("", 0);
-        _exit(result == 0 ? 0 : 1);
-    }
+    platform::TestProcess child = platform::spawnChildFunction(abruptDeathChildEntry);
+    ASSERT_GT(child, 0);
 
-    int status = 0;
-    ASSERT_EQ(waitpid(child, &status, 0), child);
-    ASSERT_TRUE(WIFEXITED(status));
-    ASSERT_EQ(WEXITSTATUS(status), 0);
+    int exit_code = -1;
+    bool exited = platform::waitChildProcess(child, 10, &exit_code);
+    if (!exited) {
+        platform::terminateChildProcess(child);
+    }
+    ASSERT_TRUE(exited);
+    ASSERT_EQ(exit_code, 0);
     ASSERT_TRUE(owner.waitForCleanupCount(1));
     ASSERT_TRUE(owner.waitForClientCount(0));
     EXPECT_EQ(owner.cleanupCount(), 1u);
@@ -695,8 +633,9 @@ TEST_F(ShmTransportTest, StalledHandshakeOnlyBoundsOwnerLoopOnce) {
     ASSERT_EQ(server.start("", 0, TransportConfig()), 0);
     ShmServerLoop owner(server);
     uint32_t timer_before = owner.timerCount();
-    int peer_fd = connectRawHandshakePeer(server.handshakeListenFd());
-    ASSERT_GE(peer_fd, 0);
+    platform::handshake_channel* peer_channel =
+        platform::handshakeConnect(server.handshakePath());
+    ASSERT_NE(peer_channel, static_cast<platform::handshake_channel*>(NULL));
 
     platform::sleepMs(750);
     EXPECT_GT(owner.timerCount(), timer_before);
@@ -707,7 +646,7 @@ TEST_F(ShmTransportTest, StalledHandshakeOnlyBoundsOwnerLoopOnce) {
     ASSERT_TRUE(owner.waitForClientCount(1));
     healthy_client.close();
     ASSERT_TRUE(owner.waitForClientCount(0));
-    close(peer_fd);
+    platform::handshakeClose(peer_channel);
 }
 
 TEST_F(ShmTransportTest, UnexpectedReadableHandshakeDataUsesLivenessCleanup) {
@@ -717,7 +656,7 @@ TEST_F(ShmTransportTest, UnexpectedReadableHandshakeDataUsesLivenessCleanup) {
     ShmServerLoop owner(server);
 
     std::ostringstream client_name_builder;
-    client_name_builder << "omni_readable_client_" << getpid();
+    client_name_builder << "omni_readable_client_" << platform::getPid();
     std::string client_name = client_name_builder.str();
     const uint32_t capacity = static_cast<uint32_t>(SHM_DEFAULT_REQ_RING_CAPACITY);
     size_t shm_size = calculateShmSize(capacity, capacity);
@@ -726,7 +665,7 @@ TEST_F(ShmTransportTest, UnexpectedReadableHandshakeDataUsesLivenessCleanup) {
     shmInitLayout(addr, shm_size, capacity, capacity);
 
     platform::handshake_channel* client_channel = platform::handshakeConnect(
-        listenerPath(server.handshakeListenFd()));
+        server.handshakePath());
     ASSERT_NE(client_channel, static_cast<platform::handshake_channel*>(NULL));
     ASSERT_TRUE(platform::handshakeSend(client_channel, client_name.data(),
                                         client_name.size(), NULL, 0));
@@ -740,7 +679,7 @@ TEST_F(ShmTransportTest, UnexpectedReadableHandshakeDataUsesLivenessCleanup) {
     ASSERT_TRUE(owner.waitForClientCount(1));
     for (int i = 0; i < received_count; ++i) platform::closeEventFd(received_fds[i]);
 
-    ASSERT_EQ(send(platform::handshakeGetFd(client_channel), "x", 1, MSG_NOSIGNAL), 1);
+    ASSERT_EQ(platform::socketSend(platform::handshakeGetFd(client_channel), "x", 1), 1);
     ASSERT_TRUE(owner.waitForCleanupCount(1));
     ASSERT_TRUE(owner.waitForClientCount(0));
 
@@ -1179,7 +1118,7 @@ TEST_F(ShmTransportTest, ConcurrentDataIntegrity) {
 #ifndef _WIN32
 TEST_F(ShmTransportTest, RepeatedLargeObjectOpenReportsActualDetachLength) {
     std::ostringstream name_builder;
-    name_builder << "omni_map_length_" << getpid();
+    name_builder << "omni_map_length_" << platform::getPid();
     const std::string name = name_builder.str();
     const size_t object_size = calculateShmSize(128 * 1024, 128 * 1024);
     size_t created_size = 0;

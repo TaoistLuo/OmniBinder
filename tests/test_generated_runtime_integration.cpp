@@ -10,7 +10,6 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
-#include <unistd.h>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -104,11 +103,9 @@ static const std::string kCppHarnessTemplate = R"CPP(
 #include <cstring>
 #include <thread>
 #include <chrono>
-#include <signal.h>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 
+#include "platform/platform_test.h"
 #include "tcp_test_server.h"
 
 using namespace omnibinder;
@@ -120,13 +117,12 @@ static const uint32_t METHOD_ECHO = fnv1a_32("echoItem");
 static const uint32_t IFACE_ID = fnv1a_32("demo.ItemService");
 static const uint32_t TOPIC_ID = fnv1a_32("ItemTopic");
 
-static pid_t g_sm_pids[4] = {};
+static omnibinder::platform::TestProcess g_sm_pids[4] = {};
 static int g_sm_count = 0;
 static void cleanupSM() {
     for (int i = 0; i < g_sm_count; ++i) {
         if (g_sm_pids[i] > 0) {
-            kill(g_sm_pids[i], SIGKILL);
-            waitpid(g_sm_pids[i], NULL, 0);
+            omnibinder::platform::terminateChildProcess(g_sm_pids[i]);
         }
     }
 }
@@ -197,32 +193,18 @@ static bool registerFakeService(TcpConnection& transport, uint32_t seq, const st
     return payload.tryReadBool(value) && value;
 }
 
-static pid_t startSM(uint16_t port) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        omnibinder::platform::setParentDeathSignal();
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%u", port);
-        execl("__SERVICE_MANAGER__", "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
-        _exit(1);
-    }
+static omnibinder::platform::TestProcess startSM(uint16_t port) {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", port);
+    omnibinder::platform::TestProcess pid = omnibinder::platform::spawnChildProcess(
+        "__SERVICE_MANAGER__", "--port", port_str, "--log-level", "3");
     if (pid > 0 && g_sm_count < 4) g_sm_pids[g_sm_count++] = pid;
     return pid;
 }
 
-static void stopSM(pid_t pid) {
+static void stopSM(omnibinder::platform::TestProcess pid) {
     if (pid > 0) {
-        kill(pid, SIGTERM);
-        int status = 0;
-        for (int i = 0; i < 20; ++i) {
-            pid_t ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) break;
-            std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        }
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-        }
+        omnibinder::platform::terminateChildProcess(pid);
         for (int i = 0; i < g_sm_count; ++i) {
             if (g_sm_pids[i] == pid) g_sm_pids[i] = 0;
         }
@@ -256,8 +238,8 @@ private:
 struct ServerCtx {
     OmniRuntime runtime;
     ItemServiceImpl service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     ServerCtx() : registered(false), should_stop(false) {}
 };
 
@@ -272,6 +254,15 @@ static void serverThread(void* arg) {
     ctx->runtime.stop();
 }
 
+static uint16_t lookupServicePort(const char* service_name) {
+    OmniRuntime probe;
+    if (probe.init("127.0.0.1", SM_PORT_REQ) != 0) return 0;
+    ServiceInfo info;
+    uint16_t port = (probe.lookupService(service_name, info) == 0) ? info.port : 0;
+    probe.stop();
+    return port;
+}
+
 enum RawReplyMode {
     RAW_REPLY_EMPTY_SUCCESS = 0,
     RAW_REPLY_TRUNCATED_STATUS,
@@ -281,8 +272,8 @@ enum RawReplyMode {
 struct RawReplyCtx {
     TcpTestServer server;
     uint16_t port;
-    volatile bool ready;
-    volatile bool done;
+    std::atomic<bool> ready;
+    std::atomic<bool> done;
     RawReplyMode mode;
     RawReplyCtx() : port(0), ready(false), done(false), mode(RAW_REPLY_EMPTY_SUCCESS) {}
 };
@@ -324,7 +315,7 @@ static void rawReplyThread(void* arg) {
 
 int main() {
     atexit(cleanupSM);
-    pid_t sm_req = startSM(SM_PORT_REQ);
+    omnibinder::platform::TestProcess sm_req = startSM(SM_PORT_REQ);
     assert(sm_req > 0);
     assert(waitSM(SM_PORT_REQ));
 
@@ -335,7 +326,7 @@ int main() {
     assert(server.registered);
 
     TcpConnection rogue;
-    assert(connectTcp(rogue, "127.0.0.1", server.service.port()));
+    assert(connectTcp(rogue, "127.0.0.1", lookupServicePort("ItemService")));
     Message bad_invoke(MessageType::MSG_INVOKE, 9001);
     bad_invoke.payload.writeUint32(IFACE_ID);
     bad_invoke.payload.writeUint32(METHOD_ECHO);
@@ -357,7 +348,7 @@ int main() {
     std::atomic<int> topic_hits(0);
     proxy.SubscribeItemTopic([&topic_hits](const demo::ItemTopic&) { topic_hits++; });
     TcpConnection broadcast_rogue;
-    assert(connectTcp(broadcast_rogue, "127.0.0.1", server.service.port()));
+    assert(connectTcp(broadcast_rogue, "127.0.0.1", lookupServicePort("ItemService")));
     Message bad_broadcast(MessageType::MSG_BROADCAST, 9002);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
     assert(sendMessage(broadcast_rogue, bad_broadcast));
@@ -370,7 +361,7 @@ int main() {
     server_tid.join();
     stopSM(sm_req);
 
-    pid_t sm_reply = startSM(SM_PORT_REPLY);
+    omnibinder::platform::TestProcess sm_reply = startSM(SM_PORT_REPLY);
     assert(sm_reply > 0);
     assert(waitSM(SM_PORT_REPLY));
 
@@ -403,7 +394,7 @@ int main() {
     raw_tid.join();
     stopSM(sm_reply);
 
-    pid_t sm_reply_truncated_status = startSM(SM_PORT_REPLY);
+    omnibinder::platform::TestProcess sm_reply_truncated_status = startSM(SM_PORT_REPLY);
     assert(sm_reply_truncated_status > 0);
     assert(waitSM(SM_PORT_REPLY));
 
@@ -436,7 +427,7 @@ int main() {
     raw_status_tid.join();
     stopSM(sm_reply_truncated_status);
 
-    pid_t sm_reply_truncated_length = startSM(SM_PORT_REPLY);
+    omnibinder::platform::TestProcess sm_reply_truncated_length = startSM(SM_PORT_REPLY);
     assert(sm_reply_truncated_length > 0);
     assert(waitSM(SM_PORT_REPLY));
 
@@ -483,11 +474,9 @@ static const std::string kCHarnessTemplate = R"CPP(
 #include <cstring>
 #include <thread>
 #include <chrono>
-#include <signal.h>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 
+#include "platform/platform_test.h"
 #include "tcp_test_server.h"
 using namespace omnibinder::test;
 
@@ -497,13 +486,12 @@ static const uint32_t METHOD_ECHO = omni_fnv1a_32("echoItem");
 static const uint32_t IFACE_ID = omni_fnv1a_32("demo.ItemService");
 static const uint32_t TOPIC_ID = omni_fnv1a_32("ItemTopic");
 
-static pid_t g_sm_pids[4] = {};
+static omnibinder::platform::TestProcess g_sm_pids[4] = {};
 static int g_sm_count = 0;
 static void cleanupSM() {
     for (int i = 0; i < g_sm_count; ++i) {
         if (g_sm_pids[i] > 0) {
-            kill(g_sm_pids[i], SIGKILL);
-            waitpid(g_sm_pids[i], NULL, 0);
+            omnibinder::platform::terminateChildProcess(g_sm_pids[i]);
         }
     }
 }
@@ -574,32 +562,18 @@ static bool registerFakeService(omnibinder::TcpConnection& transport, uint32_t s
     return payload.tryReadBool(value) && value;
 }
 
-static pid_t startSM(uint16_t port) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        omnibinder::platform::setParentDeathSignal();
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%u", port);
-        execl("__SERVICE_MANAGER__", "service_manager", "--port", port_str, "--log-level", "3", (char*)NULL);
-        _exit(1);
-    }
+static omnibinder::platform::TestProcess startSM(uint16_t port) {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", port);
+    omnibinder::platform::TestProcess pid = omnibinder::platform::spawnChildProcess(
+        "__SERVICE_MANAGER__", "--port", port_str, "--log-level", "3");
     if (pid > 0 && g_sm_count < 4) g_sm_pids[g_sm_count++] = pid;
     return pid;
 }
 
-static void stopSM(pid_t pid) {
+static void stopSM(omnibinder::platform::TestProcess pid) {
     if (pid > 0) {
-        kill(pid, SIGTERM);
-        int status = 0;
-        for (int i = 0; i < 20; ++i) {
-            pid_t ret = waitpid(pid, &status, WNOHANG);
-            if (ret == pid) break;
-            std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        }
-        if (waitpid(pid, &status, WNOHANG) == 0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-        }
+        omnibinder::platform::terminateChildProcess(pid);
         for (int i = 0; i < g_sm_count; ++i) {
             if (g_sm_pids[i] == pid) g_sm_pids[i] = 0;
         }
@@ -624,8 +598,8 @@ struct ServerCtx {
     omni_runtime_t* runtime;
     omni_service_t* service;
     std::atomic<int> echo_count;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     ServerCtx() : runtime(NULL), service(NULL), echo_count(0), registered(false), should_stop(false) {}
 };
 
@@ -664,8 +638,8 @@ enum RawReplyMode {
 struct RawReplyCtx {
     TcpTestServer server;
     uint16_t port;
-    volatile bool ready;
-    volatile bool done;
+    std::atomic<bool> ready;
+    std::atomic<bool> done;
     RawReplyMode mode;
     RawReplyCtx() : port(0), ready(false), done(false), mode(RAW_REPLY_EMPTY_SUCCESS) {}
 };
@@ -711,9 +685,23 @@ static void topicCallback(const demo_ItemTopic* msg, void* user_data) {
     (*hits)++;
 }
 
+static uint16_t lookupCServicePort(const char* service_name) {
+    omni_runtime_t* probe = omni_runtime_create();
+    if (!probe) return 0;
+    if (omni_runtime_init(probe, "127.0.0.1", SM_PORT_REQ) != 0) { omni_runtime_destroy(probe); return 0; }
+    struct CProbe { uint16_t port; } cp = {0};
+    omni_runtime_list_instances(probe, service_name,
+        [](const omni_service_instance_t* info, void* ud) {
+            static_cast<CProbe*>(ud)->port = info->port;
+        }, &cp);
+    omni_runtime_stop(probe);
+    omni_runtime_destroy(probe);
+    return cp.port;
+}
+
 int main() {
     atexit(cleanupSM);
-    pid_t sm_req = startSM(SM_PORT_REQ);
+    omnibinder::platform::TestProcess sm_req = startSM(SM_PORT_REQ);
     assert(sm_req > 0);
     assert(waitSM(SM_PORT_REQ));
 
@@ -724,7 +712,7 @@ int main() {
     assert(server.registered);
 
     omnibinder::TcpConnection rogue;
-    assert(connectTcp(rogue, "127.0.0.1", omni_service_port(server.service)));
+    assert(connectTcp(rogue, "127.0.0.1", lookupCServicePort("ItemService")));
     omnibinder::Message bad_invoke(omnibinder::MessageType::MSG_INVOKE, 9201);
     bad_invoke.payload.writeUint32(IFACE_ID);
     bad_invoke.payload.writeUint32(METHOD_ECHO);
@@ -747,7 +735,7 @@ int main() {
     std::atomic<int> topic_hits(0);
     demo_ItemService_proxy_subscribe_item_topic(&proxy, topicCallback, &topic_hits);
     omnibinder::TcpConnection broadcast_rogue;
-    assert(connectTcp(broadcast_rogue, "127.0.0.1", omni_service_port(server.service)));
+    assert(connectTcp(broadcast_rogue, "127.0.0.1", lookupCServicePort("ItemService")));
     omnibinder::Message bad_broadcast(omnibinder::MessageType::MSG_BROADCAST, 9202);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
     assert(sendMessage(broadcast_rogue, bad_broadcast));
@@ -762,7 +750,7 @@ int main() {
     server_tid.join();
     stopSM(sm_req);
 
-    pid_t sm_reply = startSM(SM_PORT_REPLY);
+    omnibinder::platform::TestProcess sm_reply = startSM(SM_PORT_REPLY);
     assert(sm_reply > 0);
     assert(waitSM(SM_PORT_REPLY));
 
@@ -802,7 +790,7 @@ int main() {
     raw_tid.join();
     stopSM(sm_reply);
 
-    pid_t sm_reply_truncated_status = startSM(SM_PORT_REPLY);
+    omnibinder::platform::TestProcess sm_reply_truncated_status = startSM(SM_PORT_REPLY);
     assert(sm_reply_truncated_status > 0);
     assert(waitSM(SM_PORT_REPLY));
 
@@ -842,7 +830,7 @@ int main() {
     raw_status_tid.join();
     stopSM(sm_reply_truncated_status);
 
-    pid_t sm_reply_truncated_length = startSM(SM_PORT_REPLY);
+    omnibinder::platform::TestProcess sm_reply_truncated_length = startSM(SM_PORT_REPLY);
     assert(sm_reply_truncated_length > 0);
     assert(waitSM(SM_PORT_REPLY));
 

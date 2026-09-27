@@ -114,7 +114,6 @@ int OmniRuntime::Impl::invokeInternal(const std::string& service_name, uint32_t 
                           service_name.c_str(), interface_id, method_id, total_timeout_ms);
             return static_cast<int>(ErrorCode::ERR_TIMEOUT);
         }
-        diag_.stats.connection_errors++;
         diag_.stats.total_rpc_failures++;
         OMNI_LOG_ERROR(LOG_TAG,
                        "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d",
@@ -183,8 +182,11 @@ int OmniRuntime::Impl::invokeOneWayInternal(const std::string& service_name, uin
     }
     emitDiagEvent(DIAG_EVENT_ONE_WAY, msg);
 
-    if (!conn_mgr_->sendMessage(service_name, msg)) {
-        diag_.stats.connection_errors++;
+    uint32_t send_elapsed_ms = 0;
+    // 单向调用使用与回复发送相同的受限预算：既容忍瞬时缓冲满，又不长时间阻塞
+    // owner event-loop（effectiveTimeout(0) 为默认 invoke 超时，可达数秒）
+    if (!conn_mgr_->sendMessageWithinTimeout(service_name, msg, reply_send_timeout_ms_,
+                                             &send_elapsed_ms)) {
         diag_.stats.total_rpc_failures++;
         OMNI_LOG_ERROR(LOG_TAG,
                        "rpc_send_failed service=%s iface=0x%08x method=0x%08x err=%d",

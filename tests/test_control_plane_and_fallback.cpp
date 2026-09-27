@@ -4,12 +4,15 @@
 #include <omnibinder/omnibinder.h>
 #include "transport/shm_ring.h"
 #include "transport/tcp_connection.h"
+#include "core/connection_manager.h"
+#include "core/event_loop.h"
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <mutex>
 #include <signal.h>
 
 using namespace omnibinder;
@@ -213,6 +216,41 @@ static bool publishFakeTopic(TcpConnection& transport, uint32_t seq,
     Message reply;
     if (!recvMessage(transport, reply, 2000)
         || reply.getType() != MessageType::MSG_PUBLISH_TOPIC_REPLY) {
+        return false;
+    }
+    Buffer payload(reply.payload.data(), reply.payload.size());
+    return mustRead<bool>(payload, &Buffer::tryReadBool);
+}
+
+// 与 registerFakeService 同构，但允许指定注册 host/host_id/instance_id，
+// 用于验证 SM 是否以“注册表权威地址”而非发布端自报地址下发发布者端点。
+static bool registerFakeServiceWithHost(TcpConnection& transport, uint32_t seq,
+                                        const std::string& name, const std::string& host,
+                                        uint16_t port, const std::string& host_id,
+                                        const std::string& instance_id = std::string()) {
+    Message msg(MessageType::MSG_REGISTER, seq);
+    ServiceInfo info;
+    info.name = name;
+    info.host = host;
+    info.port = port;
+    info.host_id = host_id;
+    info.instance_id = instance_id;
+    InterfaceInfo iface;
+    iface.interface_id = fnv1a_32(name);
+    iface.name = name;
+    iface.methods.push_back(MethodInfo(METHOD_ADD, "Add"));
+    info.interfaces.push_back(iface);
+    serializeServiceInfo(info, msg.payload);
+
+    if (!sendMessage(transport, msg)) {
+        return false;
+    }
+
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)) {
+        return false;
+    }
+    if (reply.getType() != MessageType::MSG_REGISTER_REPLY) {
         return false;
     }
     Buffer payload(reply.payload.data(), reply.payload.size());
@@ -1317,4 +1355,216 @@ TEST_F(ControlPlaneTest, DiagWatchTracksEachPidPairIndependently) {
 
     target_a.close();
     target_b.close();
+}
+
+// ============================================================
+// Bug #1 回归：TCP 半帧发送失败必须拆除连接（字节流不可复用）
+//
+// @brief  TCP sendAll 失败后 ConnectionManager 必须摘 fd + 移除连接
+// @details TCP 是字节流：sendAll 失败时可能已有半帧进入流中，若仅返回 false 而
+//          保留连接，后续帧会与残帧拼接，对端解析错位。这里用真实 TCP 传输 +
+//          极小接收窗口（不读取）制造确定性的部分写，断言连接被 failConnection
+//          摘除。修复前 sendRawWithinTimeout/sendRawWithDeadline 只返回 false，
+//          连接仍 connected=true 留在表中 → getConnection 非空，本用例失败。
+// ============================================================
+static void expectTcpSendFailureTearsDown(bool use_deadline_api) {
+    TcpTestServer server;
+    ASSERT_TRUE(server.start("127.0.0.1", 0)) << "failed to start test TCP endpoint";
+
+    EventLoop loop;
+    ConnectionManager cm(loop, "local-board");
+    // host_id 不同 → 走 TCP 数据面（同 host_id 才会走 SHM）
+    ServiceConnection* conn = cm.getOrCreateConnectionByKey(
+        "partial-send-svc", "partial-send-svc", "127.0.0.1", server.port(),
+        "remote-board", ShmConfig());
+    ASSERT_NE(conn, nullptr);
+
+    IMessageConnection* peer = server.waitAccept(3000);
+    ASSERT_NE(peer, nullptr);
+    // 接收窗口压到 4KB 且从不读取：任何 >20KB 的发送都必然出现部分写
+    platform::setSocketRecvBufferSize(peer->fd(), 4096);
+
+    // 模拟 runtime 的断开回调链：failConnection → removeConnection
+    cm.setDisconnectCallback([&cm](std::string name) { cm.removeConnection(name); });
+
+    std::vector<uint8_t> payload(4 * 1024 * 1024, 0x5A);
+    bool ok = use_deadline_api
+        ? cm.sendRawWithDeadline(conn, payload.data(), payload.size(), 0)
+        : cm.sendRawWithinTimeout(conn, payload.data(), payload.size(), 0, NULL);
+
+    EXPECT_FALSE(ok) << "oversized send must not report success";
+    EXPECT_EQ(cm.getConnection("partial-send-svc"), nullptr)
+        << "TCP partial send must tear the connection down (no corrupt byte stream)";
+    uint32_t active = 0, tcp = 0, shm = 0;
+    cm.connectionCounts(active, tcp, shm);
+    EXPECT_EQ(active, 0u) << "failed TCP connection must not remain active";
+}
+
+TEST(ConnectionManagerTcpPartialSend, WithinTimeoutFailureRemovesConnection) {
+    expectTcpSendFailureTearsDown(false);
+}
+
+TEST(ConnectionManagerTcpPartialSend, DeadlineFailureRemovesConnection) {
+    expectTcpSendFailureTearsDown(true);
+}
+
+// ============================================================
+// Bug #2 回归：话题发布者端点必须以“注册权威地址”下发
+//
+// 后半段（sm_topic.cpp）：订阅者拿到的 MSG_TOPIC_PUBLISHER_NOTIFY 中
+// ServiceInfo.host/port 必须取自注册表，而非发布端在 MSG_PUBLISH_TOPIC 里
+// 自报的地址（自报通常为 127.0.0.1/0.0.0.0，跨机订阅者据此会连错）。
+// 裸客户端协议级用例，发布端故意自报与注册 host 不同的地址。
+// ============================================================
+TEST_F(ControlPlaneTest, TopicPublisherNotifyCarriesRegisteredHostNotSelfReported) {
+    const std::string reg_host = "10.77.0.9";
+    TcpConnection sub;
+    TcpConnection pub;
+    ASSERT_TRUE(connectTcp(sub, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(connectTcp(pub, "127.0.0.1", SM_PORT));
+
+    // 先订阅（无选择器 → 匹配任意发布者），再注册+发布以触发 notify
+    Message subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 7001);
+    subscribe.payload.writeString("raw/host-notify");
+    ASSERT_TRUE(sendMessage(sub, subscribe));
+    Message sub_reply;
+    ASSERT_TRUE(recvMessage(sub, sub_reply, 2000));
+    ASSERT_EQ(sub_reply.getType(), MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
+
+    ASSERT_TRUE(registerFakeServiceWithHost(pub, 7002, "RawHostSvc", reg_host,
+                                            12500, "raw-host-id", "inst-host"));
+
+    Message publish(MessageType::MSG_PUBLISH_TOPIC, 7003);
+    publish.payload.writeString("raw/host-notify");
+    ServiceInfo self;
+    self.name = "RawHostSvc";
+    self.host = "127.0.0.1";   // 自报地址：不得被转发给订阅者
+    self.port = 1;
+    self.host_id = "raw-host-id";
+    self.instance_id = "inst-host";
+    serializeServiceInfo(self, publish.payload);
+    ASSERT_TRUE(sendMessage(pub, publish));
+    Message pub_reply;
+    ASSERT_TRUE(recvMessage(pub, pub_reply, 2000));
+    ASSERT_EQ(pub_reply.getType(), MessageType::MSG_PUBLISH_TOPIC_REPLY);
+    Buffer pub_payload(pub_reply.payload.data(), pub_reply.payload.size());
+    EXPECT_TRUE(mustRead<bool>(pub_payload, &Buffer::tryReadBool));
+
+    Message notify;
+    ASSERT_TRUE(recvMessage(sub, notify, 2000));
+    ASSERT_EQ(notify.getType(), MessageType::MSG_TOPIC_PUBLISHER_NOTIFY);
+    BufferView nbv(notify.payload.data(), notify.payload.size());
+    std::string notify_topic;
+    ASSERT_TRUE(nbv.tryReadString(notify_topic));
+    EXPECT_EQ(notify_topic, "raw/host-notify");
+
+    ServiceInfo got;
+    ASSERT_TRUE(deserializeServiceInfo(nbv, got));
+    EXPECT_EQ(got.host, reg_host)
+        << "notify must carry the registered host, not the self-reported 127.0.0.1";
+    EXPECT_EQ(got.port, 12500);
+    EXPECT_EQ(got.host_id, "raw-host-id");
+    EXPECT_EQ(got.instance_id, "inst-host");
+
+    sub.close();
+    pub.close();
+}
+
+// ============================================================
+// Bug #2 前半段（runtime_topic.cpp）：真实 runtime 的 MSG_PUBLISH_TOPIC
+// 载荷必须携带 resolveRegisterHost 解析出的地址。
+//
+// SM 侧覆盖会掩盖 runtime 是否自报错误地址，故用最小 fake ServiceManager
+// （只回 hello/register/publish 应答）直接截获发布报文并断言其 ServiceInfo.host。
+// 修复前 runtime 用 listenerAdvertiseHost()（0.0.0.0→127.0.0.1）自报，用例失败。
+// ============================================================
+class HostAdvertiseService : public Service {
+public:
+    HostAdvertiseService() : Service("HostAdvSvc") {
+        iface_.interface_id = fnv1a_32("HostAdvSvc");
+        iface_.name = "HostAdvSvc";
+        iface_.methods.push_back(MethodInfo(fnv1a_32("Ping"), "Ping"));
+    }
+    const char* serviceName() const override { return "HostAdvSvc"; }
+    const InterfaceInfo& interfaceInfo() const override { return iface_; }
+protected:
+    int onInvoke(uint32_t, const Buffer&, Buffer&) override { return 0; }
+private:
+    InterfaceInfo iface_;
+};
+
+TEST(ControlPlaneCompatibilityTest, PublishAdvertisesConfiguredRegisterHost) {
+    const uint16_t port = 19936;
+    const std::string register_host = "10.123.45.67";
+
+    TcpTestServer server;
+    ASSERT_TRUE(server.start("127.0.0.1", port));
+
+    std::mutex mtx;
+    std::string captured_host;
+    bool captured = false;
+
+    std::atomic<bool> stop_fake{false};
+    std::thread fake_sm([&]() {
+        IMessageConnection* c = server.waitAccept();
+        if (!c) {
+            return;
+        }
+        Message m;
+        while (!stop_fake.load() && recvFullMessage(*c, m, 2000)) {
+            if (m.getType() == MessageType::MSG_RUNTIME_HELLO) {
+                Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, m.getSequence());
+                reply.payload.writeBool(true);
+                sendFullMessage(*c, reply, 2000);
+            } else if (m.getType() == MessageType::MSG_REGISTER) {
+                Message reply(MessageType::MSG_REGISTER_REPLY, m.getSequence());
+                reply.payload.writeUint32(1);  // 非零 handle 表示注册成功
+                sendFullMessage(*c, reply, 2000);
+            } else if (m.getType() == MessageType::MSG_PUBLISH_TOPIC) {
+                BufferView pv(m.payload.data(), m.payload.size());
+                std::string topic;
+                ServiceInfo info;
+                pv.tryReadString(topic);
+                deserializeServiceInfo(pv, info);
+                {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    captured_host = info.host;
+                    captured = true;
+                }
+                Message reply(MessageType::MSG_PUBLISH_TOPIC_REPLY, m.getSequence());
+                reply.payload.writeBool(true);
+                sendFullMessage(*c, reply, 2000);
+            } else if (m.getType() == MessageType::MSG_HEARTBEAT) {
+                Message reply(MessageType::MSG_HEARTBEAT_ACK, m.getSequence());
+                sendFullMessage(*c, reply, 2000);
+            }
+        }
+    });
+
+    OmniRuntime rt;
+    rt.setRegisterHost(register_host);
+    ASSERT_EQ(rt.init("127.0.0.1", port), 0);
+    rt.setHeartbeatInterval(60000);
+    HostAdvertiseService svc;
+    ASSERT_EQ(rt.registerService(&svc), 0);
+    // 注册应答后 SM 才持有该服务；publishTopic 要求存在已注册本地服务
+    for (int i = 0; i < 100; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_EQ(rt.publishTopic("host/adv/topic"), 0);
+
+    for (int i = 0; i < 200 && !captured; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(captured) << "fake SM never captured MSG_PUBLISH_TOPIC";
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        EXPECT_EQ(captured_host, register_host)
+            << "publish must advertise resolveRegisterHost, not listener fallback 127.0.0.1";
+    }
+
+    rt.stop();
+    stop_fake.store(true);
+    fake_sm.join();
+    server.close();
 }

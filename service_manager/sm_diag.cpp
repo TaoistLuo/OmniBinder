@@ -157,10 +157,11 @@ void ServiceManagerApp::handleDiagWatchStart(ClientConnection* conn, const Messa
     }
     const int watcher_fd = conn->fd;
     bool sent = forEachPidConn(pid, watcher_fd,
-        [this](int, ClientConnection* target) -> bool {
+        [this](int fd, ClientConnection* target) -> bool {
             Message ctrl(MessageType::MSG_DIAG_WATCH_START, nextSMProactiveSequence());
             sendMessage(target, ctrl);
-            return true;
+            // sendMessage 失败会 closeClient(target)：按 fd 重查，目标已失效视为未成功
+            return clients_.find(fd) != clients_.end();
         });
     // forEachPidConn 内 sendMessage 失败可重入 closeClient(watcher_fd)（约束 1）
     if (clients_.find(watcher_fd) == clients_.end()) {

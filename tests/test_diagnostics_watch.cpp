@@ -4,11 +4,6 @@
 #include "platform/platform_test.h"
 #include <omnibinder/omnibinder.h>
 
-#include <signal.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -50,7 +45,7 @@ private:
     InterfaceInfo iface_;
 };
 
-std::string diagName(pid_t pid) {
+std::string diagName(platform::TestProcess pid) {
     char buf[64];
     snprintf(buf, sizeof(buf), "__diag_pid_%ld", static_cast<long>(pid));
     return std::string(buf);
@@ -131,11 +126,11 @@ bool waitForRuntimePid(OmniRuntime& runtime, uint32_t pid) {
 void runServiceChild() {
     OmniRuntime runtime;
     if (runtime.init("127.0.0.1", SM_PORT) != 0) {
-        _exit(2);
+        platform::exitChildProcess(2);
     }
     DiagLazyService service;
     if (runtime.registerService(&service) != 0) {
-        _exit(3);
+        platform::exitChildProcess(3);
     }
     while (true) {
         runtime.pollOnce(50);
@@ -145,34 +140,28 @@ void runServiceChild() {
 void runIdleClientChild() {
     OmniRuntime runtime;
     if (runtime.init("127.0.0.1", SM_PORT) != 0) {
-        _exit(2);
+        platform::exitChildProcess(2);
     }
     while (true) {
         runtime.pollOnce(50);
     }
 }
 
-// 子进程需要运行进程内函数（非外部二进制），故保留 fork；本 target 由 CMake
-// 的 if(NOT WIN32) 守卫，仅非 Windows 构建。子进程内设 parent-death 信号，
-// 回收走 platform 抽象（SIGTERM→超时→SIGKILL），避免孤儿进程。
-pid_t forkChild(void (*entry)()) {
-    pid_t pid = fork();
-    if (pid == 0) {
-        platform::setParentDeathSignal();
-        entry();
-        _exit(0);
-    }
-    return pid;
+// 子进程需要运行进程内函数（非外部二进制），走 platform::spawnChildFunction 抽象；
+// 子进程内由平台层设置 parent-death 信号，回收走平台抽象（SIGTERM→超时→SIGKILL），
+// 避免孤儿进程。本 target 由 CMake 的 if(NOT WIN32) 守卫，仅非 Windows 构建。
+platform::TestProcess spawnChild(void (*entry)()) {
+    return platform::spawnChildFunction(entry);
 }
 
-void stopChild(pid_t pid) {
-    platform::terminateChildProcess(static_cast<platform::TestProcess>(pid));
+void stopChild(platform::TestProcess pid) {
+    platform::terminateChildProcess(pid);
 }
 
 // ASSERT_* 提前 return 时也必须回收 forked child，避免孤儿进程污染后续用例
 struct ChildGuard {
-    pid_t pid;
-    explicit ChildGuard(pid_t p) : pid(p) {}
+    platform::TestProcess pid;
+    explicit ChildGuard(platform::TestProcess p) : pid(p) {}
     ~ChildGuard() { stopChild(pid); }
 };
 
@@ -194,7 +183,7 @@ protected:
 } // namespace
 
 TEST_F(DiagnosticsWatchTest, ServicePidWatchDoesNotRegisterHiddenService) {
-    pid_t service_pid = forkChild(runServiceChild);
+    platform::TestProcess service_pid = spawnChild(runServiceChild);
     ASSERT_GT(service_pid, 0);
     ChildGuard child_guard(service_pid);
 
@@ -238,7 +227,7 @@ TEST_F(DiagnosticsWatchTest, ServicePidWatchDoesNotRegisterHiddenService) {
 /* @brief SM 重连后 watcher 必须重放 WATCH_START
  * @details 否则 SM 侧 watcher 关系丢失，unwatch 无法停止目标诊断数据发布，监控静默失效。 */
 TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
-    pid_t service_pid = forkChild(runServiceChild);
+    platform::TestProcess service_pid = spawnChild(runServiceChild);
     ASSERT_GT(service_pid, 0);
     ChildGuard child_guard(service_pid);
 
@@ -332,7 +321,7 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
 }
 
 TEST_F(DiagnosticsWatchTest, ClientPidWatchRegistersAndCleansHiddenService) {
-    pid_t client_pid = forkChild(runIdleClientChild);
+    platform::TestProcess client_pid = spawnChild(runIdleClientChild);
     ASSERT_GT(client_pid, 0);
     ChildGuard child_guard(client_pid);
 
@@ -351,4 +340,85 @@ TEST_F(DiagnosticsWatchTest, ClientPidWatchRegistersAndCleansHiddenService) {
 
     watcher.stop();
     stopChild(client_pid);
+}
+
+/* @brief SM 不可达时心跳不得重放 diag watch（restoreDiagWatchers 必须在 guard 之后）
+ * @details 修复前 sendHeartbeat 先调用 restoreDiagWatchers 再判断 sm_state：SM 已断时
+ *          每个待重放 watcher 都会经 requestDiagWatch→sendToSMWithinTimeout 再次进入
+ *          reconnectServiceManagerIfNeeded，产生一次额外的阻塞重连尝试（每 tick 1+K 次而非 1 次）。
+ *          本用例用 RuntimeStats.sm_reconnect_attempts 作为确定性观测量：在 SM 已确认不可达、
+ *          watcher 已置为待重放后重置统计，再捕获心跳定时器单次触发带来的增量。
+ *          修复后单 tick 增量恒为 1；修复前为 1+K（K 为 watcher 数）→ 用例失败。
+ * @note   用“捕获首个非零增量”而非固定时间窗统计，避免对 tick 数/墙钟的时序依赖。 */
+TEST_F(DiagnosticsWatchTest, HeartbeatDoesNotReplayDiagWatchersWhileSmUnreachable) {
+    struct MultiChildGuard {
+        platform::TestProcess pids[8];
+        int count;
+        MultiChildGuard() : count(0) {}
+        ~MultiChildGuard() {
+            for (int i = 0; i < count; ++i) stopChild(pids[i]);
+        }
+        void add(platform::TestProcess p) { pids[count++] = p; }
+    };
+
+    const int kWatchTargets = 3;
+    platform::TestProcess children[kWatchTargets];
+    MultiChildGuard guard;
+    for (int i = 0; i < kWatchTargets; ++i) {
+        children[i] = spawnChild(runIdleClientChild);
+        ASSERT_GT(children[i], 0);
+        guard.add(children[i]);
+    }
+
+    OmniRuntime watcher;
+    ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+
+    for (int i = 0; i < kWatchTargets; ++i) {
+        ASSERT_TRUE(waitForRuntimePid(watcher, static_cast<uint32_t>(children[i])))
+            << "watch target " << i << " did not register";
+    }
+    for (int i = 0; i < kWatchTargets; ++i) {
+        ASSERT_EQ(watcher.watchPid(static_cast<uint32_t>(children[i]),
+                                   [](const Buffer&) {}), 0);
+    }
+
+    // 加快心跳 tick，但远大于测量步长，保证单步内至多一次 tick
+    watcher.setHeartbeatInterval(400);
+
+    stopProcess(sm_pid_);
+    sm_pid_ = 0;
+
+    // 等待 SM 断连被检测、首个失败重连完成（此时 watcher 已全部置为待重放）
+    uint64_t attempts = 0;
+    for (int i = 0; i < 300; ++i) {
+        watcher.pollOnce(20);
+        RuntimeStats stats;
+        ASSERT_EQ(watcher.getStats(stats), 0);
+        if (stats.sm_reconnect_attempts >= 2) {
+            attempts = stats.sm_reconnect_attempts;
+            break;
+        }
+    }
+    ASSERT_GE(attempts, 2u)
+        << "SM-unreachable reconnect attempts must occur for this measurement";
+
+    ASSERT_EQ(watcher.resetStats(), 0);
+
+    // 捕获心跳定时器单次触发造成的 attempts 增量
+    uint64_t delta = 0;
+    for (int i = 0; i < 60; ++i) {
+        watcher.pollOnce(25);
+        RuntimeStats stats;
+        ASSERT_EQ(watcher.getStats(stats), 0);
+        if (stats.sm_reconnect_attempts > 0) {
+            delta = stats.sm_reconnect_attempts;
+            break;
+        }
+    }
+    ASSERT_GE(delta, 1u) << "expected exactly one heartbeat tick in the measurement window";
+    EXPECT_LT(delta, static_cast<uint64_t>(1 + kWatchTargets))
+        << "restoreDiagWatchers must not run while SM is unreachable: one tick performed "
+        << delta << " reconnect attempts (watchers=" << kWatchTargets << ")";
+
+    watcher.stop();
 }

@@ -39,6 +39,7 @@
 #include "platform/platform.h"
 
 #include <string>
+#include <stddef.h>
 #include <stdint.h>
 
 namespace omnibinder {
@@ -100,6 +101,66 @@ bool waitChildProcess(TestProcess proc, int timeout_sec, int* out_exit_code = NU
  * @note   保证测试不残留僵尸/孤儿子进程；对已退出的句柄为安全空操作
  */
 void terminateChildProcess(TestProcess proc);
+
+/*
+ * @brief  在子进程中执行进程内函数入口（测试专用，用于制造进程内行为场景）
+ * @param[in]  entry  子进程入口函数；入口返回后子进程以退出码 0 结束
+ * @return 子进程句柄；<=0 表示失败
+ * @note   Linux 通过 fork 实现，子进程内设置 parent-death 信号；Windows 无 fork
+ *         等价能力，返回 0（依赖该能力的测试在 CMake 层 if(NOT WIN32) 守卫）
+ */
+TestProcess spawnChildFunction(void (*entry)());
+
+/*
+ * @brief  子进程内立即退出（不执行 atexit/全局析构，Linux _exit）
+ * @param[in]  exit_code  退出码
+ * @note   仅应在 spawnChildFunction 的子进程入口内调用
+ */
+void exitChildProcess(int exit_code);
+
+/*
+ * @brief  创建匿名管道（测试专用）
+ * @param[out]  fds  fds[0] 读端、fds[1] 写端
+ * @return true 创建成功
+ * @note   Linux 为 pipe；Windows 无 POSIX fd 语义的匿名管道，返回 false
+ *         （调用方为 Linux 专属测试）
+ */
+bool createPipe(int fds[2]);
+
+/*
+ * @brief  查询 fd 是否处于非阻塞模式（测试专用）
+ * @return true 已设置 O_NONBLOCK
+ * @note   Linux 为 fcntl(F_GETFL)；Windows 无对应查询，返回 false
+ */
+bool fdIsNonblocking(int fd);
+
+// waitFdEvents 的 events 参数与返回值共用的事件位
+enum TestFdEvent {
+    TEST_FD_READABLE = 1,
+    TEST_FD_WRITABLE = 2,
+    TEST_FD_ERROR    = 4
+};
+
+/*
+ * @brief  等待 fd 事件（读/写/错误），屏蔽 poll/select 差异（测试专用）
+ * @param[in]  fd         目标句柄
+ * @param[in]  events     关心的事件位（TestFdEvent 组合）
+ * @param[in]  timeout_ms 最长等待毫秒数
+ * @return 实际发生的事件位；0 表示超时或错误
+ * @note   Linux 为 poll；Windows 返回 0（调用方为 Linux 专属测试）
+ */
+uint32_t waitFdEvents(int fd, uint32_t events, int timeout_ms);
+
+/*
+ * @brief  原样发送"数据 + 一个 SCM_RIGHTS 句柄"（测试专用）
+ * @param[in]  fd         目标裸 fd（如握手通道的 UDS 连接）
+ * @param[in]  data       数据（可携带自定义/畸形头部）
+ * @param[in]  length     数据长度
+ * @param[in]  passed_fd  随消息传递的文件描述符
+ * @return true 完整发送
+ * @note   Linux 为 sendmsg + SCM_RIGHTS；Windows 无 SCM_RIGHTS，返回 false
+ */
+bool sendRawMessageWithFd(int fd, const void* data, size_t length, int passed_fd);
 
 } // namespace platform
 } // namespace omnibinder

@@ -988,6 +988,88 @@ void terminateChildProcess(TestProcess proc) {
     waitpid(static_cast<pid_t>(proc), &status, 0);
 }
 
+// 测试辅助实现，非生产契约
+TestProcess spawnChildFunction(void (*entry)()) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        setParentDeathSignal();
+        if (entry) entry();
+        _exit(0);
+    }
+    return static_cast<TestProcess>(pid);
+}
+
+// 测试辅助实现，非生产契约
+void exitChildProcess(int exit_code) {
+    _exit(exit_code);
+}
+
+// 测试辅助实现，非生产契约
+bool createPipe(int fds[2]) {
+    if (!fds) {
+        return false;
+    }
+    return pipe(fds) == 0;
+}
+
+// 测试辅助实现，非生产契约
+bool fdIsNonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    return flags >= 0 && (flags & O_NONBLOCK) != 0;
+}
+
+// 测试辅助实现，非生产契约
+uint32_t waitFdEvents(int fd, uint32_t events, int timeout_ms) {
+    struct pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd;
+    if (events & TEST_FD_READABLE) pfd.events |= POLLIN;
+    if (events & TEST_FD_WRITABLE) pfd.events |= POLLOUT;
+
+    int ret;
+    do {
+        ret = poll(&pfd, 1, timeout_ms);
+    } while (ret < 0 && errno == EINTR);
+    if (ret <= 0) {
+        return 0;
+    }
+
+    uint32_t result = 0;
+    if (pfd.revents & POLLIN) result |= TEST_FD_READABLE;
+    if (pfd.revents & POLLOUT) result |= TEST_FD_WRITABLE;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) result |= TEST_FD_ERROR;
+    return result;
+}
+
+// 测试辅助实现，非生产契约
+bool sendRawMessageWithFd(int fd, const void* data, size_t length, int passed_fd) {
+    struct iovec iov;
+    iov.iov_base = const_cast<void*>(data);
+    iov.iov_len = length;
+
+    char control[CMSG_SPACE(sizeof(int))];
+    memset(control, 0, sizeof(control));
+
+    struct msghdr msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+
+    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &passed_fd, sizeof(passed_fd));
+
+    ssize_t sent;
+    do {
+        sent = sendmsg(fd, &msg, MSG_NOSIGNAL);
+    } while (sent < 0 && errno == EINTR);
+    return sent == static_cast<ssize_t>(length);
+}
+
 int handshakeGetFd(handshake_channel* ch) {
     return ch ? ch->fd : -1;
 }

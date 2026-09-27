@@ -545,6 +545,12 @@ void OmniRuntime::Impl::removeTopicSubscriptionBindingForSelector(
 void OmniRuntime::Impl::clearTopicSubscriptionBindings(
     const std::string& topic_name,
     const std::function<bool(const std::string&, const ServiceState&)>& should_skip) {
+    // 该话题在本地仍存在的订阅选择器（调用方已先 forgetSubscription，故不含本次取消项）。
+    // 需要它来判断某条发布者连接是否仍被"同一话题的其它选择器"使用：config.topic_subscriptions
+    // 是按话题名去重的列表，erase 之后 find 复查恒为 false，无法承担该判断。
+    const std::vector<TopicRuntime::SubscriptionRecord> records =
+        topic_runtime_.subscriptionRecords();
+
     std::vector<std::string> to_clear;
     for (std::map<std::string, ServiceState>::iterator it = services_.begin();
          it != services_.end(); ++it) {
@@ -553,13 +559,22 @@ void OmniRuntime::Impl::clearTopicSubscriptionBindings(
             continue;
         }
         ReconnectConfig& config = st.reconnect;
+        if (config.has_topic_endpoint) {
+            const ServiceInfo& ep = config.topic_endpoint;
+            bool still_needed = false;
+            for (size_t r = 0; r < records.size(); ++r) {
+                if (records[r].topic_name == topic_name
+                    && records[r].selector.matches(ep.name, ep.host_id, ep.instance_id)) {
+                    still_needed = true;
+                    break;
+                }
+            }
+            if (still_needed) {
+                continue;
+            }
+        }
         std::vector<std::string>& topics = config.topic_subscriptions;
         topics.erase(std::remove(topics.begin(), topics.end(), topic_name), topics.end());
-        // 该连接上仍存在其它选择器订阅同一话题时保留绑定：否则重连重放会丢失
-        // 仍在生效的订阅（普通订阅与选择器订阅共用同一连接键）
-        if (std::find(topics.begin(), topics.end(), topic_name) != topics.end()) {
-            continue;
-        }
         // 仅由话题订阅建立的连接：最后一个订阅移除后已无恢复意图，整体回收
         if (topics.empty() && !config.explicit_connect) {
             if (config.timer_id > 0) {
@@ -616,15 +631,22 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
     ReconnectConfig& config = pub_state.reconnect;
     config.has_topic_endpoint = true;
     config.topic_endpoint = pub_info;
-    if (std::find(config.topic_subscriptions.begin(), config.topic_subscriptions.end(),
-                  topic_name) == config.topic_subscriptions.end()) {
-        config.topic_subscriptions.push_back(topic_name);
-    }
 
     OMNI_LOG_INFO(LOG_TAG, "Topic %s uses %s data path to publisher %s (instance=%s)",
                     topic_name.c_str(), dataChannelKindName(conn->transport->type()),
                     conn_key.c_str(), pub_info.instance_id.c_str());
-    return sendTopicBroadcastSubscription(conn_key, topic_name);
+
+    // 先发送订阅，成功后再登记话题绑定：发送失败会触发 failConnection → onDirectDisconnect，
+    // 它按 config.topic_subscriptions 通知错误；若提前登记，同一订阅会收到两次错误通知，
+    // 且留下一个从未生效的绑定。绑定仅用于重连时重放订阅。
+    if (!sendTopicBroadcastSubscription(conn_key, topic_name)) {
+        return false;
+    }
+    if (std::find(config.topic_subscriptions.begin(), config.topic_subscriptions.end(),
+                  topic_name) == config.topic_subscriptions.end()) {
+        config.topic_subscriptions.push_back(topic_name);
+    }
+    return true;
 }
 
 } // namespace omnibinder

@@ -119,6 +119,10 @@ void ServiceManagerApp::handlePublishTopic(ClientConnection* conn, const Message
         sendBoolReply(conn, MessageType::MSG_PUBLISH_TOPIC_REPLY, msg.header.sequence, false);
         return;
     }
+    // host/port 同样以注册表为准：发布端自报 host 可能是 127.0.0.1/0.0.0.0，
+    // 跨机订阅者据此会连到错误地址（详见 runtime_topic.cpp 发布路径）
+    pub_info.host = owner_entry.info.host;
+    pub_info.port = owner_entry.info.port;
     pub_info.host_id = owner_entry.info.host_id;
     pub_info.instance_id = owner_entry.info.instance_id;
 

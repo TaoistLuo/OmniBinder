@@ -15,12 +15,16 @@ namespace {
 // 反序列化 "count + N 条 T" 回复体。count 来自网络，先按剩余字节数做上限校验，
 // 避免畸形/损坏报文触发超大 reserve；分配失败返回错误码而非崩溃（无异常传播）
 template <typename T, typename ReadFn>
-int decodeCountedVector(BufferView& rbuf, ReadFn read_one, std::vector<T>& out) {
+int decodeCountedVector(BufferView& rbuf, ReadFn read_one, std::vector<T>& out,
+                        size_t min_element_bytes) {
     uint32_t count = 0;
     if (!rbuf.tryReadUint32(count)) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
-    if (count > rbuf.remaining() / 32) {
+    if (min_element_bytes == 0) {
+        min_element_bytes = 1;
+    }
+    if (count > rbuf.remaining() / min_element_bytes) {
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     std::vector<T> decoded;
@@ -407,7 +411,7 @@ int OmniRuntime::Impl::listServicesInternal(std::vector<ServiceInfo>& services) 
     BufferView rbuf(reply.payload.data(), reply.payload.size());
     return decodeCountedVector(rbuf,
         [](BufferView& b, ServiceInfo& v) -> bool { return deserializeServiceInfo(b, v); },
-        services);
+        services, 28);
 }
 
 int OmniRuntime::Impl::listServiceInstancesInternal(const std::string& name,
@@ -436,7 +440,7 @@ int OmniRuntime::Impl::listServiceInstancesInternal(const std::string& name,
 
     return decodeCountedVector(rbuf,
         [](BufferView& b, ServiceInfo& v) -> bool { return deserializeServiceInfo(b, v); },
-        out);
+        out, 28);
 }
 
 int OmniRuntime::Impl::queryInterfaces(const std::string& service_name,
@@ -468,7 +472,7 @@ int OmniRuntime::Impl::queryInterfacesInternal(const std::string& service_name,
     }
     return decodeCountedVector(rbuf,
         [](BufferView& b, InterfaceInfo& v) -> bool { return deserializeInterfaceInfo(b, v); },
-        interfaces);
+        interfaces, 10);
 }
 
 int OmniRuntime::Impl::queryPublishedTopics(const std::string& service_name,

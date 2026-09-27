@@ -160,11 +160,17 @@ bool ConnectionManager::sendRawWithDeadline(ServiceConnection* conn, const uint8
     }
 
     if (conn->transport->sendAll(data, length, timeout_ms, NULL) != 0) {
+        const bool tcp = (conn->transport->type() == TransportType::TCP);
+        const std::string key = conn->connection_key;
         OMNI_LOG_WARN(LOG_TAG,
                       "data_send_incomplete service=%s transport=%s bytes=%zu timeout_ms=%u",
-                      conn->connection_key.c_str(),
-                      dataChannelKindName(conn->transport->type()),
+                      key.c_str(), dataChannelKindName(conn->transport->type()),
                       length, timeout_ms);
+        // TCP 是字节流：失败时半帧可能已写入流中，连接不可再用。走 failConnection
+        // （摘 fd + 断开回调触发重连），否则对端后续帧解析错位。SHM 为整帧原子写，无此问题
+        if (tcp) {
+            failConnection(conn);
+        }
         return false;
     }
     return true;
@@ -189,11 +195,16 @@ bool ConnectionManager::sendRawWithinTimeout(ServiceConnection* conn,
         *elapsed_ms = elapsed;
     }
     if (ret != 0) {
+        const bool tcp = (conn->transport->type() == TransportType::TCP);
+        const std::string key = conn->connection_key;
         OMNI_LOG_WARN(LOG_TAG,
                       "data_send_incomplete service=%s transport=%s bytes=%zu timeout_ms=%u elapsed_ms=%u",
-                      conn->connection_key.c_str(),
-                      dataChannelKindName(conn->transport->type()),
+                      key.c_str(), dataChannelKindName(conn->transport->type()),
                       length, timeout_ms, elapsed);
+        // 同 sendRawWithDeadline：TCP 半帧发送失败即连接作废，摘 fd 并触发重连
+        if (tcp) {
+            failConnection(conn);
+        }
         return false;
     }
     return true;

@@ -678,15 +678,16 @@ int OmniRuntime::Impl::reconnectServiceManagerIfNeeded() {
 void OmniRuntime::Impl::sendHeartbeat() {
     // 先检查 SM 是否需要重连（客户端也可能没有注册服务，但仍需保持 SM 连接）
     const int sm_state = reconnectServiceManagerIfNeeded();
-    // 周期兜底：SM 重连时目标 pid 可能尚未重新 hello，watch 重放会先失败
-    restoreDiagWatchers();
 
-    // SM 仍不可达时直接返回：每个名字的 sendToSMWithinTimeout 都会再次进入
-    // reconnectServiceManagerIfNeeded 并阻塞一次连接尝试（每 tick N+1 次）。
+    // SM 仍不可达时直接返回：restoreDiagWatchers 与每个名字的 sendToSMWithinTimeout
+    // 都会再次进入 reconnectServiceManagerIfNeeded 并阻塞一次连接尝试（每 tick N+1 次）。
     // 已在上方统一尝试过一次，本 tick 不再重复
     if (sm_state != 0) {
         return;
     }
+
+    // 周期兜底：SM 重连时目标 pid 可能尚未重新 hello，watch 重放会先失败
+    restoreDiagWatchers();
 
     // 先拷贝 key 再遍历：reconnectServiceManagerIfNeeded 可能触发 restore 流程，
     // 其内部 waitForReply 期间用户回调可修改 local_services_（约束 2）

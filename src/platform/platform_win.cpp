@@ -1036,6 +1036,52 @@ void terminateChildProcess(TestProcess proc) {
     CloseHandle(h);
 }
 
+// 测试辅助实现，非生产契约
+// Windows 无 fork 等价能力（无法在子进程中执行进程内函数），依赖该能力的测试
+// 在 CMake 层 if(NOT WIN32) 守卫，不进入 Windows 构建。
+TestProcess spawnChildFunction(void (*entry)()) {
+    (void)entry;
+    return 0;
+}
+
+// 测试辅助实现，非生产契约
+void exitChildProcess(int exit_code) {
+    ExitProcess(static_cast<UINT>(exit_code));
+}
+
+// 测试辅助实现，非生产契约
+// Windows 无 POSIX fd 语义的匿名管道，调用方为 Linux 专属测试，此处为文档化桩。
+bool createPipe(int fds[2]) {
+    (void)fds;
+    return false;
+}
+
+// 测试辅助实现，非生产契约
+// Windows 无 O_NONBLOCK 查询接口，调用方为 Linux 专属测试，此处为文档化桩。
+bool fdIsNonblocking(int fd) {
+    (void)fd;
+    return false;
+}
+
+// 测试辅助实现，非生产契约
+// 调用方为 Linux 专属测试（poll 语义），此处为文档化桩。
+uint32_t waitFdEvents(int fd, uint32_t events, int timeout_ms) {
+    (void)fd;
+    (void)events;
+    (void)timeout_ms;
+    return 0;
+}
+
+// 测试辅助实现，非生产契约
+// Windows 无 SCM_RIGHTS 句柄随消息传递，调用方为 Linux 专属测试，此处为文档化桩。
+bool sendRawMessageWithFd(int fd, const void* data, size_t length, int passed_fd) {
+    (void)fd;
+    (void)data;
+    (void)length;
+    (void)passed_fd;
+    return false;
+}
+
 
 int handshakeGetFd(handshake_channel* ch) { return ch ? static_cast<int>(ch->fd) : -1; }
 int handshakeGetListenerFd(handshake_listener* l) { return l ? static_cast<int>(l->fd) : -1; }

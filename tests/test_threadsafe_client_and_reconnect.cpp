@@ -38,8 +38,8 @@ private:
 struct TsClientServerCtx {
     OmniRuntime runtime;
     ThreadSafeService service;
-    volatile bool registered;
-    volatile bool should_stop;
+    std::atomic<bool> registered;
+    std::atomic<bool> should_stop;
     TsClientServerCtx() : registered(false), should_stop(false) {}
 };
 
@@ -47,7 +47,7 @@ struct ClientThreadArg {
     OmniRuntime* runtime;
     int thread_index;
     int iterations;
-    volatile bool done;
+    std::atomic<bool> done;
     int failures;
     ClientThreadArg() : runtime(NULL), thread_index(0), iterations(0), done(false), failures(0) {}
 };

@@ -165,7 +165,10 @@ int OmniRuntime::Impl::publishTopicInternal(const std::string& topic_name, uint3
     if (!local_services_.empty()) {
         LocalServiceEntry* entry = local_services_.begin()->second;
         pub_info.name = local_services_.begin()->first;
-        pub_info.host = listenerAdvertiseHost();
+        // 与注册路径一致地解析对外通告地址：跨机场景 setRegisterHost 设置的真实地址
+        // 必须用于话题发布者信息，否则订阅者拿到 127.0.0.1（listenerAdvertiseHost 的
+        // 回退值）而连到本机（约束：控制面地址一致性）
+        pub_info.host = resolveRegisterHost(entry->service, listenerAdvertiseHost());
         pub_info.port = entry->port;
         if (entry->service) {
             pub_info.instance_id = entry->service->instanceId();
@@ -324,9 +327,11 @@ int OmniRuntime::Impl::subscribeTopic(const std::string& topic_name, uint32_t ex
     return callSerialized([this, &topic_name, expected_idl_hash, &on_message, &on_error]() -> int {
         // 普通订阅 = 默认空选择器（匹配任意发布者）；回调适配为携带来源身份的签名
         const TopicSubscriptionSelector selector;
+        // 按值捕获 on_message：该回调会被长期存入 topic_runtime_，
+        // 按引用捕获会在 subscribeTopic 返回后悬垂（约束 1）
         const TopicSourceCallback source_cb =
-            [&on_message](const std::string&, const std::string&, uint32_t topic_id,
-                          const Buffer& data) {
+            [on_message](const std::string&, const std::string&, uint32_t topic_id,
+                         const Buffer& data) {
                 if (on_message) {
                     on_message(topic_id, data);
                 }

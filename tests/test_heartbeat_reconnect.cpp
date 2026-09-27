@@ -423,6 +423,48 @@ TEST_F(HeartbeatLifecycleTest, StopHeartbeatKeepsSmLiveness) {
 }
 
 // ============================================================
+// 回归 #16 — SetHeartbeatIntervalZeroIsIgnored
+//
+// @brief   setHeartbeatInterval(0) 必须被忽略，不得静默关闭控制面心跳
+// @details 服务以 100ms 间隔注册后调用 setHeartbeatInterval(0)。修复前该值
+//          被写入并按 repeat 定时器重排为 0，周期定时器触发一次即不再重排，
+//          心跳停止；SM 在 heartbeat-timeout(500ms) 后摘除服务并关闭控制连接，
+//          runtime 进入重连（sm_reconnect_attempts > 0）。修复后 0 被忽略，
+//          间隔保持 100ms，服务持续在册且无重连。
+// ============================================================
+TEST_F(HeartbeatLifecycleTest, SetHeartbeatIntervalZeroIsIgnored) {
+    OmniRuntime rt;
+    ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
+    rt.setHeartbeatInterval(100);
+
+    HrtbtTestService svc(SERVICE_NAME);
+    ASSERT_EQ(rt.registerService(&svc), 0);
+    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
+
+    rt.setHeartbeatInterval(0);
+
+    bool ever_missing = false;
+    for (int i = 0; i < 40; ++i) {
+        if (smServiceState(rt, SERVICE_NAME) != 1) {
+            ever_missing = true;
+        }
+        rt.pollOnce(100);
+    }
+
+    EXPECT_FALSE(ever_missing)
+        << "service must stay registered while setHeartbeatInterval(0) is ignored";
+    EXPECT_EQ(smServiceState(rt, SERVICE_NAME), 1);
+
+    RuntimeStats stats;
+    ASSERT_EQ(rt.getStats(stats), 0);
+    EXPECT_EQ(stats.sm_reconnect_attempts, 0u)
+        << "an SM reconnect implies heartbeats stopped because the interval was zeroed";
+
+    rt.unregisterService(&svc);
+    rt.stop();
+}
+
+// ============================================================
 // Test 9 — PureClientConnectionNotClosedByPeerTimeout
 //
 // @brief   纯客户端连接不被对端超时关闭

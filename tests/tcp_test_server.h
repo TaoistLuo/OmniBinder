@@ -8,6 +8,7 @@
 #include "platform/platform_test.h"
 #include <string>
 #include <vector>
+#include <atomic>
 #include <stdint.h>
 
 namespace omnibinder {
@@ -30,9 +31,10 @@ public:
         if (!server_) {
             return false;
         }
+        // accept 回调在驱动线程执行，主线程经 waitAccept()/close() 读取，需原子访问
         server_->setAcceptCallback([this](int client_id, IMessageConnection* client) {
-            accepted_id_ = client_id;
-            accepted_ = client;
+            accepted_id_.store(client_id, std::memory_order_release);
+            accepted_.store(client, std::memory_order_release);
         });
         int ret = server_->start(host, port, TransportConfig());
         if (ret < 0) {
@@ -55,27 +57,30 @@ public:
     uint16_t port() const { return port_; }
 
     IMessageConnection* waitAccept(uint32_t timeout_ms = 5000) {
-        for (uint32_t elapsed = 0; elapsed < timeout_ms && !accepted_; elapsed += 5) {
+        for (uint32_t elapsed = 0; elapsed < timeout_ms && !accepted_.load(std::memory_order_acquire); elapsed += 5) {
             if (listen_fd_ >= 0 && platform::waitFdReadable(listen_fd_, 5)) {
                 server_->onPollEvent(listen_fd_, EventLoop::EVENT_READ);
             }
         }
-        return accepted_;
+        return accepted_.load(std::memory_order_acquire);
     }
 
-    IMessageConnection* accepted() const { return accepted_; }
+    IMessageConnection* accepted() const { return accepted_.load(std::memory_order_acquire); }
 
     void releaseAccepted() {
-        if (server_ && accepted_id_ >= 0) {
-            server_->removeClient(accepted_id_);
+        if (server_) {
+            const int id = accepted_id_.load(std::memory_order_acquire);
+            if (id >= 0) {
+                server_->removeClient(id);
+            }
         }
-        accepted_ = NULL;
-        accepted_id_ = -1;
+        accepted_.store(NULL, std::memory_order_release);
+        accepted_id_.store(-1, std::memory_order_release);
     }
 
     void close() {
-        accepted_ = NULL;
-        accepted_id_ = -1;
+        accepted_.store(NULL, std::memory_order_release);
+        accepted_id_.store(-1, std::memory_order_release);
         if (server_) {
             server_->close();
             delete server_;
@@ -91,8 +96,8 @@ private:
     IServerEndpoint* server_;
     int listen_fd_;
     uint16_t port_;
-    IMessageConnection* accepted_;
-    int accepted_id_;
+    std::atomic<IMessageConnection*> accepted_;
+    std::atomic<int> accepted_id_;
 };
 
 } // namespace test
