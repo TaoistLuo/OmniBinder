@@ -1380,11 +1380,8 @@ void        omni_service_set_instance_id(omni_service_t* svc, const char* instan
 ```c
 uint32_t omni_fnv1a_32(const char* str);
 
-void  omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
 void* omni_malloc(size_t size);
 void  omni_free(void* ptr);
-void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size);
-void* omni_realloc(void* ptr, size_t new_size);
 ```
 
 ### 6.6 使用示例

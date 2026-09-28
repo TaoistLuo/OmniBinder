@@ -497,7 +497,8 @@ struct DelayedReadServiceCtx {
     uint16_t port;
     std::atomic<bool> ready;
     std::atomic<bool> done;
-    DelayedReadServiceCtx() : port(0), ready(false), done(false) {}
+    std::atomic<bool> should_stop;
+    DelayedReadServiceCtx() : port(0), ready(false), done(false), should_stop(false) {}
 };
 
 static void delayedReadServiceThread(void* arg) {
@@ -508,6 +509,8 @@ static void delayedReadServiceThread(void* arg) {
     ctx->port = ctx->server.port();
     ctx->ready.store(true);
 
+    // close() 由主线程在 join 之后执行（见 ScopedThreadJoiner 用法）：本线程不得
+    // 自行 close server，否则会与仍在 waitAccept() 的其它线程竞争 server_ 生命周期
     IMessageConnection* accepted = ctx->server.waitAccept();
     if (!accepted) {
         ctx->done.store(true);
@@ -520,7 +523,7 @@ static void delayedReadServiceThread(void* arg) {
     Buffer input;
     std::vector<uint8_t> buf(65536);
     bool replied = false;
-    for (int i = 0; i < 400 && !replied; ++i) {
+    for (int i = 0; i < 400 && !replied && !ctx->should_stop.load(); ++i) {
         int ret = accepted->recv(buf.data(), buf.size());
         if (ret > 0) {
             input.writeRaw(buf.data(), static_cast<size_t>(ret));
@@ -538,7 +541,6 @@ static void delayedReadServiceThread(void* arg) {
                         while (sent < out.size()) {
                             int n = accepted->send(out.data() + sent, out.size() - sent);
                             if (n < 0) {
-                                ctx->server.close();
                                 ctx->done.store(true);
                                 return;
                             }
@@ -558,7 +560,6 @@ static void delayedReadServiceThread(void* arg) {
         }
     }
 
-    ctx->server.close();
     ctx->done.store(true);
 }
 
@@ -1214,7 +1215,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     DelayedReadServiceCtx delayed_ctx;
     std::thread delayed_tid;
     delayed_tid = std::thread(delayedReadServiceThread, &delayed_ctx);
-    ScopedThreadJoiner delayed_guard(delayed_tid, [&delayed_ctx]() { delayed_ctx.server.close(); });
+    ScopedThreadJoiner delayed_guard(delayed_tid, [&delayed_ctx]() { delayed_ctx.should_stop.store(true); });
     for (int i = 0; i < 50 && !delayed_ctx.ready.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     ASSERT_TRUE(delayed_ctx.ready.load());
 
@@ -1235,6 +1236,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     probe.stop();
     registrant.close();
     delayed_tid.join();
+    delayed_ctx.server.close();
 }
 
 TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {

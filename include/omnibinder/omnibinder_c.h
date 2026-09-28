@@ -73,9 +73,6 @@ typedef struct omni_runtime_t  omni_runtime_t;
 typedef struct omni_buffer_t  omni_buffer_t;
 typedef struct omni_service_t omni_service_t;
 
-typedef void* (*OmniMallocFn)(size_t size);
-typedef void  (*OmniFreeFn)(void* ptr);
-
 typedef struct omni_runtime_stats_t {
     uint64_t total_rpc_calls;
     uint64_t total_rpc_success;
@@ -410,12 +407,10 @@ int  omni_runtime_reset_stats(omni_runtime_t* client);
 /* @brief FNV-1a 32位哈希（与 C++ 侧 omnibinder::fnv1a_32 一致） */
 uint32_t omni_fnv1a_32(const char* str);
 
-/* @brief 自定义内存分配器包装（走 omniSetAllocator 注册的分配器，否则回退系统 malloc/free） */
-void  omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
+/* @brief 自定义内存分配器包装（底层为 ::operator new/delete 的薄封装）
+ * @note 想让库内分配使用自定义堆，请在程序中重载全局 operator new/delete（C 与 C++ 一次覆盖） */
 void* omni_malloc(size_t size);
 void  omni_free(void* ptr);
-void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size);
-void* omni_realloc(void* ptr, size_t new_size);
 
 #ifdef __cplusplus
 }

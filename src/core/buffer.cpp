@@ -3,9 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-
-extern "C" void* omni_malloc(size_t size);
-extern "C" void  omni_free(void* ptr);
+#include <new>
 
 namespace omnibinder {
 
@@ -44,7 +42,7 @@ Buffer::Buffer(const uint8_t* data, size_t length) noexcept
 
 Buffer::~Buffer() noexcept {
     if (data_) {
-        omni_free(data_);
+        ::operator delete(data_);
         data_ = NULL;
     }
 }
@@ -66,7 +64,7 @@ Buffer::Buffer(Buffer&& other) noexcept
 Buffer& Buffer::operator=(Buffer&& other) noexcept {
     if (this != &other) {
         if (data_) {
-            omni_free(data_);
+            ::operator delete(data_);
         }
         data_ = other.data_;
         capacity_ = other.capacity_;
@@ -108,7 +106,7 @@ void Buffer::grow(size_t min_capacity) noexcept {
         }
         new_capacity *= 2;
     }
-    uint8_t* new_data = static_cast<uint8_t*>(omni_malloc(new_capacity));
+    uint8_t* new_data = static_cast<uint8_t*>(::operator new(new_capacity, std::nothrow));
     if (!new_data) {
         write_failed_ = true;
         return;
@@ -116,7 +114,7 @@ void Buffer::grow(size_t min_capacity) noexcept {
     if (data_ && write_pos_ > 0) {
         std::memcpy(new_data, data_, write_pos_);
     }
-    omni_free(data_);
+    ::operator delete(data_);
     data_ = new_data;
     capacity_ = new_capacity;
 }

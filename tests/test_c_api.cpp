@@ -18,14 +18,6 @@ static const uint32_t HASH_ECHO = 0xCAFE0001u;
 static const uint32_t HASH_GET_NAME = 0xCAFE0002u;
 static const uint32_t HASH_ECHO_BYTES = 0xCAFE0003u;
 
-static void* cApiTestMalloc(size_t size) {
-    return std::malloc(size);
-}
-
-static void cApiTestFree(void* ptr) {
-    std::free(ptr);
-}
-
 static int cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
                           omni_buffer_t* response, void* user_data) {
     (void)user_data;
@@ -34,14 +26,14 @@ static int cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
         char* payload = omni_buffer_read_string(const_cast<omni_buffer_t*>(request), &len);
         if (payload == NULL) return -501;
         omni_buffer_write_string(response, payload, len);
-        free(payload);
+        omni_free(payload);
     } else if (method_id == METHOD_GET_NAME) {
         omni_buffer_write_string(response, "c-api-service", 13);
     } else if (method_id == METHOD_ECHO_BYTES) {
         uint32_t bytes_len = 0;
         uint8_t* bytes = omni_buffer_read_bytes(const_cast<omni_buffer_t*>(request), &bytes_len);
         omni_buffer_write_bytes(response, bytes, bytes_len);
-        free(bytes);
+        omni_free(bytes);
     }
     return 0;
 }
@@ -121,7 +113,7 @@ TEST_F(CApiTest, BufferRoundtripAndHash) {
     ASSERT_NE(text, nullptr);
     EXPECT_EQ(len, 11u);
     EXPECT_STREQ(text, "hello-c-api");
-    free(text);
+    omni_free(text);
 
     omni_buffer_t* empty = omni_buffer_create();
     ASSERT_NE(empty, nullptr);
@@ -132,7 +124,7 @@ TEST_F(CApiTest, BufferRoundtripAndHash) {
     ASSERT_NE(empty_text, nullptr);
     EXPECT_EQ(empty_len, 0u);
     EXPECT_STREQ(empty_text, "");
-    free(empty_text);
+    omni_free(empty_text);
     omni_buffer_destroy(empty);
 
     EXPECT_EQ(omni_fnv1a_32("Echo"), 0x3b7d6ba4u);
@@ -174,28 +166,19 @@ TEST_F(CApiTest, BufferUnderflowReadsFailSafe) {
     omni_buffer_destroy(marked);
 }
 
-TEST_F(CApiTest, CustomAllocatorReallocIsSafe) {
-    omniSetAllocator(cApiTestMalloc, cApiTestFree);
-
-    char* data = static_cast<char*>(omni_malloc(4));
+TEST_F(CApiTest, AllocEntryPointsWork) {
+    char* data = static_cast<char*>(omni_malloc(8));
     ASSERT_NE(data, nullptr);
     data[0] = 'o';
-    data[1] = 'm';
-    data[2] = 'n';
-    data[3] = 'i';
+    data[7] = 'i';
+    EXPECT_EQ(data[0], 'o');
+    EXPECT_EQ(data[7], 'i');
+    omni_free(data);
+    omni_free(nullptr);   // NULL 为空操作
 
-    char* grown = static_cast<char*>(omni_realloc_sized(data, 4, 8));
-    ASSERT_NE(grown, nullptr);
-    EXPECT_EQ(grown[0], 'o');
-    EXPECT_EQ(grown[1], 'm');
-    EXPECT_EQ(grown[2], 'n');
-    EXPECT_EQ(grown[3], 'i');
-    omni_free(grown);
-
-    char* unsafe = static_cast<char*>(omni_malloc(4));
-    ASSERT_NE(unsafe, nullptr);
-    EXPECT_EQ(omni_realloc(unsafe, 8), nullptr);
-    omni_free(unsafe);
+    char* read_back = static_cast<char*>(omni_malloc(4));
+    ASSERT_NE(read_back, nullptr);
+    omni_free(read_back);
 }
 
 TEST_F(CApiTest, RegisterInvokeAndStats) {
@@ -217,7 +200,7 @@ TEST_F(CApiTest, RegisterInvokeAndStats) {
     ASSERT_NE(echoed, nullptr);
     EXPECT_EQ(len, 17u);
     EXPECT_STREQ(echoed, "rpc-through-c-api");
-    free(echoed);
+    omni_free(echoed);
 
     omni_runtime_stats_t stats;
     ASSERT_EQ(omni_runtime_get_stats(runtime, &stats), 0);
@@ -252,7 +235,7 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     ASSERT_NE(name, nullptr);
     EXPECT_EQ(name_len, 13u);
     EXPECT_STREQ(name, "c-api-service");
-    free(name);
+    omni_free(name);
 
     omni_buffer_reset(req);
     omni_buffer_reset(resp);
@@ -264,7 +247,7 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     ASSERT_NE(out, nullptr);
     EXPECT_EQ(out_len, sizeof(payload));
     EXPECT_EQ(std::memcmp(out, payload, sizeof(payload)), 0);
-    free(out);
+    omni_free(out);
 
     omni_buffer_destroy(req);
     omni_buffer_destroy(resp);

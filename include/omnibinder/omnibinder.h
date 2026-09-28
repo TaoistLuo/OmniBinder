@@ -63,46 +63,20 @@ inline void versionNumbers(int& major, int& minor, int& patch) {
 } // namespace omnibinder
 
 // ============================================================
-// 自定义内存分配器
+// 内存分配入口（C 侧）
 // ============================================================
 
-typedef void* (*OmniMallocFn)(size_t size);
-typedef void  (*OmniFreeFn)(void* ptr);
-
-/* @brief 注册自定义内存分配器
- * @param[in] malloc_fn 自定义 malloc（如 pvPortMalloc / tlsf_malloc）
- * @param[in] free_fn   自定义 free（如 vPortFree / tlsf_free）
- * @note 一次性锁定：一旦设置非 NULL 钩子，后续调用被忽略。
- *       必须在任何 OmniRuntime API 调用之前设置（包括 init/registerService）。
- *       不调用 → 透明回退到系统 malloc/free（开发机零配置）。
- *       设置后永不重置 → 从根本上杜绝分配/释放走不同堆导致的堆损坏。
- *       用法:
- *       int main() {
- *           omniSetAllocator(pvPortMalloc, vPortFree);  // 必须最先调用
- *           OmniRuntime runtime;
- *           runtime.init(...);
- *           ...
- *       } */
-extern "C" void omniSetAllocator(OmniMallocFn malloc_fn, OmniFreeFn free_fn);
-
-/* @brief 从注册的自定义 allocator（或系统 malloc）分配内存
+/* @brief 分配内存（C 代码用；C++ 请直接用 new）
  * @param[in] size 请求字节数
- * @return 分配到的内存指针；失败返回 NULL */
+ * @return 分配到的内存指针；失败返回 NULL
+ * @note 本函数是 ::operator new 的薄封装。库内所有堆分配（C++ 的 new、C 生成代码的
+ *       omni_malloc）最终都走同一个全局 operator new。**想让库内分配使用自定义堆，
+ *       请在你的程序中重载全局 operator new/delete 即可**——C 与 C++ 一次覆盖。 */
 extern "C" void* omni_malloc(size_t size);
-/* @brief 释放由 omni_malloc / omni_realloc* 分配的内存
- * @param[in] ptr 待释放指针（可为 NULL，此时为空操作） */
+
+/* @brief 释放由 omni_malloc 分配的内存
+ * @param[in] ptr 待释放指针（可为 NULL，此时为空操作）
+ * @note 本函数是 ::operator delete 的薄封装。 */
 extern "C" void  omni_free(void* ptr);
-/* @brief 安全 realloc 变体
- * @param[in] old_size 旧分配大小
- * @param[in] new_size 新分配大小
- * @note 使用自定义 allocator 时，调用方必须提供旧分配大小，这样实现才能只复制
- *       min(old_size, new_size) 字节，避免越界读取旧块。 */
-extern "C" void* omni_realloc_sized(void* ptr, size_t old_size, size_t new_size);
-/* @brief 兼容系统 realloc 的包装
- * @param[in] new_size 新分配大小
- * @note 未注册自定义 allocator 时直接走 std::realloc；注册自定义 allocator 后，
- *       无法得知旧块大小，因此仅支持 ptr == NULL 或 new_size == 0。
- *       需要扩容并保留内容时请使用 omni_realloc_sized()。 */
-extern "C" void* omni_realloc(void* ptr, size_t new_size);
 
 #endif // OMNIBINDER_H
