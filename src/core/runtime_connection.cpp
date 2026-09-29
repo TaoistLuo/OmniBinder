@@ -636,17 +636,15 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
                     topic_name.c_str(), dataChannelKindName(conn->transport->type()),
                     conn_key.c_str(), pub_info.instance_id.c_str());
 
-    // 先发送订阅，成功后再登记话题绑定：发送失败会触发 failConnection → onDirectDisconnect，
-    // 它按 config.topic_subscriptions 通知错误；若提前登记，同一订阅会收到两次错误通知，
-    // 且留下一个从未生效的绑定。绑定仅用于重连时重放订阅。
-    if (!sendTopicBroadcastSubscription(conn_key, topic_name)) {
-        return false;
-    }
+    // 先发送订阅，再登记话题绑定：失败也必须登记，否则重连只恢复连接、不重放订阅，
+    // 广播永久丢失（约束 6）。登记放在发送之后，使发送期间的 onDirectDisconnect
+    // 看不到本话题，避免与上层 handleTopicPublisherNotify 的 notifyError 重复通知。
+    const bool sent = sendTopicBroadcastSubscription(conn_key, topic_name);
     if (std::find(config.topic_subscriptions.begin(), config.topic_subscriptions.end(),
                   topic_name) == config.topic_subscriptions.end()) {
         config.topic_subscriptions.push_back(topic_name);
     }
-    return true;
+    return sent;
 }
 
 } // namespace omnibinder

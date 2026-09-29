@@ -237,6 +237,7 @@ TOOLCHAIN_FILE=/path/to/toolchain.cmake \
 | `OMNIBINDER_BUILD_TESTS` | ON | 编译单元测试 |
 | `OMNIBINDER_BUILD_EXAMPLES` | ON | 编译示例程序 |
 | `OMNIBINDER_BUILD_TOOLS` | ON | 编译工具目标 |
+| `OMNIBINDER_BUILD_SHARED` | ON | 同时构建动态库（`libomnibinder.so` / `.dll`），关闭后仅产静态库 |
 | `OMNIBINDER_BUILD_HOST_IDLC` | Host 默认 ON / 交叉默认 OFF | 是否编译主机版 `omni-idlc` |
 
 ### 运行示例
@@ -530,6 +531,7 @@ int main() {
 | [内部实现架构](docs/architecture-internals.md) | 面向二次开发者的内部 runtime、数据流、内存模型说明 |
 | [通信协议](docs/protocol.md) | 二进制协议格式、消息类型、序列化规则、通信时序 |
 | [API 参考](docs/api-reference.md) | OmniRuntime / Service / Buffer 等核心类的完整 API |
+| [内存使用说明](docs/memory-guide.md) | 业务侧内存申请/释放规则、速查表与常见错误 |
 | [IDL 规范](docs/idl-specification.md) | `.bidl` 接口定义语法、类型系统、代码生成规则 |
 | [ARM 交叉编译指南](docs/cross-compiling-arm.md) | Host/Target 分离构建、ARM 工具链、部署建议 |
 | [omni-cli 使用指南](docs/omni-tool-usage.md) | 命令行工具使用说明、JSON 格式支持 |

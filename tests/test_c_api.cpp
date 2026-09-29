@@ -181,6 +181,20 @@ TEST_F(CApiTest, AllocEntryPointsWork) {
     omni_free(read_back);
 }
 
+TEST_F(CApiTest, StrdupWorks) {
+    char* copy = omni_strdup("omni-binder");
+    ASSERT_NE(copy, nullptr);
+    EXPECT_STREQ(copy, "omni-binder");
+    omni_free(copy);
+
+    char* empty = omni_strdup("");
+    ASSERT_NE(empty, nullptr);
+    EXPECT_STREQ(empty, "");
+    omni_free(empty);
+
+    EXPECT_EQ(omni_strdup(nullptr), nullptr);
+}
+
 TEST_F(CApiTest, RegisterInvokeAndStats) {
     omni_runtime_t* runtime = omni_runtime_create();
     ASSERT_NE(runtime, nullptr);

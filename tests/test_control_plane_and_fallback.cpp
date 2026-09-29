@@ -1022,7 +1022,7 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         server.releaseAccepted();
     });
-    ScopedThreadJoiner fake_sm_guard(fake_sm, [&server]() { server.close(); });
+    ScopedThreadJoiner fake_sm_guard(fake_sm);
 
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", port), 0);
@@ -1061,7 +1061,7 @@ TEST(ControlPlaneCompatibilityTest, ListInstancesMalformedReplyRejectedSafely) {
         }
         server.releaseAccepted();
     });
-    ScopedThreadJoiner fake_sm_guard(fake_sm, [&server]() { server.close(); });
+    ScopedThreadJoiner fake_sm_guard(fake_sm);
 
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", port), 0);

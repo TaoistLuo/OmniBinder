@@ -60,17 +60,20 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/target/lib)
 option(OMNIBINDER_BUILD_TESTS "Build unit tests" ON)
 option(OMNIBINDER_BUILD_EXAMPLES "Build examples" ON)
 option(OMNIBINDER_BUILD_TOOLS "Build tools (omni-idlc, omni-cli)" ON)
+option(OMNIBINDER_BUILD_SHARED "Build shared library (libomnibinder.so / .dll)" ON)
 set(OMNIBINDER_HOST_IDLC "" CACHE FILEPATH "Path to a host-runnable omni-idlc executable")
 
 # ============================================================
 # 版本号：CMakeLists.txt 为唯一真相源，通过 compile definitions 注入
+# （同一份变量由库目标 PUBLIC 导出，下游包含 omnibinder.h 的目标也能拿到）
 # ============================================================
-add_compile_definitions(
+set(OMNIBINDER_VERSION_DEFS
     OMNIBINDER_VERSION="${PROJECT_VERSION}"
     OMNIBINDER_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
     OMNIBINDER_VERSION_MINOR=${PROJECT_VERSION_MINOR}
     OMNIBINDER_VERSION_PATCH=${PROJECT_VERSION_PATCH}
 )
+add_compile_definitions(${OMNIBINDER_VERSION_DEFS})
 
 get_filename_component(_omnibinder_c_compiler_name "${CMAKE_C_COMPILER}" NAME)
 set(_omnibinder_is_cross_env OFF)
@@ -181,5 +184,6 @@ message(STATUS "  C++ Compiler:   ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_
 message(STATUS "  Build tests:    ${OMNIBINDER_BUILD_TESTS}")
 message(STATUS "  Build examples: ${OMNIBINDER_BUILD_EXAMPLES}")
 message(STATUS "  Build tools:    ${OMNIBINDER_BUILD_TOOLS}")
+message(STATUS "  Build shared:   ${OMNIBINDER_BUILD_SHARED}")
 message(STATUS "  Build host idlc:${OMNIBINDER_BUILD_HOST_IDLC}")
 message(STATUS "")

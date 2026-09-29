@@ -412,6 +412,12 @@ uint32_t omni_fnv1a_32(const char* str);
 void* omni_malloc(size_t size);
 void  omni_free(void* ptr);
 
+/* @brief 复制字符串（分配 + 拷贝，等价 strdup）
+ * @param[in] str 源字符串
+ * @return 以 '\0' 结尾的堆副本；str 为 NULL 或分配失败时返回 NULL
+ * @note 返回值需用 omni_free() 释放（不可用 free()）。 */
+char* omni_strdup(const char* str);
+
 #ifdef __cplusplus
 }
 #endif

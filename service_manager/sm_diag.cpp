@@ -131,7 +131,8 @@ void ServiceManagerApp::handleDiagSetLogLevel(ClientConnection* conn, const Mess
         sendBoolReply(conn, MessageType::MSG_DIAG_SET_LOG_LEVEL_REPLY, msg.header.sequence, false);
         return;
     }
-    bool sent = forEachPidConn(pid, conn->fd,
+    const int requester_fd = conn->fd;
+    bool sent = forEachPidConn(pid, requester_fd,
         [this, level](int fd, ClientConnection* target) -> bool {
             Message ctrl(MessageType::MSG_DIAG_SET_LOG_LEVEL, nextSMProactiveSequence());
             ctrl.payload.writeUint32(level);
@@ -145,7 +146,13 @@ void ServiceManagerApp::handleDiagSetLogLevel(ClientConnection* conn, const Mess
             cit->second->log_level = level;
             return true;
         });
-    sendBoolReply(conn, MessageType::MSG_DIAG_SET_LOG_LEVEL_REPLY, msg.header.sequence, sent);
+    // forEachPidConn 内发送失败可级联重入 closeClient(requester_fd)（约束 1），回复前判活
+    std::map<int, ClientConnection*>::iterator requester_it = clients_.find(requester_fd);
+    if (requester_it == clients_.end()) {
+        return;
+    }
+    sendBoolReply(requester_it->second, MessageType::MSG_DIAG_SET_LOG_LEVEL_REPLY,
+                  msg.header.sequence, sent);
 }
 
 void ServiceManagerApp::handleDiagWatchStart(ClientConnection* conn, const Message& msg) {

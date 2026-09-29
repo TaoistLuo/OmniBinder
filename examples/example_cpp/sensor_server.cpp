@@ -161,7 +161,6 @@ int main(int argc, char* argv[]) {
         else if (strcmp(argv[i], "--register-host") == 0 && i + 1 < argc) register_host = argv[++i];
         else if (strcmp(argv[i], "--instance-id") == 0 && i + 1 < argc) instance_id = argv[++i];
     }
-
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
     srand((unsigned)time(NULL));

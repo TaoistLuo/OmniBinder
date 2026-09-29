@@ -354,8 +354,9 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 - 继承 Stub 基类 → 直接实现生成的 `demo_SensorService_impl_xxx(...)` 接口
 - `demo_SensorService_stub_create(user_data)` 会自动绑定这些实现，不需要手动维护回调表
 - `service.BroadcastSensorUpdate(msg)` → `demo_SensorService_broadcast_sensor_update(runtime, &msg)`
-- `std::string` → `char*` + `_len` 字段，需要手动 `malloc/free`
+- `std::string` → `char*` + `_len` 字段，需要手动用 `omni_malloc()` / `omni_free()` 管理
 - 结构体需要 `_init()` / `_destroy()` 管理生命周期
+- 内存申请/释放的完整规则（谁分配、谁释放、借用有效期、常见错误）见 [内存使用说明](memory-guide.md)
 
 ## 6. C 客户端
 
@@ -1226,7 +1227,7 @@ void myapp_MyService_impl_handle_request(const myapp_Request* req,
     printf("[Server] HandleRequest: id=%d name=%.*s\n",
            req->id, req->name_len, req->name);
     result->code = 0;
-    result->message = (char*)malloc(3);
+    result->message = (char*)omni_malloc(3);
     memcpy(result->message, "OK", 3);
     result->message_len = 2;
 }
@@ -1305,7 +1306,7 @@ int main(void) {
     myapp_Request req;
     myapp_Request_init(&req);
     req.id = 1;
-    req.name = (char*)malloc(6);
+    req.name = (char*)omni_malloc(6);
     memcpy(req.name, "hello", 6);
     req.name_len = 5;
 
@@ -1400,5 +1401,5 @@ ${CC:-gcc} -std=c99 -I$OMNIBINDER_DIR/include \
 | 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(runtime, &msg)` |
 | 订阅 | `proxy.SubscribeTopic(lambda)` | `xxx_proxy_subscribe_topic(&proxy, callback, ud)` |
 | 死亡通知 | `proxy.OnServiceDied(lambda)` | `xxx_proxy_on_service_died(&proxy, callback, ud)` |
-| 字符串 | `std::string` | `char*` + `_len`，需手动 `malloc/free` |
+| 字符串 | `std::string` | `char*` + `_len`，手动 `omni_malloc()` / `omni_free()`（详见[内存使用说明](memory-guide.md)） |
 | 结构体生命周期 | 自动（RAII） | 手动 `_init()` / `_destroy()` |

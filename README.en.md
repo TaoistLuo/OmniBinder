@@ -232,6 +232,7 @@ Build options:
 | `OMNIBINDER_BUILD_TESTS` | ON | Build unit and integration tests |
 | `OMNIBINDER_BUILD_EXAMPLES` | ON | Build example programs |
 | `OMNIBINDER_BUILD_TOOLS` | ON | Build tool targets |
+| `OMNIBINDER_BUILD_SHARED` | ON | Also build the shared library (`libomnibinder.so` / `.dll`); set OFF for static-only |
 | `OMNIBINDER_BUILD_HOST_IDLC` | ON on host / OFF when cross-compiling | Build the host-side `omni-idlc` |
 
 ### Run the built-in example
@@ -514,6 +515,7 @@ Related tests include:
 | [Internal Architecture](docs/architecture-internals.md) | Internal runtime details for secondary developers, data flows, memory model |
 | [Communication Protocol](docs/protocol.md) | Binary protocol format, message types, serialization rules, communication sequences |
 | [API Reference](docs/api-reference.md) | Complete API for OmniRuntime / Service / Buffer and other core classes |
+| [Memory Guide](docs/memory-guide.md) | Memory allocation/release rules for application code (Chinese) |
 | [IDL Specification](docs/idl-specification.md) | `.bidl` syntax, type system, and code-generation rules |
 | [IDL Specification (EN)](docs/idl-specification.en.md) | English version of the IDL specification |
 | [ARM Cross-Compilation Guide](docs/cross-compiling-arm.md) | Host/Target separated build, ARM toolchain, deployment recommendations |

@@ -1157,10 +1157,6 @@ typedef struct omni_runtime_t  omni_runtime_t;
 typedef struct omni_buffer_t  omni_buffer_t;
 typedef struct omni_service_t omni_service_t;
 
-/* 自定义内存分配器钩子类型 */
-typedef void* (*OmniMallocFn)(size_t size);
-typedef void  (*OmniFreeFn)(void* ptr);
-
 typedef struct omni_runtime_stats_t {
     uint64_t total_rpc_calls;
     uint64_t total_rpc_success;
@@ -1382,6 +1378,7 @@ uint32_t omni_fnv1a_32(const char* str);
 
 void* omni_malloc(size_t size);
 void  omni_free(void* ptr);
+char* omni_strdup(const char* str);
 ```
 
 ### 6.6 使用示例

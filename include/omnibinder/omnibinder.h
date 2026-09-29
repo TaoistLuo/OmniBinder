@@ -79,4 +79,11 @@ extern "C" void* omni_malloc(size_t size);
  * @note 本函数是 ::operator delete 的薄封装。 */
 extern "C" void  omni_free(void* ptr);
 
+/* @brief 复制字符串（分配 + 拷贝，等价 strdup）
+ * @param[in] str 源字符串
+ * @return 以 '\0' 结尾的堆副本；str 为 NULL 或分配失败时返回 NULL
+ * @note 底层同样是全局 ::operator new；返回的内存归调用者，需用 omni_free() 释放
+ *       （不可用 free()，避免 alloc-dealloc 失配）。 */
+extern "C" char* omni_strdup(const char* str);
+
 #endif // OMNIBINDER_H

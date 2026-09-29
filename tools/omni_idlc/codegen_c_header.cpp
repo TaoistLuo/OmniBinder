@@ -225,11 +225,11 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
             os << "    /* " << m.name << ": for string/bytes parameters, pass pointer + length. */\n";
         }
         if (!m.return_type.isVoid() && isCStringLike(m.return_type)) {
-            os << "    /* " << m.name << ": allocate return buffer on heap, set *result_len, and the stub frees *result after reply serialization. */\n";
+            os << "    /* " << m.name << ": allocate the return buffer with omni_malloc(), set *result_len; the stub frees it with omni_free() after reply serialization. */\n";
         }
         if (!m.return_type.isVoid() &&
             (m.return_type.isArray() || m.return_type.isCustom())) {
-            os << "    /* " << m.name << ": fill *result; the stub serializes then destroys it after the reply. */\n";
+            os << "    /* " << m.name << ": fill *result; dynamic fields must be allocated with omni_malloc(); the stub serializes then destroys it with *_destroy() after the reply. */\n";
         }
         os << "    " << handler_typedef << " " << m.name << ";\n";
     }

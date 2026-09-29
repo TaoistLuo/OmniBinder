@@ -79,11 +79,15 @@ int main(int argc, char* argv[]) {
 
     demo::SensorServiceProxy proxy(runtime);
     int connect_ret = 0;
+    std::string bound_host_id;
+    std::string bound_instance_id;
     if (instance_id) {
         bool found = false;
         for (size_t i = 0; i < instances.size(); ++i) {
             if (instances[i].instance_id == instance_id) {
                 connect_ret = proxy.connect(instances[i].host_id, instances[i].instance_id);
+                bound_host_id = instances[i].host_id;
+                bound_instance_id = instances[i].instance_id;
                 found = true;
                 break;
             }
@@ -231,11 +235,22 @@ int main(int argc, char* argv[]) {
     std::printf("GetSensorCount => %d\n\n", sensor_count);
 
     std::printf("--- Topic subscriptions ---\n");
-    // 订阅普通广播话题：这是客户端订阅服务发布的消息，不是向服务注册业务回调。
-    proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) {
-        std::printf("[SensorUpdate] id=%d temp=%.2f humidity=%.2f\n",
-                   msg.data.sensor_id, msg.data.temperature, msg.data.humidity);
-    });
+    if (!bound_instance_id.empty()) {
+        // 实例级订阅：只接收该实例发布的广播，回调携带来源 host_id / instance_id
+        proxy.SubscribeSensorUpdateInstance(bound_host_id, bound_instance_id,
+            [](const std::string& host_id, const std::string& instance_id,
+               const demo::SensorUpdate& msg) {
+                std::printf("[SensorUpdate] host=%s instance=%s id=%d temp=%.2f humidity=%.2f\n",
+                            host_id.c_str(), instance_id.c_str(),
+                            msg.data.sensor_id, msg.data.temperature, msg.data.humidity);
+            });
+    } else {
+        // 服务级订阅：接收该服务全部实例发布的广播
+        proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) {
+            std::printf("[SensorUpdate] id=%d temp=%.2f humidity=%.2f\n",
+                       msg.data.sensor_id, msg.data.temperature, msg.data.humidity);
+        });
+    }
     // 订阅异步结果话题：服务端通过 topic 回推异步任务结果。
     // 调用异步请求 RPC，请求被接受后，真正结果会通过 AsyncResultReady 话题回推。
     proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& ready) {

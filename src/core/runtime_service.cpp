@@ -333,7 +333,13 @@ int OmniRuntime::Impl::unregisterServiceInternal(Service* service) {
     detachClientsFromEntry(name, entry);
     
     topic_runtime_.forgetPublishedTopicsByOwner(name);
-    
+
+    // 服务在诊断启用状态下注销：同时递减全局诊断计数，否则 diag_.active_count 单调泄漏
+    if (entry->diag_enabled && diag_.active_count > 0) {
+        diag_.active_count--;
+        entry->diag_enabled = false;
+    }
+
     service->onStop();
     service->runtime_ = NULL;
     delete entry;
