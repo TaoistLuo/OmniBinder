@@ -14,16 +14,28 @@ namespace omnibinder {
 // 分配可彻底隔离两个序列号域。
 static const uint32_t SM_PROACTIVE_SEQ_BASE = 0x40000000u;
 
+namespace {
+uint32_t makeSmIncarnationId() {
+    uint64_t x = static_cast<uint64_t>(platform::currentTimeMs());
+    x ^= static_cast<uint64_t>(platform::getPid()) << 32;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    uint32_t v = static_cast<uint32_t>(x);
+    return v != 0 ? v : 1u;
+}
+} // namespace
+
 ServiceManagerApp::ServiceManagerApp(uint32_t heartbeat_timeout_ms)
     : server_(nullptr)
-    , heartbeat_(heartbeat_timeout_ms > 0 ? heartbeat_timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT)
-    , heartbeat_check_interval_ms_(DEFAULT_HEARTBEAT_INTERVAL)
-    , heartbeat_timer_id_(0)
+    , default_session_timeout_ms_(heartbeat_timeout_ms > 0
+          ? heartbeat_timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT)
+    , max_session_timeout_ms_(DEFAULT_MAX_SESSION_TIMEOUT)
+    , sm_incarnation_id_(makeSmIncarnationId())
     , sm_seq_counter_(SM_PROACTIVE_SEQ_BASE)
     , shutdown_fd_(-1) {
-    if (heartbeat_timeout_ms > 0 && heartbeat_timeout_ms < DEFAULT_HEARTBEAT_INTERVAL) {
-        heartbeat_check_interval_ms_ = heartbeat_timeout_ms;
-    }
 }
 
 uint32_t ServiceManagerApp::nextSMProactiveSequence() {
@@ -94,11 +106,6 @@ bool ServiceManagerApp::init(const std::string& host, uint16_t port) {
             });
     }
 
-    // 启动心跳检查定时器（默认每 3 秒；超时配置较小时相应缩短）
-    heartbeat_timer_id_ = loop_.addTimer(heartbeat_check_interval_ms_, [this]() {
-        this->onHeartbeatCheck();
-    }, true);
-
     return true;
 }
 
@@ -113,20 +120,17 @@ void ServiceManagerApp::stop() {
 }
 
 void ServiceManagerApp::cleanup() {
-    if (heartbeat_timer_id_ != 0) {
-        loop_.cancelTimer(heartbeat_timer_id_);
-        heartbeat_timer_id_ = 0;
-    }
-
     // 关闭全部客户端连接
     for (auto it = clients_.begin(); it != clients_.end(); ++it) {
         ClientConnection* conn = it->second;
         if (conn) {
+            cancelSessionTimers(conn);
             loop_.removeFd(conn->fd);
             delete conn;
         }
     }
     clients_.clear();
+    runtime_sessions_.clear();
 
     // 摘除全部端点 fd 后再关闭端点（约束 3：fd 从 event-loop 摘除先于资源释放）
     for (std::set<int>::iterator it = endpoint_fds_.begin(); it != endpoint_fds_.end(); ++it) {
@@ -166,8 +170,11 @@ void ServiceManagerApp::onClientAccepted(int client_id, IMessageConnection* clie
     ClientConnection* conn = new ClientConnection();
     conn->fd = client_id;
     conn->transport = client;
+    conn->accept_time_ms = platform::currentTimeMs();
+    conn->last_heartbeat_ms = conn->accept_time_ms;
     clients_[client_id] = conn;
     registerEndpointFd(client_id);
+    armHelloDeadline(conn);
 
     OMNI_LOG_INFO(TAG, "Client connected: fd=%d", client_id);
 }
@@ -237,8 +244,8 @@ void ServiceManagerApp::dispatchMessage(ClientConnection* conn, const Message& m
         case MessageType::MSG_UNREGISTER:
             handleUnregister(conn, msg);
             break;
-        case MessageType::MSG_HEARTBEAT:
-            handleHeartbeat(conn, msg);
+        case MessageType::MSG_CONTROL_HEARTBEAT:
+            handleControlHeartbeat(conn, msg);
             break;
         case MessageType::MSG_LOOKUP:
             handleLookup(conn, msg);
@@ -312,7 +319,65 @@ void ServiceManagerApp::sendBoolReply(ClientConnection* conn, MessageType type,
     sendMessage(conn, reply);
 }
 
-void ServiceManagerApp::closeClient(int fd) {
+void ServiceManagerApp::armHelloDeadline(ClientConnection* conn) {
+    if (!conn) return;
+    if (conn->hello_timer_id > 0) {
+        loop_.cancelTimer(conn->hello_timer_id);
+        conn->hello_timer_id = 0;
+    }
+    conn->session_generation++;
+    const uint64_t generation = conn->session_generation;
+    const int fd = conn->fd;
+    conn->hello_timer_id = loop_.addTimer(DEFAULT_SESSION_HELLO_TIMEOUT,
+        [this, fd, generation]() {
+            std::map<int, ClientConnection*>::iterator it = clients_.find(fd);
+            if (it == clients_.end() || !it->second) return;
+            if (it->second->session_generation != generation) return;
+            if (it->second->hello_received) return;
+            OMNI_LOG_WARN(TAG, "session_hello_timeout fd=%d", fd);
+            closeClient(fd);
+        }, false);
+}
+
+void ServiceManagerApp::armSessionDeadline(ClientConnection* conn) {
+    if (!conn || !conn->hello_received) return;
+    if (conn->deadline_timer_id > 0) {
+        loop_.cancelTimer(conn->deadline_timer_id);
+        conn->deadline_timer_id = 0;
+    }
+    conn->session_generation++;
+    const uint64_t generation = conn->session_generation;
+    const int fd = conn->fd;
+    const uint32_t timeout_ms = conn->session_timeout_ms > 0
+        ? conn->session_timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT;
+    conn->deadline_timer_id = loop_.addTimer(timeout_ms,
+        [this, fd, generation]() { this->onSessionDeadline(fd, generation); }, false);
+}
+
+void ServiceManagerApp::cancelSessionTimers(ClientConnection* conn) {
+    if (!conn) return;
+    if (conn->hello_timer_id > 0) {
+        loop_.cancelTimer(conn->hello_timer_id);
+        conn->hello_timer_id = 0;
+    }
+    if (conn->deadline_timer_id > 0) {
+        loop_.cancelTimer(conn->deadline_timer_id);
+        conn->deadline_timer_id = 0;
+    }
+    conn->session_generation++;
+}
+
+void ServiceManagerApp::onSessionDeadline(int fd, uint64_t generation) {
+    std::map<int, ClientConnection*>::iterator it = clients_.find(fd);
+    if (it == clients_.end() || !it->second) return;
+    ClientConnection* conn = it->second;
+    if (conn->session_generation != generation) return;
+    OMNI_LOG_WARN(TAG, "session_timeout fd=%d runtime_id=%s timeout_ms=%u",
+                  fd, conn->runtime_id.c_str(), conn->session_timeout_ms);
+    closeClient(fd);
+}
+
+void ServiceManagerApp::closeClient(int fd, bool notify_service_death) {
     auto it = clients_.find(fd);
     if (it == clients_.end()) {
         return;
@@ -322,6 +387,13 @@ void ServiceManagerApp::closeClient(int fd) {
     // 先从表中摘除：notifyServiceDeath → sendDeathNotify → sendMessage 发送失败时
     // 可能再次 closeClient(fd)，早摘除可让重入在开头直接返回，避免 conn 被二次删除
     clients_.erase(it);
+    cancelSessionTimers(conn);
+    if (!conn->session_key.empty()) {
+        std::map<std::string, int>::iterator sit = runtime_sessions_.find(conn->session_key);
+        if (sit != runtime_sessions_.end() && sit->second == fd) {
+            runtime_sessions_.erase(sit);
+        }
+    }
 
     // 从 event-loop 中摘除
     loop_.removeFd(fd);
@@ -331,8 +403,10 @@ void ServiceManagerApp::closeClient(int fd) {
     // 若某名称已被更新的连接重新注册，则不再索引到该 fd 下，
     // 其存活注册保持不动。
     std::vector<ServiceIdentity> removed = registry_.removeByFd(fd);
-    for (size_t i = 0; i < removed.size(); ++i) {
-        notifyServiceRemoved(removed[i]);
+    if (notify_service_death) {
+        for (size_t i = 0; i < removed.size(); ++i) {
+            notifyServiceRemoved(removed[i]);
+        }
     }
 
     // 清理死亡通知订阅

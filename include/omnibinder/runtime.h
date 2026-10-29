@@ -371,21 +371,23 @@ public:
     // 心跳
     //
     // 两类心跳互相独立，不可混淆：
-    // 1) 控制面注册心跳：runtime 对每个本地已注册服务（registerService）自动周期
-    //    发送给 ServiceManager，生命周期与注册绑定，本组接口无法启停它。停止向 SM
-    //    宣告服务存活的唯一方式是 unregisterService()。
+    // 1) 控制面会话心跳：每个 runtime 一条 MSG_CONTROL_HEARTBEAT，覆盖该 runtime
+    //    下全部服务与订阅；间隔/超时在 init 的 Session Hello 中协商（可用
+    //    setHeartbeatInterval/setHeartbeatTimeout 配置）。本组接口无法启停它；
+    //    停止向 SM 宣告存活的唯一方式是 stop()。
     // 2) 数据面连接保活：本组 startHeartbeat/stopHeartbeat 接口，调用方作为客户端
     //    对某个远端服务名的直连做心跳检测，超时后触发数据面自动重连。stopHeartbeat
-    //    只停止该检测，不注销服务、不影响控制面注册心跳。
+    //    只停止该检测，不注销服务、不影响控制面会话心跳。
 
     /* @brief 启动到指定服务的数据面连接心跳检测
      * @param[in]  name        服务名称（或实例连接键 makeServiceConnectionKey(...)）
-     * @param[in]  interval_ms 心跳发送间隔（毫秒，默认 5000）
-     * @param[in]  timeout_ms  心跳超时阈值（毫秒，默认 10000）
+     * @param[in]  interval_ms 心跳发送间隔（毫秒，默认 DEFAULT_HEARTBEAT_INTERVAL）
+     * @param[in]  timeout_ms  心跳超时阈值（毫秒，默认 DEFAULT_HEARTBEAT_TIMEOUT）
      * @note   超时后自动触发数据面重连（如果启用了自动重连）。
      *         不涉及本地服务向 SM 的控制面注册心跳 */
-    void startHeartbeat(const std::string& name, uint32_t interval_ms = 5000,
-                        uint32_t timeout_ms = 10000);
+    void startHeartbeat(const std::string& name,
+                        uint32_t interval_ms = DEFAULT_HEARTBEAT_INTERVAL,
+                        uint32_t timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT);
 
     /* @brief 停止到指定服务的数据面连接心跳检测
      * @param[in]  name 服务名称（或实例连接键 makeServiceConnectionKey(...)）
@@ -491,9 +493,17 @@ public:
      * @return 通告地址字符串 */
     std::string getRegisterHost() const;
 
-    /* @brief 设置全局心跳间隔
-     * @param[in]  ms 心跳间隔（毫秒） */
+    /* @brief 设置控制面心跳间隔（Runtime → SM）
+     * @param[in]  ms 心跳间隔（毫秒，0 忽略）
+     * @note   间隔在下次建立/恢复控制会话时参与协商；运行期修改会立即重排本地
+     *         发送定时器，但服务端判死超时以最近一次协商结果为准。 */
     void setHeartbeatInterval(uint32_t ms);
+
+    /* @brief 设置控制面期望的判死超时（Runtime → SM 协商请求）
+     * @param[in]  ms 期望超时（毫秒，0 表示由服务端默认值决定）
+     * @note   服务端按 max(requested, interval*3) 裁定，并可通过运维上限裁剪。
+     *         低功耗运行时可在 init() 前设置分钟/小时级超时。 */
+    void setHeartbeatTimeout(uint32_t ms);
 
     /* @brief 设置全局默认 RPC 超时
      * @param[in]  ms 超时时间（毫秒） */
@@ -519,6 +529,18 @@ public:
     /* @brief 获取本机标识符（用于判断同机通信）
      * @return 本机标识字符串；未设置时返回平台机器标识 */
     std::string hostId() const;
+
+    /* @brief 设置稳定运行时身份 runtime_id
+     * @param[in]  runtime_id 运行时身份（跨进程重启不变）
+     * @note   必须在 init() 之前调用。默认值为 `process_name#pid-<seq>`：
+     *         保证同机多进程唯一，但进程重启后 pid 变化；若需要“重启后立即
+     *         顶替旧会话”（低功耗长超时场景），应显式设置为跨重启稳定的值
+     *         （例如启动参数中的实例标识）。控制面/数据面会话均以
+     *         (host_id, runtime_id) 作为稳定键。 */
+    void setRuntimeId(const std::string& runtime_id);
+
+    /* @brief 获取本运行时稳定身份（默认 process_name#pid-<seq>） */
+    std::string runtimeId() const;
 
 private:
     OmniRuntime(const OmniRuntime&);

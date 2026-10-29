@@ -33,8 +33,10 @@ static void printUsage(const char* prog) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --host <addr>     Listen address (default: 0.0.0.0)\n");
     fprintf(stderr, "  --port <port>     Listen port (default: 9900)\n");
-    fprintf(stderr, "  --log-level <n>   Log level: 0=DEBUG, 1=INFO, 2=WARN, 3=ERROR (default: 1)\n");
-    fprintf(stderr, "  --heartbeat-timeout <ms>  Per-heartbeat timeout (default: %u)\n",
+    fprintf(stderr, "  --log-level <n>   Log level: 0=FATAL, 1=ERROR, 2=WARN, 3=INFO, "
+                    "4=DEBUG, 5=VERBOSE, 6=OFF (default: 3)\n");
+    fprintf(stderr, "  --heartbeat-timeout <ms>  Default runtime session timeout when the "
+                    "client requests 0 (default: %u)\n",
             (unsigned)omnibinder::DEFAULT_HEARTBEAT_TIMEOUT);
     fprintf(stderr, "  --help            Show this help\n");
 }

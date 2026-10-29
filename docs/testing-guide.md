@@ -177,7 +177,7 @@ ctest --test-dir build --output-on-failure -R test_service_registry
 
 用途：
 
-- 验证 `HeartbeatMonitor` 与 `DeathNotifier` 的基础行为
+- 验证 `DeathNotifier` 的基础行为（会话超时由 `test_heartbeat_reconnect` / `test_control_plane_and_fallback` 覆盖）
 
 推荐运行：
 

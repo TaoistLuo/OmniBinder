@@ -59,8 +59,11 @@ enum class MessageType : uint16_t {
     MSG_REGISTER_REPLY        = 0x0002,
     MSG_UNREGISTER            = 0x0003,
     MSG_UNREGISTER_REPLY      = 0x0004,
-    MSG_HEARTBEAT             = 0x0005,
-    MSG_HEARTBEAT_ACK         = 0x0006,
+    MSG_HEARTBEAT             = 0x0005,  // 数据面心跳（payload: incarnation_id）
+    MSG_HEARTBEAT_ACK         = 0x0006,  // 数据面心跳应答（payload: peer incarnation）
+    // 控制面运行时级会话心跳（每个 runtime 一条，不再按服务发送）
+    MSG_CONTROL_HEARTBEAT     = 0x0007,
+    MSG_CONTROL_HEARTBEAT_ACK = 0x0008,
 
     // 控制通道 - 服务发现
     MSG_LOOKUP                = 0x0010,
@@ -116,6 +119,9 @@ enum class MessageType : uint16_t {
     // 数据通道 - 广播
     MSG_BROADCAST             = 0x0110,
     MSG_SUBSCRIBE_BROADCAST   = 0x0111,  // 订阅者直连发布者后发送，携带 topic_id
+    // 数据面每条直连的会话协商（连接第一帧）
+    MSG_SESSION_HELLO         = 0x0112,
+    MSG_SESSION_HELLO_ACK     = 0x0113,
 };
 
 enum DiagEventDirection : uint8_t {
@@ -383,10 +389,66 @@ bool deserializeRuntimeInfo(BufT& buf, RuntimeInfo& info) {
             }
             decoded.services.push_back(service);
         }
+        if (!(buf.tryReadUint32(decoded.session_version)
+            && buf.tryReadString(decoded.runtime_id)
+            && buf.tryReadUint32(decoded.incarnation_id)
+            && buf.tryReadUint32(decoded.heartbeat_interval_ms)
+            && buf.tryReadUint32(decoded.requested_timeout_ms)
+            && buf.tryReadString(decoded.host_id))) {
+            return false;
+        }
         info = decoded;
         return true;
     } catch (const std::bad_alloc&) {
         // 内存耗尽：返回失败而非崩溃（无异常传播原则）
+        return false;
+    }
+}
+
+/* @brief 序列化数据面 SessionHello */
+bool serializeSessionHello(const SessionHello& hello, Buffer& buf);
+
+/* @brief 反序列化数据面 SessionHello */
+template <typename BufT>
+bool deserializeSessionHello(BufT& buf, SessionHello& hello) {
+    try {
+        SessionHello decoded;
+        if (!(buf.tryReadUint32(decoded.version)
+            && buf.tryReadString(decoded.runtime_id)
+            && buf.tryReadUint32(decoded.incarnation_id)
+            && buf.tryReadUint32(decoded.heartbeat_interval_ms)
+            && buf.tryReadUint32(decoded.requested_timeout_ms)
+            && buf.tryReadUint32(decoded.capabilities)
+            && buf.tryReadString(decoded.host_id)
+            && buf.tryReadString(decoded.process_name)
+            && buf.tryReadUint32(decoded.pid))) {
+            return false;
+        }
+        hello = decoded;
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+}
+
+/* @brief 序列化数据面 SessionHelloAck */
+bool serializeSessionHelloAck(const SessionHelloAck& ack, Buffer& buf);
+
+/* @brief 反序列化数据面 SessionHelloAck */
+template <typename BufT>
+bool deserializeSessionHelloAck(BufT& buf, SessionHelloAck& ack) {
+    try {
+        SessionHelloAck decoded;
+        if (!(buf.tryReadUint32(decoded.version)
+            && buf.tryReadUint32(decoded.status)
+            && buf.tryReadUint32(decoded.accepted_interval_ms)
+            && buf.tryReadUint32(decoded.effective_timeout_ms)
+            && buf.tryReadUint32(decoded.peer_incarnation_id))) {
+            return false;
+        }
+        ack = decoded;
+        return true;
+    } catch (const std::bad_alloc&) {
         return false;
     }
 }

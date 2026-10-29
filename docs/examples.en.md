@@ -639,7 +639,7 @@ Typical client-side output:
 Typical ServiceManager-side output:
 
 ```text
-[WARN][HeartbeatMonitor] Service SensorService timed out (missed 1 heartbeats)
+[WARN][ServiceManager] session_timeout fd=... runtime_id=... timeout_ms=...
 [WARN][ServiceManager] Service timed out: SensorService (host_id=<host_id>, instance_id=)
 [INFO][DeathNotifier] Instance SensorService (host_id=<host_id>, instance_id=) died, name_gone=1, notifying 1 subscribers
 ```

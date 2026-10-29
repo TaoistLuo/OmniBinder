@@ -68,9 +68,55 @@ void OmniRuntime::Impl::onServiceClientAccepted(const std::string& name, int cli
     entry->clients[client_id] = client;
     entry->client_recv_buffers[client_id] = new Buffer();
     client_id_to_service_[client_id] = name;
+
+    ClientSessionState session;
+    session.generation = ++client_session_generation_;
+    entry->client_sessions[client_id] = session;
+    armClientSessionDeadline(name, client_id, entry);
+
     if (entry->service) {
         entry->service->onClientConnected(serviceClientLabel(client, client_id));
     }
+}
+
+void OmniRuntime::Impl::armClientSessionDeadline(const std::string& name, int client_id,
+                                                 LocalServiceEntry* entry) {
+    if (!entry) return;
+    std::map<int, ClientSessionState>::iterator it = entry->client_sessions.find(client_id);
+    if (it == entry->client_sessions.end()) return;
+    ClientSessionState& session = it->second;
+    if (session.deadline_timer_id > 0) {
+        loop_->cancelTimer(session.deadline_timer_id);
+        session.deadline_timer_id = 0;
+    }
+    session.generation = ++client_session_generation_;
+    const uint64_t generation = session.generation;
+    const uint32_t timeout_ms = session.phase == ClientSessionPhase::NEGOTIATING
+        ? DEFAULT_SESSION_HELLO_TIMEOUT
+        : (session.timeout_ms > 0 ? session.timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT);
+    session.deadline_timer_id = loop_->addTimer(timeout_ms,
+        [this, name, client_id, generation]() {
+            this->onClientSessionDeadline(name, client_id, generation);
+        }, false);
+}
+
+void OmniRuntime::Impl::onClientSessionDeadline(const std::string& name, int client_id,
+                                                uint64_t generation) {
+    std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
+    if (it == local_services_.end() || !it->second) return;
+    LocalServiceEntry* entry = it->second;
+    std::map<int, ClientSessionState>::iterator sit = entry->client_sessions.find(client_id);
+    if (sit == entry->client_sessions.end()) return;
+    if (sit->second.generation != generation) return;
+    const bool negotiating = (sit->second.phase == ClientSessionPhase::NEGOTIATING);
+    OMNI_LOG_WARN(LOG_TAG, "%s service=%s client=%d runtime_id=%s",
+                  negotiating ? "session_hello_timeout" : "session_heartbeat_timeout",
+                  name.c_str(), client_id, sit->second.runtime_id.c_str());
+    closeClientSession(name, client_id);
+}
+
+void OmniRuntime::Impl::closeClientSession(const std::string& name, int client_id) {
+    onServiceClientDisconnected(name, client_id);
 }
 
 void OmniRuntime::Impl::onServiceClientReadable(const std::string& name, int client_id) {
@@ -111,12 +157,153 @@ void OmniRuntime::Impl::handleServiceClientMessage(const std::string& name, int 
     IMessageConnection* transport = tit->second;
     const char* transport_label = dataChannelKindName(transport->type());
 
+    std::map<int, ClientSessionState>::iterator sit = entry->client_sessions.find(client_id);
+    if (sit == entry->client_sessions.end()) {
+        closeClientSession(name, client_id);
+        return;
+    }
+    if (sit->second.phase == ClientSessionPhase::NEGOTIATING
+        && msg.getType() != MessageType::MSG_SESSION_HELLO) {
+        OMNI_LOG_WARN(LOG_TAG, "session_message_before_hello service=%s client=%d type=%s",
+                      name.c_str(), client_id, messageTypeToString(msg.getType()));
+        closeClientSession(name, client_id);
+        return;
+    }
+
     switch (msg.getType()) {
+    case MessageType::MSG_SESSION_HELLO: {
+        BufferView buf(msg.payload.data(), msg.payload.size());
+        SessionHello hello;
+        if (!deserializeSessionHello(buf, hello)
+            || hello.version != SESSION_PROTOCOL_VERSION
+            || hello.incarnation_id == 0) {
+            OMNI_LOG_WARN(LOG_TAG, "malformed_session_hello service=%s client=%d",
+                          name.c_str(), client_id);
+            closeClientSession(name, client_id);
+            return;
+        }
+        const uint32_t interval = clampHeartbeatInterval(hello.heartbeat_interval_ms);
+        uint32_t requested_timeout = hello.requested_timeout_ms;
+        if (requested_timeout == 0) {
+            requested_timeout = DEFAULT_HEARTBEAT_TIMEOUT;
+        }
+        const uint32_t effective_timeout =
+            negotiateSessionTimeout(interval, requested_timeout, data_max_session_timeout_ms_);
+        std::string runtime_id = hello.runtime_id.empty() ? hello.process_name : hello.runtime_id;
+        if (runtime_id.empty()) {
+            runtime_id = "runtime-" + std::to_string(hello.pid);
+        }
+        const std::string session_key = makeRuntimeSessionKey(hello.host_id, runtime_id);
+
+        sit = entry->client_sessions.find(client_id);
+        if (sit == entry->client_sessions.end()) return;
+
+        if (sit->second.phase == ClientSessionPhase::ACTIVE) {
+            // 同一连接上的参数更新（Proxy.startHeartbeat）：不允许更换身份。
+            if (sit->second.runtime_id != runtime_id
+                || sit->second.incarnation_id != hello.incarnation_id) {
+                OMNI_LOG_WARN(LOG_TAG, "session_rehello_identity_mismatch service=%s client=%d",
+                              name.c_str(), client_id);
+                closeClientSession(name, client_id);
+                return;
+            }
+            sit->second.interval_ms = interval;
+            sit->second.timeout_ms = effective_timeout;
+            sit->second.last_heartbeat_ms = platform::currentTimeMs();
+            armClientSessionDeadline(name, client_id, entry);
+        } else {
+            // 同 (host_id, runtime_id) 的新连接顶替旧连接：快速重启/重连立即生效，
+            // 不等待旧会话超时。用户会看到旧 client 的 onClientDisconnected。
+            std::map<std::string, int>::iterator rs = entry->runtime_sessions.find(session_key);
+            if (rs != entry->runtime_sessions.end() && rs->second != client_id) {
+                const int old_client_id = rs->second;
+                std::map<int, ClientSessionState>::iterator osit =
+                    entry->client_sessions.find(old_client_id);
+                // 只有“不同代际”才顶替旧连接（进程重启）。同一 incarnation 下
+                // 一个 runtime 可能合法地持有同一服务的多条连接（例如诊断 watcher
+                // 的实例键连接 + 默认键连接），不能误关。
+                const bool supersede = (osit == entry->client_sessions.end())
+                    || osit->second.incarnation_id != hello.incarnation_id;
+                if (supersede) {
+                    OMNI_LOG_INFO(LOG_TAG, "data_session_superseded service=%s runtime_id=%s "
+                                  "old_client=%d new_client=%d",
+                                  name.c_str(), runtime_id.c_str(), old_client_id, client_id);
+                    closeClientSession(name, old_client_id);
+                    std::map<std::string, LocalServiceEntry*>::iterator re =
+                        local_services_.find(name);
+                    if (re == local_services_.end() || !re->second) return;
+                    entry = re->second;
+                    sit = entry->client_sessions.find(client_id);
+                    if (sit == entry->client_sessions.end()) return;
+                }
+            }
+            ClientSessionState& session = sit->second;
+            session.runtime_id = runtime_id;
+            session.host_id = hello.host_id;
+            session.session_key = session_key;
+            session.incarnation_id = hello.incarnation_id;
+            session.interval_ms = interval;
+            session.timeout_ms = effective_timeout;
+            session.last_heartbeat_ms = platform::currentTimeMs();
+            session.phase = ClientSessionPhase::ACTIVE;
+            entry->runtime_sessions[session_key] = client_id;
+            armClientSessionDeadline(name, client_id, entry);
+        }
+
+        // closeClientSession 可能注销服务并释放 entry；重新取 client transport。
+        std::map<std::string, LocalServiceEntry*>::iterator re = local_services_.find(name);
+        if (re == local_services_.end() || !re->second) return;
+        entry = re->second;
+        tit = entry->clients.find(client_id);
+        if (tit == entry->clients.end() || !tit->second) return;
+
+        SessionHelloAck ack;
+        ack.status = (interval == hello.heartbeat_interval_ms
+                      && (hello.requested_timeout_ms == 0
+                          || effective_timeout == hello.requested_timeout_ms))
+            ? SESSION_STATUS_OK : SESSION_STATUS_CLAMPED;
+        ack.accepted_interval_ms = interval;
+        ack.effective_timeout_ms = effective_timeout;
+        ack.peer_incarnation_id = incarnation_id_;
+
+        Message reply(MessageType::MSG_SESSION_HELLO_ACK, msg.getSequence());
+        if (!serializeSessionHelloAck(ack, reply.payload)
+            || !sendOnFd(tit->second, reply)) {
+            OMNI_LOG_WARN(LOG_TAG, "session_hello_ack_send_failed service=%s client=%d",
+                          name.c_str(), client_id);
+            closeClientSession(name, client_id);
+            return;
+        }
+        OMNI_LOG_INFO(LOG_TAG, "data_session_established service=%s client=%d runtime_id=%s "
+                      "incarnation=%u interval=%u timeout=%u",
+                      name.c_str(), client_id, runtime_id.c_str(), hello.incarnation_id,
+                      interval, effective_timeout);
+        break;
+    }
     case MessageType::MSG_HEARTBEAT: {
-        // 心跳 ACK 可丢弃：必须非阻塞/尽力而为，绝不占用 owner loop 的发送预算
-        Message ack(MessageType::MSG_HEARTBEAT_ACK, msg.getSequence());
+        sit = entry->client_sessions.find(client_id);
+        if (sit == entry->client_sessions.end()
+            || sit->second.phase != ClientSessionPhase::ACTIVE) {
+            closeClientSession(name, client_id);
+            return;
+        }
+        BufferView buf(msg.payload.data(), msg.payload.size());
+        uint32_t incarnation = 0;
+        if (!buf.tryReadUint32(incarnation)
+            || incarnation != sit->second.incarnation_id) {
+            OMNI_LOG_WARN(LOG_TAG, "data_heartbeat_incarnation_mismatch service=%s client=%d",
+                          name.c_str(), client_id);
+            closeClientSession(name, client_id);
+            return;
+        }
+        sit->second.last_heartbeat_ms = platform::currentTimeMs();
+        armClientSessionDeadline(name, client_id, entry);
+
+        // 心跳 ACK 可丢弃：非阻塞、不占 owner loop 发送预算
         tit = entry->clients.find(client_id);
         if (tit != entry->clients.end() && tit->second) {
+            Message ack(MessageType::MSG_HEARTBEAT_ACK, msg.getSequence());
+            ack.payload.writeUint32(incarnation_id_);
             if (!sendOnFdBestEffort(tit->second, ack)) {
                 OMNI_LOG_DEBUG(LOG_TAG, "heartbeat_ack_send_dropped service=%s client=%d",
                                name.c_str(), client_id);
@@ -200,6 +387,22 @@ void OmniRuntime::Impl::onServiceClientDisconnected(const std::string& name, int
     if (cit == entry->clients.end()) {
         client_id_to_service_.erase(client_id);
         return;
+    }
+
+    std::map<int, ClientSessionState>::iterator sit = entry->client_sessions.find(client_id);
+    if (sit != entry->client_sessions.end()) {
+        if (sit->second.deadline_timer_id > 0) {
+            loop_->cancelTimer(sit->second.deadline_timer_id);
+            sit->second.deadline_timer_id = 0;
+        }
+        if (!sit->second.session_key.empty()) {
+            std::map<std::string, int>::iterator rs =
+                entry->runtime_sessions.find(sit->second.session_key);
+            if (rs != entry->runtime_sessions.end() && rs->second == client_id) {
+                entry->runtime_sessions.erase(rs);
+            }
+        }
+        entry->client_sessions.erase(sit);
     }
 
     IMessageConnection* client = cit->second;
@@ -474,11 +677,49 @@ void OmniRuntime::Impl::onDirectMessage(const std::string& service_name, Message
         }
         break;
     }
+    case MessageType::MSG_SESSION_HELLO_ACK: {
+        BufferView buf(msg.payload.data(), msg.payload.size());
+        SessionHelloAck ack;
+        if (!deserializeSessionHelloAck(buf, ack)) {
+            OMNI_LOG_WARN(LOG_TAG, "malformed_session_hello_ack key=%s",
+                          service_name.c_str());
+            break;
+        }
+        ServiceConnection* conn = conn_mgr_ ? conn_mgr_->getConnection(service_name) : NULL;
+        if (!conn) break;
+        conn->session_status = ack.status;
+        conn->session_interval_ms = clampHeartbeatInterval(ack.accepted_interval_ms);
+        conn->session_timeout_ms = ack.effective_timeout_ms > 0
+            ? ack.effective_timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT;
+        conn->peer_incarnation = ack.peer_incarnation_id;
+        conn->session_ready = (ack.status != SESSION_STATUS_REJECTED);
+        conn->session_ack_received = true;
+        break;
+    }
     case MessageType::MSG_HEARTBEAT_ACK: {
+        BufferView buf(msg.payload.data(), msg.payload.size());
+        uint32_t peer_incarnation = 0;
+        const bool has_peer = buf.tryReadUint32(peer_incarnation);
+        ServiceConnection* conn = conn_mgr_ ? conn_mgr_->getConnection(service_name) : NULL;
+        if (conn && has_peer) {
+            if (conn->peer_incarnation != 0 && peer_incarnation != 0
+                && conn->peer_incarnation != peer_incarnation) {
+                OMNI_LOG_WARN(LOG_TAG, "service_incarnation_changed key=%s old=%u new=%u",
+                              service_name.c_str(), conn->peer_incarnation,
+                              peer_incarnation);
+                handleServiceLost(service_name);
+                break;
+            }
+            conn->peer_incarnation = peer_incarnation;
+        }
         ServiceState* hb_state = findServiceState(service_name);
         if (hb_state && hb_state->has_heartbeat) {
             hb_state->heartbeat.last_ack_time = platform::currentTimeMs();
             hb_state->heartbeat.pending = false;
+            if (hb_state->heartbeat.deadline_timer_id > 0) {
+                loop_->cancelTimer(hb_state->heartbeat.deadline_timer_id);
+                hb_state->heartbeat.deadline_timer_id = 0;
+            }
         }
         break;
     }

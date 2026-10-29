@@ -171,7 +171,56 @@ static bool recvFullMessage(TcpConnection& transport, Message& msg, int timeout_
     return false;
 }
 
+static bool sendDataHello(TcpConnection& transport, uint32_t seq) {
+    SessionHello hello;
+    hello.runtime_id = "raw-harness";
+    hello.incarnation_id = 1;
+    hello.heartbeat_interval_ms = 3000;
+    hello.requested_timeout_ms = 10000;
+    hello.host_id = "raw-harness";
+    hello.process_name = "raw-harness";
+    Message msg(MessageType::MSG_SESSION_HELLO, seq);
+    if (!serializeSessionHello(hello, msg.payload) || !sendMessage(transport, msg)) {
+        return false;
+    }
+    Message reply;
+    if (!recvFullMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_SESSION_HELLO_ACK) {
+        return false;
+    }
+    SessionHelloAck ack;
+    BufferView view(reply.payload.data(), reply.payload.size());
+    return deserializeSessionHelloAck(view, ack)
+        && ack.status != SESSION_STATUS_REJECTED;
+}
+
+static bool sendControlHello(TcpConnection& transport, uint32_t seq) {
+    RuntimeInfo info;
+    info.pid = static_cast<uint32_t>(omnibinder::platform::getPid());
+    info.process_name = "raw-ctrl";
+    info.session_version = SESSION_PROTOCOL_VERSION;
+    info.runtime_id = "raw-ctrl-" + std::to_string(transport.fd());
+    info.incarnation_id = 1;
+    info.heartbeat_interval_ms = 3000;
+    info.requested_timeout_ms = 10000;
+    info.host_id = "raw-harness";
+    Message msg(MessageType::MSG_RUNTIME_HELLO, seq);
+    if (!serializeRuntimeInfo(info, msg.payload) || !sendMessage(transport, msg)) {
+        return false;
+    }
+    Message reply;
+    if (!recvFullMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_RUNTIME_HELLO_REPLY) {
+        return false;
+    }
+    SessionHelloAck ack;
+    BufferView view(reply.payload.data(), reply.payload.size());
+    return deserializeSessionHelloAck(view, ack)
+        && ack.status != SESSION_STATUS_REJECTED;
+}
+
 static bool registerFakeService(TcpConnection& transport, uint32_t seq, const std::string& name, uint16_t port, const std::string& host_id) {
+    if (!sendControlHello(transport, seq + 5000)) return false;
     Message msg(MessageType::MSG_REGISTER, seq);
     ServiceInfo info;
     info.name = name;
@@ -292,6 +341,19 @@ static void rawReplyThread(void* arg) {
             Buffer input(buf, static_cast<size_t>(ret));
             MessageHeader hdr;
             assert(Message::parseHeader(input.data(), input.size(), hdr));
+            if (hdr.type == static_cast<uint16_t>(MessageType::MSG_SESSION_HELLO)) {
+                SessionHelloAck ack;
+                ack.status = SESSION_STATUS_OK;
+                ack.accepted_interval_ms = 3000;
+                ack.effective_timeout_ms = 10000;
+                ack.peer_incarnation_id = 1;
+                Message ack_msg(MessageType::MSG_SESSION_HELLO_ACK, hdr.sequence);
+                serializeSessionHelloAck(ack, ack_msg.payload);
+                Buffer ack_out;
+                ack_msg.serialize(ack_out);
+                accepted->send(ack_out.data(), ack_out.size());
+                continue;
+            }
             Message reply(MessageType::MSG_INVOKE_REPLY, hdr.sequence);
             if (ctx->mode == RAW_REPLY_TRUNCATED_STATUS) {
                 reply.payload.writeUint16(0);
@@ -327,6 +389,7 @@ int main() {
 
     TcpConnection rogue;
     assert(connectTcp(rogue, "127.0.0.1", lookupServicePort("ItemService")));
+    assert(sendDataHello(rogue, 9000));
     Message bad_invoke(MessageType::MSG_INVOKE, 9001);
     bad_invoke.payload.writeUint32(IFACE_ID);
     bad_invoke.payload.writeUint32(METHOD_ECHO);
@@ -540,7 +603,56 @@ static bool recvFullMessage(omnibinder::TcpConnection& transport, omnibinder::Me
     return false;
 }
 
+static bool sendDataHello(omnibinder::TcpConnection& transport, uint32_t seq) {
+    omnibinder::SessionHello hello;
+    hello.runtime_id = "raw-c-harness";
+    hello.incarnation_id = 1;
+    hello.heartbeat_interval_ms = 3000;
+    hello.requested_timeout_ms = 10000;
+    hello.host_id = "raw-harness";
+    hello.process_name = "raw-c-harness";
+    omnibinder::Message msg(omnibinder::MessageType::MSG_SESSION_HELLO, seq);
+    if (!omnibinder::serializeSessionHello(hello, msg.payload) || !sendMessage(transport, msg)) {
+        return false;
+    }
+    omnibinder::Message reply;
+    if (!recvFullMessage(transport, reply, 2000)
+        || reply.getType() != omnibinder::MessageType::MSG_SESSION_HELLO_ACK) {
+        return false;
+    }
+    omnibinder::SessionHelloAck ack;
+    omnibinder::BufferView view(reply.payload.data(), reply.payload.size());
+    return omnibinder::deserializeSessionHelloAck(view, ack)
+        && ack.status != omnibinder::SESSION_STATUS_REJECTED;
+}
+
+static bool sendControlHello(omnibinder::TcpConnection& transport, uint32_t seq) {
+    omnibinder::RuntimeInfo info;
+    info.pid = static_cast<uint32_t>(omnibinder::platform::getPid());
+    info.process_name = "raw-c-ctrl";
+    info.session_version = omnibinder::SESSION_PROTOCOL_VERSION;
+    info.runtime_id = "raw-c-ctrl-" + std::to_string(transport.fd());
+    info.incarnation_id = 1;
+    info.heartbeat_interval_ms = 3000;
+    info.requested_timeout_ms = 10000;
+    info.host_id = "raw-harness";
+    omnibinder::Message msg(omnibinder::MessageType::MSG_RUNTIME_HELLO, seq);
+    if (!omnibinder::serializeRuntimeInfo(info, msg.payload) || !sendMessage(transport, msg)) {
+        return false;
+    }
+    omnibinder::Message reply;
+    if (!recvFullMessage(transport, reply, 2000)
+        || reply.getType() != omnibinder::MessageType::MSG_RUNTIME_HELLO_REPLY) {
+        return false;
+    }
+    omnibinder::SessionHelloAck ack;
+    omnibinder::BufferView view(reply.payload.data(), reply.payload.size());
+    return omnibinder::deserializeSessionHelloAck(view, ack)
+        && ack.status != omnibinder::SESSION_STATUS_REJECTED;
+}
+
 static bool registerFakeService(omnibinder::TcpConnection& transport, uint32_t seq, const std::string& name, uint16_t port, const std::string& host_id) {
+    if (!sendControlHello(transport, seq + 5000)) return false;
     omnibinder::Message msg(omnibinder::MessageType::MSG_REGISTER, seq);
     omnibinder::ServiceInfo info;
     info.name = name;
@@ -658,6 +770,20 @@ static void rawReplyThread(void* arg) {
             omnibinder::Buffer input(buf, static_cast<size_t>(ret));
             omnibinder::MessageHeader hdr;
             assert(omnibinder::Message::parseHeader(input.data(), input.size(), hdr));
+            if (hdr.type == static_cast<uint16_t>(omnibinder::MessageType::MSG_SESSION_HELLO)) {
+                omnibinder::SessionHelloAck ack;
+                ack.status = omnibinder::SESSION_STATUS_OK;
+                ack.accepted_interval_ms = 3000;
+                ack.effective_timeout_ms = 10000;
+                ack.peer_incarnation_id = 1;
+                omnibinder::Message ack_msg(omnibinder::MessageType::MSG_SESSION_HELLO_ACK,
+                                            hdr.sequence);
+                omnibinder::serializeSessionHelloAck(ack, ack_msg.payload);
+                omnibinder::Buffer ack_out;
+                ack_msg.serialize(ack_out);
+                accepted->send(ack_out.data(), ack_out.size());
+                continue;
+            }
             omnibinder::Message reply(omnibinder::MessageType::MSG_INVOKE_REPLY, hdr.sequence);
             if (ctx->mode == RAW_REPLY_TRUNCATED_STATUS) {
                 reply.payload.writeUint16(0);
@@ -713,6 +839,7 @@ int main() {
 
     omnibinder::TcpConnection rogue;
     assert(connectTcp(rogue, "127.0.0.1", lookupCServicePort("ItemService")));
+    assert(sendDataHello(rogue, 9200));
     omnibinder::Message bad_invoke(omnibinder::MessageType::MSG_INVOKE, 9201);
     bad_invoke.payload.writeUint32(IFACE_ID);
     bad_invoke.payload.writeUint32(METHOD_ECHO);

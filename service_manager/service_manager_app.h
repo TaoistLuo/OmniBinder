@@ -39,7 +39,6 @@
 #include "core/event_loop.h"
 #include "transport/transport_selector.h"
 #include "service_registry.h"
-#include "heartbeat_monitor.h"
 #include "death_notifier.h"
 #include "topic_manager.h"
 #include <string>
@@ -61,6 +60,20 @@ struct ClientConnection {
     uint32_t log_level;
     bool runtime_registered;
 
+    // 控制面运行时级会话
+    std::string session_key;        // (host_id, runtime_id)
+    std::string runtime_id;
+    std::string host_id;
+    uint32_t incarnation_id;
+    uint32_t session_interval_ms;
+    uint32_t session_timeout_ms;
+    int64_t  last_heartbeat_ms;
+    int64_t  accept_time_ms;
+    bool     hello_received;
+    uint32_t hello_timer_id;
+    uint32_t deadline_timer_id;
+    uint64_t session_generation;
+
     ClientConnection()
         : fd(-1)
         , transport(nullptr)
@@ -70,6 +83,15 @@ struct ClientConnection {
         , pid(0)
         , log_level(OMNI_LOG_INFO)
         , runtime_registered(false)
+        , incarnation_id(0)
+        , session_interval_ms(DEFAULT_HEARTBEAT_INTERVAL)
+        , session_timeout_ms(DEFAULT_HEARTBEAT_TIMEOUT)
+        , last_heartbeat_ms(0)
+        , accept_time_ms(0)
+        , hello_received(false)
+        , hello_timer_id(0)
+        , deadline_timer_id(0)
+        , session_generation(0)
     {}
 };
 
@@ -146,8 +168,13 @@ private:
     void handleRegister(ClientConnection* conn, const Message& msg);
     void sendRegisterReply(ClientConnection* conn, uint32_t seq, ServiceHandle handle);
     void handleUnregister(ClientConnection* conn, const Message& msg);
-    void handleHeartbeat(ClientConnection* conn, const Message& msg);
-    void sendHeartbeatAck(ClientConnection* conn, uint32_t seq);
+    void handleControlHeartbeat(ClientConnection* conn, const Message& msg);
+    void sendControlHeartbeatAck(ClientConnection* conn, uint32_t seq);
+    void armHelloDeadline(ClientConnection* conn);
+    void armSessionDeadline(ClientConnection* conn);
+    void cancelSessionTimers(ClientConnection* conn);
+    void onSessionDeadline(int fd, uint64_t generation);
+    void closeClient(int fd, bool notify_service_death = true);
     void handleLookup(ClientConnection* conn, const Message& msg);
     void sendLookupReply(ClientConnection* conn, uint32_t seq, bool found, const ServiceInfo& info);
     void handleListInstances(ClientConnection* conn, const Message& msg);
@@ -170,7 +197,6 @@ private:
     void handleUnsubscribeTopic(ClientConnection* conn, const Message& msg);
     void sendTopicPublisherNotify(int subscriber_fd, const std::string& topic,
                                   const ServiceInfo& pub_info, uint32_t idl_hash);
-    void onHeartbeatCheck();
     /*
      * @brief  服务实例摘除后通知死亡订阅者
      * @param[in]  identity 被摘除的服务实例身份
@@ -194,7 +220,6 @@ private:
     bool removeServiceAndNotify(const ServiceIdentity& identity, int fd);
     void sendDeathNotify(ClientConnection* conn, const ServiceIdentity& identity,
                          MessageType type);
-    void closeClient(int fd);
     void sendMessage(ClientConnection* conn, Message& msg);
     bool flushPendingSends(ClientConnection* conn);
     void enableClientWriteEvents(ClientConnection* conn);
@@ -210,11 +235,13 @@ private:
     std::map<uint32_t, std::vector<int> > pid_watchers_;
     std::map<int, std::set<uint32_t> > watcher_to_pids_;
     ServiceRegistry registry_;
-    HeartbeatMonitor heartbeat_;
     DeathNotifier death_notifier_;
     TopicManager topic_manager_;
-    uint32_t heartbeat_check_interval_ms_;
-    uint32_t heartbeat_timer_id_;
+    // (host_id, runtime_id) -> 控制连接 fd；用于同运行时新会话顶替旧会话
+    std::map<std::string, int> runtime_sessions_;
+    uint32_t default_session_timeout_ms_;
+    uint32_t max_session_timeout_ms_;
+    uint32_t sm_incarnation_id_;
     uint32_t sm_seq_counter_;
     int shutdown_fd_;
 };

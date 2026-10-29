@@ -780,7 +780,7 @@ ctest --output-on-failure
 同时 ServiceManager（终端1）会输出：
 
 ```
-[WARN][HeartbeatMonitor] Service SensorService timed out (missed 1 heartbeats)
+[WARN][ServiceManager] session_timeout fd=... runtime_id=... timeout_ms=...
 [WARN][ServiceManager] Service timed out: SensorService (host_id=<host_id>, instance_id=)
 [INFO][DeathNotifier] Instance SensorService (host_id=<host_id>, instance_id=) died, name_gone=1, notifying 1 subscribers
 ```

@@ -36,7 +36,9 @@ namespace omnibinder {
 
 ServiceProxyBase::ServiceProxyBase(OmniRuntime& runtime, const std::string& service_name)
     : runtime_(runtime), service_name_(service_name), connection_key_(service_name),
-      instance_bound_(false) {
+      instance_bound_(false), heartbeat_configured_(false),
+      heartbeat_interval_ms_(DEFAULT_HEARTBEAT_INTERVAL),
+      heartbeat_timeout_ms_(DEFAULT_HEARTBEAT_TIMEOUT) {
     connected_.store(false, std::memory_order_relaxed);
     death_subscribed_.store(false, std::memory_order_relaxed);
 }
@@ -62,14 +64,21 @@ int ServiceProxyBase::connect(const std::string& host_id, const std::string& ins
 }
 
 int ServiceProxyBase::connect() {
+    // 重连时把用户配置过的策略重新登记到 runtime，使 Session Hello 携带该值；
+    // 未配置时 ensureDataSession 使用默认 3s/10s。
+    if (heartbeat_configured_) {
+        runtime_.startHeartbeat(connection_key_, heartbeat_interval_ms_, heartbeat_timeout_ms_);
+    }
     int ret = instance_bound_
         ? runtime_.connectServiceInstance(service_name_, instance_host_id_, instance_id_)
         : runtime_.connectService(service_name_);
     if (ret == 0) {
         connected_.store(true, std::memory_order_release);
-        // 连接键即数据面索引：显式实例时后续心跳/重连均作用在该实例的条目上
+        // 连接键即数据面索引：显式实例时后续心跳/重连均作用在该实例的条目上。
+        // 数据面心跳已由 ensureDataSession 在 Session Hello 后自动启动；
+        // 这里仅保留自动重连。若用户在 connect() 前配置过心跳，connectService
+        // 内的 Session Hello 会直接携带该策略，无需再次协商。
         enableAutoReconnect(true);
-        startHeartbeat();
         // 未绑定实例时按名订阅；绑定实例后按实例订阅，只有目标实例死亡才触发
         int sub_ret = 0;
         if (instance_bound_) {
@@ -138,6 +147,9 @@ void ServiceProxyBase::setReconnectInterval(uint32_t interval_ms) {
 }
 
 void ServiceProxyBase::startHeartbeat(uint32_t interval_ms, uint32_t timeout_ms) {
+    heartbeat_configured_ = true;
+    heartbeat_interval_ms_ = interval_ms;
+    heartbeat_timeout_ms_ = timeout_ms;
     runtime_.startHeartbeat(connection_key_, interval_ms, timeout_ms);
 }
 

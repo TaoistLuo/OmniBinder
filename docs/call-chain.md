@@ -34,7 +34,7 @@ ServiceManager 只负责服务注册发现、Topic 发布/订阅关系、死亡�
   -> ServiceManagerApp::handleRegister()
      - ServiceRegistry::addService()：以 (name, host_id, instance_id) 身份键存储；
        同身份重复注册为后来者顶替（保留 handle），异身份新增并存
-     - HeartbeatMonitor::startTracking(ServiceIdentity(name, host_id, instance_id))
+     - 控制面会话由 MSG_CONTROL_HEARTBEAT 续期；服务不再单独跟踪心跳
 ```
 
 `instance_id` 由服务在注册前经 `Service::setInstanceId()` 声明，默认空串表示该 `host_id` 上该服务的默认实例。

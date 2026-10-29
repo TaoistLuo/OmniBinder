@@ -86,11 +86,13 @@ public:
     void setReconnectInterval(uint32_t interval_ms);
 
     /* @brief 启动到目标服务的数据面连接心跳检测
-     * @param[in]  interval_ms 心跳间隔（毫秒，默认 5000）
-     * @param[in]  timeout_ms  超时阈值（毫秒，默认 10000）
+     * @param[in]  interval_ms 心跳间隔（毫秒，默认 DEFAULT_HEARTBEAT_INTERVAL）
+     * @param[in]  timeout_ms  超时阈值（毫秒，默认 DEFAULT_HEARTBEAT_TIMEOUT）
      * @note   检测的是客户端到目标服务的直连保活，不涉及目标服务在
-     *         ServiceManager 的注册心跳 */
-    void startHeartbeat(uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+     *         ServiceManager 的注册心跳。建议在 connect() 前调用以参与 Session
+     *         Hello 协商；connect() 后调用会触发一次会话参数更新。 */
+    void startHeartbeat(uint32_t interval_ms = DEFAULT_HEARTBEAT_INTERVAL,
+                        uint32_t timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT);
 
     /* @brief 停止到目标服务的数据面连接心跳检测
      * @note   只停止本代理的检测；不注销目标服务、不影响其 SM 注册心跳。
@@ -128,6 +130,9 @@ protected:
     // 是否绑定到显式实例（setInstance 时确定）。取代脆弱的
     // connection_key_ == service_name_ 字符串比较
     bool instance_bound_;
+    bool heartbeat_configured_;
+    uint32_t heartbeat_interval_ms_;
+    uint32_t heartbeat_timeout_ms_;
     std::function<void()> death_callback_;
 };
 

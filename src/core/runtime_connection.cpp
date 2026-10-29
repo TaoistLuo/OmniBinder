@@ -126,6 +126,12 @@ int OmniRuntime::Impl::connectResolvedConnection(const std::string& connection_k
         return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
 
+    int session_ret = ensureDataSession(connection_key, info.name);
+    if (session_ret != 0) {
+        conn_mgr_->removeConnection(connection_key);
+        return session_ret;
+    }
+
     // 记录连接恢复意图：SM 重连恢复时数据面连接会被 closeAll 清空，
     // 需要该记录才能在恢复流程中重建直连（约束 6：恢复必须覆盖数据面）。
     // explicit_connect 区分用户显式连接与话题订阅附带的连接，后者在订阅
@@ -242,7 +248,8 @@ void OmniRuntime::Impl::tryReconnectService(const std::string& service_name) {
         ServiceConnection* conn = conn_mgr_->getOrCreateConnectionByKey(
             service_name, transport_name, ep.host, ep.port, ep.host_id, ep.shm_config,
             ep.instance_id);
-        ret = conn ? 0 : static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
+        ret = conn ? ensureDataSession(service_name, transport_name)
+                   : static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
     }
     if (ret != 0) {
         if (config.has_instance) {
@@ -326,6 +333,110 @@ void OmniRuntime::Impl::scheduleReconnect(const std::string& service_name, uint3
                      service_name.c_str(), jittered_ms, delay_ms);
 }
 
+int OmniRuntime::Impl::ensureDataSession(const std::string& connection_key,
+                                         const std::string& service_name) {
+    (void)service_name;
+    if (!conn_mgr_) {
+        return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
+    }
+    ServiceConnection* conn = conn_mgr_->getConnection(connection_key);
+    if (!conn) {
+        return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
+    }
+    if (conn->session_ready) {
+        return 0;
+    }
+    int ret = sendSessionHelloAndWait(connection_key);
+    if (ret != 0) {
+        return ret;
+    }
+    conn = conn_mgr_->getConnection(connection_key);
+    if (!conn) {
+        return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
+    }
+    applyDataHeartbeatPolicy(connection_key, conn->session_interval_ms,
+                             conn->session_timeout_ms);
+    return 0;
+}
+
+int OmniRuntime::Impl::sendSessionHelloAndWait(const std::string& connection_key) {
+    ServiceConnection* conn = conn_mgr_ ? conn_mgr_->getConnection(connection_key) : NULL;
+    if (!conn) {
+        return static_cast<int>(ErrorCode::ERR_CONNECT_FAILED);
+    }
+
+    uint32_t interval_ms = DEFAULT_HEARTBEAT_INTERVAL;
+    uint32_t requested_timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT;
+    ServiceState* policy = findServiceState(connection_key);
+    if (policy && policy->has_heartbeat) {
+        interval_ms = policy->heartbeat.interval_ms;
+        requested_timeout_ms = policy->heartbeat.timeout_ms;
+    }
+
+    SessionHello hello;
+    hello.version = SESSION_PROTOCOL_VERSION;
+    hello.runtime_id = runtime_id_;
+    hello.incarnation_id = incarnation_id_;
+    hello.heartbeat_interval_ms = interval_ms;
+    hello.requested_timeout_ms = requested_timeout_ms;
+    hello.capabilities = RUNTIME_DIAG_CAP_WATCH;
+    hello.host_id = host_id_;
+    hello.process_name = diag_.process_name;
+    hello.pid = diag_.pid;
+
+    Message msg(MessageType::MSG_SESSION_HELLO, allocSequence());
+    if (!serializeSessionHello(hello, msg.payload)) {
+        OMNI_LOG_ERROR(LOG_TAG, "session_hello_serialize_failed key=%s",
+                       connection_key.c_str());
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+    conn->session_ack_received = false;
+    if (!conn_mgr_->sendMessage(connection_key, msg)) {
+        OMNI_LOG_WARN(LOG_TAG, "session_hello_send_failed key=%s", connection_key.c_str());
+        return static_cast<int>(ErrorCode::ERR_SEND_FAILED);
+    }
+
+    const int64_t deadline = platform::currentTimeMs() + DEFAULT_SESSION_HELLO_TIMEOUT;
+    while (true) {
+        conn = conn_mgr_ ? conn_mgr_->getConnection(connection_key) : NULL;
+        if (!conn) {
+            return static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
+        }
+        if (conn->session_ack_received) {
+            break;
+        }
+        int64_t remaining = deadline - platform::currentTimeMs();
+        if (remaining <= 0) {
+            OMNI_LOG_WARN(LOG_TAG, "session_hello_timeout key=%s timeout_ms=%u",
+                          connection_key.c_str(), DEFAULT_SESSION_HELLO_TIMEOUT);
+            return static_cast<int>(ErrorCode::ERR_TIMEOUT);
+        }
+        int wait_ms = remaining > 0x7fffffffLL ? 0x7fffffff : static_cast<int>(remaining);
+        loop_->pollOnceWithoutFunctors(wait_ms);
+    }
+
+    if (conn->session_status == SESSION_STATUS_REJECTED) {
+        OMNI_LOG_WARN(LOG_TAG, "session_hello_rejected key=%s", connection_key.c_str());
+        return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
+    }
+    OMNI_LOG_INFO(LOG_TAG, "data_session_established key=%s incarnation=%u "
+                  "interval=%u timeout=%u peer=%u",
+                  connection_key.c_str(), incarnation_id_,
+                  conn->session_interval_ms, conn->session_timeout_ms,
+                  conn->peer_incarnation);
+    return 0;
+}
+
+void OmniRuntime::Impl::applyDataHeartbeatPolicy(const std::string& connection_key,
+                                                 uint32_t interval_ms,
+                                                 uint32_t timeout_ms) {
+    ServiceState& state = ensureServiceState(connection_key);
+    state.has_heartbeat = true;
+    state.heartbeat.interval_ms = clampHeartbeatInterval(interval_ms);
+    state.heartbeat.timeout_ms = timeout_ms > 0 ? timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT;
+    resumeHeartbeat(connection_key);
+}
+
 void OmniRuntime::Impl::startHeartbeat(const std::string& service_name, uint32_t interval_ms, uint32_t timeout_ms) {
     callSerialized([this, &service_name, interval_ms, timeout_ms]() {
         // 未 init 时 loop_ 为 NULL：resumeHeartbeat 会 addTimer 崩溃（约束 5：
@@ -336,9 +447,26 @@ void OmniRuntime::Impl::startHeartbeat(const std::string& service_name, uint32_t
         ServiceState& svc_state = ensureServiceState(service_name);
         svc_state.has_heartbeat = true;
         HeartbeatState& state = svc_state.heartbeat;
-        state.interval_ms = interval_ms > 0 ? interval_ms : DEFAULT_HEARTBEAT_INTERVAL;
+        state.interval_ms = clampHeartbeatInterval(interval_ms);
         state.timeout_ms = timeout_ms > 0 ? timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT;
-        resumeHeartbeat(service_name);
+
+        // 会话已建立时重新协商（服务端按新值裁定并返回）；未建立时仅保存策略，
+        // 由 ensureDataSession 在 Hello 中携带。
+        ServiceConnection* conn = conn_mgr_ ? conn_mgr_->getConnection(service_name) : NULL;
+        if (conn && conn->session_ready) {
+            int ret = sendSessionHelloAndWait(service_name);
+            if (ret != 0) {
+                OMNI_LOG_WARN(LOG_TAG, "heartbeat_renegotiate_failed key=%s err=%d",
+                              service_name.c_str(), ret);
+                return;
+            }
+            conn = conn_mgr_->getConnection(service_name);
+            if (conn) {
+                state.interval_ms = conn->session_interval_ms;
+                state.timeout_ms = conn->session_timeout_ms;
+            }
+            resumeHeartbeat(service_name);
+        }
 
         OMNI_LOG_INFO(LOG_TAG, "Started heartbeat for %s (interval=%u ms, timeout=%u ms)",
                        service_name.c_str(), state.interval_ms, state.timeout_ms);
@@ -363,6 +491,10 @@ void OmniRuntime::Impl::pauseHeartbeat(const std::string& service_name) {
     if (svc_state->heartbeat.timer_id > 0) {
         loop_->cancelTimer(svc_state->heartbeat.timer_id);
         svc_state->heartbeat.timer_id = 0;
+    }
+    if (svc_state->heartbeat.deadline_timer_id > 0) {
+        loop_->cancelTimer(svc_state->heartbeat.deadline_timer_id);
+        svc_state->heartbeat.deadline_timer_id = 0;
     }
     svc_state->heartbeat.pending = false;
 }
@@ -393,12 +525,18 @@ void OmniRuntime::Impl::resumeHeartbeat(const std::string& service_name) {
     ServiceState* svc_state = findServiceState(service_name);
     if (!svc_state || !svc_state->has_heartbeat) return;
     HeartbeatState& state = svc_state->heartbeat;
-    if (state.timer_id > 0) loop_->cancelTimer(state.timer_id);
+    if (state.timer_id > 0) {
+        loop_->cancelTimer(state.timer_id);
+        state.timer_id = 0;
+    }
+    if (state.deadline_timer_id > 0) {
+        loop_->cancelTimer(state.deadline_timer_id);
+        state.deadline_timer_id = 0;
+    }
     state.last_ack_time = platform::currentTimeMs();
     state.pending = false;
     state.timer_id = loop_->addTimer(state.interval_ms, [this, service_name]() {
         sendHeartbeatToService(service_name);
-        checkHeartbeatTimeout(service_name);
     }, true);
 }
 
@@ -414,10 +552,24 @@ void OmniRuntime::Impl::sendHeartbeatToService(const std::string& service_name) 
     }
 
     Message msg(MessageType::MSG_HEARTBEAT, allocSequence());
-    if (conn_mgr_->sendMessage(service_name, msg)) {
-        state.pending = true;
-        OMNI_LOG_DEBUG(LOG_TAG, "Sent heartbeat to %s", service_name.c_str());
+    if (!msg.payload.writeUint32(incarnation_id_)) {
+        OMNI_LOG_ERROR(LOG_TAG, "data_heartbeat_serialize_failed service=%s",
+                       service_name.c_str());
+        return;
     }
+    if (!conn_mgr_->sendMessage(service_name, msg)) {
+        return;
+    }
+    state.pending = true;
+    if (state.deadline_timer_id > 0) {
+        loop_->cancelTimer(state.deadline_timer_id);
+        state.deadline_timer_id = 0;
+    }
+    state.deadline_timer_id = loop_->addTimer(state.timeout_ms, [this, service_name]() {
+        this->checkHeartbeatTimeout(service_name);
+    }, false);
+    OMNI_LOG_DEBUG(LOG_TAG, "Sent heartbeat to %s timeout=%u",
+                   service_name.c_str(), state.timeout_ms);
 }
 
 void OmniRuntime::Impl::checkHeartbeatTimeout(const std::string& service_name) {
@@ -430,20 +582,18 @@ void OmniRuntime::Impl::checkHeartbeatTimeout(const std::string& service_name) {
     if (!state.pending) {
         return;
     }
+    state.deadline_timer_id = 0;
+    state.pending = false;
+    OMNI_LOG_WARN(LOG_TAG, "Heartbeat timeout for %s (timeout=%u ms)",
+                  service_name.c_str(), state.timeout_ms);
 
-    int64_t now = platform::currentTimeMs();
-    int64_t elapsed = now - state.last_ack_time;
-    if (elapsed > static_cast<int64_t>(state.timeout_ms)) {
-        OMNI_LOG_WARN(LOG_TAG, "Heartbeat timeout for %s (elapsed=%lld ms)", service_name.c_str(), elapsed);
-
-        const bool reconnect_enabled = handleServiceLost(service_name);
-        if (!reconnect_enabled) {
-            ServiceState* lost_state = findServiceState(service_name);
-            if (lost_state) {
-                lost_state->has_heartbeat = false;
-            }
-            eraseServiceStateIfUnused(service_name);
+    const bool reconnect_enabled = handleServiceLost(service_name);
+    if (!reconnect_enabled) {
+        ServiceState* lost_state = findServiceState(service_name);
+        if (lost_state) {
+            lost_state->has_heartbeat = false;
         }
+        eraseServiceStateIfUnused(service_name);
     }
 }
 
@@ -618,6 +768,11 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
         conn_key, pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config,
         pub_info.instance_id);
     if (!conn) {
+        return false;
+    }
+    if (ensureDataSession(conn_key, pub_name) != 0) {
+        OMNI_LOG_WARN(LOG_TAG, "topic_publisher_session_failed topic=%s publisher=%s",
+                      topic_name.c_str(), conn_key.c_str());
         return false;
     }
 

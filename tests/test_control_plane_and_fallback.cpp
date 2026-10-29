@@ -166,10 +166,64 @@ static bool sendFullMessage(IMessageConnection& transport, const Message& msg, i
     return sent == out.size();
 }
 
+static bool sendControlHello(TcpConnection& transport,
+                             uint32_t interval_ms = 100,
+                             uint32_t timeout_ms = 10000) {
+    Message msg(MessageType::MSG_RUNTIME_HELLO,
+                0x7F000000u + static_cast<uint32_t>(transport.fd()));
+    RuntimeInfo info;
+    info.pid = static_cast<uint32_t>(platform::getPid());
+    info.process_name = "raw-control";
+    info.session_version = SESSION_PROTOCOL_VERSION;
+    info.runtime_id = "raw-control-" + std::to_string(transport.fd());
+    info.incarnation_id = 1;
+    info.heartbeat_interval_ms = interval_ms;
+    info.requested_timeout_ms = timeout_ms;
+    info.host_id = "raw-host";
+    if (!serializeRuntimeInfo(info, msg.payload) || !sendMessage(transport, msg)) {
+        return false;
+    }
+    Message reply;
+    if (!recvMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_RUNTIME_HELLO_REPLY) {
+        return false;
+    }
+    SessionHelloAck ack;
+    BufferView view(reply.payload.data(), reply.payload.size());
+    return deserializeSessionHelloAck(view, ack)
+        && ack.status != SESSION_STATUS_REJECTED;
+}
+
+static bool sendDataSessionHello(TcpConnection& transport, uint32_t seq) {
+    SessionHello hello;
+    hello.runtime_id = "raw-data";
+    hello.incarnation_id = 1;
+    hello.heartbeat_interval_ms = 3000;
+    hello.requested_timeout_ms = 10000;
+    hello.host_id = "raw-host";
+    hello.process_name = "raw-data";
+    hello.pid = static_cast<uint32_t>(platform::getPid());
+    Message msg(MessageType::MSG_SESSION_HELLO, seq);
+    if (!serializeSessionHello(hello, msg.payload)
+        || !sendFullMessage(transport, msg, 2000)) {
+        return false;
+    }
+    Message reply;
+    if (!recvFullMessage(transport, reply, 2000)
+        || reply.getType() != MessageType::MSG_SESSION_HELLO_ACK) {
+        return false;
+    }
+    SessionHelloAck ack;
+    BufferView view(reply.payload.data(), reply.payload.size());
+    return deserializeSessionHelloAck(view, ack)
+        && ack.status != SESSION_STATUS_REJECTED;
+}
+
 static bool registerFakeService(TcpConnection& transport, uint32_t seq,
                                 const std::string& name, uint16_t port,
                                 const std::string& host_id,
                                 const std::string& instance_id = std::string()) {
+    if (!sendControlHello(transport)) return false;
     Message msg(MessageType::MSG_REGISTER, seq);
     ServiceInfo info;
     info.name = name;
@@ -228,6 +282,7 @@ static bool registerFakeServiceWithHost(TcpConnection& transport, uint32_t seq,
                                         const std::string& name, const std::string& host,
                                         uint16_t port, const std::string& host_id,
                                         const std::string& instance_id = std::string()) {
+    if (!sendControlHello(transport)) return false;
     Message msg(MessageType::MSG_REGISTER, seq);
     ServiceInfo info;
     info.name = name;
@@ -276,12 +331,13 @@ static bool queryRawPublishedTopics(TcpConnection& transport, uint32_t seq,
 
 static bool sendHeartbeat(TcpConnection& transport, uint32_t seq,
                           const std::string& service_name) {
-    Message heartbeat(MessageType::MSG_HEARTBEAT, seq);
-    heartbeat.payload.writeString(service_name);
+    (void)service_name;
+    Message heartbeat(MessageType::MSG_CONTROL_HEARTBEAT, seq);
+    heartbeat.payload.writeUint32(1);
     if (!sendMessage(transport, heartbeat)) return false;
     Message reply;
     return recvMessage(transport, reply, 2000)
-        && reply.getType() == MessageType::MSG_HEARTBEAT_ACK;
+        && reply.getType() == MessageType::MSG_CONTROL_HEARTBEAT_ACK;
 }
 
 static bool lookupRaw(TcpConnection& transport, uint32_t seq,
@@ -326,20 +382,30 @@ static bool listInstancesRaw(TcpConnection& transport, uint32_t seq,
     return true;
 }
 
-static bool sendRuntimeHello(TcpConnection& transport, uint32_t seq, uint32_t pid, const std::string& process_name) {
+static bool sendRuntimeHello(TcpConnection& transport, uint32_t seq, uint32_t pid,
+                             const std::string& process_name) {
     Message msg(MessageType::MSG_RUNTIME_HELLO, seq);
     RuntimeInfo info;
     info.pid = pid;
     info.process_name = process_name;
-    serializeRuntimeInfo(info, msg.payload);
-    if (!sendMessage(transport, msg)) return false;
+    info.session_version = SESSION_PROTOCOL_VERSION;
+    info.runtime_id = process_name + "#" + std::to_string(pid);
+    info.incarnation_id = 1;
+    info.heartbeat_interval_ms = 100;
+    info.requested_timeout_ms = 10000;
+    info.host_id = "raw-host";
+    if (!serializeRuntimeInfo(info, msg.payload) || !sendMessage(transport, msg)) {
+        return false;
+    }
     Message reply;
     if (!recvMessage(transport, reply, 2000)
         || reply.getType() != MessageType::MSG_RUNTIME_HELLO_REPLY) {
         return false;
     }
-    Buffer payload(reply.payload.data(), reply.payload.size());
-    return mustRead<bool>(payload, &Buffer::tryReadBool);
+    SessionHelloAck ack;
+    BufferView view(reply.payload.data(), reply.payload.size());
+    return deserializeSessionHelloAck(view, ack)
+        && ack.status != SESSION_STATUS_REJECTED;
 }
 
 static bool sendWatchStart(TcpConnection& transport, uint32_t seq, uint32_t pid) {
@@ -527,33 +593,65 @@ static void delayedReadServiceThread(void* arg) {
         int ret = accepted->recv(buf.data(), buf.size());
         if (ret > 0) {
             input.writeRaw(buf.data(), static_cast<size_t>(ret));
-            if (input.size() >= MESSAGE_HEADER_SIZE) {
-                MessageHeader hdr;
-                if (Message::parseHeader(input.data(), input.size(), hdr)) {
-                    size_t total = MESSAGE_HEADER_SIZE + hdr.length;
-                    if (input.size() >= total) {
-                        Message reply(MessageType::MSG_INVOKE_REPLY, hdr.sequence);
-                        reply.payload.writeInt32(0);
-                        reply.payload.writeUint32(0);
-                        Buffer out;
-                        reply.serialize(out);
-                        size_t sent = 0;
-                        while (sent < out.size()) {
-                            int n = accepted->send(out.data() + sent, out.size() - sent);
-                            if (n < 0) {
-                                ctx->done.store(true);
-                                return;
-                            }
-                            if (n == 0) {
-                                std::this_thread::sleep_for(std::chrono::microseconds(10000));
-                                continue;
-                            }
-                            sent += static_cast<size_t>(n);
-                        }
-                        replied = true;
-                    }
-                }
+        }
+
+        size_t offset = 0;
+        while (!replied) {
+            MessageHeader hdr;
+            size_t frame_size = 0;
+            if (tryExtractFrame(input.data() + offset, input.size() - offset,
+                                hdr, frame_size) != FrameStatus::Complete) {
+                break;
             }
+            if (hdr.type == static_cast<uint16_t>(MessageType::MSG_SESSION_HELLO)) {
+                SessionHelloAck ack;
+                ack.status = SESSION_STATUS_OK;
+                ack.accepted_interval_ms = 3000;
+                ack.effective_timeout_ms = 10000;
+                ack.peer_incarnation_id = 1;
+                Message reply(MessageType::MSG_SESSION_HELLO_ACK, hdr.sequence);
+                serializeSessionHelloAck(ack, reply.payload);
+                Buffer out;
+                reply.serialize(out);
+                size_t sent = 0;
+                while (sent < out.size()) {
+                    int n = accepted->send(out.data() + sent, out.size() - sent);
+                    if (n < 0) {
+                        ctx->done.store(true);
+                        return;
+                    }
+                    if (n == 0) {
+                        std::this_thread::sleep_for(std::chrono::microseconds(10000));
+                        continue;
+                    }
+                    sent += static_cast<size_t>(n);
+                }
+            } else if (hdr.type == static_cast<uint16_t>(MessageType::MSG_INVOKE)) {
+                Message reply(MessageType::MSG_INVOKE_REPLY, hdr.sequence);
+                reply.payload.writeInt32(0);
+                reply.payload.writeUint32(0);
+                Buffer out;
+                reply.serialize(out);
+                size_t sent = 0;
+                while (sent < out.size()) {
+                    int n = accepted->send(out.data() + sent, out.size() - sent);
+                    if (n < 0) {
+                        ctx->done.store(true);
+                        return;
+                    }
+                    if (n == 0) {
+                        std::this_thread::sleep_for(std::chrono::microseconds(10000));
+                        continue;
+                    }
+                    sent += static_cast<size_t>(n);
+                }
+                replied = true;
+            }
+            offset += frame_size;
+        }
+        if (offset > 0) {
+            input.trySetReadPosition(input.readPosition() + offset);
+            input.compact();
         }
         if (!replied) {
             std::this_thread::sleep_for(std::chrono::microseconds(10000));
@@ -900,13 +998,15 @@ TEST_F(ControlPlaneTest, MalformedListInstancesRequestDegradesToNotFound) {
     rogue.close();
 }
 
-TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
+TEST_F(ControlPlaneTest, SessionTimeoutRemovesAllServicesOnControlFd) {
     TcpConnection registrant;
     TcpConnection observer;
     TcpConnection query;
     ASSERT_TRUE(connectTcp(registrant, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(observer, "127.0.0.1", SM_PORT));
     ASSERT_TRUE(connectTcp(query, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(sendControlHello(observer, 100, 60000));
+    ASSERT_TRUE(sendControlHello(query, 100, 60000));
     ASSERT_TRUE(registerFakeService(registrant, 1200, "RawTimeoutA", 12400, "raw-heartbeat"));
     ASSERT_TRUE(registerFakeService(registrant, 1201, "RawHealthyB", 12401, "raw-heartbeat"));
     ASSERT_TRUE(publishFakeTopic(registrant, 1202, "RawTimeoutA", "raw/timeout-a"));
@@ -919,48 +1019,11 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
     ASSERT_TRUE(recvMessage(registrant, subscribe_reply, 2000));
     ASSERT_EQ(subscribe_reply.getType(), MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
 
-    Message post_timeout_subscribe(MessageType::MSG_SUBSCRIBE_TOPIC, 1206);
-    post_timeout_subscribe.payload.writeString("raw/post-timeout");
-    ASSERT_TRUE(sendMessage(registrant, post_timeout_subscribe));
-    Message post_timeout_subscribe_reply;
-    ASSERT_TRUE(recvMessage(registrant, post_timeout_subscribe_reply, 2000));
-    ASSERT_EQ(post_timeout_subscribe_reply.getType(), MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
-
     Message watch(MessageType::MSG_SUBSCRIBE_SERVICE, 1205);
     watch.payload.writeString("RawTimeoutA");
     ASSERT_TRUE(sendMessage(observer, watch));
     Message watch_reply;
     ASSERT_TRUE(recvMessage(observer, watch_reply, 2000));
-
-    bool death_seen = false;
-    for (int i = 0; i < 40 && !death_seen; ++i) {
-        ASSERT_TRUE(sendHeartbeat(registrant, 1210 + i, "RawHealthyB"));
-        Message death;
-        if (recvMessage(observer, death, 200)) {
-            ASSERT_EQ(death.getType(), MessageType::MSG_DEATH_NOTIFY);
-            Buffer payload(death.payload.data(), death.payload.size());
-            EXPECT_EQ(mustReadString(payload), "RawTimeoutA");
-            death_seen = true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
-    }
-    ASSERT_TRUE(death_seen);
-
-    bool found = false;
-    std::vector<std::string> topics;
-    ASSERT_TRUE(queryRawPublishedTopics(query, 1260, "RawTimeoutA", found, topics));
-    EXPECT_FALSE(found);
-    ASSERT_TRUE(queryRawPublishedTopics(query, 1261, "RawHealthyB", found, topics));
-    ASSERT_TRUE(found);
-    ASSERT_EQ(topics.size(), 1u);
-    EXPECT_EQ(topics[0], "raw/healthy-b");
-    EXPECT_TRUE(sendHeartbeat(registrant, 1262, "RawHealthyB"));
-
-    Message stale_heartbeat(MessageType::MSG_HEARTBEAT, 1263);
-    stale_heartbeat.payload.writeString("RawTimeoutA");
-    ASSERT_TRUE(sendMessage(registrant, stale_heartbeat));
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_TRUE(sendHeartbeat(registrant, 1264, "RawHealthyB"));
 
     TcpConnection future_publisher;
     ASSERT_TRUE(connectTcp(future_publisher, "127.0.0.1", SM_PORT));
@@ -973,17 +1036,32 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
     Buffer notify_payload(notify.payload.data(), notify.payload.size());
     EXPECT_EQ(mustReadString(notify_payload), "raw/future");
 
-    // C2：RawHealthyB 是 registrant 上最后一个存活注册服务。它超时后该控制
-    // 连接已无任何存活注册，SM 必须按连接失联关闭它；真实 runtime 会通过
-    // reconnect + restoreControlPlaneState 重建订阅，裸客户端在此只能观察到 EOF。
-    bool healthy_removed = false;
-    for (int i = 0; i < 45 && !healthy_removed; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(800));
-        if (queryRawPublishedTopics(query, 1270 + i, "RawHealthyB", found, topics)) {
-            healthy_removed = !found;
+    // 运行时级会话：停止心跳后，同一控制连接上的所有服务必须一起被摘除。
+    bool death_seen = false;
+    bool both_gone = false;
+    for (int i = 0; i < 20 && !(death_seen && both_gone); ++i) {
+        Message death;
+        if (recvMessage(observer, death, 1000)) {
+            if (death.getType() == MessageType::MSG_DEATH_NOTIFY) {
+                Buffer payload(death.payload.data(), death.payload.size());
+                if (mustReadString(payload) == "RawTimeoutA") {
+                    death_seen = true;
+                }
+            }
+        }
+        bool found_a = true;
+        bool found_b = true;
+        std::vector<std::string> topics;
+        if (queryRawPublishedTopics(query, 1270 + static_cast<uint32_t>(i),
+                                    "RawTimeoutA", found_a, topics)
+            && queryRawPublishedTopics(query, 1300 + static_cast<uint32_t>(i),
+                                       "RawHealthyB", found_b, topics)) {
+            both_gone = !found_a && !found_b;
         }
     }
-    ASSERT_TRUE(healthy_removed);
+    EXPECT_TRUE(death_seen) << "death notify for the timed-out session service";
+    EXPECT_TRUE(both_gone)
+        << "session timeout must remove every service owned by the control fd";
 
     bool connection_closed = false;
     uint8_t drain_buf[4096];
@@ -996,7 +1074,7 @@ TEST_F(ControlPlaneTest, HeartbeatTimeoutIsServiceScopedOnSharedControlFd) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     EXPECT_TRUE(connection_closed)
-        << "Connection must be closed once no live service remains";
+        << "control connection must close when the runtime session times out";
 
     future_publisher.close();
     query.close();
@@ -1013,12 +1091,20 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
         if (!client) return;
         Message hello;
         if (recvFullMessage(*client, hello, 2000)) {
+            SessionHelloAck ack;
+            ack.status = SESSION_STATUS_OK;
+            ack.accepted_interval_ms = 3000;
+            ack.effective_timeout_ms = 10000;
+            ack.peer_incarnation_id = 1;
             Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, hello.getSequence());
-            reply.payload.writeBool(true);
+            serializeSessionHelloAck(ack, reply.payload);
             sendFullMessage(*client, reply, 2000);
         }
+        // 读取到真正的查询请求（跳过控制面心跳）
         Message ignored;
-        recvFullMessage(*client, ignored, 2000);
+        while (recvFullMessage(*client, ignored, 2000)
+               && ignored.getType() != MessageType::MSG_QUERY_PUBLISHED_TOPICS) {
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         server.releaseAccepted();
     });
@@ -1048,12 +1134,20 @@ TEST(ControlPlaneCompatibilityTest, ListInstancesMalformedReplyRejectedSafely) {
         if (!client) return;
         Message hello;
         if (recvFullMessage(*client, hello, 2000)) {
+            SessionHelloAck ack;
+            ack.status = SESSION_STATUS_OK;
+            ack.accepted_interval_ms = 3000;
+            ack.effective_timeout_ms = 10000;
+            ack.peer_incarnation_id = 1;
             Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, hello.getSequence());
-            reply.payload.writeBool(true);
+            serializeSessionHelloAck(ack, reply.payload);
             sendFullMessage(*client, reply, 2000);
         }
         Message request;
-        if (recvFullMessage(*client, request, 2000)) {
+        while (recvFullMessage(*client, request, 2000)
+               && request.getType() != MessageType::MSG_LIST_INSTANCES) {
+        }
+        if (request.getType() == MessageType::MSG_LIST_INSTANCES) {
             Message reply(MessageType::MSG_LIST_INSTANCES_REPLY, request.getSequence());
             reply.payload.writeBool(true);
             reply.payload.writeUint32(1);
@@ -1122,6 +1216,7 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
 TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
+    ASSERT_TRUE(sendDataSessionHello(rogue, 1999));
 
     const int before_count = owned_ctx_.service.invokeCount();
 
@@ -1242,6 +1337,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
 TEST_F(ControlPlaneTest, ServiceTcpLargeReplyHandlesPartialSend) {
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", owned_ctx_.service.port()));
+    ASSERT_TRUE(sendDataSessionHello(rogue, 3000));
 
     platform::setSocketRecvBufferSize(rogue.fd(), 4096);
 
@@ -1515,8 +1611,13 @@ TEST(ControlPlaneCompatibilityTest, PublishAdvertisesConfiguredRegisterHost) {
         Message m;
         while (!stop_fake.load() && recvFullMessage(*c, m, 2000)) {
             if (m.getType() == MessageType::MSG_RUNTIME_HELLO) {
+                SessionHelloAck ack;
+                ack.status = SESSION_STATUS_OK;
+                ack.accepted_interval_ms = 3000;
+                ack.effective_timeout_ms = 10000;
+                ack.peer_incarnation_id = 1;
                 Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, m.getSequence());
-                reply.payload.writeBool(true);
+                serializeSessionHelloAck(ack, reply.payload);
                 sendFullMessage(*c, reply, 2000);
             } else if (m.getType() == MessageType::MSG_REGISTER) {
                 Message reply(MessageType::MSG_REGISTER_REPLY, m.getSequence());
@@ -1536,8 +1637,9 @@ TEST(ControlPlaneCompatibilityTest, PublishAdvertisesConfiguredRegisterHost) {
                 Message reply(MessageType::MSG_PUBLISH_TOPIC_REPLY, m.getSequence());
                 reply.payload.writeBool(true);
                 sendFullMessage(*c, reply, 2000);
-            } else if (m.getType() == MessageType::MSG_HEARTBEAT) {
-                Message reply(MessageType::MSG_HEARTBEAT_ACK, m.getSequence());
+            } else if (m.getType() == MessageType::MSG_CONTROL_HEARTBEAT) {
+                Message reply(MessageType::MSG_CONTROL_HEARTBEAT_ACK, m.getSequence());
+                reply.payload.writeUint32(1);
                 sendFullMessage(*c, reply, 2000);
             }
         }

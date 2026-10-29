@@ -1,5 +1,6 @@
 #include "service_manager_app.h"
 #include "omnibinder/log.h"
+#include "platform/platform.h"
 #include <algorithm>
 
 #define TAG "ServiceManager"
@@ -45,10 +46,71 @@ bool ServiceManagerApp::forEachPidConn(
 void ServiceManagerApp::handleRuntimeHello(ClientConnection* conn, const Message& msg) {
     BufferView buf(msg.payload.data(), msg.payload.size());
     RuntimeInfo info;
-    if (!deserializeRuntimeInfo(buf, info) || info.pid == 0) {
-        sendBoolReply(conn, MessageType::MSG_RUNTIME_HELLO_REPLY, msg.header.sequence, false);
+    SessionHelloAck ack;
+    ack.peer_incarnation_id = sm_incarnation_id_;
+
+    if (!deserializeRuntimeInfo(buf, info) || info.pid == 0
+        || info.session_version != SESSION_PROTOCOL_VERSION) {
+        ack.status = SESSION_STATUS_REJECTED;
+        Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, msg.header.sequence);
+        serializeSessionHelloAck(ack, reply.payload);
+        sendMessage(conn, reply);
         return;
     }
+
+    const uint32_t requested_interval = info.heartbeat_interval_ms;
+    const uint32_t interval = clampHeartbeatInterval(requested_interval);
+    // requested==0 表示"由服务端默认值裁定"：此时服务端默认值可直接生效，
+    // 不再抬到 interval*3（运维用小 timeout 做快速故障演练/测试）。
+    uint32_t effective_timeout = 0;
+    if (info.requested_timeout_ms == 0) {
+        effective_timeout = default_session_timeout_ms_;
+        if (max_session_timeout_ms_ != 0 && effective_timeout > max_session_timeout_ms_) {
+            effective_timeout = max_session_timeout_ms_;
+        }
+        if (effective_timeout == 0) {
+            effective_timeout = negotiateSessionTimeout(interval, 0, max_session_timeout_ms_);
+        }
+    } else {
+        effective_timeout = negotiateSessionTimeout(
+            interval, info.requested_timeout_ms, max_session_timeout_ms_);
+    }
+
+    std::string runtime_id = info.runtime_id.empty() ? info.process_name : info.runtime_id;
+    if (runtime_id.empty()) {
+        runtime_id = "runtime-" + std::to_string(info.pid);
+    }
+    if (runtime_id.size() > MAX_SERVICE_NAME_LENGTH
+        || info.host_id.size() > MAX_SERVICE_NAME_LENGTH) {
+        OMNI_LOG_WARN(TAG, "Reject runtime hello with oversized identity fd=%d", conn->fd);
+        ack.status = SESSION_STATUS_REJECTED;
+        Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, msg.header.sequence);
+        serializeSessionHelloAck(ack, reply.payload);
+        sendMessage(conn, reply);
+        return;
+    }
+    const std::string session_key = makeRuntimeSessionKey(info.host_id, runtime_id);
+
+    // 同一 (host_id, runtime_id) 的新会话顶替旧会话。incarnation 相同说明是同一进程
+    // 重连（不触发死亡通知）；不同说明进程重启（保留死亡通知语义）。
+    std::map<std::string, int>::iterator sit = runtime_sessions_.find(session_key);
+    if (sit != runtime_sessions_.end() && sit->second != conn->fd) {
+        int old_fd = sit->second;
+        std::map<int, ClientConnection*>::iterator oit = clients_.find(old_fd);
+        bool same_incarnation = false;
+        if (oit != clients_.end() && oit->second) {
+            same_incarnation = (oit->second->incarnation_id == info.incarnation_id);
+        }
+        OMNI_LOG_INFO(TAG, "Session superseded runtime_id=%s old_fd=%d new_fd=%d same_inc=%d",
+                      runtime_id.c_str(), old_fd, conn->fd, same_incarnation ? 1 : 0);
+        closeClient(old_fd, !same_incarnation);
+        // 死亡通知回调可能重入并关闭当前连接（约束 1）：重新判活后再继续
+        if (clients_.find(conn->fd) == clients_.end()) {
+            return;
+        }
+    }
+    runtime_sessions_[session_key] = conn->fd;
+
     if (conn->runtime_registered && conn->pid != info.pid) {
         removePidFd(conn->pid, conn->fd);
     }
@@ -56,13 +118,43 @@ void ServiceManagerApp::handleRuntimeHello(ClientConnection* conn, const Message
     conn->process_name = info.process_name;
     conn->log_level = info.log_level;
     conn->runtime_registered = true;
+    conn->runtime_id = runtime_id;
+    conn->host_id = info.host_id;
+    conn->session_key = session_key;
+    conn->incarnation_id = info.incarnation_id;
+    conn->session_interval_ms = interval;
+    conn->session_timeout_ms = effective_timeout;
+    conn->last_heartbeat_ms = platform::currentTimeMs();
+    conn->hello_received = true;
+    if (conn->hello_timer_id > 0) {
+        loop_.cancelTimer(conn->hello_timer_id);
+        conn->hello_timer_id = 0;
+    }
+    armSessionDeadline(conn);
+
     std::vector<int>& fds = pid_to_fds_[info.pid];
     if (std::find(fds.begin(), fds.end(), conn->fd) == fds.end()) {
         fds.push_back(conn->fd);
     }
-    OMNI_LOG_INFO(TAG, "Runtime hello: pid=%u process=%s fd=%d log=%u",
-                  info.pid, info.process_name.c_str(), conn->fd, info.log_level);
-    sendBoolReply(conn, MessageType::MSG_RUNTIME_HELLO_REPLY, msg.header.sequence, true);
+
+    ack.status = (interval == requested_interval
+                  && (info.requested_timeout_ms == 0
+                      || effective_timeout == info.requested_timeout_ms))
+        ? SESSION_STATUS_OK : SESSION_STATUS_CLAMPED;
+    ack.accepted_interval_ms = interval;
+    ack.effective_timeout_ms = effective_timeout;
+
+    Message reply(MessageType::MSG_RUNTIME_HELLO_REPLY, msg.header.sequence);
+    if (!serializeSessionHelloAck(ack, reply.payload)) {
+        closeClient(conn->fd);
+        return;
+    }
+    sendMessage(conn, reply);
+
+    OMNI_LOG_INFO(TAG, "Runtime hello: pid=%u process=%s runtime_id=%s fd=%d "
+                  "incarnation=%u interval=%u timeout=%u status=%u",
+                  info.pid, info.process_name.c_str(), runtime_id.c_str(), conn->fd,
+                  info.incarnation_id, interval, effective_timeout, ack.status);
 }
 
 void ServiceManagerApp::handleRuntimeList(ClientConnection* conn, const Message& msg) {
@@ -84,6 +176,12 @@ void ServiceManagerApp::handleRuntimeList(ClientConnection* conn, const Message&
             info.process_name = runtime_conn->process_name;
             info.log_level = runtime_conn->log_level;
             info.diag_capabilities = RUNTIME_DIAG_CAP_WATCH;
+            info.session_version = SESSION_PROTOCOL_VERSION;
+            info.runtime_id = runtime_conn->runtime_id;
+            info.incarnation_id = runtime_conn->incarnation_id;
+            info.heartbeat_interval_ms = runtime_conn->session_interval_ms;
+            info.requested_timeout_ms = runtime_conn->session_timeout_ms;
+            info.host_id = runtime_conn->host_id;
             pit = by_pid.insert(std::make_pair(runtime_conn->pid, info)).first;
             pid_order.push_back(runtime_conn->pid);
         }

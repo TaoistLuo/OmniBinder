@@ -174,10 +174,13 @@ public:
     void setRegisterHost(const std::string& host);
     std::string getRegisterHost() const;
     void setHeartbeatInterval(uint32_t ms);
+    void setHeartbeatTimeout(uint32_t ms);
     void setDefaultTimeout(uint32_t ms);
     void setReplySendTimeout(uint32_t ms);
     void setHostId(const std::string& host_id);
     std::string hostId() const;
+    void setRuntimeId(const std::string& runtime_id);
+    std::string runtimeId() const;
 
 private:
     // ============================================================
@@ -193,6 +196,15 @@ private:
     int connectServiceInternal(const std::string& name, bool explicit_connect = true);
     int connectServiceInstanceInternal(const std::string& name, const std::string& host_id,
                                        const std::string& instance_id);
+    /* @brief 确保数据连接完成 Session Hello/ACK 协商（连接第一帧） */
+    int ensureDataSession(const std::string& connection_key,
+                          const std::string& service_name);
+    /* @brief 发送 Session Hello 并等待 ACK；用于首次协商与参数更新 */
+    int sendSessionHelloAndWait(const std::string& connection_key);
+    /* @brief 应用协商结果并启动数据面心跳发送定时器 */
+    void applyDataHeartbeatPolicy(const std::string& connection_key,
+                                  uint32_t interval_ms, uint32_t timeout_ms);
+
     int connectResolvedConnection(const std::string& connection_key, const ServiceInfo& info,
                                   bool explicit_connect, const ServiceIdentity* identity);
     int disconnectServiceInternal(const std::string& name);
@@ -280,6 +292,11 @@ private:
                                  IMessageConnection* client);
     void onServiceClientReadable(const std::string& name, int client_id);
     void onServiceClientDisconnected(const std::string& name, int client_id);
+    void armClientSessionDeadline(const std::string& name, int client_id,
+                                  LocalServiceEntry* entry);
+    void onClientSessionDeadline(const std::string& name, int client_id,
+                                 uint64_t generation);
+    void closeClientSession(const std::string& name, int client_id);
     void handleServiceClientMessage(const std::string& name, int client_id,
                                     const Message& msg);
     /*
@@ -307,6 +324,8 @@ private:
     void sendHeartbeatToService(const std::string& name);
     void checkHeartbeatTimeout(const std::string& name);
     void sendHeartbeat();
+    void onControlHeartbeatAck(const Message& msg);
+    void onControlHeartbeatTimeout();
     bool sendOnFd(IMessageConnection* transport, Message& msg);
     bool sendRawOnFd(IMessageConnection* transport, const uint8_t* data, size_t size);
     /*
@@ -454,8 +473,18 @@ private:
     std::string         host_id_;
     // setHostId 覆盖值；空串表示 init 时取平台默认机器标识（设计决策 D8）
     std::string         host_id_override_;
-    uint32_t            heartbeat_interval_ms_;
-    uint32_t            heartbeat_timer_id_;
+    // 稳定运行时身份（跨重启不变）；默认进程名
+    std::string         runtime_id_;
+    std::string         runtime_id_override_;
+    // 本次启动代际：控制面 hello、数据面 session ACK/心跳共用
+    uint32_t            incarnation_id_;
+    uint32_t            heartbeat_interval_ms_;   // 控制面心跳发送间隔
+    uint32_t            heartbeat_timer_id_;       // 控制面心跳发送定时器
+    uint32_t            control_timeout_ms_;       // 协商后的控制面判死超时
+    uint32_t            control_requested_timeout_ms_; // 协商请求值（0=服务端默认）
+    uint32_t            control_ack_timer_id_;     // 控制面 ACK deadline
+    bool                control_ack_pending_;
+    uint32_t            sm_incarnation_id_;        // 最近一次 SM hello ACK 的代际
 
     // 数据面
     ConnectionManager*  conn_mgr_;
@@ -469,6 +498,8 @@ private:
     // 本地服务托管
     std::map<std::string, LocalServiceEntry*>    local_services_;
     std::map<int, std::string>                   client_id_to_service_;
+    uint64_t                                     client_session_generation_;
+    uint32_t                                     data_max_session_timeout_ms_;
 
     // 诊断
     DiagState diag_;

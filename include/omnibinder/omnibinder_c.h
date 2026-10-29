@@ -243,6 +243,9 @@ const char* omni_runtime_get_register_host(const omni_runtime_t* client);
 /* @brief 设置向 ServiceManager 发送心跳的间隔（毫秒） */
 void omni_runtime_set_heartbeat_interval(omni_runtime_t* client, uint32_t interval_ms);
 
+/* @brief 设置控制面期望的判死超时（毫秒；0 表示服务端默认） */
+void omni_runtime_set_heartbeat_timeout(omni_runtime_t* client, uint32_t timeout_ms);
+
 /* @brief 设置 RPC 调用的默认超时时间（毫秒） */
 void omni_runtime_set_default_timeout(omni_runtime_t* client, uint32_t timeout_ms);
 
@@ -254,6 +257,17 @@ void omni_runtime_set_host_id(omni_runtime_t* client, const char* host_id);
 /* @brief 获取当前 runtime 的主机标识符
  * @return 内部 thread-local 缓冲指针；指向内容在下次调用本函数前有效 */
 const char* omni_runtime_host_id(const omni_runtime_t* client);
+
+/* @brief 设置稳定运行时身份 runtime_id（跨重启不变）
+ * @note  必须在 omni_runtime_init 之前调用。默认 process_name#pid-<seq>
+ *        保证同机多进程唯一，但 pid 在重启后变化；低功耗长超时场景若需要
+ *        “重启后立即顶替旧会话”，应显式设置为跨重启稳定的实例标识。
+ *        控制面/数据面会话键为 (host_id, runtime_id)。 */
+void omni_runtime_set_runtime_id(omni_runtime_t* client, const char* runtime_id);
+
+/* @brief 获取当前 runtime 的稳定身份
+ * @return 内部 thread-local 缓冲指针；指向内容在下次调用本函数前有效 */
+const char* omni_runtime_runtime_id(const omni_runtime_t* client);
 
 /* 服务注册/注销 */
 int  omni_runtime_register_service(omni_runtime_t* client, omni_service_t* svc);

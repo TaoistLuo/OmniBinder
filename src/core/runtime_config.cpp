@@ -18,12 +18,18 @@ void OmniRuntime::Impl::setHeartbeatInterval(uint32_t ms) {
         return;
     }
     callSerialized([this, ms]() {
-        heartbeat_interval_ms_ = ms;
+        heartbeat_interval_ms_ = clampHeartbeatInterval(ms);
         if (loop_ && initialized_ && heartbeat_timer_id_ > 0) {
             loop_->cancelTimer(heartbeat_timer_id_);
             heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
                 [this]() { this->sendHeartbeat(); }, true);
         }
+    });
+}
+
+void OmniRuntime::Impl::setHeartbeatTimeout(uint32_t ms) {
+    callSerialized([this, ms]() {
+        control_requested_timeout_ms_ = ms;
     });
 }
 
@@ -37,6 +43,19 @@ void OmniRuntime::Impl::setRegisterHost(const std::string& host) {
 std::string OmniRuntime::Impl::getRegisterHost() const {
     std::lock_guard<std::recursive_mutex> lock(api_mutex_);
     return register_host_;
+}
+
+void OmniRuntime::Impl::setRuntimeId(const std::string& runtime_id) {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    if (initialized_) {
+        return;
+    }
+    runtime_id_override_ = runtime_id;
+}
+
+std::string OmniRuntime::Impl::runtimeId() const {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    return runtime_id_.empty() ? runtime_id_override_ : runtime_id_;
 }
 
 void OmniRuntime::Impl::setDefaultTimeout(uint32_t ms) {

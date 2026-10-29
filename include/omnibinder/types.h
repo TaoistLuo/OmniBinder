@@ -56,6 +56,13 @@ const uint16_t DEFAULT_SM_PORT              = 9900;
 const char     DIAG_SERVICE_NAME_PREFIX[]   = "__diag_pid_";
 const uint32_t DEFAULT_HEARTBEAT_INTERVAL   = 3000;   // ms
 const uint32_t DEFAULT_HEARTBEAT_TIMEOUT    = 10000;  // ms
+// 会话协商：接收方按 max(requested, interval * factor) 裁定判死超时。
+// max_timeout_ms = 0 表示不设上限（低功耗客户端可协商分钟/小时级超时）。
+const uint32_t MIN_HEARTBEAT_INTERVAL_MS    = 100;    // ms
+const uint32_t HEARTBEAT_MISSED_FACTOR      = 3;
+const uint32_t DEFAULT_MAX_SESSION_TIMEOUT  = 0;      // 0 = 不限制
+const uint32_t DEFAULT_SESSION_HELLO_TIMEOUT= 5000;   // ms
+const uint32_t SESSION_PROTOCOL_VERSION     = 1;
 const uint32_t DEFAULT_INVOKE_TIMEOUT       = 5000;   // ms
 // 服务端 RPC 回复发送的专用超时预算：独立于 DEFAULT_INVOKE_TIMEOUT，避免慢客户端
 // 长时间占住 owner event-loop；可经 OmniRuntime::setReplySendTimeout 调整
@@ -69,6 +76,49 @@ const size_t   MAX_ZERO_WIRE_ARRAY_ELEMENTS = 4096u;
 const size_t   MAX_PUBLISHED_TOPICS         = 4096u;
 const size_t   MAX_PUBLISHED_TOPICS_BYTES   = 512u * 1024u;
 const uint32_t RUNTIME_DIAG_CAP_WATCH       = 1u;
+
+/* @brief 规范化心跳间隔：0 使用默认值，低于下限则抬到下限 */
+inline uint32_t clampHeartbeatInterval(uint32_t interval_ms) {
+    if (interval_ms == 0) return DEFAULT_HEARTBEAT_INTERVAL;
+    return interval_ms < MIN_HEARTBEAT_INTERVAL_MS ? MIN_HEARTBEAT_INTERVAL_MS : interval_ms;
+}
+
+/* @brief 协商接收方判死超时
+ * @param[in] interval_ms  发送方声明的心跳间隔（已由 clampHeartbeatInterval 规范化）
+ * @param[in] requested_ms 发送方请求的判死超时；0 表示使用默认值
+ * @param[in] max_timeout_ms 服务端可选上限；0 表示不限制
+ * @return 有效判死超时：max(requested, interval * factor)，再按上限裁剪
+ * @note 无上限时低功耗可协商分钟/小时级超时；下限由 interval*factor 保证，
+ *       避免发送方发得慢却被短超时误杀。 */
+inline uint32_t negotiateSessionTimeout(uint32_t interval_ms, uint32_t requested_ms,
+                                        uint32_t max_timeout_ms) {
+    uint64_t floor_ms = static_cast<uint64_t>(interval_ms) * HEARTBEAT_MISSED_FACTOR;
+    uint64_t effective = requested_ms == 0 ? floor_ms : requested_ms;
+    if (requested_ms == 0 && effective < DEFAULT_HEARTBEAT_TIMEOUT) {
+        effective = DEFAULT_HEARTBEAT_TIMEOUT;
+    }
+    if (effective < floor_ms) {
+        effective = floor_ms;
+    }
+    if (max_timeout_ms != 0 && effective > max_timeout_ms) {
+        effective = max_timeout_ms;
+    }
+    if (effective > 0xFFFFFFFFu) {
+        effective = 0xFFFFFFFFu;
+    }
+    return effective == 0 ? 1u : static_cast<uint32_t>(effective);
+}
+
+/* @brief 控制面/数据面稳定会话键：host_id + runtime_id（无歧义分隔） */
+inline std::string makeRuntimeSessionKey(const std::string& host_id,
+                                         const std::string& runtime_id) {
+    std::string key;
+    key.reserve(host_id.size() + runtime_id.size() + 1);
+    key.append(host_id);
+    key.push_back('\x1f');
+    key.append(runtime_id);
+    return key;
+}
 
 // ============================================================
 // 方法信息
@@ -187,12 +237,66 @@ struct RuntimeInfo {
     uint32_t diag_capabilities;
     std::vector<std::string> services;
 
+    // 控制面会话身份/协商字段（MSG_RUNTIME_HELLO）
+    uint32_t session_version;
+    std::string runtime_id;          // 稳定运行时身份（跨重启不变）
+    uint32_t incarnation_id;         // 本次启动代际
+    uint32_t heartbeat_interval_ms;
+    uint32_t requested_timeout_ms;
+    std::string host_id;
+
     RuntimeInfo()
         : pid(0)
         , role("client")
         , log_level(OMNI_LOG_INFO)
-        , diag_capabilities(0) {}
+        , diag_capabilities(0)
+        , session_version(SESSION_PROTOCOL_VERSION)
+        , incarnation_id(0)
+        , heartbeat_interval_ms(DEFAULT_HEARTBEAT_INTERVAL)
+        , requested_timeout_ms(0) {}
 };
+
+// ============================================================
+// 数据面会话 Hello / ACK（每条直连一次）
+// ============================================================
+struct SessionHello {
+    uint32_t version;
+    std::string runtime_id;
+    uint32_t incarnation_id;
+    uint32_t heartbeat_interval_ms;
+    uint32_t requested_timeout_ms;
+    uint32_t capabilities;
+    std::string host_id;
+    std::string process_name;
+    uint32_t pid;
+
+    SessionHello()
+        : version(SESSION_PROTOCOL_VERSION)
+        , incarnation_id(0)
+        , heartbeat_interval_ms(DEFAULT_HEARTBEAT_INTERVAL)
+        , requested_timeout_ms(0)
+        , capabilities(0)
+        , pid(0) {}
+};
+
+struct SessionHelloAck {
+    uint32_t version;
+    uint32_t status;                 // 0=OK, 1=CLAMPED, 2=REJECTED
+    uint32_t accepted_interval_ms;
+    uint32_t effective_timeout_ms;
+    uint32_t peer_incarnation_id;    // 接收方自己的代际
+
+    SessionHelloAck()
+        : version(SESSION_PROTOCOL_VERSION)
+        , status(0)
+        , accepted_interval_ms(DEFAULT_HEARTBEAT_INTERVAL)
+        , effective_timeout_ms(DEFAULT_HEARTBEAT_TIMEOUT)
+        , peer_incarnation_id(0) {}
+};
+
+const uint32_t SESSION_STATUS_OK       = 0;
+const uint32_t SESSION_STATUS_CLAMPED  = 1;
+const uint32_t SESSION_STATUS_REJECTED = 2;
 
 struct RuntimeStats {
     uint64_t total_rpc_calls;

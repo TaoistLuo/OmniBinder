@@ -51,7 +51,6 @@ add_test(NAME test_service_registry COMMAND test_service_registry)
 
 add_executable(test_heartbeat_death
     test_heartbeat_death.cpp
-    ${CMAKE_SOURCE_DIR}/service_manager/heartbeat_monitor.cpp
     ${CMAKE_SOURCE_DIR}/service_manager/death_notifier.cpp
 )
 target_include_directories(test_heartbeat_death PRIVATE ${CMAKE_SOURCE_DIR}/service_manager)

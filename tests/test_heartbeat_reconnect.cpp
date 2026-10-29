@@ -275,7 +275,9 @@ static int smServiceState(OmniRuntime& rt, const std::string& name) {
 // 用于验证"仍有存活服务时不得关闭连接"的规则。
 class RawControlClient {
 public:
-    RawControlClient() : fd_(platform::INVALID_SOCKET_FD), seq_(1) {}
+    RawControlClient()
+        : fd_(platform::INVALID_SOCKET_FD), seq_(1), hello_sent_(false),
+          incarnation_(1) {}
 
     ~RawControlClient() {
         close();
@@ -294,7 +296,29 @@ public:
         return ret == 0;
     }
 
+    bool ensureHello() {
+        if (hello_sent_) return true;
+        Message msg(MessageType::MSG_RUNTIME_HELLO, seq_++);
+        RuntimeInfo info;
+        info.pid = static_cast<uint32_t>(platform::getPid());
+        info.process_name = "raw-control";
+        info.session_version = SESSION_PROTOCOL_VERSION;
+        info.runtime_id = "raw-control-" + std::to_string(platform::getPid())
+                          + "-" + std::to_string(fd_);
+        info.incarnation_id = incarnation_;
+        info.heartbeat_interval_ms = 100;
+        info.requested_timeout_ms = 500;
+        info.host_id = "raw-host";
+        if (!serializeRuntimeInfo(info, msg.payload) || !send(msg)) {
+            return false;
+        }
+        hello_sent_ = true;
+        drain();
+        return true;
+    }
+
     bool sendRegister(const std::string& name) {
+        if (!ensureHello()) return false;
         Message msg(MessageType::MSG_REGISTER, seq_++);
         ServiceInfo info;
         info.name = name;
@@ -304,9 +328,10 @@ public:
         return send(msg);
     }
 
-    bool sendHeartbeat(const std::string& name) {
-        Message msg(MessageType::MSG_HEARTBEAT, 0);
-        msg.payload.writeString(name);
+    bool sendHeartbeat() {
+        if (!ensureHello()) return false;
+        Message msg(MessageType::MSG_CONTROL_HEARTBEAT, 0);
+        msg.payload.writeUint32(incarnation_);
         return send(msg);
     }
 
@@ -341,6 +366,8 @@ private:
 
     platform::SocketFd fd_;
     uint32_t seq_;
+    bool hello_sent_;
+    uint32_t incarnation_;
 };
 
 // ============================================================
@@ -356,6 +383,10 @@ TEST_F(HeartbeatLifecycleTest, TimeoutDisconnectTriggersReregistration) {
     ASSERT_GT(child_pid_, 0) << "Failed to start blocked service child";
 
     OmniRuntime rt;
+    // SM 的演练超时是 500ms；纯客户端必须以更短间隔发送，才能证明
+    // “对端超时不会误伤自己的会话”。
+    rt.setHeartbeatInterval(100);
+    rt.setHeartbeatTimeout(500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME))
         << "Service should register before the owner loop blocks";
@@ -401,6 +432,8 @@ TEST_F(HeartbeatLifecycleTest, StopHeartbeatKeepsSmLiveness) {
     ASSERT_GT(child_pid_, 0) << "Failed to start heartbeat-stop child";
 
     OmniRuntime rt;
+    rt.setHeartbeatInterval(100);
+    rt.setHeartbeatTimeout(500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
 
@@ -434,6 +467,8 @@ TEST_F(HeartbeatLifecycleTest, StopHeartbeatKeepsSmLiveness) {
 // ============================================================
 TEST_F(HeartbeatLifecycleTest, SetHeartbeatIntervalZeroIsIgnored) {
     OmniRuntime rt;
+    rt.setHeartbeatInterval(100);
+    rt.setHeartbeatTimeout(500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
     rt.setHeartbeatInterval(100);
 
@@ -476,6 +511,8 @@ TEST_F(HeartbeatLifecycleTest, PureClientConnectionNotClosedByPeerTimeout) {
     ASSERT_GT(child_pid_, 0) << "Failed to start blocked service child";
 
     OmniRuntime client;
+    client.setHeartbeatInterval(100);
+    client.setHeartbeatTimeout(500);
     ASSERT_EQ(client.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
     ASSERT_TRUE(waitServiceRegistered(client, SERVICE_NAME));
 
@@ -778,8 +815,10 @@ TEST_F(HeartbeatReconnectTest, DisconnectCancelsPendingReconnect) {
 // @details 一条控制连接注册 A 和 B，但只为 A 发心跳。B 超时时 SM 必须保留连接（A 仍存活）。
 //          当 A 也停止心跳后，连接已无存活服务，必须关闭。
 // ============================================================
-TEST_F(HeartbeatLifecycleTest, ConnectionWithSiblingServiceSurvivesTimeout) {
+TEST_F(HeartbeatLifecycleTest, SessionHeartbeatTimeoutRemovesAllServices) {
     OmniRuntime rt;
+    rt.setHeartbeatInterval(100);
+    rt.setHeartbeatTimeout(500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
 
     RawControlClient raw;
@@ -798,28 +837,34 @@ TEST_F(HeartbeatLifecycleTest, ConnectionWithSiblingServiceSurvivesTimeout) {
     }
     ASSERT_TRUE(both_registered) << "Both sibling services should register";
 
-    bool sibling_b_gone = false;
-    for (int i = 0; i < 30 && !sibling_b_gone; ++i) {
-        raw.sendHeartbeat("SiblingA");
-        sibling_b_gone = (smServiceState(rt, "SiblingB") == 0)
-                         && (smServiceState(rt, "SiblingA") == 1);
-        if (!sibling_b_gone) {
-            platform::sleepMs(200);
-        }
+    // 运行时级会话：一条心跳同时覆盖 A/B；持续心跳时两者都保持
+    for (int i = 0; i < 8; ++i) {
+        ASSERT_TRUE(raw.sendHeartbeat());
+        rt.pollOnce(100);
+        EXPECT_EQ(smServiceState(rt, "SiblingA"), 1);
+        EXPECT_EQ(smServiceState(rt, "SiblingB"), 1);
     }
-    ASSERT_TRUE(sibling_b_gone) << "B should time out while A keeps heartbeating";
+
+    // 停止心跳后，会话超时必须同时摘除 A/B 并关闭控制连接
+    bool both_gone = false;
+    for (int i = 0; i < 40 && !both_gone; ++i) {
+        // 父 runtime 是纯客户端，必须继续 pollOnce 才能发送自己的会话心跳，
+        // 否则会被同一个 500ms 演练超时误摘。
+        rt.pollOnce(100);
+        both_gone = (smServiceState(rt, "SiblingA") == 0)
+                    && (smServiceState(rt, "SiblingB") == 0);
+    }
+    EXPECT_TRUE(both_gone)
+        << "runtime session timeout must remove all services owned by the session";
 
     raw.drain();
-    EXPECT_NE(raw.recvProbe(), 0)
-        << "Connection with a live sibling service must not be closed";
-
     bool connection_closed = false;
     for (int i = 0; i < 30 && !connection_closed; ++i) {
-        platform::sleepMs(200);
+        rt.pollOnce(50);
         connection_closed = (raw.recvProbe() == 0);
     }
     EXPECT_TRUE(connection_closed)
-        << "Connection must close once no live service remains";
+        << "Control connection must close when the session times out";
 
     rt.stop();
 }

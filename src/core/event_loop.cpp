@@ -332,7 +332,10 @@ int EventLoop::calculateTimeout(int requested_timeout_ms)
             return 0;
         }
 
-        int remaining_int = static_cast<int>(remaining);
+        // 低功耗会话可协商分钟/小时级超时；先 clamp 到 int 上限，避免
+        // 超过 ~24.8 天时 static_cast<int> 溢出成负值（epoll_wait 负值=永久等待）。
+        int remaining_int = remaining > 0x7fffffffLL
+            ? 0x7fffffff : static_cast<int>(remaining);
         if (min_timer_timeout < 0 || remaining_int < min_timer_timeout) {
             min_timer_timeout = remaining_int;
         }

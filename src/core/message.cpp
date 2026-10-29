@@ -165,6 +165,10 @@ const char* messageTypeToString(MessageType type) {
     case MessageType::MSG_UNREGISTER_REPLY:        return "UNREGISTER_REPLY";
     case MessageType::MSG_HEARTBEAT:               return "HEARTBEAT";
     case MessageType::MSG_HEARTBEAT_ACK:           return "HEARTBEAT_ACK";
+    case MessageType::MSG_CONTROL_HEARTBEAT:       return "CONTROL_HEARTBEAT";
+    case MessageType::MSG_CONTROL_HEARTBEAT_ACK:   return "CONTROL_HEARTBEAT_ACK";
+    case MessageType::MSG_SESSION_HELLO:           return "SESSION_HELLO";
+    case MessageType::MSG_SESSION_HELLO_ACK:       return "SESSION_HELLO_ACK";
     case MessageType::MSG_LOOKUP:                  return "LOOKUP";
     case MessageType::MSG_LOOKUP_REPLY:            return "LOOKUP_REPLY";
     case MessageType::MSG_LIST_SERVICES:           return "LIST_SERVICES";
@@ -226,7 +230,35 @@ bool serializeRuntimeInfo(const RuntimeInfo& info, Buffer& buf) {
             return false;
         }
     }
+    if (!buf.writeUint32(info.session_version)
+        || !buf.writeString(info.runtime_id)
+        || !buf.writeUint32(info.incarnation_id)
+        || !buf.writeUint32(info.heartbeat_interval_ms)
+        || !buf.writeUint32(info.requested_timeout_ms)
+        || !buf.writeString(info.host_id)) {
+        return false;
+    }
     return true;
+}
+
+bool serializeSessionHello(const SessionHello& hello, Buffer& buf) {
+    return buf.writeUint32(hello.version)
+        && buf.writeString(hello.runtime_id)
+        && buf.writeUint32(hello.incarnation_id)
+        && buf.writeUint32(hello.heartbeat_interval_ms)
+        && buf.writeUint32(hello.requested_timeout_ms)
+        && buf.writeUint32(hello.capabilities)
+        && buf.writeString(hello.host_id)
+        && buf.writeString(hello.process_name)
+        && buf.writeUint32(hello.pid);
+}
+
+bool serializeSessionHelloAck(const SessionHelloAck& ack, Buffer& buf) {
+    return buf.writeUint32(ack.version)
+        && buf.writeUint32(ack.status)
+        && buf.writeUint32(ack.accepted_interval_ms)
+        && buf.writeUint32(ack.effective_timeout_ms)
+        && buf.writeUint32(ack.peer_incarnation_id);
 }
 
 // ============================================================

@@ -1,6 +1,7 @@
 #include "service_manager_app.h"
 #include "sm_parse_helpers.h"
 #include "omnibinder/log.h"
+#include "platform/platform.h"
 
 #define TAG "ServiceManager"
 
@@ -9,6 +10,12 @@ namespace omnibinder {
 void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& msg) {
     Buffer payload(msg.payload.data(), msg.payload.size());
     ServiceInfo info;
+
+    if (!conn->hello_received) {
+        OMNI_LOG_WARN(TAG, "Reject register before session hello from fd=%d", conn->fd);
+        sendRegisterReply(conn, msg.header.sequence, INVALID_HANDLE);
+        return;
+    }
 
     if (!deserializeServiceInfo(payload, info)) {
         OMNI_LOG_ERROR(TAG, "Failed to deserialize ServiceInfo from fd=%d", conn->fd);
@@ -25,7 +32,6 @@ void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& ms
         return;
     }
 
-    heartbeat_.startTracking(ServiceIdentity(info.name, info.host_id, info.instance_id));
     sendRegisterReply(conn, msg.header.sequence, handle);
 
     // 后来者已接管该名称：回收被顶替的旧控制连接上残留的发布关系，否则旧 fd
@@ -80,28 +86,33 @@ void ServiceManagerApp::handleUnregister(ClientConnection* conn, const Message& 
     sendBoolReply(conn, MessageType::MSG_UNREGISTER_REPLY, msg.header.sequence, success);
 }
 
-void ServiceManagerApp::handleHeartbeat(ClientConnection* conn, const Message& msg) {
-    std::string name;
-    if (!sm_internal::tryReadExactStringArg(msg, name, MAX_SERVICE_NAME_LENGTH)) {
-        OMNI_LOG_WARN(TAG, "Reject malformed heartbeat from fd=%d", conn->fd);
+void ServiceManagerApp::handleControlHeartbeat(ClientConnection* conn, const Message& msg) {
+    if (!conn || !conn->hello_received) {
+        if (conn) closeClient(conn->fd);
+        return;
+    }
+    BufferView buf(msg.payload.data(), msg.payload.size());
+    uint32_t incarnation = 0;
+    if (!buf.tryReadUint32(incarnation)) {
+        OMNI_LOG_WARN(TAG, "Reject malformed control heartbeat from fd=%d", conn->fd);
+        closeClient(conn->fd);
+        return;
+    }
+    if (incarnation != conn->incarnation_id) {
+        OMNI_LOG_WARN(TAG, "Control heartbeat incarnation mismatch fd=%d got=%u expected=%u",
+                      conn->fd, incarnation, conn->incarnation_id);
+        closeClient(conn->fd);
         return;
     }
 
-    ServiceEntry entry;
-    if (!registry_.findServiceByFdAndName(conn->fd, name, entry)) {
-        OMNI_LOG_WARN(TAG, "Drop stale or non-owner heartbeat for %s from fd=%d",
-                       name.c_str(), conn->fd);
-        return;
-    }
-
-    // 心跳只携带服务名，实例身份由 (fd, name) 解析：同一 fd 同名至多一个实例
-    heartbeat_.updateHeartbeat(
-        ServiceIdentity(entry.info.name, entry.info.host_id, entry.info.instance_id));
-    sendHeartbeatAck(conn, msg.header.sequence);
+    conn->last_heartbeat_ms = platform::currentTimeMs();
+    armSessionDeadline(conn);
+    sendControlHeartbeatAck(conn, msg.header.sequence);
 }
 
-void ServiceManagerApp::sendHeartbeatAck(ClientConnection* conn, uint32_t seq) {
-    Message reply(MessageType::MSG_HEARTBEAT_ACK, seq);
+void ServiceManagerApp::sendControlHeartbeatAck(ClientConnection* conn, uint32_t seq) {
+    Message reply(MessageType::MSG_CONTROL_HEARTBEAT_ACK, seq);
+    reply.payload.writeUint32(sm_incarnation_id_);
     sendMessage(conn, reply);
 }
 
@@ -274,54 +285,6 @@ void ServiceManagerApp::handleUnsubscribeServiceInstance(ClientConnection* conn,
     // unsubscribe 无需回复
 }
 
-void ServiceManagerApp::onHeartbeatCheck() {
-    std::vector<ServiceIdentity> timed_out = heartbeat_.checkTimeouts();
-
-    // 本轮确有服务因心跳超时被摘除的控制连接。全部超时服务处理完后，再统一
-    // 判定这些连接是否已无任何存活注册；纯客户端（从未注册过任何服务）不会
-    // 进入该集合，因此永远不会被本规则关闭。
-    std::set<int> affected_fds;
-
-    for (size_t i = 0; i < timed_out.size(); ++i) {
-        const ServiceIdentity& identity = timed_out[i];
-        OMNI_LOG_WARN(TAG, "Service timed out: %s (host_id=%s, instance_id=%s)",
-                      identity.name.c_str(), identity.host_id.c_str(),
-                      identity.instance_id.c_str());
-
-        // 移除前先获取该实例的控制连接 fd，走与显式注销一致的摘除序列
-        ServiceEntry entry;
-        int fd = registry_.findServiceByIdentity(identity, entry) ? entry.control_fd : -1;
-        if (!removeServiceAndNotify(identity, fd)) {
-            continue;
-        }
-
-        if (fd >= 0) {
-            affected_fds.insert(fd);
-        }
-    }
-
-    // 连接级失联处理（C2）：心跳超时后若该控制连接已无任何存活注册服务，
-    // 则按连接失联关闭，让 runtime 走既有的 disconnect → reconnect →
-    // restoreControlPlaneState 路径重新注册（约束 6）。若同连接仍有健康服务，
-    // 仅摘除超时服务，不断开连接，避免误伤同一 runtime 的其它服务。
-    for (std::set<int>::iterator it = affected_fds.begin(); it != affected_fds.end(); ++it) {
-        int fd = *it;
-
-        // notifyServiceDeath → sendDeathNotify → sendMessage 发送失败可能重入
-        // closeClient(fd)，必须在每轮重新判活（约束 1/2）
-        if (clients_.find(fd) == clients_.end()) {
-            continue;
-        }
-        if (!registry_.listServiceNamesByFd(fd).empty()) {
-            continue;
-        }
-
-        OMNI_LOG_WARN(TAG, "Control connection fd=%d has no live service after heartbeat "
-                           "timeout, closing to trigger runtime re-registration", fd);
-        closeClient(fd);
-    }
-}
-
 void ServiceManagerApp::notifyServiceInstanceDeath(const ServiceIdentity& identity) {
     // 名字级订阅只在最后一个实例消失时触发：调用前该实例已从注册表移除，
     // exists() 反映移除后是否仍有同名实例存活
@@ -342,7 +305,6 @@ void ServiceManagerApp::notifyServiceInstanceDeath(const ServiceIdentity& identi
 }
 
 void ServiceManagerApp::notifyServiceRemoved(const ServiceIdentity& identity) {
-    heartbeat_.stopTracking(identity);
     notifyServiceInstanceDeath(identity);
 }
 

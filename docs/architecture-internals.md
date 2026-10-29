@@ -34,7 +34,7 @@
 |   Transport Layer: TcpConnection / ShmClientConnection         |
 +-------------------------------------------------------------------+
 |                     ServiceManager（独立进程）                      |
-|   ServiceRegistry / HeartbeatMonitor / DeathNotifier / TopicManager |
+|   ServiceRegistry / Session deadline / DeathNotifier / TopicManager |
 +-------------------------------------------------------------------+
 ```
 
@@ -103,8 +103,6 @@ OmniBinder 的内部实现分成两个平面：
 - `service_manager/sm_diag.cpp` — 诊断 watch 控制面
 - `service_manager/service_registry.h`
 - `service_manager/service_registry.cpp`
-- `service_manager/heartbeat_monitor.h`
-- `service_manager/heartbeat_monitor.cpp`
 - `service_manager/death_notifier.h`
 - `service_manager/death_notifier.cpp`
 - `service_manager/topic_manager.h`
@@ -439,7 +437,7 @@ ShmServerConnection:
 `ServiceManager` 当前由这些核心组件组成：
 
 - `ServiceRegistry`
-- `HeartbeatMonitor`
+- `Session deadline`（控制面 runtime / 数据面 client）
 - `DeathNotifier`
 - `TopicManager`
 
@@ -454,12 +452,13 @@ ShmServerConnection:
 
 同身份 `(name, host_id, instance_id)` 重复注册为后来者顶替（保留原 handle、刷新 ServiceInfo 与控制 fd，并输出被顶替的旧 fd）；异身份新增条目并存。按名查找（`findService`）返回实例键字典序第一实例，完整枚举由 `listServiceInstances` 提供。
 
-### 11.2 HeartbeatMonitor
+### 11.2 Session deadline
 
 负责：
 
-- 心跳超时检测
-- 定期检查服务是否死亡
+- 控制面：每个 runtime 控制会话一个 deadline 定时器，`MSG_CONTROL_HEARTBEAT` 到达后续期；超时 `closeClient(fd)` 统一注销全部服务/订阅/诊断状态
+- 数据面：每个 client session 一个 deadline 定时器，`MSG_HEARTBEAT` 到达后续期；超时 `onServiceClientDisconnected` 清理该 client 的订阅与缓冲
+- 低功耗长超时：无固定上限，deadline 可到分钟/小时级
 
 ### 11.3 DeathNotifier
 
@@ -525,7 +524,7 @@ Client
 
 ```text
 ServiceManager
-  -> HeartbeatMonitor 检测超时 / 连接断开
+  -> Session deadline 检测超时 / 连接断开
   -> ServiceRegistry 删除服务
   -> DeathNotifier 生成死亡通知
   -> 通过控制面 TCP 发送给订阅者

@@ -73,8 +73,10 @@ const size_t MESSAGE_HEADER_SIZE = 16;
 | 0x0002 | MSG_REGISTER_REPLY | SM -> Service | 服务注册响应 |
 | 0x0003 | MSG_UNREGISTER | Service -> SM | 服务注销请求 |
 | 0x0004 | MSG_UNREGISTER_REPLY | SM -> Service | 服务注销响应 |
-| 0x0005 | MSG_HEARTBEAT | Service -> SM | 心跳请求 |
-| 0x0006 | MSG_HEARTBEAT_ACK | SM -> Service | 心跳响应 |
+| 0x0005 | MSG_HEARTBEAT | Client -> Service | 数据面心跳（payload: incarnation_id） |
+| 0x0006 | MSG_HEARTBEAT_ACK | Service -> Client | 数据面心跳响应（payload: service incarnation） |
+| 0x0007 | MSG_CONTROL_HEARTBEAT | Runtime -> SM | 控制面运行时级心跳（payload: incarnation_id） |
+| 0x0008 | MSG_CONTROL_HEARTBEAT_ACK | SM -> Runtime | 控制面心跳响应（payload: SM incarnation） |
 | 0x0010 | MSG_LOOKUP | Service -> SM | 查询服务请求 |
 | 0x0011 | MSG_LOOKUP_REPLY | SM -> Service | 查询服务响应 |
 | 0x0012 | MSG_LIST_SERVICES | Service -> SM | 列出所有服务请求 |
@@ -99,8 +101,8 @@ const size_t MESSAGE_HEADER_SIZE = 16;
 | 0x0036 | MSG_UNSUBSCRIBE_TOPIC | Service -> SM | 取消订阅话题 |
 | 0x0037 | MSG_QUERY_PUBLISHED_TOPICS | Service -> SM | 查询某服务已发布的话题列表 |
 | 0x0038 | MSG_QUERY_PUBLISHED_TOPICS_REPLY | SM -> Service | 查询响应（found + topic 列表） |
-| 0x0040 | MSG_RUNTIME_HELLO | Runtime -> SM | 上报 runtime PID / 进程名 / 诊断能力 |
-| 0x0041 | MSG_RUNTIME_HELLO_REPLY | SM -> Runtime | runtime hello 响应 |
+| 0x0040 | MSG_RUNTIME_HELLO | Runtime -> SM | 控制面会话协商：PID / runtime_id / incarnation / interval / timeout / 诊断能力 |
+| 0x0041 | MSG_RUNTIME_HELLO_REPLY | SM -> Runtime | 控制面会话协商响应（SessionHelloAck） |
 | 0x0042 | MSG_DIAG_SET_LOG_LEVEL | CLI/SM -> Runtime | 按 PID 设置 runtime 日志级别 |
 | 0x0043 | MSG_DIAG_SET_LOG_LEVEL_REPLY | Runtime/SM -> CLI | 设置日志级别响应 |
 | 0x0044 | MSG_DIAG_WATCH_START | CLI/SM -> Runtime | 启动指定 PID 的诊断 watch |
@@ -119,6 +121,8 @@ const size_t MESSAGE_HEADER_SIZE = 16;
 | 0x0102 | MSG_INVOKE_ONEWAY | Client -> Server | 单向调用（服务端不发送回复） |
 | 0x0110 | MSG_BROADCAST | Publisher -> Subscriber | 广播消息 |
 | 0x0111 | MSG_SUBSCRIBE_BROADCAST | Subscriber -> Publisher | 订阅者直连发布者后发送，携带 topic_id 与 topic_name |
+| 0x0112 | MSG_SESSION_HELLO | Client -> Service | 数据面会话协商（连接第一帧） |
+| 0x0113 | MSG_SESSION_HELLO_ACK | Service -> Client | 数据面会话协商响应（裁定后的 interval/timeout） |
 
 ### 3.3 C++ 枚举定义
 
@@ -133,6 +137,8 @@ enum class MessageType : uint16_t {
     MSG_UNREGISTER_REPLY      = 0x0004,
     MSG_HEARTBEAT             = 0x0005,
     MSG_HEARTBEAT_ACK         = 0x0006,
+    MSG_CONTROL_HEARTBEAT     = 0x0007,
+    MSG_CONTROL_HEARTBEAT_ACK = 0x0008,
 
     // 控制通道 - 服务发现
     MSG_LOOKUP                = 0x0010,
@@ -264,26 +270,52 @@ service_handle:
   0 (INVALID_HANDLE) = 失败
 ```
 
-### 4.3 心跳（MSG_HEARTBEAT）
+### 4.3 控制面心跳（MSG_CONTROL_HEARTBEAT）
 
-控制通道心跳（服务 -> SM）携带服务名：
-
-```
-+------------------+------------------+
-| service_name_len | service_name     |
-| (4 bytes)        | (N bytes)        |
-+------------------+------------------+
-```
-
-心跳 payload 只含服务名，**不含实例身份**。SM 收到心跳后按 `(控制连接 fd, service_name)` 在注册表中解析实例：同一 fd 与同一名称至多对应一个实例（`findServiceByFdAndName`），据此更新该实例的 `HeartbeatMonitor` 时间戳。因此同一进程注册的同名多实例（不同 `instance_id`）心跳互不串扰；来自非归属 fd 或已顶替连接的陈旧心跳被丢弃。
-
-> 数据面服务间心跳复用同一消息类型，payload 为空；实例身份由数据面连接键确定，不在消息内。
-
-### 4.4 心跳响应（MSG_HEARTBEAT_ACK）
+控制面心跳是**运行时级**的：每个 runtime 只发一条，覆盖该 runtime 下全部服务、
+topic/death 订阅与诊断状态。payload 为发送方本次启动代际：
 
 ```
-（无 payload）
++------------------+
+| incarnation_id   |
+| (4 bytes)        |
++------------------+
 ```
+
+SM 收到后按控制连接 fd 续期该会话的 deadline；不再按服务名逐条发送，也不再用
+`(fd, service_name)` 解析心跳归属。会话超时后 `closeClient(fd)` 统一注销该
+runtime 的所有服务、订阅与诊断状态，并逐服务下发死亡通知。
+
+### 4.4 控制面心跳响应（MSG_CONTROL_HEARTBEAT_ACK）
+
+payload 为 SM 自身代际，供 runtime 识别 SM 重启：
+
+```
++------------------+
+| sm_incarnation_id|
+| (4 bytes)        |
++------------------+
+```
+
+### 4.3.1 数据面会话协商（MSG_SESSION_HELLO / MSG_SESSION_HELLO_ACK）
+
+每条数据面直连建立后，客户端必须发送 `MSG_SESSION_HELLO` 作为第一帧：
+
+```
+version | runtime_id | incarnation_id | heartbeat_interval_ms |
+requested_timeout_ms | capabilities | host_id | process_name | pid
+```
+
+服务端按 `effective_timeout = max(requested, interval * HEARTBEAT_MISSED_FACTOR)`
+裁定，并在 `MSG_SESSION_HELLO_ACK` 中返回：
+
+```
+version | status | accepted_interval_ms | effective_timeout_ms | service_incarnation_id
+```
+
+数据面心跳随后使用 `MSG_HEARTBEAT` / `MSG_HEARTBEAT_ACK`，payload 仅为发送方
+`incarnation_id`。服务端按 client session 的 deadline 判死；同 `(host_id, runtime_id)`
+的新代际会话可立即顶替旧会话（同代际的多条连接允许并存）。
 
 ### 4.5 服务查询（MSG_LOOKUP）
 
@@ -803,8 +835,8 @@ Service                                    ServiceManager
    |<------- MSG_REGISTER_REPLY ----------------|
    |         {handle=1}                         |
    |                                             |
-   |-------- MSG_HEARTBEAT -------------------->|  (每3秒)
-   |<------- MSG_HEARTBEAT_ACK -----------------|
+   |-------- MSG_CONTROL_HEARTBEAT ------------>|  (每3秒，运行时级)
+   |<------- MSG_CONTROL_HEARTBEAT_ACK ---------|
    |                                             |
 ```
 
@@ -887,13 +919,14 @@ if (elapsed >= HEARTBEAT_TIMEOUT):
         触发死亡通知
 ```
 
-> 按默认参数（timeout=10s, max_missed=3），即超过 30s 未收到心跳判定死亡；
-> 检测由 SM 心跳定时器周期执行。
+> 默认 timeout=10s：超过 10s 未收到该 runtime 的控制面心跳即判定会话死亡。
+> 每个会话由独立 deadline 定时器跟踪（无周期扫描），心跳到达后重挂；
+> 超时后 `closeClient(fd)` 一次性移除该 runtime 的全部服务、订阅与诊断状态，
+> 逐服务下发死亡通知，并触发 runtime 走
+> `disconnect → reconnect → restoreControlPlaneState` 重新注册。
 >
-> HeartbeatMonitor 按完整实例身份 `(name, host_id, instance_id)` 分别跟踪时间戳
-> （键为 `makeServiceIdentityKey`），同名多实例互不干扰。超时后 SM 按实例移除注册、
-> 下发死亡通知，并据该实例的控制连接 fd 判定连接级失联：若该 fd 已无任何存活注册服务
-> 则关闭连接，触发 runtime 走 `disconnect → reconnect → restoreControlPlaneState` 重新注册。
+> 数据面每条直连有独立 client session：`MSG_HEARTBEAT` 超时后
+> `onServiceClientDisconnected` 清理该 client 的订阅/缓冲并关闭连接。
 
 ## 9. 版本兼容性
 

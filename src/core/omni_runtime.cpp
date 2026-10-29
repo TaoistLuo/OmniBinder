@@ -6,6 +6,26 @@
 
 namespace omnibinder {
 
+namespace {
+// 同进程内多个 OmniRuntime 的默认 runtime_id 序号。单 runtime 进程重启后
+// 序号仍为 #1，因此默认身份跨重启稳定；多 runtime 进程如需跨重启稳定，
+// 应由业务显式 setRuntimeId()。
+std::atomic<uint32_t> g_runtime_instance_seq(0);
+
+// 进程代际：同一进程内稳定，重启后变化。用于区分"同进程重连"与"新进程"。
+uint32_t makeIncarnationId() {
+    uint64_t x = static_cast<uint64_t>(platform::currentTimeMs());
+    x ^= static_cast<uint64_t>(platform::getPid()) << 32;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    uint32_t v = static_cast<uint32_t>(x);
+    return v != 0 ? v : 1u;
+}
+} // namespace
+
 OmniRuntime::OmniRuntime() : impl_(new Impl()) {
     impl_->setOwner(this);
 }
@@ -138,10 +158,13 @@ int OmniRuntime::unsubscribeTopic(const TopicSubscriptionSelector& selector,
 void OmniRuntime::setRegisterHost(const std::string& host) { impl_->setRegisterHost(host); }
 std::string OmniRuntime::getRegisterHost() const { return impl_->getRegisterHost(); }
 void OmniRuntime::setHeartbeatInterval(uint32_t ms) { impl_->setHeartbeatInterval(ms); }
+void OmniRuntime::setHeartbeatTimeout(uint32_t ms) { impl_->setHeartbeatTimeout(ms); }
 void OmniRuntime::setDefaultTimeout(uint32_t ms) { impl_->setDefaultTimeout(ms); }
 void OmniRuntime::setReplySendTimeout(uint32_t ms) { impl_->setReplySendTimeout(ms); }
 void OmniRuntime::setHostId(const std::string& host_id) { impl_->setHostId(host_id); }
 std::string OmniRuntime::hostId() const { return impl_->hostId(); }
+void OmniRuntime::setRuntimeId(const std::string& runtime_id) { impl_->setRuntimeId(runtime_id); }
+std::string OmniRuntime::runtimeId() const { return impl_->runtimeId(); }
 int OmniRuntime::getStats(RuntimeStats& stats) { return impl_->getStats(stats); }
 int OmniRuntime::resetStats() { return impl_->resetStats(); }
 void OmniRuntime::clearServiceCache() { impl_->clearServiceCache(); }
@@ -168,11 +191,21 @@ OmniRuntime::Impl::Impl()
     , rpc_runtime_()
     , sm_reconnect_needed_(false)
     , sm_port_(0)
+    , runtime_id_()
+    , runtime_id_override_()
+    , incarnation_id_(0)
     , heartbeat_interval_ms_(DEFAULT_HEARTBEAT_INTERVAL)
     , heartbeat_timer_id_(0)
+    , control_timeout_ms_(DEFAULT_HEARTBEAT_TIMEOUT)
+    , control_requested_timeout_ms_(0)
+    , control_ack_timer_id_(0)
+    , control_ack_pending_(false)
+    , sm_incarnation_id_(0)
     , conn_mgr_(NULL)
     , register_host_()
     , reply_send_timeout_ms_(DEFAULT_REPLY_SEND_TIMEOUT)
+    , client_session_generation_(0)
+    , data_max_session_timeout_ms_(0)
     , diag_()
 {
 }
@@ -191,12 +224,19 @@ OmniRuntime::Impl::~Impl() {
         loop_->cancelTimer(heartbeat_timer_id_);
         heartbeat_timer_id_ = 0;
     }
+    if (loop_ && control_ack_timer_id_ > 0) {
+        loop_->cancelTimer(control_ack_timer_id_);
+        control_ack_timer_id_ = 0;
+    }
 
     // 取消所有每服务心跳 / 重连定时器
     for (std::map<std::string, ServiceState>::iterator it = services_.begin();
          it != services_.end(); ++it) {
         if (loop_ && it->second.has_heartbeat && it->second.heartbeat.timer_id > 0) {
             loop_->cancelTimer(it->second.heartbeat.timer_id);
+        }
+        if (loop_ && it->second.has_heartbeat && it->second.heartbeat.deadline_timer_id > 0) {
+            loop_->cancelTimer(it->second.heartbeat.deadline_timer_id);
         }
         if (loop_ && it->second.has_reconnect && it->second.reconnect.timer_id > 0) {
             loop_->cancelTimer(it->second.reconnect.timer_id);
@@ -291,6 +331,21 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     sm_reconnect_needed_ = false;
     diag_.pid = static_cast<uint32_t>(platform::getPid());
     diag_.process_name = runtimeProcessName();
+    if (runtime_id_override_.empty()) {
+        const uint32_t seq = ++g_runtime_instance_seq;
+        const std::string base = diag_.process_name.empty()
+            ? "runtime" : diag_.process_name;
+        // 默认包含 pid：保证同机多进程（同二进制多实例）不会互相顶替。
+        // 代价是跨重启不稳定；低功耗/需要快速重启立即顶替旧会话时，
+        // 业务应显式 setRuntimeId()（例如使用启动参数中的稳定实例标识）。
+        runtime_id_ = base + "#" + std::to_string(diag_.pid) + "-" + std::to_string(seq);
+    } else {
+        runtime_id_ = runtime_id_override_;
+    }
+    incarnation_id_ = makeIncarnationId();
+    control_timeout_ms_ = DEFAULT_HEARTBEAT_TIMEOUT;
+    control_ack_pending_ = false;
+    sm_incarnation_id_ = 0;
 
     // hello 失败不阻塞 init（SM 可能随后恢复），但保留重连标志，
     // 让后续心跳路径重试 hello + 控制面状态恢复

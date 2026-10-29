@@ -271,6 +271,15 @@ void OmniRuntime::Impl::detachClientsFromEntry(const std::string& name,
         topic_runtime_.removeTcpSubscriberFd(it->first);
         topic_runtime_.removeShmSubscriberService(name, it->first);
     }
+    for (std::map<int, ClientSessionState>::iterator sit = entry->client_sessions.begin();
+         sit != entry->client_sessions.end(); ++sit) {
+        if (sit->second.deadline_timer_id > 0) {
+            loop_->cancelTimer(sit->second.deadline_timer_id);
+            sit->second.deadline_timer_id = 0;
+        }
+    }
+    entry->client_sessions.clear();
+    entry->runtime_sessions.clear();
     entry->clients.clear();
 }
 

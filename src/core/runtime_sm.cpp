@@ -75,6 +75,12 @@ int OmniRuntime::Impl::sendRuntimeHello() {
     info.process_name = diag_.process_name;
     info.log_level = static_cast<uint32_t>(g_omni_log_level);
     info.diag_capabilities = RUNTIME_DIAG_CAP_WATCH;
+    info.session_version = SESSION_PROTOCOL_VERSION;
+    info.runtime_id = runtime_id_;
+    info.incarnation_id = incarnation_id_;
+    info.heartbeat_interval_ms = heartbeat_interval_ms_;
+    info.requested_timeout_ms = control_requested_timeout_ms_;
+    info.host_id = host_id_;
     if (!serializeRuntimeInfo(info, msg.payload)) {
         OMNI_LOG_ERROR(LOG_TAG, "serialize_runtime_hello_payload_failed");
         return static_cast<int>(ErrorCode::ERR_SERIALIZE);
@@ -85,16 +91,46 @@ int OmniRuntime::Impl::sendRuntimeHello() {
     if (ret != 0) {
         return ret;
     }
-    bool accepted = false;
-    if (!decodeBoolReplyPayload(reply, accepted) || !accepted) {
+    BufferView reply_view(reply.payload.data(), reply.payload.size());
+    SessionHelloAck ack;
+    if (!deserializeSessionHelloAck(reply_view, ack)) {
+        OMNI_LOG_WARN(LOG_TAG, "malformed_runtime_hello_reply");
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
+    if (ack.status == SESSION_STATUS_REJECTED) {
+        OMNI_LOG_WARN(LOG_TAG, "runtime_session_rejected status=%u", ack.status);
         return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
     }
+    heartbeat_interval_ms_ = clampHeartbeatInterval(ack.accepted_interval_ms);
+    control_timeout_ms_ = ack.effective_timeout_ms != 0
+        ? ack.effective_timeout_ms : DEFAULT_HEARTBEAT_TIMEOUT;
+    sm_incarnation_id_ = ack.peer_incarnation_id;
+    control_ack_pending_ = false;
+    if (loop_ && control_ack_timer_id_ > 0) {
+        loop_->cancelTimer(control_ack_timer_id_);
+        control_ack_timer_id_ = 0;
+    }
+    // 用服务端裁定的间隔重排控制心跳发送定时器
+    if (loop_ && heartbeat_timer_id_ > 0) {
+        loop_->cancelTimer(heartbeat_timer_id_);
+        heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
+            [this]() { this->sendHeartbeat(); }, true);
+    }
+    OMNI_LOG_INFO(LOG_TAG, "runtime_session_established runtime_id=%s incarnation=%u "
+                  "interval=%u timeout=%u",
+                  runtime_id_.c_str(), incarnation_id_,
+                  heartbeat_interval_ms_, control_timeout_ms_);
     return 0;
 }
 
 void OmniRuntime::Impl::dropServiceManagerConnection() {
     diag_.watch_active = false;
     sm_reconnect_needed_ = true;
+    control_ack_pending_ = false;
+    if (loop_ && control_ack_timer_id_ > 0) {
+        loop_->cancelTimer(control_ack_timer_id_);
+        control_ack_timer_id_ = 0;
+    }
     sm_channel_.closeTransport(*loop_);
 }
 
@@ -180,6 +216,9 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
         sendToSM(reply);
         break;
     }
+    case MessageType::MSG_CONTROL_HEARTBEAT_ACK:
+        onControlHeartbeatAck(msg);
+        break;
     case MessageType::MSG_HEARTBEAT_ACK:
         break;
     case MessageType::MSG_DEATH_NOTIFY:
@@ -676,12 +715,8 @@ int OmniRuntime::Impl::reconnectServiceManagerIfNeeded() {
 // ============================================================
 
 void OmniRuntime::Impl::sendHeartbeat() {
-    // 先检查 SM 是否需要重连（客户端也可能没有注册服务，但仍需保持 SM 连接）
+    // 先检查 SM 是否需要重连（纯客户端也需要保持控制会话）
     const int sm_state = reconnectServiceManagerIfNeeded();
-
-    // SM 仍不可达时直接返回：restoreDiagWatchers 与每个名字的 sendToSMWithinTimeout
-    // 都会再次进入 reconnectServiceManagerIfNeeded 并阻塞一次连接尝试（每 tick N+1 次）。
-    // 已在上方统一尝试过一次，本 tick 不再重复
     if (sm_state != 0) {
         return;
     }
@@ -689,22 +724,65 @@ void OmniRuntime::Impl::sendHeartbeat() {
     // 周期兜底：SM 重连时目标 pid 可能尚未重新 hello，watch 重放会先失败
     restoreDiagWatchers();
 
-    // 先拷贝 key 再遍历：reconnectServiceManagerIfNeeded 可能触发 restore 流程，
-    // 其内部 waitForReply 期间用户回调可修改 local_services_（约束 2）
-    std::vector<std::string> names;
-    names.reserve(local_services_.size());
-    for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
-         it != local_services_.end(); ++it) {
-        names.push_back(it->first);
+    // 一次只允许一个在途心跳：等 ACK 或等 deadline 触发重连
+    if (control_ack_pending_) {
+        return;
     }
-    for (size_t i = 0; i < names.size(); ++i) {
-        Message msg(MessageType::MSG_HEARTBEAT, 0);
-        if (!msg.payload.writeString(names[i])) {
-            OMNI_LOG_ERROR(LOG_TAG, "heartbeat_serialize_failed service=%s", names[i].c_str());
-            continue;
-        }
-        sendToSMWithinTimeout(msg, CONTROL_HEARTBEAT_SEND_TIMEOUT_MS, NULL);
+
+    Message msg(MessageType::MSG_CONTROL_HEARTBEAT, 0);
+    if (!msg.payload.writeUint32(incarnation_id_)) {
+        OMNI_LOG_ERROR(LOG_TAG, "control_heartbeat_serialize_failed");
+        return;
     }
+    if (!sendToSMWithinTimeout(msg, CONTROL_HEARTBEAT_SEND_TIMEOUT_MS, NULL)) {
+        // 发送失败已由 sendToSMWithinTimeout 置 sm_reconnect_needed_
+        return;
+    }
+
+    control_ack_pending_ = true;
+    if (control_ack_timer_id_ > 0) {
+        loop_->cancelTimer(control_ack_timer_id_);
+        control_ack_timer_id_ = 0;
+    }
+    control_ack_timer_id_ = loop_->addTimer(control_timeout_ms_, [this]() {
+        this->onControlHeartbeatTimeout();
+    }, false);
+}
+
+void OmniRuntime::Impl::onControlHeartbeatAck(const Message& msg) {
+    BufferView buf(msg.payload.data(), msg.payload.size());
+    uint32_t peer_incarnation = 0;
+    if (!buf.tryReadUint32(peer_incarnation)) {
+        OMNI_LOG_WARN(LOG_TAG, "malformed_control_heartbeat_ack");
+        return;
+    }
+    control_ack_pending_ = false;
+    if (control_ack_timer_id_ > 0) {
+        loop_->cancelTimer(control_ack_timer_id_);
+        control_ack_timer_id_ = 0;
+    }
+    if (sm_incarnation_id_ != 0 && peer_incarnation != 0
+        && peer_incarnation != sm_incarnation_id_) {
+        OMNI_LOG_WARN(LOG_TAG, "sm_incarnation_changed old=%u new=%u, reconnecting",
+                      sm_incarnation_id_, peer_incarnation);
+        sm_incarnation_id_ = peer_incarnation;
+        sm_reconnect_needed_ = true;
+        dropServiceManagerConnection();
+        return;
+    }
+    sm_incarnation_id_ = peer_incarnation;
+}
+
+void OmniRuntime::Impl::onControlHeartbeatTimeout() {
+    control_ack_timer_id_ = 0;
+    if (!control_ack_pending_) {
+        return;
+    }
+    control_ack_pending_ = false;
+    OMNI_LOG_WARN(LOG_TAG, "sm_heartbeat_timeout timeout_ms=%u, reconnect",
+                  control_timeout_ms_);
+    diag_.stats.connection_errors++;
+    dropServiceManagerConnection();
 }
 
 } // namespace omnibinder

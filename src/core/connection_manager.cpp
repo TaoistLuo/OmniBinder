@@ -33,20 +33,34 @@ ServiceConnection* ConnectionManager::getOrCreateConnectionByKey(
     // 检查是否已有连接
     std::map<std::string, ServiceConnection*>::iterator it = connections_.find(connection_key);
     if (it != connections_.end()) {
-        if (it->second->connected) {
-            return it->second;
+        ServiceConnection* existing = it->second;
+        const bool same_endpoint = existing->remote_host == host
+            && existing->remote_port == port
+            && existing->remote_host_id == host_id
+            && existing->remote_instance_id == instance_id;
+        if (existing->connected && same_endpoint) {
+            return existing;
         }
-        // 已断开连接：先注销其 fd 再释放，避免 EventLoop 中残留悬垂 fd
-        // （部分错误路径只置 connected=false 而未 removeFd）
-        if (it->second->transport && it->second->transport->fd() >= 0) {
-            loop_.removeFd(it->second->transport->fd());
+        // 断开，或同一连接键对应的端点已变化（服务重启换了 port/instance）：
+        // 旧连接不能复用，否则会在旧连接上重放订阅（审计 P0）。
+        OMNI_LOG_INFO(LOG_TAG, "Connection %s endpoint changed or disconnected, rebuilding "
+                      "(old=%s:%u new=%s:%u)",
+                      connection_key.c_str(), existing->remote_host.c_str(),
+                      static_cast<unsigned>(existing->remote_port),
+                      host.c_str(), static_cast<unsigned>(port));
+        if (existing->transport && existing->transport->fd() >= 0) {
+            loop_.removeFd(existing->transport->fd());
         }
-        delete it->second;
+        delete existing;
         connections_.erase(it);
     }
 
     ServiceConnection* conn = new ServiceConnection();
     conn->connection_key = connection_key;
+    conn->remote_host = host;
+    conn->remote_port = port;
+    conn->remote_host_id = host_id;
+    conn->remote_instance_id = instance_id;
 
     conn->transport = createClientConnection(service_name, host, port,
                                       local_host_id_, host_id, shm_config, instance_id);

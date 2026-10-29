@@ -64,6 +64,52 @@ static bool recvMsg(TcpConnection& t, Message& msg, int timeout_ms) {
     return false;
 }
 
+static bool sendDataSessionHello(TcpConnection& t, uint32_t seq) {
+    SessionHello hello;
+    hello.runtime_id = "raw-idl";
+    hello.incarnation_id = 1;
+    hello.heartbeat_interval_ms = 3000;
+    hello.requested_timeout_ms = 10000;
+    hello.host_id = "raw-idl-host";
+    hello.process_name = "raw-idl";
+    hello.pid = static_cast<uint32_t>(platform::getPid());
+    Message msg(MessageType::MSG_SESSION_HELLO, seq);
+    if (!serializeSessionHello(hello, msg.payload) || !sendMsg(t, msg)) return false;
+    Message reply;
+    if (!recvMsg(t, reply, 2000)
+        || reply.getType() != MessageType::MSG_SESSION_HELLO_ACK) {
+        return false;
+    }
+    SessionHelloAck ack;
+    BufferView view(reply.payload.data(), reply.payload.size());
+    return deserializeSessionHelloAck(view, ack)
+        && ack.status != SESSION_STATUS_REJECTED;
+}
+
+static bool sendControlSessionHello(TcpConnection& t, uint32_t seq,
+                                    const std::string& runtime_id) {
+    Message msg(MessageType::MSG_RUNTIME_HELLO, seq);
+    RuntimeInfo info;
+    info.pid = static_cast<uint32_t>(platform::getPid());
+    info.process_name = runtime_id;
+    info.session_version = SESSION_PROTOCOL_VERSION;
+    info.runtime_id = runtime_id;
+    info.incarnation_id = 1;
+    info.heartbeat_interval_ms = 3000;
+    info.requested_timeout_ms = 10000;
+    info.host_id = "raw-idl-host";
+    if (!serializeRuntimeInfo(info, msg.payload) || !sendMsg(t, msg)) return false;
+    Message reply;
+    if (!recvMsg(t, reply, 2000)
+        || reply.getType() != MessageType::MSG_RUNTIME_HELLO_REPLY) {
+        return false;
+    }
+    SessionHelloAck ack;
+    BufferView view(reply.payload.data(), reply.payload.size());
+    return deserializeSessionHelloAck(view, ack)
+        && ack.status != SESSION_STATUS_REJECTED;
+}
+
 class EchoService : public Service {
 public:
     EchoService() : Service("IdlTestService") {
@@ -127,6 +173,7 @@ TEST_F(IdlMismatchTest, InvokeWrongIdlHashReturnsMismatch) {
 
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc_port));
+    ASSERT_TRUE(sendDataSessionHello(rogue, 10));
 
     Message msg(MessageType::MSG_INVOKE, 1);
     msg.payload.writeUint32(IFACE_ID);
@@ -162,6 +209,7 @@ TEST_F(IdlMismatchTest, InvokeCorrectIdlHashSucceeds) {
 
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc_port));
+    ASSERT_TRUE(sendDataSessionHello(rogue, 11));
 
     Message msg(MessageType::MSG_INVOKE, 2);
     msg.payload.writeUint32(IFACE_ID);
@@ -232,6 +280,7 @@ TEST_F(IdlMismatchTest, InvokeWrongHashErrorLog) {
 TEST_F(IdlMismatchTest, TopicSubscribeReturnsPublisherIdlHash) {
     TcpConnection sm_conn;
     ASSERT_TRUE(connectTcp(sm_conn, "127.0.0.1", SM_PORT));
+    ASSERT_TRUE(sendControlSessionHello(sm_conn, 50, "raw-idl-sm"));
 
     {
         Message reg(MessageType::MSG_REGISTER, 100);

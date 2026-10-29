@@ -60,8 +60,25 @@ struct ServiceConnection {
     Buffer          recv_buffer;
     bool            connected;
 
+    // 数据面会话（每条直连一次 Session Hello/ACK）
+    std::string     remote_host;
+    uint16_t        remote_port;
+    std::string     remote_host_id;
+    std::string     remote_instance_id;
+    bool            session_ready;
+    bool            session_ack_received;
+    uint32_t        session_status;
+    uint32_t        session_interval_ms;
+    uint32_t        session_timeout_ms;
+    uint32_t        peer_incarnation;
+
     ServiceConnection()
-        : transport(NULL), connected(false) {}
+        : transport(NULL), connected(false), remote_port(0)
+        , session_ready(false), session_ack_received(false)
+        , session_status(0)
+        , session_interval_ms(DEFAULT_HEARTBEAT_INTERVAL)
+        , session_timeout_ms(DEFAULT_HEARTBEAT_TIMEOUT)
+        , peer_incarnation(0) {}
 
     ~ServiceConnection() {
         if (transport) {

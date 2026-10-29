@@ -65,6 +65,38 @@ struct InvokeDispatchResult {
  * @details endpoints 拥有各传输端点（TCP/SHM），clients 为端点接入的客户端
  *          非拥有视图（生命周期由 endpoint 管理）。
  */
+enum class ClientSessionPhase {
+    NEGOTIATING,
+    ACTIVE
+};
+
+/*
+ * @brief 服务端 per-client 数据面会话
+ * @note  与 LocalServiceEntry::clients 一一对应；负责 Session Hello/心跳 deadline。
+ *        连接断开/超时必须取消其定时器（约束 3）。
+ */
+struct ClientSessionState {
+    std::string runtime_id;
+    std::string host_id;
+    std::string session_key;      // (host_id, runtime_id)
+    uint32_t    incarnation_id;
+    uint32_t    interval_ms;
+    uint32_t    timeout_ms;
+    int64_t     last_heartbeat_ms;
+    uint32_t    deadline_timer_id;
+    uint64_t    generation;
+    ClientSessionPhase phase;
+
+    ClientSessionState()
+        : incarnation_id(0)
+        , interval_ms(DEFAULT_HEARTBEAT_INTERVAL)
+        , timeout_ms(DEFAULT_HEARTBEAT_TIMEOUT)
+        , last_heartbeat_ms(0)
+        , deadline_timer_id(0)
+        , generation(0)
+        , phase(ClientSessionPhase::NEGOTIATING) {}
+};
+
 struct LocalServiceEntry {
     Service*            service;
     uint16_t            port;
@@ -72,6 +104,9 @@ struct LocalServiceEntry {
     std::vector<IServerEndpoint*>    endpoints;
     std::map<int, IMessageConnection*> clients;
     std::map<int, Buffer*>           client_recv_buffers;
+    std::map<int, ClientSessionState> client_sessions;
+    // (host_id, runtime_id) -> client_id，用于快速重启/重连顶替旧会话
+    std::map<std::string, int>       runtime_sessions;
     // 已注册到 EventLoop 的端点级 fd（含 TCP 客户端 fd / SHM liveness fd）
     std::set<int>                    endpoint_fds;
 
@@ -89,6 +124,8 @@ struct LocalServiceEntry {
         }
         client_recv_buffers.clear();
         clients.clear();
+        client_sessions.clear();
+        runtime_sessions.clear();
         for (size_t i = 0; i < endpoints.size(); ++i) {
             endpoints[i]->close();
             delete endpoints[i];
@@ -133,11 +170,14 @@ struct ReconnectConfig {
 struct HeartbeatState {
     uint32_t interval_ms;
     uint32_t timeout_ms;
-    uint32_t timer_id;
+    uint32_t timer_id;          // 周期发送定时器
+    uint32_t deadline_timer_id; // 单次 ACK deadline
     int64_t  last_ack_time;
     bool     pending;
-    HeartbeatState() : interval_ms(5000), timeout_ms(10000),
-                       timer_id(0), last_ack_time(0), pending(false) {}
+    HeartbeatState() : interval_ms(DEFAULT_HEARTBEAT_INTERVAL),
+                       timeout_ms(DEFAULT_HEARTBEAT_TIMEOUT),
+                       timer_id(0), deadline_timer_id(0),
+                       last_ack_time(0), pending(false) {}
 };
 
 /*
