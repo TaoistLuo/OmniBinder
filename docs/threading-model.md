@@ -24,7 +24,7 @@
 - RPC：`invoke()`、`invokeOneWay()`
 - 死亡通知：`subscribeServiceDeath()`、`unsubscribeServiceDeath()`、`subscribeServiceInstanceDeath()`、`unsubscribeServiceInstanceDeath()`
 - 话题：`publishTopic()`、`broadcast()`、`subscribeTopic()`、`unsubscribeTopic()`（含 `TopicSubscriptionSelector` 重载）
-- 配置：`setHeartbeatInterval()`、`setDefaultTimeout()`、`setHostId()`、`hostId()`
+- 配置：`setHeartbeatPolicy()`、`setDefaultTimeout()`、`setHostId()`、`hostId()`、`setRuntimeId()`、`runtimeId()`
 
 这里的“线程安全”含义是：
 
@@ -41,7 +41,7 @@
 | 单次驱动 | `pollOnce()` | 线程安全，但不能与另一个线程中的 `run()` 形成“双重驱动”；若 `run()` 已接管 event-loop，应禁止并发 `pollOnce()` |
 | 停止 | `stop()` | 可从任意线程安全调用；必须可靠唤醒 owner event-loop 并使 `run()` 退出 |
 | 状态查询 | `isRunning()`、`hostId()` | 可从任意线程并发读取，但返回值只保证内部状态的可见性，不代表更强的事务语义 |
-| 配置 | `setHeartbeatInterval()`、`setDefaultTimeout()`、`setHostId()` | 可从任意线程安全调用；配置变更应在 owner event-loop 上串行生效。`setHostId()` 须在 `init()` 之前调用 |
+| 配置 | `setHeartbeatPolicy()`、`setDefaultTimeout()`、`setHostId()`、`setRuntimeId()` | 可从任意线程安全调用；`setHostId()` / `setHeartbeatPolicy()` / `setRuntimeId()` 必须在 `init()` 之前调用，init 后调用被忽略 |
 | 服务发现 | `lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()` | 可从任意线程安全调用；同步等待与缓存更新由 owner event-loop 串行处理 |
 | 连接管理 | `connectService()`、`connectServiceInstance()`、`disconnectService()`、`disconnectServiceInstance()`、`isServiceConnected()`、`isServiceInstanceConnected()` | 可从任意线程安全调用；连接建立/断开与 SM 交互由 owner event-loop 串行处理 |
 | RPC | `invoke()`、`invokeOneWay()` | 可从任意线程安全调用；同步调用允许阻塞调用线程，但内部发送/等待/状态更新由 owner event-loop 串行处理 |
@@ -209,12 +209,22 @@ while (running) {
 - 重连定时器回调在 event-loop 线程执行
 - 重连过程中会查询 SM：显式实例绑定按 `(name, host_id, instance_id)` 经 `listServiceInstances` 重新解析，未绑定实例按名 `lookupServiceInfo`，均同步等待回复
 
-### 7.3 心跳
+### 7.3 心跳与会话
 
-- 心跳定时器在 event-loop 线程执行
-- 心跳消息在 owner event-loop 线程通过 `conn_mgr_->sendMessage` 发送（该方法不加锁，仅可在 owner 线程调用）
-- 心跳响应（`MSG_HEARTBEAT_ACK`）在 event-loop 线程处理
-- 心跳超时检测在 event-loop 线程执行
+控制面：
+
+- 每个 runtime 一个 `MSG_CONTROL_HEARTBEAT`，定时器在 event-loop 线程执行；
+- SM 的 `MSG_CONTROL_HEARTBEAT_ACK` 与 runtime 的 ACK deadline 均在 event-loop 线程处理；
+- session deadline 到期 → 标记 SM 不可达 → 关闭控制连接 → 重连 + 恢复。
+
+数据面：
+
+- 连接建立后由 `ensureDataSession()` 发送 `MSG_SESSION_HELLO` 并等待 ACK；
+- 心跳消息在 owner event-loop 线程通过 `conn_mgr_->sendMessage` 发送；
+- `MSG_HEARTBEAT_ACK` 在 event-loop 线程处理，取消 client 侧 deadline；
+- 服务端 per-client deadline 与 `onServiceClientDisconnected()` 同样在 owner event-loop 线程执行。
+
+所有心跳/会话定时器都是 owner event-loop 的定时器，不涉及跨线程加锁。
 
 ### 7.4 Proxy 基类
 

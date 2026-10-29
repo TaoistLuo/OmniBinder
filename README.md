@@ -96,6 +96,21 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - 同步 reply wait 期间只处理 fd/timer，不执行新的 pending API functor
 - `run()` / `pollOnce()` / `stop()` 的并发协作规则见 [线程模型文档](docs/threading-model.md)
 
+### 心跳与会话配置
+
+OmniBinder 有两层独立心跳：
+
+- **控制面（Runtime ↔ SM）**：每个 runtime 一个会话心跳。`init()` 前调用
+  `runtime.setHeartbeatPolicy(interval_ms, timeout_ms)`；默认 `3000 / 10000ms`，
+  `timeout=0` 由 SM 默认值裁定；无固定上限，低功耗可设置分钟/小时级。
+- **数据面（Client ↔ Service）**：每条直连一个 Session Hello，协商成功后自动启动心跳。
+  普通业务用 `proxy.startHeartbeat(interval, timeout)` 自定义；裸 runtime 使用
+  `runtime.startHeartbeat(name, interval, timeout)`。两者配置的是同一个
+  per-connection 心跳，Proxy 只是薄封装。
+- 同进程重连会自动重放订阅；进程重启后需业务重新注册/订阅。
+- 低功耗/快速重启需要立即顶替旧会话时，在 `init()` 前设置稳定的
+  `runtime.setRuntimeId("...")`；默认 `runtime_id` 为 `process_name#pid-<seq>`。
+
 ### 错误处理模型说明
 
 - Buffer 写接口返回 `bool`

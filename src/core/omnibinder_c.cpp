@@ -514,12 +514,9 @@ const char* omni_runtime_get_register_host(const omni_runtime_t* runtime) {
     return holder.c_str();
 }
 
-void omni_runtime_set_heartbeat_interval(omni_runtime_t* runtime, uint32_t interval_ms) {
-    if (runtime) runtime->runtime.setHeartbeatInterval(interval_ms);
-}
-
-void omni_runtime_set_heartbeat_timeout(omni_runtime_t* runtime, uint32_t timeout_ms) {
-    if (runtime) runtime->runtime.setHeartbeatTimeout(timeout_ms);
+void omni_runtime_set_heartbeat_policy(omni_runtime_t* runtime,
+                                       uint32_t interval_ms, uint32_t timeout_ms) {
+    if (runtime) runtime->runtime.setHeartbeatPolicy(interval_ms, timeout_ms);
 }
 
 void omni_runtime_set_default_timeout(omni_runtime_t* runtime, uint32_t timeout_ms) {

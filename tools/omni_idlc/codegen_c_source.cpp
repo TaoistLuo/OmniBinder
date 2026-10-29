@@ -576,7 +576,8 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "        p->connected = 1;\n";
     os << "        omni_runtime_enable_auto_reconnect(p->runtime, \"" << svc.name << "\", 1);\n";
     os << "        p->auto_reconnect_enabled = 1;\n";
-    os << "        omni_runtime_start_heartbeat(p->runtime, \"" << svc.name << "\", 5000, 10000);\n";
+    // 数据面心跳由 omni_runtime_connect_* 内的 Session Hello 自动启动；
+    // C proxy 不再用硬编码默认值覆盖用户预先配置的策略。
     os << "        omni_runtime_subscribe_death(p->runtime, \"" << svc.name << "\",\n";
     os << "            " << prefix << "_internal_death_cb, p);\n";
     os << "    }\n";
@@ -600,7 +601,7 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "        p->instance_bound = 1;\n";
     os << "        omni_runtime_enable_auto_reconnect(p->runtime, key, 1);\n";
     os << "        p->auto_reconnect_enabled = 1;\n";
-    os << "        omni_runtime_start_heartbeat(p->runtime, key, 5000, 10000);\n";
+    // 同上：不覆盖用户策略；需要自定义时调用 *_proxy_start_heartbeat。
     os << "        omni_runtime_subscribe_death_instance(p->runtime, \"" << svc.name << "\",\n";
     os << "            p->instance_host_id, p->instance_id, " << prefix << "_internal_death_cb, p);\n";
     os << "    }\n";

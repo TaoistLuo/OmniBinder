@@ -385,8 +385,7 @@ TEST_F(HeartbeatLifecycleTest, TimeoutDisconnectTriggersReregistration) {
     OmniRuntime rt;
     // SM 的演练超时是 500ms；纯客户端必须以更短间隔发送，才能证明
     // “对端超时不会误伤自己的会话”。
-    rt.setHeartbeatInterval(100);
-    rt.setHeartbeatTimeout(500);
+    rt.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME))
         << "Service should register before the owner loop blocks";
@@ -432,8 +431,7 @@ TEST_F(HeartbeatLifecycleTest, StopHeartbeatKeepsSmLiveness) {
     ASSERT_GT(child_pid_, 0) << "Failed to start heartbeat-stop child";
 
     OmniRuntime rt;
-    rt.setHeartbeatInterval(100);
-    rt.setHeartbeatTimeout(500);
+    rt.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
 
@@ -456,27 +454,24 @@ TEST_F(HeartbeatLifecycleTest, StopHeartbeatKeepsSmLiveness) {
 }
 
 // ============================================================
-// 回归 #16 — SetHeartbeatIntervalZeroIsIgnored
+// 回归 #16 — HeartbeatPolicyAfterInitIgnored
 //
-// @brief   setHeartbeatInterval(0) 必须被忽略，不得静默关闭控制面心跳
-// @details 服务以 100ms 间隔注册后调用 setHeartbeatInterval(0)。修复前该值
-//          被写入并按 repeat 定时器重排为 0，周期定时器触发一次即不再重排，
-//          心跳停止；SM 在 heartbeat-timeout(500ms) 后摘除服务并关闭控制连接，
-//          runtime 进入重连（sm_reconnect_attempts > 0）。修复后 0 被忽略，
-//          间隔保持 100ms，服务持续在册且无重连。
+// @brief   init() 之后的 setHeartbeatPolicy 必须被忽略
+// @details 合并后的 setHeartbeatPolicy(interval, timeout) 只允许在 init() 前调用。
+//          init 后再调用（哪怕 0/0）不得静默关闭或改变控制面心跳；否则服务会在
+//          SM heartbeat-timeout 后被摘除并进入重连。
 // ============================================================
-TEST_F(HeartbeatLifecycleTest, SetHeartbeatIntervalZeroIsIgnored) {
+TEST_F(HeartbeatLifecycleTest, HeartbeatPolicyAfterInitIgnored) {
     OmniRuntime rt;
-    rt.setHeartbeatInterval(100);
-    rt.setHeartbeatTimeout(500);
+    rt.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
-    rt.setHeartbeatInterval(100);
 
     HrtbtTestService svc(SERVICE_NAME);
     ASSERT_EQ(rt.registerService(&svc), 0);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
 
-    rt.setHeartbeatInterval(0);
+    // init 之后的策略修改必须被忽略，不能用 0/0 静默关闭控制面心跳
+    rt.setHeartbeatPolicy(0, 0);
 
     bool ever_missing = false;
     for (int i = 0; i < 40; ++i) {
@@ -487,13 +482,12 @@ TEST_F(HeartbeatLifecycleTest, SetHeartbeatIntervalZeroIsIgnored) {
     }
 
     EXPECT_FALSE(ever_missing)
-        << "service must stay registered while setHeartbeatInterval(0) is ignored";
+        << "post-init setHeartbeatPolicy must be ignored, not silently disable heartbeats";
     EXPECT_EQ(smServiceState(rt, SERVICE_NAME), 1);
 
     RuntimeStats stats;
     ASSERT_EQ(rt.getStats(stats), 0);
-    EXPECT_EQ(stats.sm_reconnect_attempts, 0u)
-        << "an SM reconnect implies heartbeats stopped because the interval was zeroed";
+    EXPECT_EQ(stats.sm_reconnect_attempts, 0u);
 
     rt.unregisterService(&svc);
     rt.stop();
@@ -511,8 +505,7 @@ TEST_F(HeartbeatLifecycleTest, PureClientConnectionNotClosedByPeerTimeout) {
     ASSERT_GT(child_pid_, 0) << "Failed to start blocked service child";
 
     OmniRuntime client;
-    client.setHeartbeatInterval(100);
-    client.setHeartbeatTimeout(500);
+    client.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(client.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
     ASSERT_TRUE(waitServiceRegistered(client, SERVICE_NAME));
 
@@ -817,8 +810,7 @@ TEST_F(HeartbeatReconnectTest, DisconnectCancelsPendingReconnect) {
 // ============================================================
 TEST_F(HeartbeatLifecycleTest, SessionHeartbeatTimeoutRemovesAllServices) {
     OmniRuntime rt;
-    rt.setHeartbeatInterval(100);
-    rt.setHeartbeatTimeout(500);
+    rt.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
 
     RawControlClient raw;
@@ -1167,8 +1159,8 @@ int main(int argc, char** argv) {
     if (argc >= 3 && strcmp(argv[1], "--child-owns-heartbeat-stop") == 0) {
         uint16_t port = (uint16_t)atoi(argv[2]);
         OmniRuntime rt;
+        rt.setHeartbeatPolicy(200, 500);
         if (rt.init("127.0.0.1", port) != 0) return 1;
-        rt.setHeartbeatInterval(200);
         HrtbtTestService svc(SERVICE_NAME);
         if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
         // C2b 回归：对本进程已注册服务调用 stopHeartbeat 只影响数据面检测，
@@ -1183,8 +1175,8 @@ int main(int argc, char** argv) {
         uint16_t port = (uint16_t)atoi(argv[2]);
         int block_ms = atoi(argv[3]);
         OmniRuntime rt;
+        rt.setHeartbeatPolicy(200, 500);
         if (rt.init("127.0.0.1", port) != 0) return 1;
-        rt.setHeartbeatInterval(200);
         HrtbtTestService svc(SERVICE_NAME);
         if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
         // 阻塞 owner-loop 超过 SM 超时窗口，模拟卡死；恢复后由 C2 的连接断开

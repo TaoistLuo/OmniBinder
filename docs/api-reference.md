@@ -156,7 +156,7 @@ OmniRuntime 是用户使用 OmniBinder 的主要入口，负责与 ServiceManage
 | 单次驱动 | `pollOnce()` | 线程安全，但不应与另一个线程中的 `run()` 或 `pollOnce()` 并发驱动同一实例 |
 | 停止 | `stop()` | 可从任意线程并发调用 |
 | 同步阻塞 | `lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`、`invoke()`、`connectServiceInstance()`、`disconnectServiceInstance()`、`subscribeServiceDeath()`、`subscribeServiceInstanceDeath()`、`publishTopic()`、`subscribeTopic()` | 可从任意线程安全调用，但内部发送/等待/状态写入由 owner event-loop 串行处理 |
-| 异步/配置 | `invokeOneWay()`、`broadcast()`、`setHeartbeatInterval()`、`setDefaultTimeout()` | 可从任意线程安全调用，内部状态更新在 owner event-loop 串行处理 |
+| 异步/配置 | `invokeOneWay()`、`broadcast()`、`setHeartbeatPolicy()`、`setDefaultTimeout()` | 可从任意线程安全调用；`setHeartbeatPolicy` 必须在 `init()` 前调用，不投递 event-loop |
 | 回调 | `TopicCallback`、`DeathCallback` | 默认在 owner event-loop 线程执行 |
 
 #### 超时与阻塞语义
@@ -390,11 +390,17 @@ public:
     // interval_ms: 重连间隔（毫秒）
     void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
 
-    // 启动心跳检测
-    // service_name: 目标服务名
-    // interval_ms: 心跳间隔（毫秒，默认 5000）
+    // 数据面连接心跳（低级入口，供无 Proxy 的裸 runtime 用户）
+    // service_name: 目标服务名或实例连接键
+    // interval_ms: 心跳间隔（毫秒，默认 3000）
     // timeout_ms: 心跳超时（毫秒，默认 10000）
-    void startHeartbeat(const std::string& service_name, uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+    // 注意：普通业务优先使用 ServiceProxyBase::startHeartbeat(interval, timeout)；
+    //       它与本接口配置同一个 per-connection heartbeat，Proxy 只是薄封装，
+    //       不存在两套心跳机制。同一 connection_key 的多个 Proxy 共享同一
+    //       连接/心跳状态，后配置的策略生效。
+    void startHeartbeat(const std::string& service_name,
+                        uint32_t interval_ms = DEFAULT_HEARTBEAT_INTERVAL,
+                        uint32_t timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT);
 
     // 停止心跳检测
     // service_name: 目标服务名
@@ -556,8 +562,8 @@ public:
     void setRegisterHost(const std::string& host);
     std::string getRegisterHost() const;
 
-    // 设置心跳间隔（毫秒）
-    void setHeartbeatInterval(uint32_t interval_ms);
+    // 设置控制面心跳策略（interval + 协商 timeout）；必须在 init() 前调用
+    void setHeartbeatPolicy(uint32_t interval_ms, uint32_t timeout_ms);
 
     // 设置默认调用超时（毫秒）
     void setDefaultTimeout(uint32_t timeout_ms);
@@ -575,6 +581,14 @@ public:
 
     // 获取本机 host_id
     std::string hostId() const;
+
+    // 设置稳定运行时身份 runtime_id；必须在 init() 前调用
+    // 默认 process_name#pid-<seq>（同机多进程唯一，但跨重启不稳定）。
+    // 低功耗/快速重启需要立即顶替旧会话时，设置为跨重启稳定的业务实例标识。
+    void setRuntimeId(const std::string& runtime_id);
+
+    // 获取运行时稳定身份
+    std::string runtimeId() const;
 
     // 获取运行时统计信息
     int getStats(RuntimeStats& stats);
@@ -956,8 +970,6 @@ const uint32_t DEFAULT_HEARTBEAT_INTERVAL = 3000;
 // 默认心跳超时（毫秒）
 const uint32_t DEFAULT_HEARTBEAT_TIMEOUT = 10000;
 
-// 默认最大丢失心跳次数
-const uint32_t DEFAULT_MAX_MISSED_HEARTBEATS = 3;
 
 // 默认调用超时（毫秒）
 const uint32_t DEFAULT_INVOKE_TIMEOUT = 5000;
@@ -1255,11 +1267,17 @@ int            omni_runtime_is_running(const omni_runtime_t* runtime);
 /* Runtime 配置 */
 void        omni_runtime_set_register_host(omni_runtime_t* runtime, const char* host);
 const char* omni_runtime_get_register_host(const omni_runtime_t* runtime);
-void        omni_runtime_set_heartbeat_interval(omni_runtime_t* runtime, uint32_t interval_ms);
+void        omni_runtime_set_heartbeat_policy(omni_runtime_t* runtime,
+                                               uint32_t interval_ms,
+                                               uint32_t timeout_ms);
 void        omni_runtime_set_default_timeout(omni_runtime_t* runtime, uint32_t timeout_ms);
 /* 覆盖本机 host_id（同机判断 + 实例身份）；必须在 init 之前调用，空串用平台默认 */
 void        omni_runtime_set_host_id(omni_runtime_t* runtime, const char* host_id);
 const char* omni_runtime_host_id(const omni_runtime_t* runtime);
+
+/* 稳定运行时身份 runtime_id；必须在 init 之前调用 */
+void        omni_runtime_set_runtime_id(omni_runtime_t* runtime, const char* runtime_id);
+const char* omni_runtime_runtime_id(const omni_runtime_t* runtime);
 
 /* 服务注册/注销 */
 int  omni_runtime_register_service(omni_runtime_t* runtime, omni_service_t* svc);

@@ -751,7 +751,9 @@ class OmniRuntime {
     void setReconnectInterval(const std::string& service_name, uint32_t interval_ms);
 
     // 心跳检测
-    void startHeartbeat(const std::string& service_name, uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+    void startHeartbeat(const std::string& service_name,
+                        uint32_t interval_ms = DEFAULT_HEARTBEAT_INTERVAL,
+                        uint32_t timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT);
     void stopHeartbeat(const std::string& service_name);
 
     // 死亡通知（名字级 / 实例级）
@@ -779,7 +781,8 @@ public:
     bool isConnected() const;
     void enableAutoReconnect(bool enable = true);
     void setReconnectInterval(uint32_t interval_ms);
-    void startHeartbeat(uint32_t interval_ms = 5000, uint32_t timeout_ms = 10000);
+    void startHeartbeat(uint32_t interval_ms = DEFAULT_HEARTBEAT_INTERVAL,
+                        uint32_t timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT);
     void stopHeartbeat();
     void OnServiceDied(const std::function<void()>& callback);
 
@@ -834,43 +837,50 @@ uint32_t delay_ms = delay64 > 30000 ? 30000 : static_cast<uint32_t>(delay64);  /
 - 第 5 次及以后：interval_ms * 32，并 clamp 到 30s（如 interval_ms=1000 时为 30s）
 - `scheduleReconnect()` 定时前再叠加 ±25% jitter（`addReconnectJitter`），避免多客户端同时重连
 
-### 17.5 心跳机制
+### 17.5 心跳与会话
 
-#### 工作流程
+控制面（Runtime ↔ SM）：
 
-```
-客户端                                     服务端
-  │                                          │
-  ├── startHeartbeat(interval, timeout)       │
-  │       │                                   │
-  │       └── 启动定时器                       │
-  │               │                           │
-  │               ├── sendHeartbeatToService() │
-  │               │       │                   │
-  │               │       └── MSG_HEARTBEAT ──>│
-  │               │                           ├── 自动响应
-  │               │       MSG_HEARTBEAT_ACK <──┤
-  │               │       │                   │
-  │               │       └── 更新 last_ack    │
-  │               │                           │
-  │               └── checkHeartbeatTimeout()  │
-  │                       │                   │
-  │                       ├── 未超时: 继续     │
-  │                       │                   │
-  │                       └── 超时:            │
-  │                               ├── 清除缓存 │
-  │                               ├── 移除连接 │
-  │                               └── 触发重连 │
+```text
+init()
+  -> MSG_RUNTIME_HELLO { runtime_id, incarnation_id, interval, requested_timeout }
+  -> MSG_RUNTIME_HELLO_REPLY { accepted_interval, effective_timeout, sm_incarnation }
+  每个 runtime 一个会话 + 一个 deadline timer
+  -> MSG_CONTROL_HEARTBEAT { incarnation } 到达后重挂 deadline
+  -> MSG_CONTROL_HEARTBEAT_ACK { sm_incarnation } 清除 runtime 侧 ACK deadline
+  -> 超时: closeClient(fd) 注销该 runtime 全部服务/订阅/诊断并逐服务发死亡通知
 ```
 
-#### 服务端自动响应
+数据面（Client ↔ Service）：
 
-`OmniRuntime::Impl` 的 TCP/SHM 请求分派方法自动响应 `MSG_HEARTBEAT`，无需业务代码干预：
+```text
+connectService / Proxy.connect()
+  -> ensureDataSession()
+     -> MSG_SESSION_HELLO { runtime_id, incarnation, interval, requested_timeout }
+     -> MSG_SESSION_HELLO_ACK { accepted_interval, effective_timeout, service_incarnation }
+  -> 自动启动数据面心跳
+     -> MSG_HEARTBEAT { incarnation_id }
+     -> MSG_HEARTBEAT_ACK { service_incarnation }
+     -> 每次 ACK 重挂 client 侧 deadline
+  -> 超时: handleServiceLost -> 移除连接 -> 重连 -> 重新 ensureDataSession
+           -> 重放 MSG_SUBSCRIBE_BROADCAST
+```
+
+服务端为每个 client 维护独立 session：
+
+- 连接第一帧必须是 `MSG_SESSION_HELLO`，否则断开；
+- session 独立 deadline timer，`MSG_HEARTBEAT` 到达后续期；
+- 超时 `onServiceClientDisconnected()` 清理订阅、接收缓冲并关闭连接；
+- 同 `(host_id, runtime_id)` 不同 `incarnation_id` 的新代际立即顶替旧会话；
+  同代际的多条连接允许并存。
+
+服务端自动响应心跳：
 
 ```cpp
 if (msg.getType() == MessageType::MSG_HEARTBEAT) {
     Message ack(MessageType::MSG_HEARTBEAT_ACK, msg.getSequence());
-    // 发送 ACK 响应
+    ack.payload.writeUint32(incarnation_id_);  // 本服务端代际
+    sendOnFdBestEffort(transport, ack);
 }
 ```
 
@@ -923,8 +933,8 @@ proxy.connect();
 // 启用自动重连
 proxy.enableAutoReconnect(true);
 
-// 可选：启动心跳（检测服务存活）
-proxy.startHeartbeat(5000, 10000);  // 5秒间隔，10秒超时
+// 可选：自定义数据面心跳（不调用则使用默认 3000/10000 自动启动）
+proxy.startHeartbeat(3000, 10000);  // 默认策略；低功耗可传分钟/小时级
 
 // 调用方法（直接使用已建立的连接）
 SensorData data;

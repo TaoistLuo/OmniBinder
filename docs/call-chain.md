@@ -61,7 +61,8 @@ ServiceProxyBase::connect()
        -> connectResolvedConnection(makeServiceConnectionKey(name, host_id, instance_id), instance_info, true, &identity)
           - ConnectionManager::getOrCreateConnectionByKey(connection_key, name, host, port, host_id, shm_config, instance_id)
   -> enableAutoReconnect(true)
-  -> startHeartbeat()
+  -> connectService 内 ensureDataSession()：MSG_SESSION_HELLO/ACK；数据面心跳自动启动
+     （可选：startHeartbeat(interval, timeout) 自定义策略/重新协商）
   -> 未绑定实例：subscribeServiceDeath()；绑定实例：subscribeServiceInstanceDeath()
      - 分别向 SM 发 MSG_SUBSCRIBE_SERVICE / MSG_SUBSCRIBE_SERVICE_INSTANCE 注册死亡通知
 ```
@@ -282,18 +283,40 @@ runtime 在 `onSMMessage()` 中处理死亡通知：
 - `handleServiceLost()`：实例死亡只清理该实例键（`makeServiceConnectionKey`）的连接/状态；名字死亡才清理该名及其全部实例键。随后暂停 heartbeat、清除对应 `ServiceState.info`。
 - 如果启用了自动重连，`scheduleReconnect()` 在退避延迟后调度 `tryReconnectService()`。
 
-### 8.2 数据面 heartbeat
+### 8.2 数据面会话与 heartbeat
 
-`startHeartbeat(service_name, interval, timeout)` 启动客户端到服务端的数据面 heartbeat：
+`connectService()` / `Proxy.connect()` 首先完成数据面会话协商：
+
+```text
+ensureDataSession()
+  -> conn_mgr_->sendMessage(MSG_SESSION_HELLO)
+  -> 等待 MSG_SESSION_HELLO_ACK（5s 超时）
+  -> 保存 accepted_interval / effective_timeout / peer_incarnation
+  -> 自动启动 heartbeat 定时器
+```
+
+heartbeat 流程：
 
 ```text
 timer
   -> sendHeartbeatToService()
+     - msg.payload.writeUint32(incarnation_id_)
      - conn_mgr_->sendMessage(MSG_HEARTBEAT)
-  -> checkHeartbeatTimeout()
+     - 挂 ACK deadline（effective_timeout）
+  -> MSG_HEARTBEAT_ACK
+     - 清除 pending / 取消 deadline / 刷新 peer_incarnation
+  -> deadline 到期且仍 pending
+     - handleServiceLost()：移除连接、暂停 heartbeat、调度重连
 ```
 
-TCP 与 SHM 服务端路径统一由 `handleServiceClientMessage()` 拆包后特判 heartbeat，通过 `sendOnFdBestEffort()`（timeout=0，可丢弃）返回 `MSG_HEARTBEAT_ACK`。客户端在 `onDirectMessage(MSG_HEARTBEAT_ACK)` 中清除 pending 并刷新时间戳。
+服务端 `handleServiceClientMessage()`：
+
+- 连接第一帧必须是 `MSG_SESSION_HELLO`；协商 per-client session 并回 ACK；
+- 之后 `MSG_HEARTBEAT` 续期该 client 的 deadline，回 `MSG_HEARTBEAT_ACK`；
+- deadline 到期调用 `onServiceClientDisconnected()` 清理订阅/缓冲/连接。
+
+重连成功后 `tryReconnectService()` 会再次 `ensureDataSession()`，然后重放
+`MSG_SUBSCRIBE_BROADCAST`，最后恢复 heartbeat。
 
 ---
 

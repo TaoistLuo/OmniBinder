@@ -43,6 +43,10 @@
 #define OMNI_MAX_ARRAY_ELEMENTS (1024u * 1024u)
 #define OMNI_MAX_ZERO_WIRE_ARRAY_ELEMENTS (4096u)
 
+/* 控制面/数据面默认心跳参数（毫秒），与 C++ 侧常量保持一致 */
+#define OMNI_DEFAULT_HEARTBEAT_INTERVAL 3000u
+#define OMNI_DEFAULT_HEARTBEAT_TIMEOUT  10000u
+
 /* C 错误码常量（与 omnibinder::ErrorCode 同值，供 C 用户与生成代码引用） */
 #define OMNI_OK                     0
 #define OMNI_ERR_UNKNOWN           (-1)
@@ -240,11 +244,12 @@ void omni_runtime_set_register_host(omni_runtime_t* client, const char* host);
  * @return 内部 thread-local 缓冲指针；指向内容在下次调用本函数前有效 */
 const char* omni_runtime_get_register_host(const omni_runtime_t* client);
 
-/* @brief 设置向 ServiceManager 发送心跳的间隔（毫秒） */
-void omni_runtime_set_heartbeat_interval(omni_runtime_t* client, uint32_t interval_ms);
-
-/* @brief 设置控制面期望的判死超时（毫秒；0 表示服务端默认） */
-void omni_runtime_set_heartbeat_timeout(omni_runtime_t* client, uint32_t timeout_ms);
+/* @brief 设置控制面心跳策略（发送间隔 + 期望判死超时）
+ * @param[in]  interval_ms 发送间隔；0 使用默认 3000ms
+ * @param[in]  timeout_ms  期望判死超时；0 由服务端默认值裁定
+ * @note  必须在 omni_runtime_init 之前调用；单次调用同时设置两者。 */
+void omni_runtime_set_heartbeat_policy(omni_runtime_t* client,
+                                       uint32_t interval_ms, uint32_t timeout_ms);
 
 /* @brief 设置 RPC 调用的默认超时时间（毫秒） */
 void omni_runtime_set_default_timeout(omni_runtime_t* client, uint32_t timeout_ms);

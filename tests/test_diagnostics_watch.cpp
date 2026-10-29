@@ -188,6 +188,7 @@ TEST_F(DiagnosticsWatchTest, ServicePidWatchDoesNotRegisterHiddenService) {
     ChildGuard child_guard(service_pid);
 
     OmniRuntime watcher;
+    watcher.setHeartbeatPolicy(400, 10000);
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
     ASSERT_TRUE(waitForService(watcher, SERVICE_NAME, true));
 
@@ -371,6 +372,7 @@ TEST_F(DiagnosticsWatchTest, HeartbeatDoesNotReplayDiagWatchersWhileSmUnreachabl
     }
 
     OmniRuntime watcher;
+    watcher.setHeartbeatPolicy(400, 10000);
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
 
     for (int i = 0; i < kWatchTargets; ++i) {
@@ -382,8 +384,6 @@ TEST_F(DiagnosticsWatchTest, HeartbeatDoesNotReplayDiagWatchersWhileSmUnreachabl
                                    [](const Buffer&) {}), 0);
     }
 
-    // 加快心跳 tick，但远大于测量步长，保证单步内至多一次 tick
-    watcher.setHeartbeatInterval(400);
 
     stopProcess(sm_pid_);
     sm_pid_ = 0;

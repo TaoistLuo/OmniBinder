@@ -12,25 +12,17 @@ namespace omnibinder {
 // 配置 — 线程安全的设置/查询
 // ============================================================
 
-void OmniRuntime::Impl::setHeartbeatInterval(uint32_t ms) {
-    // 0 会让周期定时器失去重排能力（等价于静默关闭心跳），与 setDefaultTimeout 一致地忽略
-    if (ms == 0) {
+void OmniRuntime::Impl::setHeartbeatPolicy(uint32_t interval_ms, uint32_t timeout_ms) {
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    if (initialized_) {
+        OMNI_LOG_WARN("OmniRuntimeConfig",
+                      "setHeartbeatPolicy ignored after init()");
         return;
     }
-    callSerialized([this, ms]() {
-        heartbeat_interval_ms_ = clampHeartbeatInterval(ms);
-        if (loop_ && initialized_ && heartbeat_timer_id_ > 0) {
-            loop_->cancelTimer(heartbeat_timer_id_);
-            heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
-                [this]() { this->sendHeartbeat(); }, true);
-        }
-    });
-}
-
-void OmniRuntime::Impl::setHeartbeatTimeout(uint32_t ms) {
-    callSerialized([this, ms]() {
-        control_requested_timeout_ms_ = ms;
-    });
+    // 单次调用同时设置发送间隔与协商请求，避免调用方只配一半。
+    // interval=0 使用默认 3000ms；timeout=0 表示由 SM 默认值裁定。
+    heartbeat_interval_ms_ = clampHeartbeatInterval(interval_ms);
+    control_requested_timeout_ms_ = timeout_ms;
 }
 
 void OmniRuntime::Impl::setRegisterHost(const std::string& host) {

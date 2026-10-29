@@ -173,8 +173,7 @@ public:
     // ============================================================
     void setRegisterHost(const std::string& host);
     std::string getRegisterHost() const;
-    void setHeartbeatInterval(uint32_t ms);
-    void setHeartbeatTimeout(uint32_t ms);
+    void setHeartbeatPolicy(uint32_t interval_ms, uint32_t timeout_ms);
     void setDefaultTimeout(uint32_t ms);
     void setReplySendTimeout(uint32_t ms);
     void setHostId(const std::string& host_id);

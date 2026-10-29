@@ -157,8 +157,9 @@ int OmniRuntime::unsubscribeTopic(const TopicSubscriptionSelector& selector,
 
 void OmniRuntime::setRegisterHost(const std::string& host) { impl_->setRegisterHost(host); }
 std::string OmniRuntime::getRegisterHost() const { return impl_->getRegisterHost(); }
-void OmniRuntime::setHeartbeatInterval(uint32_t ms) { impl_->setHeartbeatInterval(ms); }
-void OmniRuntime::setHeartbeatTimeout(uint32_t ms) { impl_->setHeartbeatTimeout(ms); }
+void OmniRuntime::setHeartbeatPolicy(uint32_t interval_ms, uint32_t timeout_ms) {
+    impl_->setHeartbeatPolicy(interval_ms, timeout_ms);
+}
 void OmniRuntime::setDefaultTimeout(uint32_t ms) { impl_->setDefaultTimeout(ms); }
 void OmniRuntime::setReplySendTimeout(uint32_t ms) { impl_->setReplySendTimeout(ms); }
 void OmniRuntime::setHostId(const std::string& host_id) { impl_->setHostId(host_id); }

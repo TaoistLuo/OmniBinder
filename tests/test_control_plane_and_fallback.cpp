@@ -1647,8 +1647,8 @@ TEST(ControlPlaneCompatibilityTest, PublishAdvertisesConfiguredRegisterHost) {
 
     OmniRuntime rt;
     rt.setRegisterHost(register_host);
+    rt.setHeartbeatPolicy(60000, 10000);
     ASSERT_EQ(rt.init("127.0.0.1", port), 0);
-    rt.setHeartbeatInterval(60000);
     HostAdvertiseService svc;
     ASSERT_EQ(rt.registerService(&svc), 0);
     // 注册应答后 SM 才持有该服务；publishTopic 要求存在已注册本地服务

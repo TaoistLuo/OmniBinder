@@ -373,7 +373,7 @@ public:
     // 两类心跳互相独立，不可混淆：
     // 1) 控制面会话心跳：每个 runtime 一条 MSG_CONTROL_HEARTBEAT，覆盖该 runtime
     //    下全部服务与订阅；间隔/超时在 init 的 Session Hello 中协商（可用
-    //    setHeartbeatInterval/setHeartbeatTimeout 配置）。本组接口无法启停它；
+    //    setHeartbeatPolicy(interval, timeout) 配置）。本组接口无法启停它；
     //    停止向 SM 宣告存活的唯一方式是 stop()。
     // 2) 数据面连接保活：本组 startHeartbeat/stopHeartbeat 接口，调用方作为客户端
     //    对某个远端服务名的直连做心跳检测，超时后触发数据面自动重连。stopHeartbeat
@@ -493,17 +493,15 @@ public:
      * @return 通告地址字符串 */
     std::string getRegisterHost() const;
 
-    /* @brief 设置控制面心跳间隔（Runtime → SM）
-     * @param[in]  ms 心跳间隔（毫秒，0 忽略）
-     * @note   间隔在下次建立/恢复控制会话时参与协商；运行期修改会立即重排本地
-     *         发送定时器，但服务端判死超时以最近一次协商结果为准。 */
-    void setHeartbeatInterval(uint32_t ms);
-
-    /* @brief 设置控制面期望的判死超时（Runtime → SM 协商请求）
-     * @param[in]  ms 期望超时（毫秒，0 表示由服务端默认值决定）
-     * @note   服务端按 max(requested, interval*3) 裁定，并可通过运维上限裁剪。
-     *         低功耗运行时可在 init() 前设置分钟/小时级超时。 */
-    void setHeartbeatTimeout(uint32_t ms);
+    /* @brief 设置控制面心跳策略（Runtime → SM）
+     * @param[in]  interval_ms 控制面心跳发送间隔；0 使用默认 3000ms
+     * @param[in]  timeout_ms  期望的会话判死超时；0 由服务端默认值裁定
+     * @note   必须在 init() 之前调用，init() 之后调用会被忽略。
+     *         单次调用同时设置 interval 与 timeout，避免只配置一半导致
+     *         “发送间隔与判死超时”语义不一致。
+     *         服务端按 max(timeout_ms, interval_ms * 3) 裁定，并可配置运维上限；
+     *         低功耗运行时可在 init() 前设置分钟/小时级间隔与超时。 */
+    void setHeartbeatPolicy(uint32_t interval_ms, uint32_t timeout_ms);
 
     /* @brief 设置全局默认 RPC 超时
      * @param[in]  ms 超时时间（毫秒） */

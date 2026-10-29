@@ -191,6 +191,8 @@ enum class MessageType : uint16_t {
     // 数据通道 - 广播
     MSG_BROADCAST             = 0x0110,
     MSG_SUBSCRIBE_BROADCAST   = 0x0111,  // 订阅者直连发布者后发送
+    MSG_SESSION_HELLO         = 0x0112,  // 数据面会话协商（连接第一帧）
+    MSG_SESSION_HELLO_ACK     = 0x0113,  // 数据面会话协商响应
 };
 
 } // namespace omnibinder
@@ -900,33 +902,41 @@ ServiceB                    ServiceManager                   ServiceA
 
 ## 8. 心跳与超时机制
 
-### 8.1 心跳参数
+### 8.1 参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| HEARTBEAT_INTERVAL | 3000 ms | 心跳发送间隔 |
-| HEARTBEAT_TIMEOUT | 10000 ms | 心跳超时时间 |
-| MAX_MISSED_HEARTBEATS | 3 | 最大允许丢失心跳次数 |
+| HEARTBEAT_INTERVAL | 3000 ms | 控制面/数据面心跳发送间隔 |
+| HEARTBEAT_TIMEOUT | 10000 ms | 接收方判死超时（可由双方协商覆盖） |
+| HEARTBEAT_MISSED_FACTOR | 3 | `effective_timeout >= interval * factor` 的安全下限 |
+| SESSION_HELLO_TIMEOUT | 5000 ms | 连接建立后等待 Session Hello 的时间 |
+| MAX_SESSION_TIMEOUT | 0（不限） | 可选运维上限；0 表示不限制 |
 
-### 8.2 超时判定
+### 8.2 协商与判定
 
+控制面（Runtime ↔ SM）：
+
+```text
+effective_timeout = max(requested_timeout, heartbeat_interval * 3)
 ```
-elapsed = 当前时间 - 最后心跳时间
-if (elapsed >= HEARTBEAT_TIMEOUT):
-    missed = elapsed / HEARTBEAT_TIMEOUT
-    if (missed >= MAX_MISSED_HEARTBEATS):
-        判定该服务实例死亡
-        触发死亡通知
-```
 
-> 默认 timeout=10s：超过 10s 未收到该 runtime 的控制面心跳即判定会话死亡。
-> 每个会话由独立 deadline 定时器跟踪（无周期扫描），心跳到达后重挂；
-> 超时后 `closeClient(fd)` 一次性移除该 runtime 的全部服务、订阅与诊断状态，
-> 逐服务下发死亡通知，并触发 runtime 走
-> `disconnect → reconnect → restoreControlPlaneState` 重新注册。
->
-> 数据面每条直连有独立 client session：`MSG_HEARTBEAT` 超时后
-> `onServiceClientDisconnected` 清理该 client 的订阅/缓冲并关闭连接。
+- Runtime 在 `MSG_RUNTIME_HELLO` 中声明 interval / requested_timeout；
+- SM 裁定后通过 `MSG_RUNTIME_HELLO_REPLY` 返回 accepted_interval / effective_timeout；
+- 每个 runtime 一个会话，一个独立 deadline 定时器；
+- `MSG_CONTROL_HEARTBEAT` 到达后续期；超时 `closeClient(fd)` 一次性移除该 runtime 的
+  全部服务、订阅、诊断状态，并逐服务下发死亡通知。
+
+数据面（Client ↔ Service）：
+
+- 每条直连第一帧为 `MSG_SESSION_HELLO`，服务端按同一公式裁定并在
+  `MSG_SESSION_HELLO_ACK` 返回；
+- 每个 client session 一个独立 deadline 定时器；
+- `MSG_HEARTBEAT(incarnation_id)` 到达后续期；超时
+  `onServiceClientDisconnected` 清理该 client 的订阅/缓冲并关闭连接；
+- 发送方等待 ACK 的超时同样使用 `effective_timeout`。
+
+> 不再使用“连续丢失 N 次心跳”的 `MAX_MISSED_HEARTBEATS` 模型。判死时间就是
+> `effective_timeout`，默认 10s；低功耗可协商到分钟/小时级，无固定上限。
 
 ## 9. 版本兼容性
 

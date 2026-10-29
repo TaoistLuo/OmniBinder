@@ -93,6 +93,25 @@ See the "Run two same-name service instances on one board" section of the [examp
 - synchronous reply wait only processes fd/timer events, not new pending API functors
 - see the [threading model document](docs/threading-model.md) for `run()` / `pollOnce()` / `stop()` concurrency details
 
+### Heartbeat and session configuration
+
+OmniBinder has two independent heartbeat layers:
+
+- **Control plane (Runtime ↔ SM)**: one session heartbeat per runtime. Call
+  `runtime.setHeartbeatPolicy(interval_ms, timeout_ms)` before `init()`. Defaults are
+  `3000 / 10000ms`; `timeout=0` lets the SM decide; there is no fixed upper bound,
+  so low-power clients can negotiate minute/hour-scale values.
+- **Data plane (Client ↔ Service)**: one Session Hello per direct connection; the
+  heartbeat starts automatically after negotiation. Use
+  `proxy.startHeartbeat(interval, timeout)` for normal business code, or
+  `runtime.startHeartbeat(name, interval, timeout)` for bare-runtime users. Both
+  configure the same per-connection heartbeat; the Proxy is a thin wrapper.
+- Same-process reconnect replays subscriptions automatically; after a process
+  restart, the application must register/subscribe again.
+- For low-power fast restart with immediate old-session replacement, set a stable
+  `runtime.setRuntimeId("...")` before `init()`. The default `runtime_id` is
+  `process_name#pid-<seq>`.
+
 ### Error handling model
 
 - Buffer write APIs return `bool`
