@@ -73,7 +73,6 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "SERVER: register failed\n");
         return 1;
     }
-    service.PublishPerfTopic();
 
     printf("SERVER_READY port=%u\n", service.port());
     fflush(stdout);

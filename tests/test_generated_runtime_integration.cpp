@@ -296,7 +296,6 @@ static void serverThread(void* arg) {
     ServerCtx* ctx = static_cast<ServerCtx*>(arg);
     if (ctx->runtime.init("127.0.0.1", SM_PORT_REQ) != 0) return;
     if (ctx->runtime.registerService(&ctx->service) != 0) { ctx->runtime.stop(); return; }
-    ctx->service.PublishItemTopic();
     ctx->registered = true;
     while (!ctx->should_stop) ctx->runtime.pollOnce(20);
     ctx->runtime.unregisterService(&ctx->service);
@@ -732,7 +731,6 @@ static void serverThread(void* arg) {
     ctx->service = demo_ItemService_stub_create_from_callbacks(&cbs);
     assert(ctx->service != NULL);
     assert(omni_runtime_register_service(ctx->runtime, ctx->service) == 0);
-    assert(omni_runtime_publish_topic(ctx->runtime, "ItemTopic", demo_ItemTopic_TOPIC_IDL_HASH) == 0);
     ctx->registered = true;
     while (!ctx->should_stop) omni_runtime_poll_once(ctx->runtime, 20);
     omni_runtime_unregister_service(ctx->runtime, ctx->service);

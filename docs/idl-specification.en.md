@@ -311,9 +311,7 @@ public:
     virtual SensorData GetLatestData() = 0;
     virtual void ResetSensor(int32_t sensor_id) = 0;
 
-    void PublishSensorUpdate();
     void BroadcastSensorUpdate(const SensorUpdate& msg);
-    void PublishSystemAlert();
     void BroadcastSystemAlert(const SystemAlert& msg);
 
     // ---- Interface info (used by the framework) ----
@@ -327,6 +325,10 @@ protected:
                  omnibinder::Buffer& response) override;
 };
 ```
+
+> The Stub registers every `publishes` topic automatically in `onStart()`;
+> applications only call `registerService()` and must not call `Publish<Topic>()`.
+> `Broadcast<Topic>(msg)` remains available for sending payloads.
 
 Generated C++ Proxy shape:
 
@@ -459,6 +461,10 @@ typedef int (*omni_invoke_callback_t)(uint32_t method_id,
 ```
 
 C handler typedefs are `void`-returning with out parameters (`<pkg>_<Service>_<snake_method>_handler_t`; `string`/`bytes` results use `char**`/`uint8_t**` plus `uint32_t*`), and `<pkg>_<Service>_stub_create()` binds the user-provided `<pkg>_<Service>_impl_*()` functions and registers each method id together with its IDL hash through `omni_service_add_method_ex()`.
+
+> The generated C `stub_create()` calls `omni_service_add_topic()` for every
+> `publishes` entry; topics are published automatically on service registration.
+> Applications no longer call `omni_runtime_publish_topic()`.
 
 ## 8. Strict semantic validation
 

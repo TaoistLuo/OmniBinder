@@ -194,8 +194,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    service.PublishSensorUpdate();
-    service.PublishAsyncResultReady();
 
     std::printf("SensorService registered on port %u (host_id=%s, instance_id=%s)\n",
                 service.port(), runtime.hostId().c_str(), service.instanceId().c_str());

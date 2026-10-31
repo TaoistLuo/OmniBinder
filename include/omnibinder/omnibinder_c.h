@@ -232,6 +232,15 @@ void omni_service_add_method(omni_service_t* svc, uint32_t method_id, const char
 void omni_service_add_method_ex(omni_service_t* svc, uint32_t method_id, const char* method_name,
     const char* param_types, const char* return_type, uint32_t idl_hash);
 
+/* @brief 声明服务发布 topic
+ * @param[in] svc         服务实例
+ * @param[in] topic_name  topic 名称
+ * @param[in] idl_hash    topic IDL 哈希（由 omni-idlc 生成）
+ * @note 生成的 C stub 在创建时自动调用；服务注册成功（onStart）时自动向
+ *       ServiceManager 声明发布关系，业务不需要手动 publish。
+ */
+void omni_service_add_topic(omni_service_t* svc, const char* topic_name, uint32_t idl_hash);
+
 /* @brief 获取服务监听端口（注册后有效） */
 uint16_t omni_service_port(const omni_service_t* svc);
 

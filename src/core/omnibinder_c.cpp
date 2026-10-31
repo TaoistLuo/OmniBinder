@@ -68,6 +68,18 @@ public:
     const char* serviceName() const override { return name().c_str(); }
     const omnibinder::InterfaceInfo& interfaceInfo() const override { return iface_; }
 
+    struct TopicDeclaration {
+        std::string name;
+        uint32_t idl_hash;
+    };
+
+    void addTopic(const char* topic_name, uint32_t idl_hash) {
+        TopicDeclaration declaration;
+        declaration.name = topic_name ? topic_name : "";
+        declaration.idl_hash = idl_hash;
+        topics_.push_back(declaration);
+    }
+
     void addMethod(uint32_t method_id, const char* method_name,
                    const char* param_types, const char* return_type,
                    uint32_t idl_hash) {
@@ -85,6 +97,15 @@ public:
     omnibinder::InterfaceInfo iface_;
 
 protected:
+    void onStart() override {
+        if (!runtime()) {
+            return;
+        }
+        for (size_t i = 0; i < topics_.size(); ++i) {
+            runtime()->publishTopic(topics_[i].name, topics_[i].idl_hash);
+        }
+    }
+
     int onInvoke(uint32_t method_id, const omnibinder::Buffer& request,
                   omnibinder::Buffer& response) override {
         /* 将 C++ Buffer 包装为 omni_buffer_t 供 C 回调使用 */
@@ -115,6 +136,7 @@ protected:
 private:
     omni_invoke_callback_t callback_;
     void* user_data_;
+    std::vector<TopicDeclaration> topics_;
 };
 
 struct omni_service_t {
@@ -641,6 +663,12 @@ void omni_service_add_method_ex(omni_service_t* svc, uint32_t method_id, const c
 {
     if (svc && svc->bridge) {
         svc->bridge->addMethod(method_id, method_name, param_types, return_type, idl_hash);
+    }
+}
+
+void omni_service_add_topic(omni_service_t* svc, const char* topic_name, uint32_t idl_hash) {
+    if (svc && svc->bridge) {
+        svc->bridge->addTopic(topic_name, idl_hash);
     }
 }
 

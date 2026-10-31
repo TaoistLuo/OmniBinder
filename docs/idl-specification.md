@@ -368,9 +368,7 @@ public:
     virtual void ResetSensor(int32_t sensor_id) = 0;
 
     // ---- 广播方法（框架提供） ----
-    void PublishSensorUpdate();
     void BroadcastSensorUpdate(const SensorUpdate& msg);
-    void PublishSystemAlert();
     void BroadcastSystemAlert(const SystemAlert& msg);
 
     // ---- 接口信息（框架使用） ----
@@ -386,6 +384,10 @@ protected:
 
 } // namespace demo
 ```
+
+> Stub 会在 `onStart()` 中自动把 `publishes` 声明的所有 topic 注册为发布关系；
+> 业务只需 `registerService()`，不需要也不应再调用 `Publish<主题>()`。
+> `Broadcast<主题>(msg)` 仍保留用于发送具体消息。
 
 ### 7.5 生成的 C++ 代码 — Proxy（客户端代理）
 
@@ -509,6 +511,10 @@ int demo_SensorService_proxy_subscribe_sensor_update(
 ```
 
 补充：C Proxy 最多同时订阅 8 个话题（`_sub_ctxs[8]`），超出返回 -1；`string` 返回值通过 `char** result`（NUL 结尾）回传；`bytes` 返回值通过 `uint8_t** result, uint32_t* result_len` 回传。
+
+> C stub 的 `stub_create()` 会自动调用 `omni_service_add_topic()` 登记 `publishes`；
+> 服务注册成功时自动发布，业务不需要调用 `omni_runtime_publish_topic()`。
+> `xxx_broadcast_*()` 仍保留用于发送具体消息。
 
 ## 8. 严格语义校验
 

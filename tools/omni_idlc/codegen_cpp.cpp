@@ -270,11 +270,13 @@ void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
     }
 
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
-        os << "    void Publish" << svc.publishes[i] << "();\n";
         os << "    void Broadcast" << svc.publishes[i] << "(const " << svc.publishes[i] << "& msg);\n";
     }
 
     os << "\nprotected:\n";
+    if (!svc.publishes.empty()) {
+        os << "    void onStart() override;\n";
+    }
     os << "    int onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) override;\n";
     os << "};\n\n";
 }
@@ -415,16 +417,24 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         }
         os << "    default: return static_cast<int>(omnibinder::ErrorCode::ERR_METHOD_NOT_FOUND);\n    }\n}\n\n";
 
+        if (!svc.publishes.empty()) {
+            os << "void " << svc.name << "Stub::onStart() {\n";
+            os << "    if (!runtime()) return;\n";
+            for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
+                const std::string& topic = svc.publishes[pi];
+                os << "    runtime()->publishTopic(\"" << topic << "\", s_"
+                   << topic << "_topic_idl_hash);\n";
+            }
+            os << "}\n\n";
+        }
+
         for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
             const std::string& topic = svc.publishes[pi];
             uint32_t tid = fnv1a_hash(topic);
-            os << "void " << svc.name << "Stub::Publish" << topic << "() {\n";
-            os << "    if (runtime()) runtime()->publishTopic(\"" << topic << "\", s_" << topic << "_topic_idl_hash);\n";
-            os << "}\n\n";
             os << "void " << svc.name << "Stub::Broadcast" << topic << "(const " << topic << "& msg) {\n";
-        os << "    omnibinder::Buffer buf;\n";
-        os << "    if (!msg.serialize(buf)) return;\n";
-        os << "    if (runtime()) runtime()->broadcast(0x" << std::hex << tid << std::dec << "u, buf);\n";
+            os << "    omnibinder::Buffer buf;\n";
+            os << "    if (!msg.serialize(buf)) return;\n";
+            os << "    if (runtime()) runtime()->broadcast(0x" << std::hex << tid << std::dec << "u, buf);\n";
             os << "}\n\n";
         }
 

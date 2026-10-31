@@ -509,6 +509,18 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
            << ", \"" << svc.methods[i].name << "\", \"" << param_type_str
            << "\", \"" << return_type_str << "\", 0x" << std::hex << idl_hash << std::dec << "u);\n";
     }
+    for (size_t i = 0; i < svc.publishes.size(); ++i) {
+        const std::string& topic_name = svc.publishes[i];
+        uint32_t topic_hash = 0;
+        for (size_t j = 0; j < ast.topics.size(); ++j) {
+            if (ast.topics[j].name == topic_name) {
+                topic_hash = computeTopicHash(ast.topics[j], ast, *context_);
+                break;
+            }
+        }
+        os << "    omni_service_add_topic(svc, \"" << topic_name << "\", 0x"
+           << std::hex << topic_hash << std::dec << "u);\n";
+    }
     os << "    return svc;\n";
     os << "}\n\n";
 

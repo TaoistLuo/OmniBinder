@@ -1076,7 +1076,6 @@ int main() {
 
     MyServiceImpl service;
     runtime.registerService(&service);
-    service.PublishStatusUpdate();
 
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {
@@ -1243,7 +1242,6 @@ int main(void) {
     /* 直接绑定生成的 impl 接口 */
     omni_service_t* svc = myapp_MyService_stub_create(runtime);
     omni_runtime_register_service(runtime, svc);
-    omni_runtime_publish_topic(runtime, "StatusUpdate", myapp_StatusUpdate_TOPIC_IDL_HASH);
 
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {

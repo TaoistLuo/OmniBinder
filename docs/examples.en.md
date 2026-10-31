@@ -902,7 +902,6 @@ int main() {
 
     MyServiceImpl service;
     runtime.registerService(&service);
-    service.PublishStatusUpdate();
 
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {

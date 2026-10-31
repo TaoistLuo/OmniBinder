@@ -1515,6 +1515,11 @@ void omni_service_add_method_ex(omni_service_t* svc,
                                 const char* return_type,
                                 uint32_t idl_hash);
 
+/* 声明服务发布的 topic；服务注册成功时自动 publish，业务无需手动调用 */
+void omni_service_add_topic(omni_service_t* svc,
+                            const char* topic_name,
+                            uint32_t idl_hash);
+
 /* 服务配置 */
 uint16_t    omni_service_port(const omni_service_t* svc);
 void        omni_service_set_register_host(omni_service_t* svc, const char* host);
@@ -1525,6 +1530,9 @@ void        omni_service_set_instance_id(omni_service_t* svc, const char* instan
 ```
 
 C 服务端内存语义：
+
+- 生成的 `xxx_stub_create()` 会自动注册 IDL 中的 `publishes` topic；业务只需注册 service，
+  不需要调用 `omni_runtime_publish_topic()`。服务注册成功时由 stub 的 `onStart` 自动发布。
 
 - **typed 生成 handler 返回 `void`**：无法通过返回值传播错误；需要错误码时在 IDL 响应结构里放状态字段，或改用非 typed 的 `omni_invoke_callback_t`（返回 `int`）。
 - typed handler 的入参由 stub 反序列化，handler 返回后由 stub 自动释放；业务**不要** `free`、不要保存入参指针。
