@@ -1128,8 +1128,8 @@ protected:
 
         CppCodeGen cpp_gen;
         CCodeGen c_gen;
-        ASSERT_TRUE(cpp_gen.generate(ast, dir_, "guarded"));
-        ASSERT_TRUE(c_gen.generate(ast, dir_, "guarded"));
+        ASSERT_TRUE(cpp_gen.generate(ast, dir_, "guarded", ctx));
+        ASSERT_TRUE(c_gen.generate(ast, dir_, "guarded", ctx));
 
         std::string cpp_harness = kCppHarnessTemplate;
         cpp_harness = replaceAll(cpp_harness, "__CPP_REQ_PORT__", "19961");

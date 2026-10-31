@@ -1236,8 +1236,8 @@ TEST(IdlCompilerTest, SemanticOrdersForwardByValueStructDependencies) {
     ensureDir(dir);
     CppCodeGen cpp_gen;
     CCodeGen c_gen;
-    ASSERT_TRUE(cpp_gen.generate(ast, dir, "forward"));
-    ASSERT_TRUE(c_gen.generate(ast, dir, "forward"));
+    ASSERT_TRUE(cpp_gen.generate(ast, dir, "forward", ctx));
+    ASSERT_TRUE(c_gen.generate(ast, dir, "forward", ctx));
     const std::string cpp_header = readFile(std::string(dir) + "/forward.h");
     const std::string c_header = readFile(std::string(dir) + "/forward_c.h");
     ASSERT_LT(cpp_header.find("struct Inner {"), cpp_header.find("struct Outer {"));
@@ -1281,7 +1281,8 @@ TEST(IdlCompilerTest, CodegenCppArrayUsesBufferSuffixMethods) {
         "}";
 
     Lexer lex(src);
-    Parser parser(lex);
+    ParseContext ctx;
+    Parser parser(lex, ctx, "test.bidl");
     AstFile ast;
     ASSERT_TRUE(parser.parse(ast));
     ASSERT_FALSE(parser.hasError());
@@ -1290,7 +1291,7 @@ TEST(IdlCompilerTest, CodegenCppArrayUsesBufferSuffixMethods) {
     ensureDir(dir);
 
     CppCodeGen gen;
-    ASSERT_TRUE(gen.generate(ast, dir, "arrays"));
+    ASSERT_TRUE(gen.generate(ast, dir, "arrays", ctx));
 
     std::string cpp = readFile(std::string(dir) + "/arrays.cpp");
 
@@ -1319,7 +1320,8 @@ TEST(IdlCompilerTest, CodegenCppMethodArraysUseRecursiveBufferLogic) {
         "}";
 
     Lexer lex(src);
-    Parser parser(lex);
+    ParseContext ctx;
+    Parser parser(lex, ctx, "test.bidl");
     AstFile ast;
     ASSERT_TRUE(parser.parse(ast));
     ASSERT_FALSE(parser.hasError());
@@ -1328,7 +1330,7 @@ TEST(IdlCompilerTest, CodegenCppMethodArraysUseRecursiveBufferLogic) {
     ensureDir(dir);
 
     CppCodeGen gen;
-    ASSERT_TRUE(gen.generate(ast, dir, "array_service"));
+    ASSERT_TRUE(gen.generate(ast, dir, "array_service", ctx));
 
     std::string cpp = readFile(std::string(dir) + "/array_service.cpp");
 
@@ -1363,7 +1365,8 @@ TEST(IdlCompilerTest, CodegenCppCustomArraysUseRecursiveCustomLogic) {
         "}";
 
     Lexer lex(src);
-    Parser parser(lex);
+    ParseContext ctx;
+    Parser parser(lex, ctx, "test.bidl");
     AstFile ast;
     ASSERT_TRUE(parser.parse(ast));
     ASSERT_FALSE(parser.hasError());
@@ -1372,7 +1375,7 @@ TEST(IdlCompilerTest, CodegenCppCustomArraysUseRecursiveCustomLogic) {
     ensureDir(dir);
 
     CppCodeGen gen;
-    ASSERT_TRUE(gen.generate(ast, dir, "custom_arrays"));
+    ASSERT_TRUE(gen.generate(ast, dir, "custom_arrays", ctx));
 
     std::string cpp = readFile(std::string(dir) + "/custom_arrays.cpp");
 
@@ -1402,7 +1405,8 @@ TEST(IdlCompilerTest, CodegenCppNestedArraysUseDistinctLoopDepths) {
         "}";
 
     Lexer lex(src);
-    Parser parser(lex);
+    ParseContext ctx;
+    Parser parser(lex, ctx, "test.bidl");
     AstFile ast;
     ASSERT_TRUE(parser.parse(ast));
     ASSERT_FALSE(parser.hasError());
@@ -1411,7 +1415,7 @@ TEST(IdlCompilerTest, CodegenCppNestedArraysUseDistinctLoopDepths) {
     ensureDir(dir);
 
     CppCodeGen gen;
-    ASSERT_TRUE(gen.generate(ast, dir, "nested_arrays"));
+    ASSERT_TRUE(gen.generate(ast, dir, "nested_arrays", ctx));
 
     std::string cpp = readFile(std::string(dir) + "/nested_arrays.cpp");
 
@@ -1442,7 +1446,7 @@ TEST(IdlCompilerTest, CodegenCppVoidProxyIsOneWay) {
     const char* dir = "/tmp/omni-idlc_test_cpp_oneway";
     ensureDir(dir);
     CppCodeGen gen;
-    ASSERT_TRUE(gen.generate(ast, dir, "commands"));
+    ASSERT_TRUE(gen.generate(ast, dir, "commands", ctx));
     const std::string header = readFile(std::string(dir) + "/commands.h");
     const std::string source_code = readFile(std::string(dir) + "/commands.cpp");
 
@@ -1471,7 +1475,8 @@ TEST(IdlCompilerTest, CodegenCStringBytesSignaturesAndMetadata) {
         "}";
 
     Lexer lex(src);
-    Parser parser(lex);
+    ParseContext ctx;
+    Parser parser(lex, ctx, "test.bidl");
     AstFile ast;
     ASSERT_TRUE(parser.parse(ast));
     ASSERT_FALSE(parser.hasError());
@@ -1480,7 +1485,7 @@ TEST(IdlCompilerTest, CodegenCStringBytesSignaturesAndMetadata) {
     ensureDir(dir);
 
     CCodeGen gen;
-    ASSERT_TRUE(gen.generate(ast, dir, "blob_service"));
+    ASSERT_TRUE(gen.generate(ast, dir, "blob_service", ctx));
 
     std::string header = readFile(std::string(dir) + "/blob_service_c.h");
     std::string source = readFile(std::string(dir) + "/blob_service.c");
@@ -1542,7 +1547,8 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
         "}";
 
     Lexer lex(src);
-    Parser parser(lex);
+    ParseContext ctx;
+    Parser parser(lex, ctx, "test.bidl");
     AstFile ast;
     ASSERT_TRUE(parser.parse(ast));
     ASSERT_FALSE(parser.hasError());
@@ -1551,9 +1557,9 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
     ensureDir(dir);
 
     CppCodeGen cpp_gen;
-    ASSERT_TRUE(cpp_gen.generate(ast, dir, "guarded"));
+    ASSERT_TRUE(cpp_gen.generate(ast, dir, "guarded", ctx));
     CCodeGen c_gen;
-    ASSERT_TRUE(c_gen.generate(ast, dir, "guarded"));
+    ASSERT_TRUE(c_gen.generate(ast, dir, "guarded", ctx));
 
     std::string cpp = readFile(std::string(dir) + "/guarded.cpp");
     std::string c_header = readFile(std::string(dir) + "/guarded_c.h");
@@ -1633,7 +1639,7 @@ TEST(IdlCompilerTest, CodegenCCustomStructNamingIsForwardDeclSafe) {
     ASSERT_TRUE(parseFile(common_path, common_ast, common_ctx));
     ASSERT_EQ(common_ctx.loaded_packages.count("common"), 1u);
     CCodeGen common_gen;
-    ASSERT_TRUE(common_gen.generate(common_ast, dir, "common_types.bidl"));
+    ASSERT_TRUE(common_gen.generate(common_ast, dir, "common_types.bidl", common_ctx));
 
     AstFile main_ast;
     ParseContext main_ctx;
@@ -1641,7 +1647,7 @@ TEST(IdlCompilerTest, CodegenCCustomStructNamingIsForwardDeclSafe) {
     ASSERT_EQ(main_ctx.loaded_packages.count("demo"), 1u);
     ASSERT_EQ(main_ctx.loaded_packages.count("common"), 1u);
     CCodeGen main_gen;
-    ASSERT_TRUE(main_gen.generate(main_ast, dir, "item_service.bidl"));
+    ASSERT_TRUE(main_gen.generate(main_ast, dir, "item_service.bidl", main_ctx));
 
     std::string header = readFile(dir + "/item_service.bidl_c.h");
 
@@ -1675,8 +1681,8 @@ TEST(IdlCompilerTest, CodegenPublicApiHasNoViewWriter) {
     ensureDir(dir);
     CppCodeGen cpp_gen;
     CCodeGen c_gen;
-    ASSERT_TRUE(cpp_gen.generate(ast, dir, "simple"));
-    ASSERT_TRUE(c_gen.generate(ast, dir, "simple"));
+    ASSERT_TRUE(cpp_gen.generate(ast, dir, "simple", ctx));
+    ASSERT_TRUE(c_gen.generate(ast, dir, "simple", ctx));
 
     const std::string cpp_header = readFile(std::string(dir) + "/simple.h");
     const std::string c_header = readFile(std::string(dir) + "/simple_c.h");
@@ -1698,6 +1704,180 @@ TEST(IdlCompilerTest, CodegenPublicApiHasNoViewWriter) {
     ASSERT_NE(c_header.find("void demo_Item_destroy(demo_Item* self);"), std::string::npos);
     ASSERT_NE(c_header.find("int  demo_ItemService_proxy_echo_item(demo_ItemService_proxy* p, const struct demo_Item* item, struct demo_Item* result);"), std::string::npos);
     ASSERT_NE(c_header.find("omni_impl demo_ItemService_impl_echo_item(const struct demo_Item* item, struct demo_Item* result, void* user_data);"), std::string::npos);
+
+    removeTree(dir);
+}
+
+TEST(IdlCompilerTest, IdlHashIgnoresFieldAndParameterNames) {
+    const std::string source_a =
+        "package demo;\n"
+        "struct Data { int32 value; string label; }\n"
+        "topic DataTopic { Data item; }\n"
+        "service DataService { Data echo(Data input); publishes DataTopic; }\n";
+    const std::string source_b =
+        "package demo;\n"
+        "struct Data { int32 renamed_value; string renamed_label; }\n"
+        "topic DataTopic { Data renamed_item; }\n"
+        "service DataService { Data echo(Data renamed_input); publishes DataTopic; }\n";
+
+    AstFile ast_a;
+    ParseContext ctx_a;
+    std::string error_a;
+    ASSERT_TRUE(parseAndValidate(source_a, ast_a, ctx_a, error_a)) << error_a;
+
+    AstFile ast_b;
+    ParseContext ctx_b;
+    std::string error_b;
+    ASSERT_TRUE(parseAndValidate(source_b, ast_b, ctx_b, error_b)) << error_b;
+
+    ASSERT_EQ(computeMethodHash(ast_a.services[0].methods[0], ast_a, ctx_a),
+              computeMethodHash(ast_b.services[0].methods[0], ast_b, ctx_b));
+    ASSERT_EQ(computeTopicHash(ast_a.topics[0], ast_a, ctx_a),
+              computeTopicHash(ast_b.topics[0], ast_b, ctx_b));
+}
+
+TEST(IdlCompilerTest, IdlHashPropagatesNestedSamePackageChanges) {
+    const std::string source_int32 =
+        "package demo;\n"
+        "struct Leaf { int32 value; }\n"
+        "struct Middle { array<Leaf> leaves; }\n"
+        "struct Top { Middle middle; }\n"
+        "topic TopTopic { array<Top> items; }\n"
+        "service TopService { Top echo(array<Top> input); publishes TopTopic; }\n";
+    const std::string source_int64 =
+        "package demo;\n"
+        "struct Leaf { int64 value; }\n"
+        "struct Middle { array<Leaf> leaves; }\n"
+        "struct Top { Middle middle; }\n"
+        "topic TopTopic { array<Top> items; }\n"
+        "service TopService { Top echo(array<Top> input); publishes TopTopic; }\n";
+
+    AstFile ast_int32;
+    ParseContext ctx_int32;
+    std::string error_int32;
+    ASSERT_TRUE(parseAndValidate(source_int32, ast_int32, ctx_int32, error_int32)) << error_int32;
+
+    AstFile ast_int64;
+    ParseContext ctx_int64;
+    std::string error_int64;
+    ASSERT_TRUE(parseAndValidate(source_int64, ast_int64, ctx_int64, error_int64)) << error_int64;
+
+    ASSERT_NE(computeMethodHash(ast_int32.services[0].methods[0], ast_int32, ctx_int32),
+              computeMethodHash(ast_int64.services[0].methods[0], ast_int64, ctx_int64));
+    ASSERT_NE(computeTopicHash(ast_int32.topics[0], ast_int32, ctx_int32),
+              computeTopicHash(ast_int64.topics[0], ast_int64, ctx_int64));
+}
+
+TEST(IdlCompilerTest, IdlHashPropagatesImportedNestedTypeChanges) {
+    char dir_template[] = "/tmp/omni-idlc_test_hash_import_XXXXXX";
+    char* dir_path = mkdtemp(dir_template);
+    ASSERT_TRUE(dir_path != NULL);
+    const std::string dir(dir_path);
+    const std::string common_path = dir + "/common_types.bidl";
+    const std::string main_path = dir + "/main.bidl";
+
+    const std::string main_source =
+        "package demo;\n"
+        "import \"common_types.bidl\";\n"
+        "struct Middle { common.Leaf leaf; }\n"
+        "struct Top { array<Middle> middles; }\n"
+        "topic TopTopic { Top top; }\n"
+        "service TopService { Top echo(Top input); publishes TopTopic; }\n";
+    {
+        std::ofstream out(common_path.c_str());
+        out << "package common;\nstruct Leaf { int32 value; }\n";
+    }
+    {
+        std::ofstream out(main_path.c_str());
+        out << main_source;
+    }
+
+    AstFile main_int32;
+    ParseContext ctx_int32;
+    ASSERT_TRUE(parseFile(main_path, main_int32, ctx_int32));
+    ASSERT_EQ(ctx_int32.loaded_packages.count("common"), 1u);
+    const uint32_t method_int32 = computeMethodHash(
+        main_int32.services[0].methods[0], main_int32, ctx_int32);
+    const uint32_t topic_int32 = computeTopicHash(
+        main_int32.topics[0], main_int32, ctx_int32);
+
+    {
+        std::ofstream out(common_path.c_str());
+        out << "package common;\nstruct Leaf { int64 value; }\n";
+    }
+
+    AstFile main_int64;
+    ParseContext ctx_int64;
+    ASSERT_TRUE(parseFile(main_path, main_int64, ctx_int64));
+    ASSERT_EQ(ctx_int64.loaded_packages.count("common"), 1u);
+    const uint32_t method_int64 = computeMethodHash(
+        main_int64.services[0].methods[0], main_int64, ctx_int64);
+    const uint32_t topic_int64 = computeTopicHash(
+        main_int64.topics[0], main_int64, ctx_int64);
+
+    ASSERT_NE(method_int32, method_int64);
+    ASSERT_NE(topic_int32, topic_int64);
+
+    removeTree(dir);
+}
+
+TEST(IdlCompilerTest, CodegenUsesFullContextForImportedTypeHashes) {
+    char dir_template[] = "/tmp/omni-idlc_test_hash_codegen_XXXXXX";
+    char* dir_path = mkdtemp(dir_template);
+    ASSERT_TRUE(dir_path != NULL);
+    const std::string dir(dir_path);
+    const std::string common_path = dir + "/common_types.bidl";
+    const std::string main_path = dir + "/main.bidl";
+    const std::string int32_dir = dir + "/int32";
+    const std::string int64_dir = dir + "/int64";
+    ensureDir(int32_dir);
+    ensureDir(int64_dir);
+
+    const std::string main_source =
+        "package demo;\n"
+        "import \"common_types.bidl\";\n"
+        "struct Middle { common.Leaf leaf; }\n"
+        "struct Top { array<Middle> middles; }\n"
+        "topic TopTopic { Top top; }\n"
+        "service TopService { Top echo(Top input); publishes TopTopic; }\n";
+    {
+        std::ofstream out(main_path.c_str());
+        out << main_source;
+    }
+
+    auto generateWithCommon = [&](const std::string& common_source,
+                                  const std::string& output_dir,
+                                  std::string& cpp_header,
+                                  std::string& c_header) {
+        {
+            std::ofstream out(common_path.c_str());
+            out << common_source;
+        }
+        AstFile ast;
+        ParseContext ctx;
+        if (!parseFile(main_path, ast, ctx)) return false;
+        CppCodeGen cpp_gen;
+        CCodeGen c_gen;
+        if (!cpp_gen.generate(ast, output_dir, "main", ctx)) return false;
+        if (!c_gen.generate(ast, output_dir, "main", ctx)) return false;
+        cpp_header = readFile(output_dir + "/main.h");
+        c_header = readFile(output_dir + "/main_c.h");
+        return true;
+    };
+
+    std::string cpp_int32;
+    std::string c_int32;
+    std::string cpp_int64;
+    std::string c_int64;
+    ASSERT_TRUE(generateWithCommon(
+        "package common;\nstruct Leaf { int32 value; }\n", int32_dir,
+        cpp_int32, c_int32));
+    ASSERT_TRUE(generateWithCommon(
+        "package common;\nstruct Leaf { int64 value; }\n", int64_dir,
+        cpp_int64, c_int64));
+
+    ASSERT_NE(cpp_int32, cpp_int64);
+    ASSERT_NE(c_int32, c_int64);
 
     removeTree(dir);
 }

@@ -510,7 +510,7 @@ static int cmdSubscribe(omnibinder::OmniRuntime& runtime, const char* topic_name
     }
 
     const std::string package = owner->package_name;
-    const uint32_t expected_hash = omnic::computeTopicHash(*topic, *owner);
+    const uint32_t expected_hash = omnic::computeTopicHash(*topic, *owner, *g_parse_ctx);
     omnic::ParseContext* ctx = g_parse_ctx;
 
     omnibinder::TopicCallback on_msg =

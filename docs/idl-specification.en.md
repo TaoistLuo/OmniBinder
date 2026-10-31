@@ -515,8 +515,14 @@ uint32_t fnv1a_32(const char* str) {
 
 Besides the runtime IDs above, generated code computes an IDL hash for every method and topic (method name + parameter/return types, topic name + field types) and reports it on registration/subscription, so the runtime can verify that publisher and subscriber agree on the IDL:
 
+- The hash is recursive over **field types and declaration order**; field/variable names do not participate.
+- Custom types are identified by `package + type name` and all their field types are expanded recursively.
+- Imported package types are expanded too, so layout changes at any nesting depth propagate to every containing method/topic hash.
+- Recursive types use a visited-type set to avoid infinite expansion.
 - C++: the `<Topic>::TOPIC_IDL_HASH` constant; method hashes are carried in `MethodInfo.idl_hash`
 - C: the `<pkg>_<Topic>_TOPIC_IDL_HASH` and `<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` macros; `<pkg>_<Service>_stub_create()` binds the `*_impl_*` functions and registers method hashes through `omni_service_add_method_ex()`
+
+> Renaming fields therefore does not produce `ERR_IDL_MISMATCH`; changing a field type, field count/order, or the layout of any nested type does.
 
 ---
 

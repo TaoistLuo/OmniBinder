@@ -40,8 +40,10 @@ namespace omnic {
 
 class CCodeGen {
 public:
+    CCodeGen() : context_(NULL) {}
+
     bool generate(const AstFile& ast, const std::string& output_dir,
-                  const std::string& filename);
+                  const std::string& filename, const ParseContext& context);
 private:
     void generateHeader(const AstFile& ast, std::ostream& os, const std::string& filename);
     void generateSource(const AstFile& ast, std::ostream& os, const std::string& filename);
@@ -66,6 +68,7 @@ private:
     void genFieldDeserialize(const FieldDef& f, const std::string& obj, std::ostream& os);
 
     std::string pkg_;
+    const ParseContext* context_;
 };
 
 } // namespace omnic

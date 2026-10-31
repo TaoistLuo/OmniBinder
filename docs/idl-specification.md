@@ -565,8 +565,14 @@ uint32_t fnv1a_32(const char* str) {
 
 除上述运行时 ID 外，生成代码还会为每个方法和话题计算 IDL 哈希（方法名 + 参数/返回类型、话题名 + 字段类型），随注册/订阅上报，用于运行时校验发布者与订阅者的 IDL 是否一致：
 
+- 哈希按**字段类型和声明顺序**递归计算；字段/变量名不参与哈希。
+- 自定义类型按 `包名 + 类型名` 识别，并递归展开其全部字段类型。
+- 跨包引用同样递归展开，因此任意深度嵌套类型的布局变化都会传播到包含它的方法/topic 哈希。
+- 递归类型使用已访问类型集合避免无限展开。
 - C++：话题常量 `<Topic>::TOPIC_IDL_HASH`；方法哈希由 `MethodInfo.idl_hash` 携带
 - C：`<pkg>_<Topic>_TOPIC_IDL_HASH`、`<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` 宏；`<pkg>_<Service>_stub_create()` 会自动绑定业务实现的 `<pkg>_<Service>_impl_*()`，并通过 `omni_service_add_method_ex()` 把方法哈希一并注册到运行时
+
+> 因此重命名字段不会触发 `ERR_IDL_MISMATCH`；改变字段类型、字段数量/顺序或任意层级嵌套类型的布局会触发。
 
 ## 10. 完整 IDL 示例
 

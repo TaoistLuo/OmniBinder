@@ -61,8 +61,9 @@ static void emitStubHandlerParams(std::ostream& os, const MethodDef& m, const st
 }
 
 bool CCodeGen::generate(const AstFile& ast, const std::string& output_dir,
-                        const std::string& filename) {
+                        const std::string& filename, const ParseContext& context) {
     pkg_ = ast.package_name;
+    context_ = &context;
 
     std::string header_path = output_dir + "/" + filename + "_c.h";
     std::string source_path = output_dir + "/" + filename + ".c";
@@ -123,7 +124,7 @@ void CCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std::s
     // 话题
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         genTopic(ast.topics[i], os);
-        uint32_t topic_idl_hash = computeTopicHash(ast.topics[i], ast);
+        uint32_t topic_idl_hash = computeTopicHash(ast.topics[i], ast, *context_);
         os << "#define " << pkg_ << "_" << ast.topics[i].name << "_TOPIC_IDL_HASH"
            << " 0x" << std::hex << topic_idl_hash << std::dec << "u\n\n";
     }
@@ -197,7 +198,7 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
     // Method IDL hash 宏定义（用于运行时 IDL 兼容性校验）
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
-        uint32_t idl_hash = computeMethodHash(m, ast);
+        uint32_t idl_hash = computeMethodHash(m, ast, *context_);
         std::string upper_name = cToSnakeCase(m.name);
         for (size_t j = 0; j < upper_name.size(); ++j)
             upper_name[j] = static_cast<char>(toupper(static_cast<unsigned char>(upper_name[j])));

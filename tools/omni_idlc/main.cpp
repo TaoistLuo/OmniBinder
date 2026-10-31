@@ -33,17 +33,19 @@ static std::string extractBasename(const std::string& path) {
  * @param[in] ast 待生成代码的 AST
  * @param[in] lang 目标语言（cpp/c/all）
  * @param[in] output_dir 输出目录
+ * @param[in] context 全量解析上下文（用于跨包类型哈希展开）
  * @return 成功返回 true
  */
 static bool generateForAst(const omnic::AstFile& ast, const std::string& lang,
-                           const std::string& output_dir) {
+                           const std::string& output_dir,
+                           const omnic::ParseContext& context) {
     std::string basename = extractBasename(ast.file_path);
     if (basename.empty()) return true;  // 无文件路径，跳过
     
     bool ok = true;
     if (lang == "cpp" || lang == "all") {
         omnic::CppCodeGen gen;
-        if (!gen.generate(ast, output_dir, basename)) {
+        if (!gen.generate(ast, output_dir, basename, context)) {
             fprintf(stderr, "Error: Failed to generate C++ code for %s\n", basename.c_str());
             ok = false;
         } else {
@@ -54,7 +56,7 @@ static bool generateForAst(const omnic::AstFile& ast, const std::string& lang,
     
     if (lang == "c" || lang == "all") {
         omnic::CCodeGen gen;
-        if (!gen.generate(ast, output_dir, basename)) {
+        if (!gen.generate(ast, output_dir, basename, context)) {
             fprintf(stderr, "Error: Failed to generate C code for %s\n", basename.c_str());
             ok = false;
         } else {
@@ -189,13 +191,13 @@ int main(int argc, char* argv[]) {
          it != ctx.loaded_packages.end(); ++it) {
         // 跳过主文件自身（主文件最后生成）
         if (it->second.package_name == ast.package_name) continue;
-        if (!generateForAst(it->second, lang, output_dir)) {
+        if (!generateForAst(it->second, lang, output_dir, ctx)) {
             ok = false;
         }
     }
     
     // 再为主文件生成代码
-    if (!generateForAst(ast, lang, output_dir)) {
+    if (!generateForAst(ast, lang, output_dir, ctx)) {
         ok = false;
     }
     

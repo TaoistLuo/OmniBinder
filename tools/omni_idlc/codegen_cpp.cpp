@@ -156,8 +156,9 @@ static void emitDeserializeValue(const TypeRef& type, const std::string& target,
 }
 
 bool CppCodeGen::generate(const AstFile& ast, const std::string& output_dir,
-                          const std::string& filename) {
+                          const std::string& filename, const ParseContext& context) {
     pkg_ = ast.package_name;
+    context_ = &context;
 
     std::string header_path = output_dir + "/" + filename + ".h";
     std::string source_path = output_dir + "/" + filename + ".cpp";
@@ -243,7 +244,7 @@ void CppCodeGen::genStruct(const StructDef& s, std::ostream& os) {
 void CppCodeGen::genTopic(const TopicDef& t, const AstFile& ast, std::ostream& os) {
     emitStructFields(t.name, t.fields, os);
     os << "\n    static const uint32_t TOPIC_ID = 0x" << std::hex << fnv1a_hash(t.name) << std::dec << "u;\n";
-    os << "    static const uint32_t TOPIC_IDL_HASH = 0x" << std::hex << computeTopicHash(t, ast) << std::dec << "u;\n";
+    os << "    static const uint32_t TOPIC_IDL_HASH = 0x" << std::hex << computeTopicHash(t, ast, *context_) << std::dec << "u;\n";
     emitStructCtorAndDecls(t.name, t.fields, os);
 }
 
@@ -348,7 +349,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
     // topic IDL hash 常量（用于运行时 IDL 兼容性校验）
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         const TopicDef& t = ast.topics[i];
-        uint32_t topic_hash = computeTopicHash(t, ast);
+        uint32_t topic_hash = computeTopicHash(t, ast, *context_);
         os << "static const uint32_t s_" << t.name << "_topic_idl_hash = 0x"
            << std::hex << topic_hash << std::dec << "u;\n";
     }
@@ -375,7 +376,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             // 生成返回类型字符串
             std::string return_type_str = cppTypeName(m.return_type);
 
-            uint32_t idl_hash = computeMethodHash(m, ast);
+            uint32_t idl_hash = computeMethodHash(m, ast, *context_);
             os << "        { omnibinder::MethodInfo mi(0x"
                << std::hex << mid << std::dec << "u, \"" << m.name << "\", \""
                << param_type_str << "\", \"" << return_type_str
@@ -431,7 +432,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
-            uint32_t idl_hash = computeMethodHash(m, ast);
+            uint32_t idl_hash = computeMethodHash(m, ast, *context_);
             const std::string ret_type = cppTypeName(m.return_type);
             if (m.return_type.isVoid()) {
                 os << "int ";

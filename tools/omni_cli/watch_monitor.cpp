@@ -472,7 +472,7 @@ void buildIdlMethodMap(WatchState& state) {
                 std::string param_type = m.has_param ? typeRefCliName(m.param.type) : "";
                 std::string return_type = typeRefCliName(m.return_type);
                 omnibinder::MethodInfo info(method_id, m.name, param_type, return_type);
-                info.idl_hash = omnic::computeMethodHash(m, ast);
+                info.idl_hash = omnic::computeMethodHash(m, ast, *state.ctx);
                 state.method_storage.push_back(info);
                 uint64_t key = (static_cast<uint64_t>(iface_id) << 32) | method_id;
                 state.method_map[key] = &state.method_storage.back();

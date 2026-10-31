@@ -35,6 +35,7 @@
 #define BINDERC_CODEGEN_H
 
 #include "ast.h"
+#include "parser.h"
 #include <string>
 #include <sstream>
 #include <ostream>
@@ -158,18 +159,22 @@ inline size_t minimumWireSize(const TypeRef& type) {
 /* @brief 计算单个方法的哈希
  * @param[in] m 方法定义
  * @param[in] ast 方法所属的 AST
+ * @param[in] context 全量解析上下文（展开导入包类型）
  * @return 方法哈希
  * @note 由 method_name + param_type + return_type 组成
  */
-uint32_t computeMethodHash(const MethodDef& m, const AstFile& ast);
+uint32_t computeMethodHash(const MethodDef& m, const AstFile& ast,
+                           const ParseContext& context);
 
 /* @brief 计算话题的哈希
  * @param[in] t 话题定义
  * @param[in] ast 话题所属的 AST
+ * @param[in] context 全量解析上下文（展开导入包类型）
  * @return 话题哈希
  * @note 由 topic_name + 按声明顺序的全部字段类型组成
  */
-uint32_t computeTopicHash(const TopicDef& t, const AstFile& ast);
+uint32_t computeTopicHash(const TopicDef& t, const AstFile& ast,
+                          const ParseContext& context);
 
 /* @brief 获取 C++ 类型名
  * @param[in] type 类型引用
@@ -215,39 +220,73 @@ inline const char* primitiveHashName(PrimitiveType p) {
     }
 }
 
+/* @brief 查找自定义类型所属的 AST
+ * @param[in] owner 当前 AST（包内类型直接使用）
+ * @param[in] context 全量解析上下文（含导入包）
+ * @param[in] package 目标包名
+ * @return AST 指针；找不到返回 NULL
+ */
+inline const AstFile* findTypeAst(const AstFile& owner, const ParseContext& context,
+                                  const std::string& package) {
+    if (owner.package_name == package) {
+        return &owner;
+    }
+    std::map<std::string, AstFile>::const_iterator it =
+        context.loaded_packages.find(package);
+    return it == context.loaded_packages.end() ? NULL : &it->second;
+}
+
+/* @brief 递归计算类型布局哈希
+ * @param[in] t 类型引用
+ * @param[in] ast 当前类型所属 AST（字段相对包解析基准）
+ * @param[in] context 全量解析上下文，用于展开导入包中的结构体
+ * @param[in,out] visited 已展开类型的 FQN 集合，防止递归类型无限展开
+ * @return 类型布局哈希
+ * @note 字段名/变量名不参与哈希；仅按声明顺序哈希字段类型。
+ *       自定义类型哈希 FQN，并递归展开其字段类型，因此任意深度的
+ *       类型布局变化都会传播到包含它的方法/topic hash。
+ */
 inline uint32_t hashTypeRef(const TypeRef& t, const AstFile& ast,
+                            const ParseContext& context,
                             std::set<std::string>& visited) {
     switch (t.primitive) {
     case TYPE_ARRAY:
         if (t.element_type) {
             return fnv1a_combine(fnv1a_hash("[]"),
-                                 hashTypeRef(*t.element_type, ast, visited));
+                                 hashTypeRef(*t.element_type, ast, context, visited));
         }
         return fnv1a_hash("[]");
     case TYPE_CUSTOM: {
-        std::string fqn;
-        if (!t.package_name.empty()) {
-            fqn = t.package_name + "." + t.custom_name;
-        } else {
-            fqn = ast.package_name + "." + t.custom_name;
-        }
+        const std::string package = t.package_name.empty() ? ast.package_name
+                                                           : t.package_name;
+        const std::string fqn = package + "." + t.custom_name;
         uint32_t hash = fnv1a_hash(fqn);
-        const bool same_package = t.package_name.empty() ||
-                                  t.package_name == ast.package_name;
-        // 跨包类型只哈希 FQN：codegen 层拿不到被导入包的 AST，无法展开其字段布局，
-        // 因此导入 struct 的布局变更不会改变本哈希（已知限制）。同包类型按字段展开，
-        // 且必须校验包名，避免同名跨包类型被误当作本包 struct 混入字段。
-        if (same_package && visited.find(fqn) == visited.end()) {
-            visited.insert(fqn);
-            for (size_t i = 0; i < ast.structs.size(); ++i) {
-                if (ast.structs[i].name == t.custom_name) {
-                    for (size_t j = 0; j < ast.structs[i].fields.size(); ++j) {
-                        hash = fnv1a_combine(hash,
-                            hashTypeRef(ast.structs[i].fields[j].type, ast, visited));
-                    }
-                    break;
-                }
+
+        // 递归类型：只保留类型身份，不再展开同一条引用链，避免无限递归。
+        if (visited.find(fqn) != visited.end()) {
+            return hash;
+        }
+
+        const AstFile* type_ast = findTypeAst(ast, context, package);
+        if (!type_ast) {
+            return hash;
+        }
+
+        const StructDef* definition = NULL;
+        for (size_t i = 0; i < type_ast->structs.size(); ++i) {
+            if (type_ast->structs[i].name == t.custom_name) {
+                definition = &type_ast->structs[i];
+                break;
             }
+        }
+        if (!definition) {
+            return hash;
+        }
+
+        visited.insert(fqn);
+        for (size_t i = 0; i < definition->fields.size(); ++i) {
+            hash = fnv1a_combine(hash,
+                hashTypeRef(definition->fields[i].type, *type_ast, context, visited));
         }
         return hash;
     }
@@ -256,21 +295,24 @@ inline uint32_t hashTypeRef(const TypeRef& t, const AstFile& ast,
     }
 }
 
-inline uint32_t computeMethodHash(const MethodDef& m, const AstFile& ast) {
+inline uint32_t computeMethodHash(const MethodDef& m, const AstFile& ast,
+                                  const ParseContext& context) {
     std::set<std::string> visited;
     uint32_t hash = fnv1a_hash(m.name);
     if (m.has_param) {
-        hash = fnv1a_combine(hash, hashTypeRef(m.param.type, ast, visited));
+        hash = fnv1a_combine(hash, hashTypeRef(m.param.type, ast, context, visited));
     }
-    hash = fnv1a_combine(hash, hashTypeRef(m.return_type, ast, visited));
+    hash = fnv1a_combine(hash, hashTypeRef(m.return_type, ast, context, visited));
     return hash;
 }
 
-inline uint32_t computeTopicHash(const TopicDef& t, const AstFile& ast) {
+inline uint32_t computeTopicHash(const TopicDef& t, const AstFile& ast,
+                                 const ParseContext& context) {
     std::set<std::string> visited;
     uint32_t hash = fnv1a_hash(t.name);
     for (size_t i = 0; i < t.fields.size(); ++i) {
-        hash = fnv1a_combine(hash, hashTypeRef(t.fields[i].type, ast, visited));
+        hash = fnv1a_combine(hash,
+            hashTypeRef(t.fields[i].type, ast, context, visited));
     }
     return hash;
 }

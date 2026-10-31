@@ -504,7 +504,7 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
             upper_name[j] = static_cast<char>(toupper(static_cast<unsigned char>(upper_name[j])));
         std::string param_type_str = svc.methods[i].has_param ? cppTypeName(svc.methods[i].param.type) : "";
         std::string return_type_str = cppTypeName(svc.methods[i].return_type);
-        uint32_t idl_hash = computeMethodHash(svc.methods[i], ast);
+        uint32_t idl_hash = computeMethodHash(svc.methods[i], ast, *context_);
         os << "    omni_service_add_method_ex(svc, " << prefix << "_METHOD_" << upper_name
            << ", \"" << svc.methods[i].name << "\", \"" << param_type_str
            << "\", \"" << return_type_str << "\", 0x" << std::hex << idl_hash << std::dec << "u);\n";
@@ -666,7 +666,8 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
 
 static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const MethodDef& m,
                                   uint32_t iface_id, const std::string& prefix,
-                                  const AstFile& ast, const std::string& pkg) {
+                                  const AstFile& ast, const std::string& pkg,
+                                  const ParseContext& context) {
     uint32_t mid = fnv1a_hash(m.name);
     std::string fn_name = prefix + "_proxy_" + cToSnakeCase(m.name);
 
@@ -698,7 +699,7 @@ static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const
         }
     }
 
-    uint32_t idl_hash = computeMethodHash(m, ast);
+    uint32_t idl_hash = computeMethodHash(m, ast, context);
     if (m.return_type.isVoid()) {
         os << "    if (p->instance_bound) {\n";
         os << "        omni_runtime_invoke_oneway_instance(p->runtime, \"" << svc.name << "\",\n";
@@ -812,7 +813,7 @@ void CCodeGen::genServiceProxySource(const ServiceDef& svc, const AstFile& ast, 
     emitProxyLifecycleSource(os, svc, prefix);
 
     for (size_t i = 0; i < svc.methods.size(); ++i) {
-        emitProxyMethodSource(os, svc, svc.methods[i], iface_id, prefix, ast, pkg_);
+        emitProxyMethodSource(os, svc, svc.methods[i], iface_id, prefix, ast, pkg_, *context_);
     }
 
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
