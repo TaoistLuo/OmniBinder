@@ -372,6 +372,9 @@ mkdir -p generated/
 ```cpp
 #include "sensor_service.bidl.h"
 
+template <typename T>
+T unwrap(omnibinder::Result<T> r) { return r.value(); } // 示例省略错误处理
+
 class MySensorService : public demo::SensorServiceStub {
 public:
     bool EchoBool(bool value) override { return !value; }
@@ -431,27 +434,21 @@ int main() {
     demo::SensorServiceProxy proxy(runtime);
     proxy.connect();
 
-    bool echo_bool = false;
-    proxy.EchoBool(false, echo_bool);
+    bool echo_bool = unwrap(proxy.EchoBool(false));
 
-    int32_t echo_i32 = 0;
-    proxy.EchoInt32(32, echo_i32);
+    int32_t echo_i32 = unwrap(proxy.EchoInt32(32));
 
-    std::string echo_string;
-    proxy.EchoString("hello", echo_string);
+    std::string echo_string = unwrap(proxy.EchoString("hello"));
 
-    demo::SensorData latest;
-    proxy.GetLatestData(latest);
+    demo::SensorData latest = unwrap(proxy.GetLatestData());
 
     demo::ControlCommand cmd;
     cmd.command_type = 1;
     cmd.target = "temperature";
     cmd.value = 30;
-    common::StatusResponse resp;
-    proxy.SetThreshold(cmd, resp);
+    common::StatusResponse resp = unwrap(proxy.SetThreshold(cmd));
 
-    int32_t sensor_count = 0;
-    proxy.GetSensorCount(sensor_count);
+    int32_t sensor_count = unwrap(proxy.GetSensorCount());
 
     proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) {
         // 收到普通话题广播
@@ -464,8 +461,7 @@ int main() {
     demo::AsyncRequest req;
     req.request_id = 42;
     req.client_tag = "cpp-client";
-    common::StatusResponse ack;
-    proxy.RequestLatestDataAsync(req, ack);
+    common::StatusResponse ack = unwrap(proxy.RequestLatestDataAsync(req));
 
     proxy.OnServiceDied([]() {
         // 服务异常退出通知
@@ -546,7 +542,7 @@ int main() {
 | [内部实现架构](docs/architecture-internals.md) | 面向二次开发者的内部 runtime、数据流、内存模型说明 |
 | [通信协议](docs/protocol.md) | 二进制协议格式、消息类型、序列化规则、通信时序 |
 | [API 参考](docs/api-reference.md) | OmniRuntime / Service / Buffer 等核心类的完整 API |
-| [内存使用说明](docs/memory-guide.md) | 业务侧内存申请/释放规则、速查表与常见错误 |
+| [内存使用说明](docs/memory-guide.md) | C / C++ 业务侧内存申请/释放规则、生命周期与常见错误 |
 | [IDL 规范](docs/idl-specification.md) | `.bidl` 接口定义语法、类型系统、代码生成规则 |
 | [ARM 交叉编译指南](docs/cross-compiling-arm.md) | Host/Target 分离构建、ARM 工具链、部署建议 |
 | [omni-cli 使用指南](docs/omni-tool-usage.md) | 命令行工具使用说明、JSON 格式支持 |

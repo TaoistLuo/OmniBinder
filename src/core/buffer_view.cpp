@@ -89,4 +89,32 @@ bool BufferView::tryReadBytes(std::vector<uint8_t>& value) noexcept {
     return buffer_read::readBytes(data_, length_, read_pos_, value);
 }
 
+bool BufferView::tryReadStringView(const char*& data, uint32_t& size) noexcept {
+    uint32_t len = 0;
+    const size_t start = read_pos_;
+    if (!buffer_read::readUint32(data_, length_, read_pos_, len)) return false;
+    if (!buffer_read::canRead(length_, read_pos_, len)) {
+        read_pos_ = start;
+        return false;
+    }
+    data = reinterpret_cast<const char*>(data_ + read_pos_);
+    size = len;
+    read_pos_ += len;
+    return true;
+}
+
+bool BufferView::tryReadBytesView(const uint8_t*& data, uint32_t& size) noexcept {
+    uint32_t len = 0;
+    const size_t start = read_pos_;
+    if (!buffer_read::readUint32(data_, length_, read_pos_, len)) return false;
+    if (!buffer_read::canRead(length_, read_pos_, len)) {
+        read_pos_ = start;
+        return false;
+    }
+    data = data_ + read_pos_;
+    size = len;
+    read_pos_ += len;
+    return true;
+}
+
 } // namespace omnibinder

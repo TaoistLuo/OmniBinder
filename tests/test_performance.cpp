@@ -245,26 +245,25 @@ int main(int argc, char* argv[]) {
         std::mt19937 rng(42);
         std::shuffle(sequence.begin(), sequence.end(), rng);
 
-        // 预分配每种 size 的 payload 和输出缓冲
-        std::vector<std::vector<uint8_t>> payloads(n_sizes), outputs(n_sizes);
+        // 预分配每种 size 的 payload
+        std::vector<std::vector<uint8_t>> payloads(n_sizes);
         for (int i = 0; i < n_sizes; ++i) {
             payloads[i].assign(sizes[i], 0xAB);
-            outputs[i].reserve(sizes[i]);
         }
 
-        // 每个 size 做预热（复用预分配缓冲）
+        // 每个 size 做预热
         for (int i = 0; i < n_sizes; ++i) {
             for (int w = 0; w < RPC_WARMUP; ++w)
-                proxy.EchoBytes(payloads[i], outputs[i]);
+                proxy.EchoBytes(payloads[i]);
         }
 
-        // 正式测试：复用预分配缓冲，只测量纯 RPC 耗时
+        // 正式测试：只测量纯 RPC 耗时
         for (int idx : sequence) {
-            std::vector<uint8_t>& out = outputs[idx];
             int64_t t0 = nowUs();
-            int ret = proxy.EchoBytes(payloads[idx], out);
+            auto result = proxy.EchoBytes(payloads[idx]);
             int64_t dt = nowUs() - t0;
-            if (ret != 0 || out != payloads[idx]) {
+            int ret = result.error();
+            if (ret != 0 || result.value() != payloads[idx]) {
                 fprintf(stderr, "FATAL: EchoBytes(%d) failed ret=%d\n", sizes[idx], ret);
                 fatalExit(2);
             }
@@ -279,13 +278,13 @@ int main(int argc, char* argv[]) {
         {
             LatencyStats s;
             s.name = "RPC EchoInt32";
-            int32_t result;
-            for (int i = 0; i < RPC_WARMUP; ++i) proxy.EchoInt32(42, result);
+            for (int i = 0; i < RPC_WARMUP; ++i) proxy.EchoInt32(42);
             for (int i = 0; i < RPC_ROUNDS; ++i) {
                 int64_t t0 = nowUs();
-                int ret = proxy.EchoInt32(i, result);
+                auto result = proxy.EchoInt32(i);
+                int ret = result.error();
                 s.add(static_cast<double>(nowUs() - t0));
-                if (ret != 0 || result != i + 1) {
+                if (ret != 0 || result.value() != i + 1) {
                     fprintf(stderr, "FATAL: EchoInt32 failed i=%d ret=%d\n", i, ret);
                     fatalExit(2);
                 }
@@ -298,14 +297,15 @@ int main(int argc, char* argv[]) {
         {
             LatencyStats s;
             s.name = "RPC EchoStruct";
-            perf::PerfData input, output;
+            perf::PerfData input;
             input.id = 1; input.value = 3.14; input.tag = "benchmark";
             input.blob = std::vector<uint8_t>(64, 0xCD);
-            for (int i = 0; i < RPC_WARMUP; ++i) proxy.EchoStruct(input, output);
+            for (int i = 0; i < RPC_WARMUP; ++i) proxy.EchoStruct(input);
             for (int i = 0; i < RPC_ROUNDS; ++i) {
                 input.id = i;
                 int64_t t0 = nowUs();
-                int ret = proxy.EchoStruct(input, output);
+                auto result = proxy.EchoStruct(input);
+                int ret = result.error();
                 s.add(static_cast<double>(nowUs() - t0));
                 if (ret != 0) {
                     fprintf(stderr, "FATAL: EchoStruct failed i=%d ret=%d\n", i, ret);
@@ -320,16 +320,16 @@ int main(int argc, char* argv[]) {
         {
             LatencyStats s;
             s.name = "RPC Add (2 x int32)";
-            int32_t result;
             perf::AddParams params;
             params.a = 42; params.b = 58;
-            for (int i = 0; i < RPC_WARMUP; ++i) proxy.Add(params, result);
+            for (int i = 0; i < RPC_WARMUP; ++i) proxy.Add(params);
             for (int i = 0; i < RPC_ROUNDS; ++i) {
                 params.a = i; params.b = i * 2;
                 int64_t t0 = nowUs();
-                int ret = proxy.Add(params, result);
+                auto result = proxy.Add(params);
+                int ret = result.error();
                 s.add(static_cast<double>(nowUs() - t0));
-                if (ret != 0 || result != (i + i * 2)) {
+                if (ret != 0 || result.value() != (i + i * 2)) {
                     fprintf(stderr, "FATAL: Add failed i=%d ret=%d\n", i, ret);
                     fatalExit(2);
                 }

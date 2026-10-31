@@ -9,7 +9,9 @@
 #include <vector>
 
 static volatile bool g_running = true;
-static void signalHandler(int) { g_running = false; }
+static void signalHandler(int) {
+    g_running = false;
+}
 
 class MySensorService : public demo::SensorServiceStub {
 public:

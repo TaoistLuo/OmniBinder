@@ -263,29 +263,24 @@ The current `examples/example_cpp/sensor_client.cpp` has also been expanded into
 Core shape:
 
 ```cpp
+// 非 void Proxy 方法返回 omnibinder::Result<T>；示例为简洁省略错误检查。
 omnibinder::OmniRuntime runtime;
 runtime.init("127.0.0.1", 9900);
 
 demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
-bool bool_out = false;
-proxy.EchoBool(false, bool_out);
+bool bool_out = proxy.EchoBool(false).value();
 
-int32_t int_out = 0;
-proxy.EchoInt32(32, int_out);
+int32_t int_out = proxy.EchoInt32(32).value();
 
-common::StatusResponse status_out;
-proxy.EchoStatus(status, status_out);
+common::StatusResponse status_out = proxy.EchoStatus(status).value();
 
-demo::SensorEnvelope envelope_out;
-proxy.EchoEnvelope(envelope, envelope_out);
+demo::SensorEnvelope envelope_out = proxy.EchoEnvelope(envelope).value();
 
-std::vector<int32_t> ids_out;
-proxy.EchoIdArray(ids, ids_out);
+std::vector<int32_t> ids_out = proxy.EchoIdArray(ids).value();
 
-demo::SensorArrayBundle bundle_out;
-proxy.EchoBundle(bundle, bundle_out);
+demo::SensorArrayBundle bundle_out = proxy.EchoBundle(bundle).value();
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
 proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
@@ -293,8 +288,7 @@ proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
 demo::AsyncRequest req;
 req.request_id = 42;
 req.client_tag = "cpp-client";
-common::StatusResponse ack;
-proxy.RequestLatestDataAsync(req, ack);
+common::StatusResponse ack = proxy.RequestLatestDataAsync(req);
 ```
 
 Use `examples/example_cpp/sensor_client.cpp` as the authoritative source for the full implementation.
@@ -950,8 +944,7 @@ int main() {
     myapp::Request req;
     req.id = 1;
     req.name = "hello";
-    myapp::Response resp;
-    proxy.HandleRequest(req, resp);
+    myapp::Response resp = proxy.HandleRequest(req);
     printf("Response: code=%d message=%s\n", resp.code, resp.message.c_str());
 
     // Subscribe to broadcast

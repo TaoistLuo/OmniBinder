@@ -31,25 +31,18 @@ static void on_instance(const omni_service_instance_t* info, void* user_data) {
     }
 }
 
-static char* dup_cstr(const char* s, uint32_t* len_out) {
-    size_t len = strlen(s);
-    char* out = (char*)omni_malloc(len + 1);
-    if (!out) return NULL;
-    memcpy(out, s, len + 1);
-    if (len_out) *len_out = (uint32_t)len;
-    return out;
-}
-
+/* 请求输入是借用语义：框架只读取、不接管内存，因此可直接指向字符串字面量。
+ * 注意：这类借用输入结构不要调用 *_destroy()，否则会尝试释放字面量。 */
 static void fill_status(common_StatusResponse* resp, int32_t code, const char* msg) {
     resp->code = code;
-    resp->message = dup_cstr(msg, &resp->message_len);
+    resp->message = (char*)msg;
 }
 
 static void fill_config(demo_SensorConfig* cfg) {
     demo_SensorConfig_init(cfg);
     cfg->enabled = 1;
     cfg->sample_rate_hz = 25;
-    cfg->label = dup_cstr("sensor-main", &cfg->label_len);
+    cfg->label = (char*)"sensor-main";
 }
 
 static void fill_envelope(demo_SensorEnvelope* env) {
@@ -58,40 +51,38 @@ static void fill_envelope(demo_SensorEnvelope* env) {
     env->data.temperature = 18.5;
     env->data.humidity = 45.5;
     env->data.timestamp = 123456789;
-    env->data.location = dup_cstr("Lab-1", &env->data.location_len);
+    env->data.location = (char*)"Lab-1";
     fill_config(&env->config);
     env->captured_at.seconds = 123456789;
     env->captured_at.nanos = 321;
 }
 
 static void fill_bundle(demo_SensorArrayBundle* bundle) {
+    static int32_t ids[2] = {1, 2};
+    static char* labels[2] = {(char*)"alpha", (char*)"beta"};
+    static uint8_t blob[3] = {0xAA, 0xAA, 0xAA};
+    static uint8_t* blobs[1] = {blob};
+    static uint32_t blob_lens[1] = {3};
+    static demo_SensorData samples[1];
+
     demo_SensorArrayBundle_init(bundle);
     bundle->ids.count = 2;
-    bundle->ids.data = (int32_t*)omni_malloc(sizeof(int32_t) * 2);
-    bundle->ids.data[0] = 1;
-    bundle->ids.data[1] = 2;
+    bundle->ids.data = ids;
 
     bundle->labels.count = 2;
-    bundle->labels.data = (char**)omni_malloc(sizeof(char*) * 2);
-    bundle->labels.lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * 2);
-    bundle->labels.data[0] = dup_cstr("alpha", &bundle->labels.lens[0]);
-    bundle->labels.data[1] = dup_cstr("beta", &bundle->labels.lens[1]);
+    bundle->labels.data = labels;
 
     bundle->blobs.count = 1;
-    bundle->blobs.data = (uint8_t**)omni_malloc(sizeof(uint8_t*));
-    bundle->blobs.lens = (uint32_t*)omni_malloc(sizeof(uint32_t));
-    bundle->blobs.lens[0] = 3;
-    bundle->blobs.data[0] = (uint8_t*)omni_malloc(3);
-    memset(bundle->blobs.data[0], 0xAA, 3);
+    bundle->blobs.data = blobs;
+    bundle->blobs.lens = blob_lens;
 
     bundle->samples.count = 1;
-    bundle->samples.data = (struct demo_SensorData*)omni_malloc(sizeof(struct demo_SensorData));
-    demo_SensorData_init(&bundle->samples.data[0]);
-    bundle->samples.data[0].sensor_id = 77;
-    bundle->samples.data[0].temperature = 20.5;
-    bundle->samples.data[0].humidity = 30.5;
-    bundle->samples.data[0].timestamp = 123;
-    bundle->samples.data[0].location = dup_cstr("bundle", &bundle->samples.data[0].location_len);
+    bundle->samples.data = samples;
+    samples[0].sensor_id = 77;
+    samples[0].temperature = 20.5;
+    samples[0].humidity = 30.5;
+    samples[0].timestamp = 123;
+    samples[0].location = (char*)"bundle";
 }
 
 static void on_sensor_update(const demo_SensorUpdate* msg, void* user_data) {
@@ -102,9 +93,8 @@ static void on_sensor_update(const demo_SensorUpdate* msg, void* user_data) {
 
 static void on_async_result(const demo_AsyncResultReady* msg, void* user_data) {
     (void)user_data;
-    printf("[AsyncResultReady] request_id=%d tag=%.*s code=%d temp=%.2f\n",
+    printf("[AsyncResultReady] request_id=%d tag=%s code=%d temp=%.2f\n",
            msg->result.request_id,
-           msg->result.client_tag_len,
            msg->result.client_tag,
            msg->result.status.code,
            msg->result.data.temperature);
@@ -216,10 +206,9 @@ int main(int argc, char* argv[]) {
     printf("EchoFloat32 => %.2f, EchoFloat64 => %.2f\n", f32, f64);
 
     char* out_str = NULL;
-    uint32_t out_str_len = 0;
-    /* 调用字符串回显 RPC，演示 char* + length 形式的字符串传输。 */
-    demo_SensorService_proxy_echo_string(&proxy, "hello", 5, &out_str, &out_str_len);
-    printf("EchoString => %.*s\n", out_str_len, out_str);
+    /* 调用字符串回显 RPC，演示 C 标准字符串传输。 */
+    demo_SensorService_proxy_echo_string(&proxy, "hello", &out_str);
+    printf("EchoString => %s\n", out_str);
     omni_free(out_str);
 
     uint8_t in_bytes[3] = {0x11, 0x11, 0x11};
@@ -238,7 +227,7 @@ int main(int argc, char* argv[]) {
     fill_status(&status_in, 7, "demo");
     /* 调用结构体回显 RPC，演示跨包结构体 common_StatusResponse 的传输。 */
     demo_SensorService_proxy_echo_status(&proxy, &status_in, &status_out);
-    printf("EchoStatus => code=%d message=%.*s\n", status_out.code, status_out.message_len, status_out.message);
+    printf("EchoStatus => code=%d message=%s\n", status_out.code, status_out.message);
 
     demo_SensorConfig cfg_in;
     demo_SensorConfig cfg_out;
@@ -246,8 +235,8 @@ int main(int argc, char* argv[]) {
     demo_SensorConfig_init(&cfg_out);
     /* 调用自定义配置结构体回显 RPC，演示普通 struct 参数与返回值。 */
     demo_SensorService_proxy_echo_config(&proxy, &cfg_in, &cfg_out);
-    printf("EchoConfig => enabled=%d rate=%d label=%.*s\n",
-           cfg_out.enabled, cfg_out.sample_rate_hz, cfg_out.label_len, cfg_out.label);
+    printf("EchoConfig => enabled=%d rate=%d label=%s\n",
+           cfg_out.enabled, cfg_out.sample_rate_hz, cfg_out.label);
 
     demo_SensorEnvelope env_in;
     demo_SensorEnvelope env_out;
@@ -255,58 +244,53 @@ int main(int argc, char* argv[]) {
     demo_SensorEnvelope_init(&env_out);
     /* 调用嵌套结构体回显 RPC，演示多层 struct 组合的序列化。 */
     demo_SensorService_proxy_echo_envelope(&proxy, &env_in, &env_out);
-    printf("EchoEnvelope => location=%.*s nested_label=%.*s nanos=%d\n",
-           env_out.data.location_len, env_out.data.location,
-           env_out.config.label_len, env_out.config.label,
+    printf("EchoEnvelope => location=%s nested_label=%s nanos=%d\n",
+           env_out.data.location,
+           env_out.config.label,
            env_out.captured_at.nanos);
-    demo_SensorEnvelope_destroy(&env_in);
     demo_SensorEnvelope_destroy(&env_out);
 
     printf("\n--- Array RPCs ---\n");
+    int32_t ids_buf[2] = {10, 20};
     demo_int32_t_array ids_in;
     demo_int32_t_array ids_out;
     demo_int32_t_array_init(&ids_in);
     demo_int32_t_array_init(&ids_out);
     ids_in.count = 2;
-    ids_in.data = (int32_t*)omni_malloc(sizeof(int32_t) * 2);
-    ids_in.data[0] = 10;
-    ids_in.data[1] = 20;
+    ids_in.data = ids_buf;
     /* 调用整数数组回显 RPC，演示 array<int32> 的传输。 */
     demo_SensorService_proxy_echo_id_array(&proxy, &ids_in, &ids_out);
     printf("EchoIdArray => size=%u tail=%d\n", ids_out.count, ids_out.data[ids_out.count - 1]);
 
+    char* labels_buf[2] = {(char*)"l1", (char*)"l2"};
     demo_string_array labels_in;
     demo_string_array labels_out;
     demo_string_array_init(&labels_in);
     demo_string_array_init(&labels_out);
     labels_in.count = 2;
-    labels_in.data = (char**)omni_malloc(sizeof(char*) * 2);
-    labels_in.lens = (uint32_t*)omni_malloc(sizeof(uint32_t) * 2);
-    labels_in.data[0] = dup_cstr("l1", &labels_in.lens[0]);
-    labels_in.data[1] = dup_cstr("l2", &labels_in.lens[1]);
+    labels_in.data = labels_buf;
     /* 调用字符串数组回显 RPC，演示 array<string> 的传输。 */
     demo_SensorService_proxy_echo_label_array(&proxy, &labels_in, &labels_out);
-    printf("EchoLabelArray => size=%u tail=%.*s\n",
+    printf("EchoLabelArray => size=%u tail=%s\n",
            labels_out.count,
-           labels_out.lens[labels_out.count - 1],
            labels_out.data[labels_out.count - 1]);
 
+    demo_SensorData sensor_buf[1];
+    demo_SensorData_init(&sensor_buf[0]);
     demo_demo_SensorData_array sensor_arr_in;
     demo_demo_SensorData_array sensor_arr_out;
     demo_demo_SensorData_array_init(&sensor_arr_in);
     demo_demo_SensorData_array_init(&sensor_arr_out);
     sensor_arr_in.count = 1;
-    sensor_arr_in.data = (struct demo_SensorData*)omni_malloc(sizeof(struct demo_SensorData));
-    demo_SensorData_init(&sensor_arr_in.data[0]);
-    sensor_arr_in.data[0].sensor_id = 88;
-    sensor_arr_in.data[0].temperature = 21.5;
-    sensor_arr_in.data[0].humidity = 31.5;
-    sensor_arr_in.data[0].timestamp = 321;
-    sensor_arr_in.data[0].location = dup_cstr("array-item", &sensor_arr_in.data[0].location_len);
+    sensor_arr_in.data = sensor_buf;
+    sensor_buf[0].sensor_id = 88;
+    sensor_buf[0].temperature = 21.5;
+    sensor_buf[0].humidity = 31.5;
+    sensor_buf[0].timestamp = 321;
+    sensor_buf[0].location = (char*)"array-item";
     /* 调用结构体数组回显 RPC，演示 array<struct> 的传输。 */
     demo_SensorService_proxy_echo_sensor_array(&proxy, &sensor_arr_in, &sensor_arr_out);
-    printf("EchoSensorArray => first.location=%.*s\n",
-           sensor_arr_out.data[0].location_len,
+    printf("EchoSensorArray => first.location=%s\n",
            sensor_arr_out.data[0].location);
 
     demo_SensorArrayBundle bundle_in;
@@ -317,13 +301,9 @@ int main(int argc, char* argv[]) {
     demo_SensorService_proxy_echo_bundle(&proxy, &bundle_in, &bundle_out);
     printf("EchoBundle => ids=%u labels=%u blobs=%u samples=%u\n\n",
            bundle_out.ids.count, bundle_out.labels.count, bundle_out.blobs.count, bundle_out.samples.count);
-    demo_int32_t_array_destroy(&ids_in);
     demo_int32_t_array_destroy(&ids_out);
-    demo_string_array_destroy(&labels_in);
     demo_string_array_destroy(&labels_out);
-    demo_demo_SensorData_array_destroy(&sensor_arr_in);
     demo_demo_SensorData_array_destroy(&sensor_arr_out);
-    demo_SensorArrayBundle_destroy(&bundle_in);
     demo_SensorArrayBundle_destroy(&bundle_out);
 
     printf("--- Existing RPCs ---\n");
@@ -331,25 +311,24 @@ int main(int argc, char* argv[]) {
     demo_SensorData_init(&data);
     /* 调用查询类 RPC，获取服务端当前最新的传感器数据。 */
     demo_SensorService_proxy_get_latest_data(&proxy, &data);
-    printf("GetLatestData => sensor_id=%d temp=%.2f humidity=%.2f location=%.*s\n",
-           data.sensor_id, data.temperature, data.humidity, data.location_len, data.location);
+    printf("GetLatestData => sensor_id=%d temp=%.2f humidity=%.2f location=%s\n",
+           data.sensor_id, data.temperature, data.humidity, data.location);
     demo_SensorData_destroy(&data);
 
     demo_ControlCommand cmd;
     demo_ControlCommand_init(&cmd);
     cmd.command_type = 1;
-    cmd.target = dup_cstr("temperature", &cmd.target_len);
+    cmd.target = (char*)"temperature";
     cmd.value = 30;
     common_StatusResponse resp;
     common_StatusResponse_init(&resp);
     /* 调用控制类 RPC，请求服务端修改阈值配置。 */
     demo_SensorService_proxy_set_threshold(&proxy, &cmd, &resp);
-    printf("SetThreshold => code=%d message=%.*s\n", resp.code, resp.message_len, resp.message);
+    printf("SetThreshold => code=%d message=%s\n", resp.code, resp.message);
     int32_t count = 0;
     /* 调用统计类 RPC，获取服务端维护的传感器数量。 */
     demo_SensorService_proxy_get_sensor_count(&proxy, &count);
     printf("GetSensorCount => %d\n", count);
-    demo_ControlCommand_destroy(&cmd);
     common_StatusResponse_destroy(&resp);
 
     /* 订阅普通广播话题：这是客户端订阅服务发布的消息，不是向服务注册业务回调。 */
@@ -362,13 +341,12 @@ int main(int argc, char* argv[]) {
     demo_AsyncRequest async_req;
     demo_AsyncRequest_init(&async_req);
     async_req.request_id = 42;
-    async_req.client_tag = dup_cstr("c-client", &async_req.client_tag_len);
+    async_req.client_tag = (char*)"c-client";
     common_StatusResponse ack;
     common_StatusResponse_init(&ack);
     /* 调用异步请求 RPC，请求被接受后，真正结果会通过 AsyncResultReady 话题回推。 */
     demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
-    printf("RequestLatestDataAsync => code=%d message=%.*s\n", ack.code, ack.message_len, ack.message);
-    demo_AsyncRequest_destroy(&async_req);
+    printf("RequestLatestDataAsync => code=%d message=%s\n", ack.code, ack.message);
     common_StatusResponse_destroy(&ack);
 
     printf("\nWaiting for broadcasts / async callbacks (Ctrl+C to stop)...\n\n");

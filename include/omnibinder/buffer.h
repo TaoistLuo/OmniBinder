@@ -81,6 +81,8 @@ public:
     bool writeFloat64(double value) noexcept;
     /* @brief 写入字符串（uint32 长度前缀 + 字节） */
     bool writeString(const std::string& value) noexcept;
+    /* @brief 写入字符串（uint32 长度前缀 + 字节），避免构造 std::string */
+    bool writeString(const char* data, size_t length) noexcept;
     /* @brief 写入字节数组（uint32 长度前缀 + 字节） */
     bool writeBytes(const void* data, size_t length) noexcept;
     /* @brief 写入字节数组（uint32 长度前缀 + 字节） */

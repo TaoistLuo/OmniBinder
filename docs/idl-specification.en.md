@@ -220,9 +220,8 @@ typedef struct demo_SensorData {
     double temperature;
     double humidity;
     int64_t timestamp;
-    char* location;
-    uint32_t location_len;
-    uint8_t* raw_data;
+    char* location;          /* NUL-terminated */
+    uint8_t* raw_data;       /* bytes: length required */
     uint32_t raw_data_len;
 } demo_SensorData;
 

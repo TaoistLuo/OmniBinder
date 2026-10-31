@@ -38,8 +38,11 @@
 
 #include "omnibinder/types.h"
 #include "omnibinder/error.h"
+#include "omnibinder/result.h"
 #include "omnibinder/log.h"
 #include "omnibinder/buffer.h"
+#include "omnibinder/buffer_view.h"
+#include "omnibinder/string_view.h"
 #include "omnibinder/service.h"
 #include "omnibinder/runtime.h"
 

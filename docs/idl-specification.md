@@ -253,9 +253,8 @@ typedef struct demo_SensorData {
     double temperature;
     double humidity;
     int64_t timestamp;
-    char* location;
-    uint32_t location_len;
-    uint8_t* raw_data;
+    char* location;          /* NUL-terminated */
+    uint8_t* raw_data;       /* bytes: length required */
     uint32_t raw_data_len;
 } demo_SensorData;
 
@@ -514,7 +513,7 @@ int demo_SensorService_proxy_subscribe_sensor_update(
     void* user_data);
 ```
 
-补充：C Proxy 最多同时订阅 8 个话题（`_sub_ctxs[8]`），超出返回 -1；`string`/`bytes` 类型的返回值通过 `char** result, uint32_t* result_len`（或 `uint8_t**`）回传。
+补充：C Proxy 最多同时订阅 8 个话题（`_sub_ctxs[8]`），超出返回 -1；`string` 返回值通过 `char** result`（NUL 结尾）回传；`bytes` 返回值通过 `uint8_t** result, uint32_t* result_len` 回传。
 
 ## 8. 严格语义校验
 

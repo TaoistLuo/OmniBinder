@@ -364,6 +364,9 @@ mkdir -p generated/
 ```cpp
 #include "sensor_service.bidl.h"
 
+template <typename T>
+T unwrap(omnibinder::Result<T> r) { return r.value(); } // error handling omitted for brevity
+
 class MySensorService : public demo::SensorServiceStub {
 public:
     bool EchoBool(bool value) override { return !value; }
@@ -420,27 +423,21 @@ int main() {
     demo::SensorServiceProxy proxy(runtime);
     proxy.connect();
 
-    bool echo_bool = false;
-    proxy.EchoBool(false, echo_bool);
+    bool echo_bool = unwrap(proxy.EchoBool(false));
 
-    int32_t echo_i32 = 0;
-    proxy.EchoInt32(32, echo_i32);
+    int32_t echo_i32 = unwrap(proxy.EchoInt32(32));
 
-    std::string echo_string;
-    proxy.EchoString("hello", echo_string);
+    std::string echo_string = unwrap(proxy.EchoString("hello"));
 
-    demo::SensorData latest;
-    proxy.GetLatestData(latest);
+    demo::SensorData latest = unwrap(proxy.GetLatestData());
 
     demo::ControlCommand cmd;
     cmd.command_type = 1;
     cmd.target = "temperature";
     cmd.value = 30;
-    common::StatusResponse resp;
-    proxy.SetThreshold(cmd, resp);
+    common::StatusResponse resp = unwrap(proxy.SetThreshold(cmd));
 
-    int32_t sensor_count = 0;
-    proxy.GetSensorCount(sensor_count);
+    int32_t sensor_count = unwrap(proxy.GetSensorCount());
 
     proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) {
         // regular topic broadcast
@@ -453,8 +450,7 @@ int main() {
     demo::AsyncRequest req;
     req.request_id = 42;
     req.client_tag = "cpp-client";
-    common::StatusResponse ack;
-    proxy.RequestLatestDataAsync(req, ack);
+    common::StatusResponse ack = unwrap(proxy.RequestLatestDataAsync(req));
 
     proxy.OnServiceDied([]() {
         // service death notification
@@ -534,7 +530,7 @@ Related tests include:
 | [Internal Architecture](docs/architecture-internals.md) | Internal runtime details for secondary developers, data flows, memory model |
 | [Communication Protocol](docs/protocol.md) | Binary protocol format, message types, serialization rules, communication sequences |
 | [API Reference](docs/api-reference.md) | Complete API for OmniRuntime / Service / Buffer and other core classes |
-| [Memory Guide](docs/memory-guide.md) | Memory allocation/release rules for application code (Chinese) |
+| [Memory Guide](docs/memory-guide.md) | C / C++ application-side allocation, lifetime, and cleanup rules (Chinese) |
 | [IDL Specification](docs/idl-specification.md) | `.bidl` syntax, type system, and code-generation rules |
 | [IDL Specification (EN)](docs/idl-specification.en.md) | English version of the IDL specification |
 | [ARM Cross-Compilation Guide](docs/cross-compiling-arm.md) | Host/Target separated build, ARM toolchain, deployment recommendations |

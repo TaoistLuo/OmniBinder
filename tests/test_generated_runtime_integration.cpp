@@ -447,9 +447,9 @@ int main() {
     assert(reply_proxy.connect() == 0);
     demo::Item input;
     input.id = 77;
-    demo::Item result;
-    int ret = reply_proxy.echoItem(input, result);
-    assert(ret == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+    auto result = reply_proxy.echoItem(input);
+    assert(!result);
+    assert(result.error() == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_runtime.stop();
     reg_runtime.stop();
     sm_conn.close();
@@ -480,9 +480,9 @@ int main() {
     assert(status_proxy.connect() == 0);
     demo::Item status_input;
     status_input.id = 78;
-    demo::Item status_result;
-    ret = status_proxy.echoItem(status_input, status_result);
-    assert(ret == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+    auto status_result = status_proxy.echoItem(status_input);
+    assert(!status_result);
+    assert(status_result.error() == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_status_runtime.stop();
     reg_status_runtime.stop();
     sm_status_conn.close();
@@ -513,9 +513,9 @@ int main() {
     assert(length_proxy.connect() == 0);
     demo::Item length_input;
     length_input.id = 79;
-    demo::Item length_result;
-    ret = length_proxy.echoItem(length_input, length_result);
-    assert(ret == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+    auto length_result = length_proxy.echoItem(length_input);
+    assert(!length_result);
+    assert(length_result.error() == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_length_runtime.stop();
     reg_length_runtime.stop();
     sm_length_conn.close();

@@ -36,7 +36,9 @@ static void emitStubHandlerParams(std::ostream& os, const MethodDef& m, const st
     if (m.has_param) {
         if (isCompositePointerType(m.param.type)) {
             os << "const " << cDeclaredTypeName(m.param.type, pkg) << "* " << m.param.name;
-        } else if (isCStringLike(m.param.type)) {
+        } else if (m.param.type.primitive == TYPE_STRING) {
+            os << "const " << cDeclaredTypeName(m.param.type, pkg) << " " << m.param.name;
+        } else if (m.param.type.primitive == TYPE_BYTES) {
             os << "const " << cDeclaredTypeName(m.param.type, pkg) << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
         } else {
             os << cDeclaredTypeName(m.param.type, pkg) << " " << m.param.name;
@@ -47,7 +49,7 @@ static void emitStubHandlerParams(std::ostream& os, const MethodDef& m, const st
         if (has_args) os << ", ";
         if (m.return_type.isArray() || m.return_type.isCustom()) {
             os << cDeclaredTypeName(m.return_type, pkg) << "* result";
-        } else if (isCStringLike(m.return_type)) {
+        } else if (m.return_type.primitive == TYPE_BYTES) {
             os << cDeclaredTypeName(m.return_type, pkg) << "* result, uint32_t* result_len";
         } else {
             os << cDeclaredTypeName(m.return_type, pkg) << "* result";
@@ -142,7 +144,7 @@ void CCodeGen::emitStructTypedef(const std::string& type_name,
     for (size_t j = 0; j < fields.size(); ++j) {
         const FieldDef& f = fields[j];
         os << "    " << cDeclaredTypeName(f.type, pkg_) << " " << f.name << ";\n";
-        if (f.type.primitive == TYPE_STRING || f.type.primitive == TYPE_BYTES) {
+        if (f.type.primitive == TYPE_BYTES) {
             os << "    uint32_t " << f.name << "_len;\n";
         }
     }
@@ -221,11 +223,14 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
         std::string handler_typedef = prefix + "_" + cToSnakeCase(m.name) + "_handler_t";
-        if (m.has_param && isCStringLike(m.param.type)) {
-            os << "    /* " << m.name << ": for string/bytes parameters, pass pointer + length. */\n";
+        if (m.has_param && m.param.type.primitive == TYPE_BYTES) {
+            os << "    /* " << m.name << ": bytes parameter: pass pointer + length. */\n";
         }
-        if (!m.return_type.isVoid() && isCStringLike(m.return_type)) {
-            os << "    /* " << m.name << ": allocate the return buffer with omni_malloc(), set *result_len; the stub frees it with omni_free() after reply serialization. */\n";
+        if (!m.return_type.isVoid() && m.return_type.primitive == TYPE_STRING) {
+            os << "    /* " << m.name << ": string result: allocate with omni_strdup(); the stub frees it after serialization. */\n";
+        }
+        if (!m.return_type.isVoid() && m.return_type.primitive == TYPE_BYTES) {
+            os << "    /* " << m.name << ": bytes result: allocate with omni_malloc(), set *result_len; the stub frees it. */\n";
         }
         if (!m.return_type.isVoid() &&
             (m.return_type.isArray() || m.return_type.isCustom())) {

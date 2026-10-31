@@ -7,7 +7,9 @@
  * @date        2026-02-28
  *************************************************************************************************/
 #include "omnibinder/omnibinder_c.h"
+#include "omnibinder/omnibinder_c_view.h"
 #include "omnibinder/omnibinder.h"
+#include "buffer_read_utils.h"
 #include <cstring>
 #include <cstdlib>
 #include <new>
@@ -231,8 +233,7 @@ void omni_buffer_write_string(omni_buffer_t* buf, const char* val, uint32_t len)
         if (!val) {
             len = 0;
         }
-        std::string s(val ? val : "", len);
-        (void)buf->buf.writeString(s);
+        (void)buf->buf.writeString(val ? val : "", len);
     }
 }
 void omni_buffer_write_bytes(omni_buffer_t* buf, const uint8_t* data, uint32_t len) {
@@ -407,6 +408,197 @@ uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len) {
     memcpy(result, value.data(), len);
     if (out_len) *out_len = len;
     return result;
+}
+
+/* ============================================================
+ * BufferView 零拷贝读取
+ * ============================================================ */
+
+static void markViewError(omni_buffer_view_t* view) {
+    if (view) view->ok = 0;
+}
+
+static int viewCanRead(const omni_buffer_view_t* view, size_t n) {
+    return view && view->ok && view->pos <= view->size && n <= view->size - view->pos;
+}
+
+void omni_buffer_view_init(omni_buffer_view_t* view, const uint8_t* data, size_t len) {
+    if (!view) return;
+    view->data = data;
+    view->size = len;
+    view->pos = 0;
+    view->ok = (data != NULL || len == 0) ? 1 : 0;
+}
+
+void omni_buffer_view_from_buffer(omni_buffer_view_t* view, const omni_buffer_t* buf) {
+    if (!view) return;
+    if (!buf) {
+        omni_buffer_view_init(view, NULL, 0);
+        view->ok = 0;
+        return;
+    }
+    omni_buffer_view_init(view, omni_buffer_data(buf), omni_buffer_size(buf));
+}
+
+uint8_t omni_buffer_view_read_bool(omni_buffer_view_t* view) {
+    bool value = false;
+    if (!view || !viewCanRead(view, 1) ||
+        !omnibinder::buffer_read::readBool(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value ? 1 : 0;
+}
+
+int8_t omni_buffer_view_read_int8(omni_buffer_view_t* view) {
+    int8_t value = 0;
+    if (!view || !viewCanRead(view, 1) ||
+        !omnibinder::buffer_read::readInt8(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+uint8_t omni_buffer_view_read_uint8(omni_buffer_view_t* view) {
+    uint8_t value = 0;
+    if (!view || !viewCanRead(view, 1) ||
+        !omnibinder::buffer_read::readUint8(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+int16_t omni_buffer_view_read_int16(omni_buffer_view_t* view) {
+    int16_t value = 0;
+    if (!view || !viewCanRead(view, 2) ||
+        !omnibinder::buffer_read::readInt16(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+uint16_t omni_buffer_view_read_uint16(omni_buffer_view_t* view) {
+    uint16_t value = 0;
+    if (!view || !viewCanRead(view, 2) ||
+        !omnibinder::buffer_read::readUint16(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+int32_t omni_buffer_view_read_int32(omni_buffer_view_t* view) {
+    int32_t value = 0;
+    if (!view || !viewCanRead(view, 4) ||
+        !omnibinder::buffer_read::readInt32(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+uint32_t omni_buffer_view_read_uint32(omni_buffer_view_t* view) {
+    uint32_t value = 0;
+    if (!view || !viewCanRead(view, 4) ||
+        !omnibinder::buffer_read::readUint32(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+int64_t omni_buffer_view_read_int64(omni_buffer_view_t* view) {
+    int64_t value = 0;
+    if (!view || !viewCanRead(view, 8) ||
+        !omnibinder::buffer_read::readInt64(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+uint64_t omni_buffer_view_read_uint64(omni_buffer_view_t* view) {
+    uint64_t value = 0;
+    if (!view || !viewCanRead(view, 8) ||
+        !omnibinder::buffer_read::readUint64(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0;
+    }
+    return value;
+}
+
+float omni_buffer_view_read_float32(omni_buffer_view_t* view) {
+    float value = 0.0f;
+    if (!view || !viewCanRead(view, 4) ||
+        !omnibinder::buffer_read::readFloat32(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0.0f;
+    }
+    return value;
+}
+
+double omni_buffer_view_read_float64(omni_buffer_view_t* view) {
+    double value = 0.0;
+    if (!view || !viewCanRead(view, 8) ||
+        !omnibinder::buffer_read::readFloat64(view->data, view->size, view->pos, value)) {
+        markViewError(view);
+        return 0.0;
+    }
+    return value;
+}
+
+const char* omni_buffer_view_read_string(omni_buffer_view_t* view, uint32_t* out_len) {
+    if (out_len) *out_len = 0;
+    uint32_t len = 0;
+    size_t start = view ? view->pos : 0;
+    if (!view || !viewCanRead(view, 4) ||
+        !omnibinder::buffer_read::readUint32(view->data, view->size, view->pos, len) ||
+        !viewCanRead(view, len)) {
+        if (view) view->pos = start;
+        markViewError(view);
+        return NULL;
+    }
+    const char* result = reinterpret_cast<const char*>(view->data + view->pos);
+    view->pos += len;
+    if (out_len) *out_len = len;
+    return result;
+}
+
+const uint8_t* omni_buffer_view_read_bytes(omni_buffer_view_t* view, uint32_t* out_len) {
+    if (out_len) *out_len = 0;
+    uint32_t len = 0;
+    size_t start = view ? view->pos : 0;
+    if (!view || !viewCanRead(view, 4) ||
+        !omnibinder::buffer_read::readUint32(view->data, view->size, view->pos, len) ||
+        !viewCanRead(view, len)) {
+        if (view) view->pos = start;
+        markViewError(view);
+        return NULL;
+    }
+    const uint8_t* result = view->data + view->pos;
+    view->pos += len;
+    if (out_len) *out_len = len;
+    return result;
+}
+
+int omni_buffer_view_ok(const omni_buffer_view_t* view) {
+    return (view && view->ok) ? 1 : 0;
+}
+
+size_t omni_buffer_view_position(const omni_buffer_view_t* view) {
+    return view ? view->pos : 0;
+}
+
+int omni_buffer_view_set_position(omni_buffer_view_t* view, size_t pos) {
+    if (!view || pos > view->size) {
+        markViewError(view);
+        return 0;
+    }
+    view->pos = pos;
+    return 1;
 }
 
 /* ============================================================

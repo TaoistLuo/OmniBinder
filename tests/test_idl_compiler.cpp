@@ -1339,10 +1339,10 @@ TEST(IdlCompilerTest, CodegenCppMethodArraysUseRecursiveBufferLogic) {
     ASSERT_TRUE(cpp.find("if (!response.writeUint32(static_cast<uint32_t>(result.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!response.writeInt32(result[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!response.writeString(result[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(blobs.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeBytes(blobs[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!resp.tryReadString(out[i0])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(blobs.size()))) { return omnibinder::Result<std::vector<std::vector<uint8_t>>>(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeBytes(blobs[i0])) { return omnibinder::Result<std::vector<std::vector<uint8_t>>>(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0])) { return omnibinder::Result<std::vector<int32_t>>(static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE)); }") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!resp.tryReadString(out[i0])) { return omnibinder::Result<std::vector<std::string>>(static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE)); }") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(") == std::string::npos);
     ASSERT_TRUE(cpp.find("resp.read()") == std::string::npos);
@@ -1381,9 +1381,9 @@ TEST(IdlCompilerTest, CodegenCppCustomArraysUseRecursiveCustomLogic) {
     ASSERT_TRUE(cpp.find("if (!items[i0].deserialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!response.writeUint32(static_cast<uint32_t>(result.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!result[i0].serialize(response)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(items.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!items[i0].serialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!out[i0].deserialize(resp)) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(items.size()))) { return omnibinder::Result<std::vector<Item>>(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!items[i0].serialize(req)) { return omnibinder::Result<std::vector<Item>>(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!out[i0].deserialize(resp)) { return omnibinder::Result<std::vector<Item>>(static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE)); }") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(items)") == std::string::npos);
     ASSERT_TRUE(cpp.find("response.write(result)") == std::string::npos);
@@ -1422,9 +1422,9 @@ TEST(IdlCompilerTest, CodegenCppNestedArraysUseDistinctLoopDepths) {
     ASSERT_TRUE(cpp.find("if (cnt1 > omnibinder::MAX_ARRAY_ELEMENTS) return false;") != std::string::npos);
     ASSERT_TRUE(cpp.find("buf.remaining() / 4u") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!buf.tryReadInt32(matrix[i0][i1])) return false;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(matrix.size()))) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!req.writeInt32(matrix[i0][i1])) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0][i1])) return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeUint32(static_cast<uint32_t>(matrix.size()))) { return omnibinder::Result<std::vector<std::vector<int32_t>>>(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!req.writeInt32(matrix[i0][i1])) { return omnibinder::Result<std::vector<std::vector<int32_t>>>(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (!resp.tryReadInt32(out[i0][i1])) { return omnibinder::Result<std::vector<std::vector<int32_t>>>(static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE)); }") != std::string::npos);
 
     ASSERT_TRUE(cpp.find("req.write(matrix)") == std::string::npos);
     ASSERT_TRUE(cpp.find("resp.read()") == std::string::npos);
@@ -1446,15 +1446,15 @@ TEST(IdlCompilerTest, CodegenCppVoidProxyIsOneWay) {
     const std::string header = readFile(std::string(dir) + "/commands.h");
     const std::string source_code = readFile(std::string(dir) + "/commands.cpp");
 
-    ASSERT_NE(header.find("void reset();"), std::string::npos);
-    ASSERT_NE(header.find("void submit(const Request& request);"), std::string::npos);
-    ASSERT_NE(header.find("int query(const Request& request, int32_t& out);"), std::string::npos);
-    ASSERT_NE(source_code.find("void CommandsProxy::reset()"), std::string::npos);
-    ASSERT_NE(source_code.find("void CommandsProxy::submit(const Request& request)"), std::string::npos);
+    ASSERT_NE(header.find("int reset();"), std::string::npos);
+    ASSERT_NE(header.find("int submit(const Request& request);"), std::string::npos);
+    ASSERT_NE(header.find("omnibinder::Result<int32_t> query(const Request& request);"), std::string::npos);
+    ASSERT_NE(source_code.find("int CommandsProxy::reset()"), std::string::npos);
+    ASSERT_NE(source_code.find("int CommandsProxy::submit(const Request& request)"), std::string::npos);
     ASSERT_NE(source_code.find("runtime_.invokeOneWay(connectionKey(), 0x"), std::string::npos);
     ASSERT_EQ(source_code.find("void CommandsProxy::reset() {\n    omnibinder::Buffer req, resp;"), std::string::npos);
-    ASSERT_NE(source_code.find("if (!request.serialize(req)) return;"), std::string::npos);
-    ASSERT_NE(source_code.find("if (!request.serialize(req)) return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);"), std::string::npos);
+    ASSERT_NE(source_code.find("if (!request.serialize(req)) { return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE); }"), std::string::npos);
+    ASSERT_NE(source_code.find("if (!request.serialize(req)) { return omnibinder::Result<int32_t>(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }"), std::string::npos);
 }
 
 TEST(IdlCompilerTest, CodegenCStringBytesSignaturesAndMetadata) {
@@ -1486,24 +1486,23 @@ TEST(IdlCompilerTest, CodegenCStringBytesSignaturesAndMetadata) {
     std::string source = readFile(std::string(dir) + "/blob_service.c");
 
     ASSERT_TRUE(header.find("char* name;") != std::string::npos);
-    ASSERT_TRUE(header.find("uint32_t name_len;") != std::string::npos);
     ASSERT_TRUE(header.find("uint8_t* data;") != std::string::npos);
     ASSERT_TRUE(header.find("uint32_t data_len;") != std::string::npos);
 
     ASSERT_TRUE(header.find("demo_BlobService_echo_name_handler_t echoName;") != std::string::npos);
     ASSERT_TRUE(header.find("demo_BlobService_echo_data_handler_t echoData;") != std::string::npos);
-    ASSERT_TRUE(header.find("int  demo_BlobService_proxy_echo_name(demo_BlobService_proxy* p, const char* name, uint32_t name_len, char** result, uint32_t* result_len);") != std::string::npos);
+    ASSERT_TRUE(header.find("int  demo_BlobService_proxy_echo_name(demo_BlobService_proxy* p, const char* name, char** result);") != std::string::npos);
     ASSERT_TRUE(header.find("int  demo_BlobService_proxy_echo_data(demo_BlobService_proxy* p, const uint8_t* data, uint32_t data_len, uint8_t** result, uint32_t* result_len);") != std::string::npos);
 
     ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_NAME, \"echoName\", \"std::string\", \"std::string\", 0x") != std::string::npos);
     ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ECHO_DATA, \"echoData\", \"std::vector<uint8_t>\", \"std::vector<uint8_t>\", 0x") != std::string::npos);
     ASSERT_TRUE(source.find("omni_service_add_method_ex(svc, demo_BlobService_METHOD_ROUND_TRIP, \"roundTrip\", \"Payload\", \"Payload\", 0x") != std::string::npos);
 
-    ASSERT_TRUE(source.find("name = omni_buffer_read_string(req, &name_len);") != std::string::npos);
+    ASSERT_TRUE(source.find("name = omni_buffer_read_string(req, NULL);") != std::string::npos);
     ASSERT_TRUE(source.find("data = omni_buffer_read_bytes(req, &data_len);") != std::string::npos);
-    ASSERT_TRUE(source.find("omni_buffer_write_string(response, result, result_len);") != std::string::npos);
+    ASSERT_TRUE(source.find("omni_buffer_write_string(response, result, result ? (uint32_t)strlen(result) : 0);") != std::string::npos);
     ASSERT_TRUE(source.find("omni_buffer_write_bytes(response, result, result_len);") != std::string::npos);
-    ASSERT_TRUE(source.find("*result = omni_buffer_read_string(resp, result_len);") != std::string::npos);
+    ASSERT_TRUE(source.find("*result = omni_buffer_read_string(resp, NULL);") != std::string::npos);
     ASSERT_TRUE(source.find("*result = omni_buffer_read_bytes(resp, result_len);") != std::string::npos);
 }
 
@@ -1565,10 +1564,10 @@ TEST(IdlCompilerTest, CodegenCppAndCMalformedDeserializeGuardsAllTypeClasses) {
     ASSERT_TRUE(cpp.find("buf.remaining() / 4u") != std::string::npos);
     ASSERT_TRUE(cpp.find("omnibinder::MAX_MESSAGE_SIZE / sizeof(int32_t)") != std::string::npos);
     ASSERT_TRUE(cpp.find("if (!msg.deserialize(buf)) return;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("GuardedServiceProxy::echo(const AllTypes& input, AllTypes& out)") != std::string::npos);
+    ASSERT_TRUE(cpp.find("GuardedServiceProxy::echo(const AllTypes& input)") != std::string::npos);
     ASSERT_TRUE(cpp.find("int ret = runtime_.invoke(connectionKey(), 0x") != std::string::npos);
-    ASSERT_TRUE(cpp.find("if (ret != 0) return ret;") != std::string::npos);
-    ASSERT_TRUE(cpp.find("return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("if (ret != 0) return omnibinder::Result<AllTypes>(ret);") != std::string::npos);
+    ASSERT_TRUE(cpp.find("return omnibinder::Result<AllTypes>(static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE));") != std::string::npos);
 
     ASSERT_TRUE(c_header.find("int demo_Inner_deserialize(demo_Inner* self, omni_buffer_t* buf);") != std::string::npos);
     ASSERT_TRUE(c_header.find("int demo_AllTypes_deserialize(demo_AllTypes* self, omni_buffer_t* buf);") != std::string::npos);
@@ -1649,6 +1648,56 @@ TEST(IdlCompilerTest, CodegenCCustomStructNamingIsForwardDeclSafe) {
     ASSERT_TRUE(header.find("struct demo_Item;") != std::string::npos);
     ASSERT_TRUE(header.find("struct demo_Item item;") != std::string::npos);
     ASSERT_TRUE(header.find("struct demo_Item* data;") != std::string::npos);
+
+    removeTree(dir);
+}
+
+TEST(IdlCompilerTest, CodegenPublicApiHasNoViewWriter) {
+    const std::string source =
+        "package demo;\n"
+        "struct Item {\n"
+        "    int32 id;\n"
+        "    string name;\n"
+        "    array<int32> tags;\n"
+        "}\n"
+        "topic ItemTopic { Item item; }\n"
+        "service ItemService {\n"
+        "    Item echoItem(Item item);\n"
+        "    string echoName(string name);\n"
+        "    publishes ItemTopic;\n"
+        "}";
+    AstFile ast;
+    ParseContext ctx;
+    std::string error;
+    ASSERT_TRUE(parseAndValidate(source, ast, ctx, error)) << error;
+
+    const char* dir = "/tmp/omni-idlc_test_public_api_simple";
+    ensureDir(dir);
+    CppCodeGen cpp_gen;
+    CCodeGen c_gen;
+    ASSERT_TRUE(cpp_gen.generate(ast, dir, "simple"));
+    ASSERT_TRUE(c_gen.generate(ast, dir, "simple"));
+
+    const std::string cpp_header = readFile(std::string(dir) + "/simple.h");
+    const std::string c_header = readFile(std::string(dir) + "/simple_c.h");
+
+    // 公共业务头只暴露 owned 结构/普通返回值；View/Writer 不得泄漏到用户 API。
+    ASSERT_EQ(cpp_header.find("View"), std::string::npos);
+    ASSERT_EQ(cpp_header.find("Writer"), std::string::npos);
+    ASSERT_EQ(c_header.find("View"), std::string::npos);
+    ASSERT_EQ(c_header.find("Writer"), std::string::npos);
+
+    ASSERT_NE(cpp_header.find("std::string name;"), std::string::npos);
+    ASSERT_NE(cpp_header.find("std::vector<int32_t> tags;"), std::string::npos);
+    ASSERT_NE(cpp_header.find("omnibinder::Result<Item> echoItem(const Item& item);"), std::string::npos);
+    ASSERT_NE(cpp_header.find("omnibinder::Result<std::string> echoName(const std::string& name);"), std::string::npos);
+
+    // C：owned struct + _init/_destroy，Proxy/Handler 使用借用指针输入。
+    ASSERT_NE(c_header.find("typedef struct demo_Item {"), std::string::npos);
+    ASSERT_NE(c_header.find("void demo_Item_init(demo_Item* self);"), std::string::npos);
+    ASSERT_NE(c_header.find("void demo_Item_destroy(demo_Item* self);"), std::string::npos);
+    ASSERT_NE(c_header.find("int  demo_ItemService_proxy_echo_item(demo_ItemService_proxy* p, const struct demo_Item* item, struct demo_Item* result);"), std::string::npos);
+    ASSERT_NE(c_header.find("void demo_ItemService_impl_echo_item(const struct demo_Item* item, struct demo_Item* result, void* user_data);"), std::string::npos);
 
     removeTree(dir);
 }

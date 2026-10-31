@@ -14,6 +14,10 @@ add_executable(test_buffer test_buffer.cpp)
 target_link_libraries(test_buffer PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_buffer COMMAND test_buffer)
 
+add_executable(test_buffer_view test_buffer_view.cpp)
+target_link_libraries(test_buffer_view PRIVATE omnibinder_static gtest gtest_main)
+add_test(NAME test_buffer_view COMMAND test_buffer_view)
+
 add_executable(test_message test_message.cpp)
 target_link_libraries(test_message PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_message COMMAND test_message)

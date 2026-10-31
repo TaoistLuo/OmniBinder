@@ -77,6 +77,10 @@ typedef struct omni_runtime_t  omni_runtime_t;
 typedef struct omni_buffer_t  omni_buffer_t;
 typedef struct omni_service_t omni_service_t;
 
+/* @brief 消息句柄：当前由 omni_buffer_t 承载 payload 所有权。
+ * @note 生成代码的 view 只在 message 存活期间有效。 */
+typedef omni_buffer_t omni_message_t;
+
 typedef struct omni_runtime_stats_t {
     uint64_t total_rpc_calls;
     uint64_t total_rpc_success;
@@ -98,11 +102,15 @@ typedef struct omni_runtime_stats_t {
 typedef int (*omni_invoke_callback_t)(uint32_t method_id,
     const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
 
-/* @brief 话题广播接收回调 */
+/* @brief 话题广播接收回调
+ * @note  data 仅在本次回调执行期间有效；不得 omni_buffer_destroy、不得跨回调保存。
+ *        user_data 归调用方所有，生命周期必须覆盖订阅期间。 */
 typedef void (*omni_topic_callback_t)(uint32_t topic_id,
     const omni_buffer_t* data, void* user_data);
 
-/* @brief 服务死亡通知回调 */
+/* @brief 服务死亡通知回调
+ * @note  service_name 仅在本次回调执行期间有效；需要留用请自行拷贝。
+ *        user_data 归调用方所有，生命周期必须覆盖订阅期间。 */
 typedef void (*omni_death_callback_t)(const char* service_name, void* user_data);
 
 /* @brief 服务实例信息（实例发现结果）
@@ -122,10 +130,17 @@ typedef void (*omni_instance_callback_t)(const omni_service_instance_t* info, vo
  * Buffer 接口
  * ============================================================ */
 
+/* @brief 创建空 buffer（调用者拥有；必须 omni_buffer_destroy） */
 omni_buffer_t* omni_buffer_create(void);
+/* @brief 从外部数据创建 buffer（会拷贝 data；调用后外部内存可立即释放）
+ * @return 新 buffer；失败返回 NULL。调用者必须 omni_buffer_destroy。 */
 omni_buffer_t* omni_buffer_create_from(const uint8_t* data, size_t len);
+/* @brief 销毁 buffer（NULL 安全；只释放 buffer 自身，不释放 omni_buffer_data 借用指针） */
 void           omni_buffer_destroy(omni_buffer_t* buf);
+/* @brief 重置读写位置与读错误状态；保留底层已分配内存，不释放 */
 void           omni_buffer_reset(omni_buffer_t* buf);
+/* @brief 借用内部数据指针；不得 omni_free。
+ * @note  buffer 再次写入/重置/销毁后指针失效，不可长期保存。 */
 const uint8_t* omni_buffer_data(const omni_buffer_t* buf);
 size_t         omni_buffer_size(const omni_buffer_t* buf);
 size_t         omni_buffer_remaining(const omni_buffer_t* buf);
@@ -169,7 +184,8 @@ char*    omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len);
 
 /* @brief 读取字节数组
  * @param[out] out_len 输出长度（可为 NULL，此时不返回长度）
- * @return 堆分配内存，调用者需要用 omni_free() 释放；失败返回 NULL（读越界或内存不足） */
+ * @return 堆分配内存，调用者需要用 omni_free() 释放；失败返回 NULL（读越界或内存不足）。
+ * @note  长度为 0 时返回 NULL 且 out_len=0，这是合法的空数组，不是错误。 */
 uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len);
 
 /* ============================================================
@@ -187,6 +203,10 @@ omni_service_t* omni_service_create(const char* name, uint32_t interface_id,
 /* @brief 销毁服务实例
  * @note  必须先 omni_runtime_unregister_service 注销，再销毁；runtime 内部以裸指针
  *        持有该 Service，注册状态下销毁会留下悬空指针。 */
+/* @brief 销毁 C 服务对象
+ * @note 必须先 omni_runtime_unregister_service() 再调用；否则运行期仍有悬空服务指针。
+ *       生成 stub 在创建时按值拷贝回调表；user_data 指针不拷贝，其生命周期必须
+ *       覆盖服务注册期间。 */
 void omni_service_destroy(omni_service_t* svc);
 
 /* @brief 取回创建服务时传入的 user_data（生成代码据此释放自有的 stub 上下文） */
@@ -229,6 +249,9 @@ void omni_service_set_instance_id(omni_service_t* svc, const char* instance_id);
  * ============================================================ */
 
 omni_runtime_t* omni_runtime_create(void);
+/* @brief 销毁 runtime
+ * @note 必须先 omni_runtime_stop()；不会释放调用者创建的 buffer、proxy、service。
+ *       请先销毁 proxy、注销并销毁 service，再销毁 runtime。 */
 void           omni_runtime_destroy(omni_runtime_t* client);
 
 int  omni_runtime_init(omni_runtime_t* client, const char* sm_host, uint16_t sm_port);
@@ -278,12 +301,18 @@ const char* omni_runtime_runtime_id(const omni_runtime_t* client);
 int  omni_runtime_register_service(omni_runtime_t* client, omni_service_t* svc);
 int  omni_runtime_unregister_service(omni_runtime_t* client, omni_service_t* svc);
 
-/* RPC 调用 */
+/* RPC 调用
+ * @note request/response 均为调用者创建的 omni_buffer_t：
+ *       - request 只读，调用期间有效；
+ *       - response 由运行时写入/覆盖，成功时内容有效；
+ *       - 无论成功失败，调用返回后都必须 omni_buffer_destroy(request/response)。
+ *       失败时不要读取 response 内容。 */
 int  omni_runtime_invoke(omni_runtime_t* client, const char* service_name,
          uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
          const omni_buffer_t* request, omni_buffer_t* response,
          uint32_t timeout_ms);
 
+/* @note request 只读、归调用者所有；调用返回后可 omni_buffer_destroy。 */
 int  omni_runtime_invoke_oneway(omni_runtime_t* client, const char* service_name,
          uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
          const omni_buffer_t* request);
@@ -381,14 +410,15 @@ void omni_runtime_stop_heartbeat(omni_runtime_t* client, const char* service_nam
  * @return 0 成功，<0 失败 */
 int  omni_runtime_publish_topic(omni_runtime_t* client, const char* topic_name,
          uint32_t idl_hash);
+/* @note data 只读、归调用者所有；调用返回后可 omni_buffer_destroy。 */
 int  omni_runtime_broadcast(omni_runtime_t* client, uint32_t topic_id,
          const omni_buffer_t* data);
 /* @brief 订阅 topic
  * @param[in] client            runtime 实例
  * @param[in] topic_name        topic 名称
  * @param[in] expected_idl_hash 订阅者期望的 topic IDL 哈希（由 omni-idlc 生成；0 表示不校验）
- * @param[in] callback          消息回调
- * @param[in] user_data         用户数据
+ * @param[in] callback          消息回调（data 仅在回调期间有效，不得释放/保存）
+ * @param[in] user_data         用户数据（归调用方所有，必须覆盖订阅期间）
  * @return 0 成功；发布者哈希与期望不一致时返回 ERR_IDL_MISMATCH 且不投递数据 */
 int  omni_runtime_subscribe_topic(omni_runtime_t* client, const char* topic_name,
          uint32_t expected_idl_hash, omni_topic_callback_t callback, void* user_data);

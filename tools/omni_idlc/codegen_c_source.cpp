@@ -79,7 +79,8 @@ static void emitValueSerialize(std::ostream& os, const TypeRef& type,
         return;
     }
     if (type.primitive == TYPE_STRING) {
-        os << indent << "omni_buffer_write_string(" << buf << ", " << expr << ", " << len_expr << ");\n";
+        os << indent << "omni_buffer_write_string(" << buf << ", " << expr
+           << ", " << expr << " ? (uint32_t)strlen(" << expr << ") : 0);\n";
         return;
     }
     if (type.primitive == TYPE_BYTES) {
@@ -102,7 +103,7 @@ static void emitValueDeserialize(std::ostream& os, const TypeRef& type,
         return;
     }
     if (type.primitive == TYPE_STRING) {
-        os << indent << expr << " = omni_buffer_read_string(" << buf << ", &" << len_expr << ");\n";
+        os << indent << expr << " = omni_buffer_read_string(" << buf << ", NULL);\n";
         os << indent << "if (!omni_buffer_read_ok(" << buf << ")) { " << fail_action << "; }\n";
         return;
     }
@@ -127,7 +128,15 @@ static void emitArrayTypeDefinitions(std::ostream& os, const TypeRef& type,
     os << "}\n\n";
 
     os << "void " << type_name << "_destroy(" << type_name << "* self) {\n";
-    if (element.primitive == TYPE_STRING || element.primitive == TYPE_BYTES) {
+    if (element.primitive == TYPE_STRING) {
+        os << "    uint32_t i = 0;\n";
+        os << "    if (self->data) {\n";
+        os << "        for (i = 0; i < self->count; ++i) {\n";
+        os << "            if (self->data[i]) { omni_free(self->data[i]); }\n";
+        os << "        }\n";
+        os << "        omni_free(self->data);\n";
+        os << "    }\n";
+    } else if (element.primitive == TYPE_BYTES) {
         os << "    uint32_t i = 0;\n";
         os << "    if (self->data) {\n";
         os << "        for (i = 0; i < self->count; ++i) {\n";
@@ -286,13 +295,13 @@ void CCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std::s
 
 void CCodeGen::genFieldSerialize(const FieldDef& f, const std::string& obj, std::ostream& os) {
     std::string name = obj + f.name;
-    std::string len_name = isCStringLike(f.type) ? name + "_len" : "0";
+    std::string len_name = f.type.primitive == TYPE_BYTES ? name + "_len" : "0";
     emitValueSerialize(os, f.type, name, len_name, "buf", pkg_, "    ");
 }
 
 void CCodeGen::genFieldDeserialize(const FieldDef& f, const std::string& obj, std::ostream& os) {
     std::string name = obj + f.name;
-    std::string len_name = isCStringLike(f.type) ? name + "_len" : "0";
+    std::string len_name = f.type.primitive == TYPE_BYTES ? name + "_len" : "0";
     emitValueDeserialize(os, f.type, name, len_name, "buf", pkg_, "    ", "goto fail");
 }
 
@@ -335,15 +344,15 @@ static void emitStubParamDeserialize(std::ostream& os, const MethodDef& m, const
         os << "        " << ptype << " " << m.param.name << ";\n";
         os << "        " << ppfx << "_init(&" << m.param.name << ");\n";
         os << "        if (!" << ppfx << "_deserialize(&" << m.param.name << ", req)) { " << ppfx << "_destroy(&" << m.param.name << "); omni_buffer_destroy(req); return OMNI_ERR_DESERIALIZE; }\n";
-    } else if (isCStringLike(m.param.type)) {
+    } else if (m.param.type.primitive == TYPE_STRING) {
+        std::string ptype = cTypeName(m.param.type, pkg);
+        os << "        " << ptype << " " << m.param.name << " = omni_buffer_read_string(req, NULL);\n";
+        os << "        if (!omni_buffer_read_ok(req)) { if (" << m.param.name << ") omni_free(" << m.param.name << "); omni_buffer_destroy(req); return OMNI_ERR_DESERIALIZE; }\n";
+    } else if (m.param.type.primitive == TYPE_BYTES) {
         std::string ptype = cTypeName(m.param.type, pkg);
         os << "        " << ptype << " " << m.param.name << " = NULL;\n";
         os << "        uint32_t " << m.param.name << "_len = 0;\n";
-        if (m.param.type.primitive == TYPE_STRING) {
-            os << "        " << m.param.name << " = omni_buffer_read_string(req, &" << m.param.name << "_len);\n";
-        } else {
-            os << "        " << m.param.name << " = omni_buffer_read_bytes(req, &" << m.param.name << "_len);\n";
-        }
+        os << "        " << m.param.name << " = omni_buffer_read_bytes(req, &" << m.param.name << "_len);\n";
         os << "        if (!omni_buffer_read_ok(req)) { if (" << m.param.name << ") omni_free(" << m.param.name << "); omni_buffer_destroy(req); return OMNI_ERR_DESERIALIZE; }\n";
     } else {
         std::string ptype = cTypeName(m.param.type, pkg);
@@ -367,7 +376,9 @@ static void emitStubResultDecl(std::ostream& os, const MethodDef& m, const std::
         std::string rpfx = cDestroyPrefix(m.return_type, pkg);
         os << "        " << rtype << " result;\n";
         os << "        " << rpfx << "_init(&result);\n";
-    } else if (isCStringLike(m.return_type)) {
+    } else if (m.return_type.primitive == TYPE_STRING) {
+        os << "        " << cTypeName(m.return_type, pkg) << " result = NULL;\n";
+    } else if (m.return_type.primitive == TYPE_BYTES) {
         os << "        " << cTypeName(m.return_type, pkg) << " result = NULL;\n";
         os << "        uint32_t result_len = 0;\n";
     } else {
@@ -382,7 +393,7 @@ static void emitStubCallbackCall(std::ostream& os, const MethodDef& m) {
     if (m.has_param) {
         if (isCompositePointerType(m.param.type)) {
             os << "&" << m.param.name;
-        } else if (isCStringLike(m.param.type)) {
+        } else if (m.param.type.primitive == TYPE_BYTES) {
             os << m.param.name << ", " << m.param.name << "_len";
         } else {
             os << m.param.name;
@@ -391,7 +402,7 @@ static void emitStubCallbackCall(std::ostream& os, const MethodDef& m) {
     }
     if (!m.return_type.isVoid()) {
         if (has_args) os << ", ";
-        if (isCStringLike(m.return_type)) {
+        if (m.return_type.primitive == TYPE_BYTES) {
             os << "&result, &result_len";
         } else {
             os << "&result";
@@ -411,12 +422,11 @@ static void emitStubResultSerialize(std::ostream& os, const MethodDef& m, const 
         std::string rpfx = cDestroyPrefix(m.return_type, pkg);
         os << "        " << rpfx << "_serialize(&result, response);\n";
         os << "        " << rpfx << "_destroy(&result);\n";
-    } else if (isCStringLike(m.return_type)) {
-        if (m.return_type.primitive == TYPE_STRING) {
-            os << "        omni_buffer_write_string(response, result, result_len);\n";
-        } else {
-            os << "        omni_buffer_write_bytes(response, result, result_len);\n";
-        }
+    } else if (m.return_type.primitive == TYPE_STRING) {
+        os << "        omni_buffer_write_string(response, result, result ? (uint32_t)strlen(result) : 0);\n";
+        os << "        if (result) omni_free(result);\n";
+    } else if (m.return_type.primitive == TYPE_BYTES) {
+        os << "        omni_buffer_write_bytes(response, result, result_len);\n";
         os << "        if (result) omni_free(result);\n";
     } else {
         emitPrimitiveWrite(os, m.return_type.primitive, "result", "response", "        ");
@@ -678,12 +688,11 @@ static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const
         if (isCompositePointerType(m.param.type)) {
             std::string ppfx = cDestroyPrefix(m.param.type, pkg);
             os << "    " << ppfx << "_serialize(" << m.param.name << ", req);\n";
-        } else if (isCStringLike(m.param.type)) {
-            if (m.param.type.primitive == TYPE_STRING) {
-                os << "    omni_buffer_write_string(req, " << m.param.name << ", " << m.param.name << "_len);\n";
-            } else {
-                os << "    omni_buffer_write_bytes(req, " << m.param.name << ", " << m.param.name << "_len);\n";
-            }
+        } else if (m.param.type.primitive == TYPE_STRING) {
+            os << "    omni_buffer_write_string(req, " << m.param.name << ", "
+               << m.param.name << " ? (uint32_t)strlen(" << m.param.name << ") : 0);\n";
+        } else if (m.param.type.primitive == TYPE_BYTES) {
+            os << "    omni_buffer_write_bytes(req, " << m.param.name << ", " << m.param.name << "_len);\n";
         } else {
             emitPrimitiveWrite(os, m.param.type.primitive, m.param.name, "req", "    ");
         }
@@ -718,12 +727,11 @@ static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const
             std::string rpfx = cDestroyPrefix(m.return_type, pkg);
             os << "        " << rpfx << "_init(result);\n";
             os << "        if (!" << rpfx << "_deserialize(result, resp)) { " << rpfx << "_destroy(result); ret = OMNI_ERR_DESERIALIZE; }\n";
-        } else if (isCStringLike(m.return_type)) {
-            if (m.return_type.primitive == TYPE_STRING) {
-                os << "        *result = omni_buffer_read_string(resp, result_len);\n";
-            } else {
-                os << "        *result = omni_buffer_read_bytes(resp, result_len);\n";
-            }
+        } else if (m.return_type.primitive == TYPE_STRING) {
+            os << "        *result = omni_buffer_read_string(resp, NULL);\n";
+            os << "        if (!omni_buffer_read_ok(resp)) { if (*result) omni_free(*result); *result = NULL; ret = OMNI_ERR_DESERIALIZE; }\n";
+        } else if (m.return_type.primitive == TYPE_BYTES) {
+            os << "        *result = omni_buffer_read_bytes(resp, result_len);\n";
             os << "        if (!omni_buffer_read_ok(resp)) { if (*result) omni_free(*result); *result = NULL; if (result_len) *result_len = 0; ret = OMNI_ERR_DESERIALIZE; }\n";
         } else {
             emitPrimitiveRead(os, m.return_type.primitive, "*result", "resp", "        ");

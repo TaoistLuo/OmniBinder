@@ -133,6 +133,73 @@ private:
 } // namespace omnibinder
 ```
 
+### 2.1.1 StringView / ByteView / BufferView（C++11 零拷贝）
+
+```cpp
+namespace omnibinder {
+
+class StringView {
+public:
+    StringView() noexcept;
+    StringView(const char* data, size_t size) noexcept;
+    const char* data() const noexcept;
+    size_t size() const noexcept;
+};
+
+class ByteView {
+public:
+    ByteView() noexcept;
+    ByteView(const uint8_t* data, size_t size) noexcept;
+    const uint8_t* data() const noexcept;
+    size_t size() const noexcept;
+};
+
+class BufferView {
+public:
+    bool tryReadStringView(const char*& data, uint32_t& size) noexcept;
+    bool tryReadBytesView(const uint8_t*& data, uint32_t& size) noexcept;
+    bool trySetReadPosition(size_t pos) noexcept;
+};
+
+} // namespace omnibinder
+```
+
+- `StringView` / `ByteView` 不拥有、不分配、不释放，不保证以 `\0` 结尾；
+- `tryReadStringView` / `tryReadBytesView` 返回指向原 buffer 的指针；
+- 这些类型是运行时协议解析的辅助原语，不会出现在生成的业务头文件中；
+- 生成的 C++ 业务 API 使用普通 owned 结构（`std::string` / `std::vector`），由 RAII 管理。
+
+### 2.1.2 Result<T>（C++ Proxy 调用结果）
+
+```cpp
+namespace omnibinder {
+template <typename T>
+class Result {
+public:
+    bool ok() const;
+    explicit operator bool() const;
+    int error() const;
+    T& value();
+    const T& value() const;
+};
+}
+```
+
+生成的非 void Proxy 方法返回 `omnibinder::Result<T>`：
+
+```cpp
+auto result = proxy.EchoStatus(status);
+if (!result) {
+    printf("failed: %d\n", result.error());
+    return;
+}
+const common::StatusResponse& out = result.value();
+```
+
+- 返回值与错误码绑定，不使用 per-proxy `lastError()`；
+- 失败时 `value()` 是默认对象，不应使用；
+- void 方法返回 `int`：0 成功，负值失败。
+
 ### 2.2 OmniRuntime（客户端核心类）
 
 `include/omnibinder/runtime.h`
@@ -1115,8 +1182,47 @@ OMNI_LOG_VERBOSE(tag, ...)
 - `data_send_incomplete`
 - `data_send_deadline_expired`
 - `data_connection_lost`
+- `runtime_session_established`
+- `data_session_established`
+- `sm_heartbeat_timeout`
+- `session_hello_timeout`
+- `session_timeout`
 
 ## 6. C 语言 API
+
+### 6.0 内存与所有权速查
+
+C API 需要手动管理内存。完整规则（含失败路径、回调借用指针、thread-local 返回值）
+见 [内存使用说明](memory-guide.md)。
+
+**C 生成结构体的 string/bytes 区别：**
+
+- `string` → `char*`，NUL 结尾，不需要 `_len`，用 `omni_strdup()` 复制；
+- `bytes` → `uint8_t* + uint32_t _len`，二进制安全；
+- `array<string>` → `char**`，无 lens；
+- `array<bytes>` → `uint8_t** + uint32_t* lens`。
+
+最常用的四条：
+
+1. **创建出来的 `omni_buffer_t` 必须 `omni_buffer_destroy()`**，包括 `omni_runtime_invoke`
+   的 request 和 response；`omni_buffer_create_from()` 会拷贝输入，外部数据随后可释放。
+2. **库返回的堆内存用 `omni_free()`**：`omni_buffer_read_string/read_bytes()`、
+   生成 proxy 返回的 `string/bytes`、`omni_strdup()`。不要用系统 `free()`。
+3. **生成的 struct / 数组 / topic 用 `xxx_destroy()`**：递归释放嵌套动态字段，可重复调用；
+   不要逐个裸 `omni_free`。
+4. **回调参数是借用指针，不能释放、不能跨回调保存**：topic `data`、death `service_name`、
+   `omni_service_instance_t` 字段、生成 topic 回调的 `const T* msg` 都只在回调期间有效。
+
+| 对象 | 创建 | 释放 | 备注 |
+|---|---|---|---|
+| `omni_runtime_t` | `omni_runtime_create()` | `omni_runtime_stop()` → `omni_runtime_destroy()` | 先销毁 proxy / 注销 service |
+| `omni_service_t` | `xxx_stub_create_from_callbacks()` | `xxx_stub_destroy()` | 先 `omni_runtime_unregister_service()` |
+| C proxy | `xxx_proxy_init()` | `xxx_proxy_destroy()` | 内部退订/断开并释放订阅上下文 |
+| `omni_buffer_t` | `omni_buffer_create/create_from` | `omni_buffer_destroy()` | `destroy(NULL)` 安全 |
+| 生成 struct/数组/topic | `xxx_init()` | `xxx_destroy()` | 幂等；递归释放字段 |
+| thread-local 字符串 | `omni_runtime_host_id/runtime_id/get_register_host/service_connection_key` | **不释放** | 到下一次调用对应函数前有效，需立即拷贝 |
+| 回调参数 | 框架 | **不释放** | 仅回调期间有效 |
+
 
 > **状态：已完全实现** ✅  
 > **头文件**：`include/omnibinder/omnibinder_c.h`  
@@ -1251,6 +1357,35 @@ char*    omni_buffer_read_string(omni_buffer_t* buf, uint32_t* out_len);
 /* 返回堆分配内存，调用者需用 omni_free() 释放；out_len 不可为 NULL */
 uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len);
 ```
+
+### 6.2.1 零拷贝 BufferView API
+
+> 头文件：`#include <omnibinder/omnibinder_c_view.h>`。该接口属于运行时协议解析辅助能力，
+> 不会出现在生成的业务头文件中。
+
+```c
+typedef struct omni_buffer_view_t {
+    const uint8_t* data;
+    size_t         size;
+    size_t         pos;
+    int            ok;
+} omni_buffer_view_t;
+
+void omni_buffer_view_init(omni_buffer_view_t* view, const uint8_t* data, size_t len);
+void omni_buffer_view_from_buffer(omni_buffer_view_t* view, const omni_buffer_t* buf);
+
+uint32_t omni_buffer_view_read_uint32(omni_buffer_view_t* view);
+/* 返回 payload 内指针，不分配；失败返回 NULL 且 pos 不前进 */
+const char*    omni_buffer_view_read_string(omni_buffer_view_t* view, uint32_t* out_len);
+const uint8_t* omni_buffer_view_read_bytes(omni_buffer_view_t* view, uint32_t* out_len);
+int            omni_buffer_view_ok(const omni_buffer_view_t* view);
+size_t         omni_buffer_view_position(const omni_buffer_view_t* view);
+int            omni_buffer_view_set_position(omni_buffer_view_t* view, size_t pos);
+```
+
+> 生成代码的公共业务 API 使用 owned struct（`xxx_init()` / `xxx_destroy()`），
+> 不会生成 `XxxView` / `XxxWriter`。`omni_buffer_view_t` 仅作为运行时协议解析的
+> 内部/辅助接口存在。
 
 ### 6.3 Runtime API
 
@@ -1388,6 +1523,14 @@ const char* omni_service_get_register_host(const omni_service_t* svc);
 /* 声明服务实例标识（同名多实例必须各自不同；须在 register 之前调用） */
 void        omni_service_set_instance_id(omni_service_t* svc, const char* instance_id);
 ```
+
+C 服务端内存语义：
+
+- **typed 生成 handler 返回 `void`**：无法通过返回值传播错误；需要错误码时在 IDL 响应结构里放状态字段，或改用非 typed 的 `omni_invoke_callback_t`（返回 `int`）。
+- typed handler 的入参由 stub 反序列化，handler 返回后由 stub 自动释放；业务**不要** `free`、不要保存入参指针。
+- typed handler 的 `result` 由 stub `_init`/序列化/`_destroy` 管理，业务**不要**手动销毁；动态字段由业务用 `omni_malloc` 申请，stub 序列化后释放。
+- 非 typed `omni_invoke_callback_t` 的 `request`/`response` 都是框架提供的 buffer：业务只读 `request`、写 `response`，**不要** `omni_buffer_destroy`，也不要保存到回调之外。
+- `user_data` 归业务所有，生命周期必须覆盖服务注册期间。
 
 ### 6.5 工具函数
 

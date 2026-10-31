@@ -161,12 +161,12 @@ bool CppCodeGen::generate(const AstFile& ast, const std::string& output_dir,
 
     std::string header_path = output_dir + "/" + filename + ".h";
     std::string source_path = output_dir + "/" + filename + ".cpp";
-    
+
     std::ofstream hdr(header_path.c_str());
     std::ofstream src(source_path.c_str());
-    
+
     if (!hdr.is_open() || !src.is_open()) return false;
-    
+
     generateHeader(ast, hdr, filename);
     generateSource(ast, src, filename);
     return true;
@@ -180,13 +180,14 @@ void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std:
                             filename,
                             "Auto-generated OmniBinder C++ declarations",
                             "Generated from OmniBinder IDL for C++ declarations and client/server bindings.");
-    
+
     os << "#ifndef " << guard << "\n";
     os << "#define " << guard << "\n\n";
-    os << "#include <omnibinder/omnibinder.h>\n";
+    os << "#include <omnibinder/service.h>\n";
     os << "#include <omnibinder/proxy_base.h>\n";
+    os << "#include <omnibinder/result.h>\n";
     os << "#include <string>\n#include <vector>\n#include <functional>\n\n";
-    
+
     // 生成被导入文件的 #include
     for (size_t i = 0; i < ast.imports.size(); ++i) {
         // 从 import 路径提取文件名
@@ -196,16 +197,16 @@ void CppCodeGen::generateHeader(const AstFile& ast, std::ostream& os, const std:
         os << "#include \"" << imp << ".h\"\n";
     }
     if (!ast.imports.empty()) os << "\n";
-    
+
     os << "namespace " << pkg_ << " {\n\n";
-    
+
     for (size_t i = 0; i < ast.structs.size(); ++i) genStruct(ast.structs[i], os);
     for (size_t i = 0; i < ast.topics.size(); ++i) genTopic(ast.topics[i], ast, os);
     for (size_t i = 0; i < ast.services.size(); ++i) {
         genStub(ast.services[i], os);
         genProxy(ast.services[i], os);
     }
-    
+
     os << "} // namespace " << pkg_ << "\n\n";
     os << "#endif // " << guard << "\n";
 }
@@ -253,7 +254,7 @@ void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
     os << "    virtual ~" << svc.name << "Stub() {}\n\n";
     // serviceName() 由基类默认返回构造名，无需在此重复生成
     os << "    const omnibinder::InterfaceInfo& interfaceInfo() const override;\n\n";
-    
+
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
         os << "    virtual " << cppTypeName(m.return_type) << " " << m.name << "(";
@@ -266,12 +267,12 @@ void CppCodeGen::genStub(const ServiceDef& svc, std::ostream& os) {
         }
         os << ") = 0;\n";
     }
-    
+
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
         os << "    void Publish" << svc.publishes[i] << "();\n";
         os << "    void Broadcast" << svc.publishes[i] << "(const " << svc.publishes[i] << "& msg);\n";
     }
-    
+
     os << "\nprotected:\n";
     os << "    int onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) override;\n";
     os << "};\n\n";
@@ -282,10 +283,12 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     os << "public:\n";
     os << "    explicit " << svc.name << "Proxy(omnibinder::OmniRuntime& runtime)\n";
     os << "        : ServiceProxyBase(runtime, \"" << svc.name << "\") {}\n\n";
-    
+
     for (size_t i = 0; i < svc.methods.size(); ++i) {
         const MethodDef& m = svc.methods[i];
-        os << "    " << (m.return_type.isVoid() ? "void" : "int") << " " << m.name << "(";
+        os << "    " << (m.return_type.isVoid() ? "int" :
+               ("omnibinder::Result<" + cppTypeName(m.return_type) + ">"))
+           << " " << m.name << "(";
         if (m.has_param) {
             if (isReferenceType(m.param.type)) {
                 os << "const " << cppTypeName(m.param.type) << "& " << m.param.name;
@@ -293,25 +296,19 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
                 os << cppTypeName(m.param.type) << " " << m.param.name;
             }
         }
-        if (!m.return_type.isVoid()) {
-            if (m.has_param) {
-                os << ", ";
-            }
-            os << cppTypeName(m.return_type) << "& out";
-        }
         os << ");\n";
     }
-    
+
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
         os << "    void Subscribe" << svc.publishes[i] << "(const std::function<void(const " << svc.publishes[i] << "&)>& callback);\n";
         os << "    void Subscribe" << svc.publishes[i] << "WithSource(const std::function<void(const std::string& host_id, const std::string& instance_id, const " << svc.publishes[i] << "&)>& callback);\n";
         os << "    void Subscribe" << svc.publishes[i] << "Instance(const std::string& host_id, const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << svc.publishes[i] << "&)>& callback);\n";
     }
-    
+
     os << "\n    // Inherited from ServiceProxyBase: connect(), connect(host_id, instance_id),\n";
     os << "    //   setInstance(), disconnect(), isConnected(), enableAutoReconnect(),\n";
     os << "    //   startHeartbeat(), stopHeartbeat(), OnServiceDied()\n";
-    
+
     os << "};\n\n";
 }
 
@@ -323,31 +320,31 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
                             "Generated from OmniBinder IDL for C++ serialization and proxy/stub implementation glue.");
     os << "#include \"" << filename << ".h\"\n";
     os << "\nnamespace " << pkg_ << " {\n\n";
-    
+
     // 结构体序列化/反序列化
     for (size_t i = 0; i < ast.structs.size(); ++i) {
         const StructDef& s = ast.structs[i];
         os << "bool " << s.name << "::serialize(omnibinder::Buffer& buf) const {\n";
         genSerialize(s.fields, "", os);
         os << "    return true;\n}\n\n";
-        
+
         os << "bool " << s.name << "::deserialize(omnibinder::Buffer& buf) {\n";
         genDeserialize(s.fields, "", os);
         os << "    return true;\n}\n\n";
     }
-    
+
     // topic 序列化/反序列化
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         const TopicDef& t = ast.topics[i];
         os << "bool " << t.name << "::serialize(omnibinder::Buffer& buf) const {\n";
         genSerialize(t.fields, "", os);
         os << "    return true;\n}\n\n";
-        
+
         os << "bool " << t.name << "::deserialize(omnibinder::Buffer& buf) {\n";
         genDeserialize(t.fields, "", os);
         os << "    return true;\n}\n\n";
     }
-    
+
     // topic IDL hash 常量（用于运行时 IDL 兼容性校验）
     for (size_t i = 0; i < ast.topics.size(); ++i) {
         const TopicDef& t = ast.topics[i];
@@ -356,15 +353,15 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
            << std::hex << topic_hash << std::dec << "u;\n";
     }
     if (!ast.topics.empty()) os << "\n";
-    
+
     // 服务 Stub 实现
     for (size_t si = 0; si < ast.services.size(); ++si) {
         const ServiceDef& svc = ast.services[si];
         uint32_t iface_id = fnv1a_hash(pkg_ + "." + svc.name);
-        
+
         os << "static omnibinder::InterfaceInfo s_" << svc.name << "_info;\n";
         os << "static bool s_" << svc.name << "_info_init = false;\n\n";
-        
+
         os << "const omnibinder::InterfaceInfo& " << svc.name << "Stub::interfaceInfo() const {\n";
         os << "    if (!s_" << svc.name << "_info_init) {\n";
         os << "        s_" << svc.name << "_info.interface_id = 0x" << std::hex << iface_id << std::dec << "u;\n";
@@ -372,14 +369,14 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
-            
+
             // 生成参数类型字符串
             std::string param_type_str = m.has_param ? cppTypeName(m.param.type) : "";
             // 生成返回类型字符串
             std::string return_type_str = cppTypeName(m.return_type);
-            
+
             uint32_t idl_hash = computeMethodHash(m, ast);
-            os << "        { omnibinder::MethodInfo mi(0x" 
+            os << "        { omnibinder::MethodInfo mi(0x"
                << std::hex << mid << std::dec << "u, \"" << m.name << "\", \""
                << param_type_str << "\", \"" << return_type_str
                << "\"); mi.idl_hash = 0x" << std::hex << idl_hash << std::dec
@@ -387,7 +384,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         }
         os << "        s_" << svc.name << "_info_init = true;\n";
         os << "    }\n    return s_" << svc.name << "_info;\n}\n\n";
-        
+
         os << "int " << svc.name << "Stub::onInvoke(uint32_t method_id, const omnibinder::Buffer& request, omnibinder::Buffer& response) {\n";
             os << "    omnibinder::Buffer req(request.data(), request.size());\n";
             os << "    switch (method_id) {\n";
@@ -416,7 +413,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "        return 0;\n    }\n";
         }
         os << "    default: return static_cast<int>(omnibinder::ErrorCode::ERR_METHOD_NOT_FOUND);\n    }\n}\n\n";
-        
+
         for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
             const std::string& topic = svc.publishes[pi];
             uint32_t tid = fnv1a_hash(topic);
@@ -429,13 +426,19 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
         os << "    if (runtime()) runtime()->broadcast(0x" << std::hex << tid << std::dec << "u, buf);\n";
             os << "}\n\n";
         }
-        
+
         // Proxy 实现 - 仅方法（connect/disconnect 继承自 ServiceProxyBase）
         for (size_t mi = 0; mi < svc.methods.size(); ++mi) {
             const MethodDef& m = svc.methods[mi];
             uint32_t mid = fnv1a_hash(m.name);
             uint32_t idl_hash = computeMethodHash(m, ast);
-            os << (m.return_type.isVoid() ? "void " : "int ") << svc.name << "Proxy::" << m.name << "(";
+            const std::string ret_type = cppTypeName(m.return_type);
+            if (m.return_type.isVoid()) {
+                os << "int ";
+            } else {
+                os << "omnibinder::Result<" << ret_type << "> ";
+            }
+            os << svc.name << "Proxy::" << m.name << "(";
             if (m.has_param) {
                 if (isReferenceType(m.param.type)) {
                     os << "const " << cppTypeName(m.param.type) << "& " << m.param.name;
@@ -443,36 +446,33 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
                     os << cppTypeName(m.param.type) << " " << m.param.name;
                 }
             }
-            if (!m.return_type.isVoid()) {
-                if (m.has_param) {
-                    os << ", ";
-                }
-            os << cppTypeName(m.return_type) << "& out";
-            }
             os << ") {\n";
             os << "    omnibinder::Buffer req";
             if (!m.return_type.isVoid()) os << ", resp";
             os << ";\n";
             if (m.has_param) {
                 const std::string fail_stmt = m.return_type.isVoid()
-                    ? "return;"
-                    : "return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE);";
+                    ? "{ return static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE); }"
+                    : "{ return omnibinder::Result<" + ret_type
+                        + ">(static_cast<int>(omnibinder::ErrorCode::ERR_SERIALIZE)); }";
                 emitSerializeValue(m.param.type, m.param.name, "req", "    ", 0,
                                    fail_stmt, os);
             }
             if (m.return_type.isVoid()) {
-                os << "    runtime_.invokeOneWay(connectionKey(), 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
+                os << "    return runtime_.invokeOneWay(connectionKey(), 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req);\n";
             } else {
                 os << "    int ret = runtime_.invoke(connectionKey(), 0x" << std::hex << iface_id << std::dec << "u, 0x" << std::hex << mid << std::dec << "u, 0x" << std::hex << idl_hash << std::dec << "u, req, resp, 0);\n";
-                os << "    if (ret != 0) return ret;\n";
+                os << "    if (ret != 0) return omnibinder::Result<" << ret_type << ">(ret);\n";
+                os << "    " << ret_type << " out;\n";
                 emitDeserializeValue(m.return_type, "out", "resp", "    ", 0,
-                                     "return static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE);",
+                                     "{ return omnibinder::Result<" + ret_type
+                                         + ">(static_cast<int>(omnibinder::ErrorCode::ERR_DESERIALIZE)); }",
                                      os);
-                os << "    return 0;\n";
+                os << "    return omnibinder::Result<" << ret_type << ">(0, out);\n";
             }
             os << "}\n\n";
         }
-        
+
         for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
             const std::string& topic = svc.publishes[pi];
             os << "void " << svc.name << "Proxy::Subscribe" << topic << "(const std::function<void(const " << topic << "&)>& callback) {\n";
@@ -500,7 +500,7 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "    }, nullptr);\n}\n\n";
         }
     }
-    
+
     os << "} // namespace " << pkg_ << "\n";
 }
 

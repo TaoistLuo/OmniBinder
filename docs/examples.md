@@ -255,29 +255,24 @@ endif()
 典型调用形态如下：
 
 ```cpp
+// 非 void Proxy 方法返回 omnibinder::Result<T>；示例为简洁省略错误检查。
 omnibinder::OmniRuntime runtime;
 runtime.init("127.0.0.1", 9900);
 
 demo::SensorServiceProxy proxy(runtime);
 proxy.connect();
 
-bool bool_out = false;
-proxy.EchoBool(false, bool_out);
+bool bool_out = proxy.EchoBool(false).value();
 
-int32_t int_out = 0;
-proxy.EchoInt32(32, int_out);
+int32_t int_out = proxy.EchoInt32(32).value();
 
-common::StatusResponse status_out;
-proxy.EchoStatus(status, status_out);
+common::StatusResponse status_out = proxy.EchoStatus(status).value();
 
-demo::SensorEnvelope envelope_out;
-proxy.EchoEnvelope(envelope, envelope_out);
+demo::SensorEnvelope envelope_out = proxy.EchoEnvelope(envelope).value();
 
-std::vector<int32_t> ids_out;
-proxy.EchoIdArray(ids, ids_out);
+std::vector<int32_t> ids_out = proxy.EchoIdArray(ids).value();
 
-demo::SensorArrayBundle bundle_out;
-proxy.EchoBundle(bundle, bundle_out);
+demo::SensorArrayBundle bundle_out = proxy.EchoBundle(bundle).value();
 
 proxy.SubscribeSensorUpdate([](const demo::SensorUpdate& msg) { ... });
 proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
@@ -285,8 +280,7 @@ proxy.SubscribeAsyncResultReady([](const demo::AsyncResultReady& msg) { ... });
 demo::AsyncRequest req;
 req.request_id = 42;
 req.client_tag = "cpp-client";
-common::StatusResponse ack;
-proxy.RequestLatestDataAsync(req, ack);
+common::StatusResponse ack = proxy.RequestLatestDataAsync(req);
 ```
 
 完整代码请直接以 `examples/example_cpp/sensor_client.cpp` 为准。
@@ -354,7 +348,7 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 - 继承 Stub 基类 → 直接实现生成的 `demo_SensorService_impl_xxx(...)` 接口
 - `demo_SensorService_stub_create(user_data)` 会自动绑定这些实现，不需要手动维护回调表
 - `service.BroadcastSensorUpdate(msg)` → `demo_SensorService_broadcast_sensor_update(runtime, &msg)`
-- `std::string` → `char*` + `_len` 字段，需要手动用 `omni_malloc()` / `omni_free()` 管理
+- `std::string` → `char*`（NUL 结尾）；`bytes` 才是 `uint8_t* + _len`
 - 结构体需要 `_init()` / `_destroy()` 管理生命周期
 - 内存申请/释放的完整规则（谁分配、谁释放、借用有效期、常见错误）见 [内存使用说明](memory-guide.md)
 
@@ -402,9 +396,9 @@ demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 
 与 C++ 版本的关键区别：
 - `SensorServiceProxy proxy(client)` → `demo_SensorService_proxy proxy; demo_SensorService_proxy_init(&proxy, runtime)`
-- `proxy.GetLatestData(data)` 使用 C++ 输出引用 → `demo_SensorService_proxy_get_latest_data(&proxy, &data)` 使用 C 输出指针
+- `proxy.GetLatestData()` 直接返回值 → `demo_SensorService_proxy_get_latest_data(&proxy, &data)` 使用 C 输出指针
 - `proxy.SubscribeSensorUpdate([](auto& msg){...})` → `demo_SensorService_proxy_subscribe_sensor_update(&proxy, callback, user_data)`
-- 所有结构体需要 `_init()` 初始化、`_destroy()` 释放
+- 输出结构体需要 `_init()` 初始化、`_destroy()` 释放；**请求输入是借用语义**，字符串字段可直接指向字面量，不要为输入调用 `omni_strdup()` 或 `_destroy()`
 
 ## 7. omni-cli 使用示例
 
@@ -1124,8 +1118,7 @@ int main() {
     myapp::Request req;
     req.id = 1;
     req.name = "hello";
-    myapp::Response resp;
-    proxy.HandleRequest(req, resp);
+    myapp::Response resp = proxy.HandleRequest(req);
     printf("Response: code=%d message=%s\n", resp.code, resp.message.c_str());
 
     // 订阅广播
@@ -1219,17 +1212,17 @@ omnic_generate(
 #include <time.h>
 
 static volatile int g_running = 1;
-static void signal_handler(int sig) { (void)sig; g_running = 0; }
+static void signal_handler(int sig) {
+    (void)sig;
+    g_running = 0;
+}
 
 void myapp_MyService_impl_handle_request(const myapp_Request* req,
                                          myapp_Response* result, void* user_data) {
     (void)user_data;
-    printf("[Server] HandleRequest: id=%d name=%.*s\n",
-           req->id, req->name_len, req->name);
+    printf("[Server] HandleRequest: id=%d name=%s\n", req->id, req->name);
     result->code = 0;
-    result->message = (char*)omni_malloc(3);
-    memcpy(result->message, "OK", 3);
-    result->message_len = 2;
+    result->message = omni_strdup("OK");
 }
 
 void myapp_MyService_impl_notify(int32_t event_id, void* user_data) {
@@ -1275,11 +1268,14 @@ int main(void) {
 #include <signal.h>
 
 static volatile int g_running = 1;
-static void signal_handler(int sig) { (void)sig; g_running = 0; }
+static void signal_handler(int sig) {
+    (void)sig;
+    g_running = 0;
+}
 
 static void on_status_update(const myapp_StatusUpdate* msg, void* user_data) {
     (void)user_data;
-    printf("[Broadcast] id=%d status=%.*s\n", msg->id, msg->status_len, msg->status);
+    printf("[Broadcast] id=%d status=%s\n", msg->id, msg->status);
 }
 
 static void on_service_died(void* user_data) {
@@ -1306,17 +1302,15 @@ int main(void) {
     myapp_Request req;
     myapp_Request_init(&req);
     req.id = 1;
-    req.name = (char*)omni_malloc(6);
-    memcpy(req.name, "hello", 6);
-    req.name_len = 5;
+    req.name = (char*)"hello";   /* 借用字面量，不 omni_strdup */
 
     myapp_Response resp;
     myapp_Response_init(&resp);
     if (myapp_MyService_proxy_handle_request(&proxy, &req, &resp) == 0) {
-        printf("Response: code=%d message=%.*s\n", resp.code, resp.message_len, resp.message);
+        printf("Response: code=%d message=%s\n", resp.code, resp.message);
     }
-    myapp_Request_destroy(&req);
     myapp_Response_destroy(&resp);
+    /* req 是借用输入：不要 destroy */
 
     /* 订阅广播 */
     myapp_MyService_proxy_subscribe_status_update(&proxy, on_status_update, NULL);
@@ -1397,9 +1391,9 @@ ${CC:-gcc} -std=c99 -I$OMNIBINDER_DIR/include \
 | 库链接 | `OmniBinder::omnibinder_static` | 同左（需声明 CXX 语言） |
 | 实现服务 | 继承 `XxxStub`，重写虚函数 | 实现生成的 `xxx_impl_*` 接口，并调用 `xxx_stub_create(user_data)` |
 | 调用服务 | `XxxProxy proxy(runtime)` | `xxx_proxy proxy; xxx_proxy_init(&proxy, runtime)` |
-| RPC 调用 | `proxy.Method(req, resp)` | `xxx_proxy_method(&proxy, &req, &resp)` |
+| RPC 调用 | `Return r = proxy.Method(req)` | `xxx_proxy_method(&proxy, &req, &resp)` |
 | 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(runtime, &msg)` |
 | 订阅 | `proxy.SubscribeTopic(lambda)` | `xxx_proxy_subscribe_topic(&proxy, callback, ud)` |
 | 死亡通知 | `proxy.OnServiceDied(lambda)` | `xxx_proxy_on_service_died(&proxy, callback, ud)` |
-| 字符串 | `std::string` | `char*` + `_len`，手动 `omni_malloc()` / `omni_free()`（详见[内存使用说明](memory-guide.md)） |
+| string | `std::string` | `char*`（NUL 结尾），手动 `omni_malloc()` / `omni_free()`（详见[内存使用说明](memory-guide.md)） |
 | 结构体生命周期 | 自动（RAII） | 手动 `_init()` / `_destroy()` |

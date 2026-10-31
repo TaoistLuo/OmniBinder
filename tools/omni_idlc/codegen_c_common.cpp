@@ -74,7 +74,7 @@ std::string cArrayTypeName(const TypeRef& type, const std::string& pkg) {
 }
 
 bool arrayElementNeedsLengths(const TypeRef& type) {
-    return type.primitive == TYPE_STRING || type.primitive == TYPE_BYTES;
+    return type.primitive == TYPE_BYTES;
 }
 
 bool isCompositePointerType(const TypeRef& type) {
@@ -176,7 +176,9 @@ void emitProxyMethodParams(std::ostream& os, const MethodDef& m, const std::stri
                                            : cTypeName(m.param.type, pkg);
         if (isCompositePointerType(m.param.type)) {
             os << ", const " << ptype << "* " << m.param.name;
-        } else if (isCStringLike(m.param.type)) {
+        } else if (m.param.type.primitive == TYPE_STRING) {
+            os << ", const " << ptype << " " << m.param.name;
+        } else if (m.param.type.primitive == TYPE_BYTES) {
             os << ", const " << ptype << " " << m.param.name << ", uint32_t " << m.param.name << "_len";
         } else {
             os << ", " << ptype << " " << m.param.name;
@@ -187,7 +189,7 @@ void emitProxyMethodParams(std::ostream& os, const MethodDef& m, const std::stri
                                            : cTypeName(m.return_type, pkg);
         if (m.return_type.isArray() || m.return_type.isCustom()) {
             os << ", " << rtype << "* result";
-        } else if (isCStringLike(m.return_type)) {
+        } else if (m.return_type.primitive == TYPE_BYTES) {
             os << ", " << rtype << "* result, uint32_t* result_len";
         } else {
             os << ", " << rtype << "* result";
