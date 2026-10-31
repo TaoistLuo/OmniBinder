@@ -371,29 +371,25 @@ Notes on topic source identity:
 
 Generated C API shape:
 
+`omni_impl` is a marker macro from `omnibinder_c.h` that expands to `void`.
+Generated headers declare `<pkg>_<Service>_impl_*()` with it; define those bodies in
+your `.c` file. `stub_create()` binds them into the internal callback table, so you
+never need to memset or assign callbacks manually. A missing implementation produces
+an `undefined reference to ..._impl_...` link error.
+
+
 ```c
-/* ---- Stub handler typedefs (snake_case; results returned via out pointers) ---- */
-typedef void (*demo_SensorService_set_threshold_handler_t)(
+/* ---- Stub implementation declarations (define bodies externally) ---- */
+omni_impl demo_SensorService_impl_set_threshold(
     const struct demo_ControlCommand* cmd,
     common_StatusResponse* result, void* user_data);
-typedef void (*demo_SensorService_get_latest_data_handler_t)(
+omni_impl demo_SensorService_impl_get_latest_data(
     struct demo_SensorData* result, void* user_data);
-typedef void (*demo_SensorService_reset_sensor_handler_t)(
+omni_impl demo_SensorService_impl_reset_sensor(
     int32_t sensor_id, void* user_data);
 
-/* runtime boundary callback (defined in omnibinder_c.h) */
-typedef int (*omni_invoke_callback_t)(uint32_t method_id,
-    const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
-
-typedef struct demo_SensorService_callbacks {
-    demo_SensorService_set_threshold_handler_t SetThreshold;
-    demo_SensorService_get_latest_data_handler_t GetLatestData;
-    demo_SensorService_reset_sensor_handler_t ResetSensor;
-    void* user_data;
-} demo_SensorService_callbacks;
-
-omni_service_t* demo_SensorService_stub_create_from_callbacks(
-    const demo_SensorService_callbacks* cbs);
+/* Default entry point: binds every *_impl_*; a missing implementation is a link error. */
+omni_service_t* demo_SensorService_stub_create(void* user_data);
 void demo_SensorService_stub_destroy(omni_service_t* svc);
 
 /* Broadcast */
@@ -462,7 +458,7 @@ typedef int (*omni_invoke_callback_t)(uint32_t method_id,
     const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
 ```
 
-C handler typedefs are `void`-returning with out parameters (`<pkg>_<Service>_<snake_method>_handler_t`; `string`/`bytes` results use `char**`/`uint8_t**` plus `uint32_t*`), and `<pkg>_<Service>_stub_create_from_callbacks()` registers each method id together with its IDL hash through `omni_service_add_method_ex()`.
+C handler typedefs are `void`-returning with out parameters (`<pkg>_<Service>_<snake_method>_handler_t`; `string`/`bytes` results use `char**`/`uint8_t**` plus `uint32_t*`), and `<pkg>_<Service>_stub_create()` binds the user-provided `<pkg>_<Service>_impl_*()` functions and registers each method id together with its IDL hash through `omni_service_add_method_ex()`.
 
 ## 8. Strict semantic validation
 
@@ -520,7 +516,7 @@ uint32_t fnv1a_32(const char* str) {
 Besides the runtime IDs above, generated code computes an IDL hash for every method and topic (method name + parameter/return types, topic name + field types) and reports it on registration/subscription, so the runtime can verify that publisher and subscriber agree on the IDL:
 
 - C++: the `<Topic>::TOPIC_IDL_HASH` constant; method hashes are carried in `MethodInfo.idl_hash`
-- C: the `<pkg>_<Topic>_TOPIC_IDL_HASH` and `<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` macros; `<pkg>_<Service>_stub_create_from_callbacks()` registers method hashes through `omni_service_add_method_ex()`
+- C: the `<pkg>_<Topic>_TOPIC_IDL_HASH` and `<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` macros; `<pkg>_<Service>_stub_create()` binds the `*_impl_*` functions and registers method hashes through `omni_service_add_method_ex()`
 
 ---
 

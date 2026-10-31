@@ -1216,7 +1216,7 @@ C API 需要手动管理内存。完整规则（含失败路径、回调借用�
 | 对象 | 创建 | 释放 | 备注 |
 |---|---|---|---|
 | `omni_runtime_t` | `omni_runtime_create()` | `omni_runtime_stop()` → `omni_runtime_destroy()` | 先销毁 proxy / 注销 service |
-| `omni_service_t` | `xxx_stub_create_from_callbacks()` | `xxx_stub_destroy()` | 先 `omni_runtime_unregister_service()` |
+| `omni_service_t` | `xxx_stub_create()` | `xxx_stub_destroy()` | 业务实现全部 `xxx_impl_*`；先 `omni_runtime_unregister_service()` |
 | C proxy | `xxx_proxy_init()` | `xxx_proxy_destroy()` | 内部退订/断开并释放订阅上下文 |
 | `omni_buffer_t` | `omni_buffer_create/create_from` | `omni_buffer_destroy()` | `destroy(NULL)` 安全 |
 | 生成 struct/数组/topic | `xxx_init()` | `xxx_destroy()` | 幂等；递归释放字段 |
@@ -1647,7 +1647,7 @@ target_link_libraries(my_c_client omnibinder_static)
 
 ## 7. omni-cli 命令行接口
 
-omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runtime/PID、调用服务方法、按 PID 调整日志级别和 watch 业务接口 I/O。调用和 watch 解码支持两种输入/显示模式：
+omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runtime/PID、调用服务方法、按 PID 调整日志级别、订阅主题并按 JSON 输出，以及 watch 业务接口 I/O。调用和 watch 解码支持两种输入/显示模式：
 - **Hex 模式**：直接传入二进制数据的十六进制表示（不需要 IDL 文件）
 - **JSON 模式**：使用人类可读的 JSON 格式（需要通过 --idl 指定 IDL 文件）
 
@@ -1672,6 +1672,7 @@ omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runt
                         params: hex 字符串（不带 --idl）或 JSON（带 --idl）
   log set --pid <pid> --level <F|E|W|I|D|V|O>
                         设置指定 runtime 的日志级别
+  subscribe <topic>     订阅主题，输出格式化 JSON 消息（需 --idl）
   watch --pid <pid> --idl <file.bidl> [--filter <method|topic>]
                         观察指定 PID 的业务接口输入/输出
 
@@ -1690,6 +1691,7 @@ omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runt
   omni-cli --idl sensor_service.bidl call SensorService GetLatestData
   omni-cli --idl sensor_service.bidl call SensorService SetThreshold \
     '{"command_type":1,"target":"sensor1","value":100}'
+  omni-cli --idl sensor_service.bidl subscribe SensorUpdate
   omni-cli watch --pid 12345 --idl sensor_service.bidl --filter GetLatestData
   omni-cli log set --pid 12345 --level D
 
@@ -1854,7 +1856,7 @@ Response (status=OK, 42 bytes, 0.85 ms):
 - 未指定选择器时使用确定性第一实例（与 `list` / `info` 表格首行一致，SM 按实例键字典序返回），输出首行显式标明实际命中的实例
 - JSON 模式自动格式化输出；hex 模式直接传入二进制数据的十六进制表示
 
-### 7.5 log/watch 诊断命令
+### 7.5 log/watch/subscribe 诊断命令
 
 `log set` 通过 PID 调整目标 runtime 日志级别：
 
@@ -1869,3 +1871,28 @@ omni-cli watch --pid 12345 --idl sensor_service.bidl --filter GetLatestData
 ```
 
 watch 数据面复用 OmniBinder 既有 topic 数据通道：同机自动使用 SHM，跨机自动使用 TCP；ServiceManager 只负责启动/停止控制面。
+
+`subscribe` 按 IDL 主题定义订阅并解码，每条消息输出格式化 JSON：
+
+```bash
+omni-cli --idl sensor_service.bidl subscribe SensorUpdate
+```
+
+```json
+{
+  "data": {
+    "data": {
+      "humidity": 60.2,
+      "location": "Room-A",
+      "sensor_id": 1,
+      "temperature": 25.1,
+      "timestamp": 1707321600
+    },
+    "publish_time": 1707321600
+  },
+  "topic": "SensorUpdate",
+  "topic_id": 3927308058
+}
+```
+
+字段 `topic` / `topic_id` 标识消息来源，`data` 为解码后的主题内容；解码失败时输出 `error` 与 `raw_hex`。应用日志和订阅状态写 stderr，stdout 可直接管道给 `jq`。

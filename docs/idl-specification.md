@@ -444,29 +444,24 @@ public:
 
 ### 7.6 生成的 C 代码
 
+`omni_impl` 是 `omnibinder_c.h` 提供的标记宏，展开为 `void`。生成头文件用
+`omni_impl` 声明 `<pkg>_<Service>_impl_*()`，业务在 `.c` 中实现这些函数体；
+`stub_create()` 会自动把它们绑定为内部回调表，**不需要业务手动 memset/赋值回调**。
+缺少任一实现时链接器会报 `undefined reference to ..._impl_...`。
+
+
 ```c
-/* ---- Stub 回调函数类型（方法名 snake_case，返回值通过 out 指针回传） ---- */
-typedef void (*demo_SensorService_set_threshold_handler_t)(
+/* ---- Stub 实现函数声明（业务只定义函数体，返回值通过 out 指针回传） ---- */
+omni_impl demo_SensorService_impl_set_threshold(
     const struct demo_ControlCommand* cmd,
     common_StatusResponse* result, void* user_data);
-typedef void (*demo_SensorService_get_latest_data_handler_t)(
+omni_impl demo_SensorService_impl_get_latest_data(
     struct demo_SensorData* result, void* user_data);
-typedef void (*demo_SensorService_reset_sensor_handler_t)(
+omni_impl demo_SensorService_impl_reset_sensor(
     int32_t sensor_id, void* user_data);
 
-/* runtime boundary callback（定义于 omnibinder_c.h） */
-typedef int (*omni_invoke_callback_t)(uint32_t method_id,
-    const omni_buffer_t* request, omni_buffer_t* response, void* user_data);
-
-typedef struct demo_SensorService_callbacks {
-    demo_SensorService_set_threshold_handler_t SetThreshold;
-    demo_SensorService_get_latest_data_handler_t GetLatestData;
-    demo_SensorService_reset_sensor_handler_t ResetSensor;
-    void* user_data;
-} demo_SensorService_callbacks;
-
-omni_service_t* demo_SensorService_stub_create_from_callbacks(
-    const demo_SensorService_callbacks* cbs);
+/* 默认创建入口：自动绑定全部 *_impl_*；缺少任一实现会在链接期报错 */
+omni_service_t* demo_SensorService_stub_create(void* user_data);
 void demo_SensorService_stub_destroy(omni_service_t* svc);
 
 /* 广播 */
@@ -571,7 +566,7 @@ uint32_t fnv1a_32(const char* str) {
 除上述运行时 ID 外，生成代码还会为每个方法和话题计算 IDL 哈希（方法名 + 参数/返回类型、话题名 + 字段类型），随注册/订阅上报，用于运行时校验发布者与订阅者的 IDL 是否一致：
 
 - C++：话题常量 `<Topic>::TOPIC_IDL_HASH`；方法哈希由 `MethodInfo.idl_hash` 携带
-- C：`<pkg>_<Topic>_TOPIC_IDL_HASH`、`<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` 宏；`<pkg>_<Service>_stub_create_from_callbacks()` 会通过 `omni_service_add_method_ex()` 把方法哈希一并注册到运行时
+- C：`<pkg>_<Topic>_TOPIC_IDL_HASH`、`<pkg>_<Service>_METHOD_<SNAKE_UPPER>_IDL_HASH` 宏；`<pkg>_<Service>_stub_create()` 会自动绑定业务实现的 `<pkg>_<Service>_impl_*()`，并通过 `omni_service_add_method_ex()` 把方法哈希一并注册到运行时
 
 ## 10. 完整 IDL 示例
 

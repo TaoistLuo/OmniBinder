@@ -67,7 +67,18 @@ public:
      */
     bool decodeFromBuffer(omnibinder::Buffer& buf, const omnic::TypeRef& type,
                           const std::string& package, simple_json::Value& json);
-    
+
+    /* @brief 将 topic payload 解码为 JSON
+     * @param[in,out] buf 待解码 Buffer（消费位置会推进）
+     * @param[in] topic topic 定义（字段布局与 struct 相同）
+     * @param[in] package topic 所属包
+     * @param[out] json 解码输出
+     * @return 成功返回 true
+     * @note 用于 omni-cli subscribe 的 JSON 输出
+     */
+    bool decodeTopicFromBuffer(omnibinder::Buffer& buf, const omnic::TopicDef& topic,
+                               const std::string& package, simple_json::Value& json);
+
 private:
     const omnic::ParseContext& ctx_;
     

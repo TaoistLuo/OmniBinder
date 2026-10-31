@@ -3,12 +3,13 @@
 [中文](omni-tool-usage.md) | English
 
 > **Version**: 1.1.0  
-> **Updated**: 2026-09-21
+> **Updated**: 2026-10-31
 
 ## Overview
 
 `omni-cli` is the command-line debugging tool for OmniBinder. It can be used to:
 
+- subscribe to IDL topics and print each received message as JSON
 - list all online service instances (service name / `instance_id` / `host_id` / `host:port`)
 - list online runtimes / PIDs
 - enumerate every instance of a service name and inspect its interfaces and method signatures
@@ -60,6 +61,7 @@ omni-cli [options] <command> [args]
 | `info <service> [--instance-id <id>] [--host-id <id>]` | Enumerate instances and show the selected instance's interfaces |
 | `call <service> <method> [params] [--instance-id <id>] [--host-id <id>]` | Invoke a method on the selected instance |
 | `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | Set a runtime log level by PID |
+| `subscribe <topic>` | Subscribe to a topic and print each message as formatted JSON (requires `--idl`) |
 | `watch --pid <pid> --idl <file.bidl> [--filter <name>]` | Watch business interface I/O from a runtime PID |
 
 ---
@@ -354,7 +356,56 @@ omni-cli log set --pid 12345 --level D
 
 ---
 
-### 6. `watch`
+### 6. `subscribe`
+
+Subscribes to a topic defined in the IDL. Every received message is printed as formatted JSON on **stdout**; logs and subscription status go to **stderr**, so stdout can be piped directly to `jq` or another program.
+
+```bash
+omni-cli --idl <file.bidl> subscribe <topic>
+```
+
+- `--idl` is required, and the topic must exist in the IDL.
+- This is a **global topic subscription**: messages from all publishers of that topic name are received.
+- Press `Ctrl+C` to stop; the subscription is removed on exit.
+- Decode failures are still emitted as valid JSON with `error` and `raw_hex` fields.
+
+Output envelope:
+
+```json
+{
+  "data": {
+    "data": {
+      "humidity": 60.2,
+      "location": "Room-A",
+      "sensor_id": 1,
+      "temperature": 25.1,
+      "timestamp": 1707321600
+    },
+    "publish_time": 1707321600
+  },
+  "topic": "SensorUpdate",
+  "topic_id": 3927308058
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `topic` | Subscribed topic name |
+| `topic_id` | Runtime topic ID |
+| `data` | Decoded topic fields; absent on failure |
+| `error` | Decode/subscription error (if any) |
+| `raw_hex` | Raw payload on decode/subscription failure |
+
+Example:
+
+```bash
+omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate
+omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate | jq .
+```
+
+---
+
+### 7. `watch`
 
 Watches IDL business interface input/output from a runtime PID. The watch data path reuses OmniBinder's normal topic data channel: same-machine traffic uses SHM automatically, while cross-machine traffic uses TCP. ServiceManager is only used for start/stop control.
 

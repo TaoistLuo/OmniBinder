@@ -3,11 +3,11 @@
 中文 | [English](omni-tool-usage.en.md)
 
 > **版本**：1.1.0  
-> **更新日期**：2026-09-21
+> **更新日期**：2026-10-31
 
 ## 概述
 
-`omni-cli` 是 OmniBinder 的命令行调试工具，用于查询在线服务实例和运行时、查看接口定义、调用服务方法、调整运行时日志级别，以及按 PID 观察业务接口输入/输出。
+`omni-cli` 是 OmniBinder 的命令行调试工具，用于查询在线服务实例和运行时、查看接口定义、调用服务方法、调整运行时日志级别、订阅主题并输出 JSON，以及按 PID 观察业务接口输入/输出。
 
 **服务身份模型**：一个服务名可以同时存在多个实例，实例身份为 `(service_name, host_id, instance_id)`。
 `instance_id` 为空串表示该 `host_id` 上该服务的**默认实例**。
@@ -20,6 +20,7 @@
 - 按 `(host_id, instance_id)` 调用指定实例的方法（支持 hex 和 JSON 格式）
 - 显示调用耗时统计
 - 按 PID 设置运行时日志级别
+- 订阅 IDL 主题并将收到的消息打印为 JSON
 - 按 PID watch IDL 业务接口输入/输出
 
 ---
@@ -58,6 +59,7 @@ omni-cli [options] <command> [args]
 | `info <service> [--instance-id <id>] [--host-id <id>]` | 枚举服务名下的实例并查看指定实例的接口 |
 | `call <service> <method> [params] [--instance-id <id>] [--host-id <id>]` | 调用指定实例的方法 |
 | `log set --pid <pid> --level <F\|E\|W\|I\|D\|V\|O>` | 设置指定 runtime 日志级别 |
+| `subscribe <topic>` | 订阅主题，输出格式化 JSON 消息（需 `--idl`） |
 | `watch --pid <pid> --idl <file.bidl> [--filter <name>]` | 观察指定 PID 的业务接口 I/O |
 
 ---
@@ -347,7 +349,58 @@ omni-cli log set --pid 12345 --level D
 
 ---
 
-### 6. watch - 观察业务接口 I/O
+### 6. subscribe - 订阅主题并输出 JSON
+
+按 IDL 主题定义订阅一个 topic。收到消息后，每条消息在 **stdout** 输出格式化 JSON；
+日志和订阅状态输出到 **stderr**，方便把 stdout 直接交给 `jq` 或程序处理。
+
+**语法**：
+```bash
+omni-cli --idl <file.bidl> subscribe <topic>
+```
+
+- `--idl` 必填，且 IDL 中必须存在该 topic 定义。
+- 订阅是**全局主题订阅**，会接收该 topic 名称下所有发布者的消息。
+- `Ctrl+C` 停止订阅；退出前自动取消订阅。
+- 解码失败时仍输出合法 JSON，包含 `error` 和 `raw_hex` 字段。
+
+**输出格式**：
+```json
+{
+  "data": {
+    "data": {
+      "humidity": 60.2,
+      "location": "Room-A",
+      "sensor_id": 1,
+      "temperature": 25.1,
+      "timestamp": 1707321600
+    },
+    "publish_time": 1707321600
+  },
+  "topic": "SensorUpdate",
+  "topic_id": 3927308058
+}
+```
+
+外层字段：
+
+| 字段 | 说明 |
+|------|------|
+| `topic` | 订阅的 topic 名称 |
+| `topic_id` | 运行时分配的话题 ID |
+| `data` | 按 IDL 解码后的 topic 字段；失败时不存在 |
+| `error` | 解码/订阅错误（失败时存在） |
+| `raw_hex` | 解码失败或订阅错误时的原始字节 |
+
+**示例**：
+```bash
+omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate
+omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate | jq .
+```
+
+---
+
+### 7. watch - 观察业务接口 I/O
 
 按 PID 观察 runtime 的 IDL 业务接口输入/输出。watch 数据面复用 OmniBinder 既有 topic 数据通道：同机自动使用 SHM，跨机自动使用 TCP；ServiceManager 只负责控制面启动/停止。
 

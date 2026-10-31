@@ -214,7 +214,7 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
         emitStubHandlerParams(os, m, pkg_);
         os << ");\n";
 
-        os << "void " << handler_decl << "(";
+        os << "omni_impl " << handler_decl << "(";
         emitStubHandlerParams(os, m, pkg_);
         os << ");\n\n";
     }
@@ -242,6 +242,7 @@ void CCodeGen::genServiceStubHeader(const ServiceDef& svc, const AstFile& ast, s
     os << "} " << prefix << "_callbacks;\n\n";
 
     os << "omni_service_t* " << prefix << "_stub_create_from_callbacks(const " << prefix << "_callbacks* cbs);\n";
+    os << "/* Default entry: binds every *_impl_* implementation; a missing implementation is a link error. */\n";
     os << "static inline omni_service_t* " << prefix << "_stub_create(void* user_data) {\n";
     os << "    " << prefix << "_callbacks cbs;\n";
     os << "    memset(&cbs, 0, sizeof(cbs));\n";

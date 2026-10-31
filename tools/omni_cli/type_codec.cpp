@@ -273,6 +273,14 @@ bool TypeCodec::encodeStruct(const simple_json::Value& json, const omnic::Struct
     return true;
 }
 
+bool TypeCodec::decodeTopicFromBuffer(omnibinder::Buffer& buf, const omnic::TopicDef& topic,
+                                      const std::string& package, simple_json::Value& json) {
+    omnic::StructDef fields;
+    fields.name = topic.name;
+    fields.fields = topic.fields;
+    return decodeStruct(buf, fields, package, json);
+}
+
 bool TypeCodec::decodeStruct(omnibinder::Buffer& buf, const omnic::StructDef& structDef,
                              const std::string& package, simple_json::Value& json) {
     json.setObject();

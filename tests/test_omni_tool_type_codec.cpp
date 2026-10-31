@@ -143,6 +143,48 @@ int main() {
         PASS();
     }
 
+    TEST(topic_payload_decode_roundtrip);
+    {
+        const std::string idl =
+            "package demo;\n"
+            "struct Payload {\n"
+            "    int32 id;\n"
+            "    string label;\n"
+            "}\n"
+            "topic SensorUpdate {\n"
+            "    int32 id;\n"
+            "    string label;\n"
+            "}\n";
+
+        std::string file_path = writeTempFile("omnibinder_topic_", ".bidl", idl);
+        AstFile ast;
+        ParseContext ctx = parseFile(file_path, ast);
+        assert(ast.topics.size() == 1);
+        assert(ast.topics[0].name == "SensorUpdate");
+
+        omnic::TypeRef payload_type;
+        payload_type.primitive = omnic::TYPE_CUSTOM;
+        payload_type.custom_name = "Payload";
+
+        simple_json::Value input;
+        input.setObject();
+        input.set("id", simple_json::Value(7.0));
+        input.set("label", simple_json::Value(std::string("topic-json")));
+
+        type_codec::TypeCodec codec(ctx);
+        omnibinder::Buffer encoded;
+        assert(codec.encodeToBuffer(input, payload_type, "demo", encoded));
+
+        omnibinder::Buffer decode_buf(encoded.data(), encoded.size());
+        simple_json::Value decoded;
+        assert(codec.decodeTopicFromBuffer(decode_buf, ast.topics[0], "demo", decoded));
+        assert(decoded.get("id").asInt64() == 7);
+        assert(decoded.get("label").asString() == "topic-json");
+
+        unlink(file_path.c_str());
+        PASS();
+    }
+
     TEST(cross_package_struct_roundtrip);
     {
         const std::string common =

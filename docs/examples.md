@@ -324,12 +324,12 @@ endif()
 它的关键形态是：
 
 ```c
-void demo_SensorService_impl_echo_int32(int32_t value, int32_t* result, void* user_data) {
+omni_impl demo_SensorService_impl_echo_int32(int32_t value, int32_t* result, void* user_data) {
     (void)user_data;
     *result = value + 3;
 }
 
-void demo_SensorService_impl_request_latest_data_async(
+omni_impl demo_SensorService_impl_request_latest_data_async(
     const demo_AsyncRequest* request,
     common_StatusResponse* result,
     void* user_data) {
@@ -1217,7 +1217,7 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
-void myapp_MyService_impl_handle_request(const myapp_Request* req,
+omni_impl myapp_MyService_impl_handle_request(const myapp_Request* req,
                                          myapp_Response* result, void* user_data) {
     (void)user_data;
     printf("[Server] HandleRequest: id=%d name=%s\n", req->id, req->name);
@@ -1225,7 +1225,7 @@ void myapp_MyService_impl_handle_request(const myapp_Request* req,
     result->message = omni_strdup("OK");
 }
 
-void myapp_MyService_impl_notify(int32_t event_id, void* user_data) {
+omni_impl myapp_MyService_impl_notify(int32_t event_id, void* user_data) {
     (void)user_data;
     printf("[Server] Notify: event_id=%d\n", event_id);
 }

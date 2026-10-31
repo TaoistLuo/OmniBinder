@@ -1697,7 +1697,7 @@ TEST(IdlCompilerTest, CodegenPublicApiHasNoViewWriter) {
     ASSERT_NE(c_header.find("void demo_Item_init(demo_Item* self);"), std::string::npos);
     ASSERT_NE(c_header.find("void demo_Item_destroy(demo_Item* self);"), std::string::npos);
     ASSERT_NE(c_header.find("int  demo_ItemService_proxy_echo_item(demo_ItemService_proxy* p, const struct demo_Item* item, struct demo_Item* result);"), std::string::npos);
-    ASSERT_NE(c_header.find("void demo_ItemService_impl_echo_item(const struct demo_Item* item, struct demo_Item* result, void* user_data);"), std::string::npos);
+    ASSERT_NE(c_header.find("omni_impl demo_ItemService_impl_echo_item(const struct demo_Item* item, struct demo_Item* result, void* user_data);"), std::string::npos);
 
     removeTree(dir);
 }

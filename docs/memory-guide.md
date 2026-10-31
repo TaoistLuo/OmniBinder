@@ -273,11 +273,16 @@ A：一般不需要。它们用于 C API 或 C 生成代码；C++ 用 `new/delet
 omni_runtime_t* rt = omni_runtime_create();
 omni_runtime_init(rt, "127.0.0.1", 9900);
 
-demo_SensorService_callbacks cbs;
-memset(&cbs, 0, sizeof(cbs));
-cbs.GetLatestData = on_get_latest_data;
-cbs.user_data = my_context;                 /* 你拥有，活到服务销毁 */
-omni_service_t* svc = demo_SensorService_stub_create_from_callbacks(&cbs);
+/* 生成头文件只声明，函数体由业务实现；缺少任一实现会在链接期报错。 */
+omni_impl demo_SensorService_impl_get_latest_data(
+    struct demo_SensorData* result, void* user_data) {
+    (void)user_data;
+    demo_SensorData_init(result);
+    result->sensor_id = 1;
+    result->location = omni_strdup("Room-A");
+}
+/* 其余生成的 demo_SensorService_impl_* 也必须实现；不要手动赋值回调表。 */
+omni_service_t* svc = demo_SensorService_stub_create(my_context);
 omni_runtime_register_service(rt, svc);
 
 demo_SensorService_proxy proxy;
@@ -496,7 +501,7 @@ void on_sensor_update(const demo_SensorUpdate* msg, void* user_data) {
 | 对象 | 创建 | 释放 | 注意 |
 |---|---|---|---|
 | `omni_runtime_t` | `omni_runtime_create()` | `omni_runtime_stop()` → `omni_runtime_destroy()` | 不要在业务线程调用中销毁 |
-| C service | `xxx_stub_create_from_callbacks()` | `xxx_stub_destroy()` | 先 `omni_runtime_unregister_service()` |
+| C service | `xxx_stub_create()` | `xxx_stub_destroy()` | 业务实现全部 `xxx_impl_*`；先 `omni_runtime_unregister_service()` |
 | C proxy | `xxx_proxy_init()` | `xxx_proxy_destroy()` | 先 destroy proxy |
 | `omni_buffer_t` | `omni_buffer_create/create_from` | `omni_buffer_destroy()` | 每个成功创建的都要销毁 |
 | 生成 struct/数组/topic | `xxx_init()` | `xxx_destroy()` | 递归释放字段，可重复调用 |

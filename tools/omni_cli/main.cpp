@@ -5,6 +5,7 @@
 #include "type_resolver.h"
 #include "info_formatter.h"
 #include "watch_monitor.h"
+#include "codegen.h"
 #include "lexer.h"
 #include "parser.h"
 #include "semantic_validator.h"
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <csignal>
 #include <map>
 #include <vector>
 
@@ -26,7 +28,7 @@ static void printUsage(const char* prog) {
     printf("Options:\n");
     printf("  -h, --host <addr>   ServiceManager address (default: 127.0.0.1)\n");
     printf("  -p, --port <port>   ServiceManager port (default: 9900)\n");
-    printf("  --idl <file.bidl>   IDL file for JSON I/O/watch support\n");
+    printf("  --idl <file.bidl>   IDL file for JSON I/O/watch/subscribe support\n");
     printf("  --instance-id <id>  Target service instance (info/call)\n");
     printf("                      instance_id is part of the service identity; '' selects\n");
     printf("                      the default instance of a name\n");
@@ -46,6 +48,8 @@ static void printUsage(const char* prog) {
     printf("                      params: hex string (without --idl) or JSON (with --idl)\n");
     printf("  log set --pid <pid> --level <F|E|W|I|D|V|O>\n");
     printf("                      Set a runtime log level by PID\n");
+    printf("  subscribe <topic>   Subscribe to a topic and print each message as JSON\n");
+    printf("                      requires --idl; Ctrl+C stops subscription\n");
     printf("  watch --pid <pid> --idl <file.bidl> [--filter <method|topic>]\n");
     printf("                      Watch diagnostic data from a runtime PID\n");
 }
@@ -407,6 +411,168 @@ static int resolveServiceInstance(const std::vector<omnibinder::ServiceInfo>& in
     return 0;
 }
 
+/* @brief 在单个 AST 中按名称查找 topic
+ * @param[in] ast AST
+ * @param[in] name topic 名称
+ * @return 定义指针；未找到返回 NULL
+ */
+static const omnic::TopicDef* findTopicInAst(const omnic::AstFile& ast,
+                                             const std::string& name) {
+    for (size_t i = 0; i < ast.topics.size(); ++i) {
+        if (ast.topics[i].name == name) {
+            return &ast.topics[i];
+        }
+    }
+    return NULL;
+}
+
+/* @brief 在主 IDL 及其导入包中查找 topic 定义
+ * @param[in] name topic 名称
+ * @param[out] owner topic 所属 AST
+ * @param[out] topic topic 定义
+ * @return 找到返回 true
+ * @note 优先主包，避免导入包同名 topic 覆盖当前 IDL 的定义。
+ */
+static bool findTopicDefinition(const std::string& name,
+                                const omnic::AstFile*& owner,
+                                const omnic::TopicDef*& topic) {
+    owner = NULL;
+    topic = NULL;
+    if (!g_parse_ctx) {
+        return false;
+    }
+
+    std::map<std::string, omnic::AstFile>::const_iterator main_it =
+        g_parse_ctx->loaded_packages.find(g_idl_package);
+    if (main_it != g_parse_ctx->loaded_packages.end()) {
+        topic = findTopicInAst(main_it->second, name);
+        if (topic) {
+            owner = &main_it->second;
+            return true;
+        }
+    }
+
+    for (std::map<std::string, omnic::AstFile>::const_iterator it =
+             g_parse_ctx->loaded_packages.begin();
+         it != g_parse_ctx->loaded_packages.end(); ++it) {
+        if (it->first == g_idl_package) {
+            continue;
+        }
+        topic = findTopicInAst(it->second, name);
+        if (topic) {
+            owner = &it->second;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* @brief 将字节流转换为紧凑 hex 字符串
+ * @param[in] data 数据
+ * @param[in] size 长度
+ * @return hex 字符串
+ */
+static std::string bytesToHex(const uint8_t* data, size_t size) {
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.resize(size * 2);
+    for (size_t i = 0; i < size; ++i) {
+        out[i * 2] = kHex[(data[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = kHex[data[i] & 0x0F];
+    }
+    return out;
+}
+
+static volatile sig_atomic_t g_subscribe_running = 1;
+
+static void subscribe_signal_handler(int) {
+    g_subscribe_running = 0;
+}
+
+/* @brief 订阅 topic，并将每条消息以 JSON 行输出
+ * @param[in,out] runtime OmniRuntime 实例
+ * @param[in] topic_name topic 名称
+ * @return 成功返回 0，失败返回 1
+ * @note 需要 --idl 已解析；订阅持续到 SIGINT/SIGTERM。
+ */
+static int cmdSubscribe(omnibinder::OmniRuntime& runtime, const char* topic_name) {
+    if (!g_parse_ctx) {
+        fprintf(stderr, "Error: 'subscribe' requires --idl <file.bidl>\n");
+        return 1;
+    }
+
+    const omnic::AstFile* owner = NULL;
+    const omnic::TopicDef* topic = NULL;
+    const std::string name(topic_name);
+    if (!findTopicDefinition(name, owner, topic)) {
+        fprintf(stderr, "Error: Topic '%s' not found in IDL\n", topic_name);
+        return 1;
+    }
+
+    const std::string package = owner->package_name;
+    const uint32_t expected_hash = omnic::computeTopicHash(*topic, *owner);
+    omnic::ParseContext* ctx = g_parse_ctx;
+
+    omnibinder::TopicCallback on_msg =
+        [ctx, topic, package, name](uint32_t topic_id, const omnibinder::Buffer& data) {
+            omnibinder::Buffer decode_buf(data.data(), data.size());
+            simple_json::Value payload;
+            type_codec::TypeCodec codec(*ctx);
+            const bool decoded = codec.decodeTopicFromBuffer(
+                decode_buf, *topic, package, payload);
+
+            simple_json::Value output;
+            output.setObject();
+            output.set("topic", simple_json::Value(name));
+            output.set("topic_id", simple_json::Value(static_cast<uint64_t>(topic_id)));
+            if (decoded) {
+                output.set("data", payload);
+            } else {
+                output.set("error", simple_json::Value(std::string("decode_failed")));
+                output.set("raw_hex", simple_json::Value(
+                    bytesToHex(data.data(), data.size())));
+            }
+            printf("%s\n", output.toString(true, 0).c_str());
+            fflush(stdout);
+        };
+
+    omnibinder::TopicErrorCallback on_err =
+        [name](uint32_t topic_id, omnibinder::ErrorCode error,
+               const omnibinder::Buffer& raw_data) {
+            simple_json::Value output;
+            output.setObject();
+            output.set("topic", simple_json::Value(name));
+            output.set("topic_id", simple_json::Value(static_cast<uint64_t>(topic_id)));
+            output.set("error", simple_json::Value(std::string(
+                omnibinder::errorCodeToString(error))));
+            if (raw_data.size() > 0) {
+                output.set("raw_hex", simple_json::Value(
+                    bytesToHex(raw_data.data(), raw_data.size())));
+            }
+            printf("%s\n", output.toString(true, 0).c_str());
+            fflush(stdout);
+        };
+
+    int ret = runtime.subscribeTopic(name, expected_hash, on_msg, on_err);
+    if (ret != 0) {
+        fprintf(stderr, "Error: Failed to subscribe topic '%s': %s\n", topic_name,
+                omnibinder::errorCodeToString(static_cast<omnibinder::ErrorCode>(ret)));
+        return 1;
+    }
+
+    fprintf(stderr, "Subscribed topic '%s' (idl_hash=0x%08x). Press Ctrl+C to stop.\n",
+            topic_name, expected_hash);
+    g_subscribe_running = 1;
+    signal(SIGINT, subscribe_signal_handler);
+    signal(SIGTERM, subscribe_signal_handler);
+    while (g_subscribe_running) {
+        runtime.pollOnce(100);
+    }
+    runtime.unsubscribeTopic(name);
+    fprintf(stderr, "Topic subscription stopped.\n");
+    return 0;
+}
+
 /* @brief 解析并校验 log set 的 <pid> + <level> 参数，然后调用运行时接口
  * @param[in,out] runtime OmniRuntime 实例
  * @param[in] pid_text pid 文本
@@ -689,6 +855,15 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Error: 'call' requires <service> <method> [params]\n");
             return 1;
         }
+    } else if (strcmp(command, "subscribe") == 0) {
+        if (pos_count != 2) {
+            fprintf(stderr, "Error: 'subscribe' requires exactly one topic name\n");
+            return 1;
+        }
+        if (!idl_file) {
+            fprintf(stderr, "Error: 'subscribe' requires --idl <file.bidl>\n");
+            return 1;
+        }
     } else if (strcmp(command, "watch") == 0) {
         if (!pid_arg) {
             fprintf(stderr, "Error: 'watch' requires --pid <pid>\n");
@@ -781,6 +956,8 @@ int main(int argc, char* argv[]) {
         result = cmdInfo(runtime, positional[1], instance_selector);
     } else if (strcmp(command, "call") == 0) {
         result = cmdCall(runtime, positional[1], positional[2], positional[3], instance_selector);
+    } else if (strcmp(command, "subscribe") == 0) {
+        result = cmdSubscribe(runtime, positional[1]);
     } else if (strcmp(command, "watch") == 0) {
         result = omni_cli::runWatchMonitor(runtime, watch_pid, diag_filter, *g_parse_ctx, g_idl_package);
     } else if (strcmp(command, "log") == 0) {

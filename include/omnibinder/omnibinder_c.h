@@ -66,6 +66,12 @@
 #define OMNI_ERR_SERIALIZE         (-500)
 #define OMNI_ERR_DESERIALIZE       (-501)
 
+/* @brief 标记生成的服务端实现函数；展开为 void
+ * @details 生成头文件使用 omni_impl 声明 <pkg>_<Service>_impl_*；业务定义函数体时
+ *          也使用该宏。默认 stub_create() 会自动绑定全部实现，缺少任一实现会在链接期报错。
+ * @note 该宏只是可读性标记，不改变函数返回类型（仍为 void）。 */
+#define omni_impl void
+
 #ifdef __cplusplus
 extern "C" {
 #endif
