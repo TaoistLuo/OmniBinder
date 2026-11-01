@@ -78,6 +78,14 @@ public:
     void run();
 
     /*
+     * @brief  运行事件循环并使用指定的轮询等待策略
+     * @param[in] timeout_ms 每轮 poll 的最大等待时间，0 = 不等待，-1 = 无限等待
+     * @param[in] on_tick     每轮 poll 后执行的回调，可为空
+     * @note   on_tick 在 owner 线程执行；stop 被请求后不会再调用。
+     */
+    void run(int timeout_ms, const Functor& on_tick);
+
+    /*
      * @brief  处理一轮事件
      * @param[in] timeout_ms 最大等待时间，0 = 不等待，-1 = 无限等待
      */

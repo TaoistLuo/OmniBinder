@@ -62,7 +62,7 @@ OmniBinder covers both **service management** and **service-to-service data path
 - **Remote method invocation (RPC)** — synchronous request/response and one-way calls
 - **Publish/subscribe broadcast** — topic-based broadcast with real-time subscribers
 - **Death notification** — automatic notification when a service exits unexpectedly
-- **Proactive connection management** — Proxy provides `connect()`/`disconnect()` for explicit service connections
+- **Automatic proxy connection** — proxies connect on first use; `disconnect()` remains available for explicit teardown
 - **Auto-reconnect** — automatic reconnection on service recovery with configurable exponential backoff
 - **Heartbeat detection** — periodic heartbeat for service liveness detection, auto-triggers reconnect on timeout
 - **Multi-instance service identity**: same-name services coexist with distinct `instance_id`; an instance is identified by `(service_name, host_id, instance_id)`, with per-instance discovery, addressing, subscription, and death notification
@@ -77,7 +77,7 @@ OmniBinder covers both **service management** and **service-to-service data path
 A single board can run multiple services with the **same name** (for example two `SensorService` instances bound to `ttyUSB0` and `ttyUSB1`):
 
 - Each instance must declare a **distinct `instance_id`** (C++ `Service::setInstanceId()`, C `omni_service_set_instance_id()`). An instance is identified by `(service_name, host_id, instance_id)`. **Two registrations with exactly the same identity are treated as the same instance and take over each other (newer wins)**; an empty `instance_id` means the single default instance of that name on that board.
-- Clients enumerate all instances of a name with `listServiceInstances()` / `omni_runtime_list_instances()`, then bind to one with `connectServiceInstance()` / `omni_runtime_connect_service_instance()` / the generated proxy's `connect(host_id, instance_id)` / `_proxy_connect_instance()`.
+- Clients enumerate all instances of a name with `listServiceInstances()` / `omni_runtime_list_instances()`, then bind to one with `connectServiceInstance()` / `omni_runtime_connect_service_instance()` / the generated proxy's `setInstance(host_id, instance_id)`.
 - Every board needs a **unique `host_id`**. Mass-produced images often clone `/etc/machine-id`, so multiple boards share one `host_id` and get mistaken for the same identity (taking each other over) while SHM wrongly treats them as same-host. Set each device's unique id (MAC / chip id / serial) at startup via `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()`.
 - Multiple same-name instances may publish under one topic: a service-level subscription receives data from all instances and can tell them apart by source identity, while an instance-level subscription receives only the selected instance.
 
@@ -91,7 +91,7 @@ See the "Run two same-name service instances on one board" section of the [examp
 - the internal runtime is serialized by a single owner event loop
 - callbacks (such as topic callbacks and death callbacks) run on the owner event-loop thread by default
 - synchronous reply wait only processes fd/timer events, not new pending API functors
-- see the [threading model document](docs/threading-model.md) for `run()` / `pollOnce()` / `stop()` concurrency details
+- see the [threading model document](docs/threading-model.md) for `init()` / `start()` / `stop()` concurrency details
 
 ### Heartbeat and session configuration
 
@@ -131,38 +131,38 @@ The following data highlights typical OmniBinder latency on the **same-host SHM 
 
 - Transport: automatic TCP + SHM selection (SHM used for same-host traffic)
 - RPC warmup rounds: 50; RPC measured rounds: 1000 per case
-- Topic mode: server publishes rotating topics every 500us; client uses `pollOnce(0)` busy-spin receive loop
+- Topic mode: server publishes rotating topics every 500us; client owner event loop receives them
 - Test service SHM ring: 64KB / 64KB
 - Topic warmup rounds: 100; topic measured rounds: 1000 per case
+- event loop: `start(0, nullptr)` low-latency busy-poll mode
 
-> **Test environment**: Windows WSL2 Ubuntu 20.04. Absolute values are for reference only — bare-metal Linux delivers lower, more stable latency. See [full performance report](docs/performance-report.md).
+> **Test environment**: Windows WSL2 Ubuntu 20.04. Absolute values are for reference only — bare-metal Linux delivers lower, more stable latency. See the default [low-latency report](docs/performance-report.md).
 
 | Test Item | Samples | Trimmed Mean | 95% Case | Notes |
 |-----------|---------|-------------|----------|-------|
-| RPC EchoBytes (0 bytes) | 1000 | 24.8 us | 44 us | Empty payload, protocol scheduling overhead |
-| RPC EchoBytes (64 bytes) | 1000 | 26.3 us | 47 us | Common small payload RPC |
-| RPC EchoBytes (256 bytes) | 1000 | 26.2 us | 46 us | Common small payload RPC |
-| RPC EchoBytes (1024 bytes) | 1000 | 28.0 us | 49 us | 1KB payload |
-| RPC EchoBytes (4096 bytes) | 1000 | 38.0 us | 62 us | 4KB payload, enlarged SHM ring |
-| RPC EchoBytes (8192 bytes) | 1000 | 57.4 us | 79 us | 8KB payload, enlarged SHM ring |
-| RPC EchoInt32 | 1000 | 13.1 us | 43 us | Small primitive RPC |
-| RPC EchoStruct | 1000 | 15.0 us | 40 us | Struct RPC |
-| RPC Add (2 x int32) | 1000 | 16.1 us | 43 us | Small compute RPC |
-| Topic pub/sub (0 bytes) | 1000 | 5.2 us | 12 us | Empty broadcast payload |
-| Topic pub/sub (64 bytes) | 1000 | 5.6 us | 11 us | Small broadcast data |
-| Topic pub/sub (256 bytes) | 1000 | 5.2 us | 11 us | Common small broadcast data |
-| Topic pub/sub (1024 bytes) | 1000 | 6.2 us | 12 us | 1KB broadcast data |
-| Topic pub/sub (4096 bytes) | 1000 | 9.7 us | 18 us | 4KB broadcast data |
-| Topic pub/sub (8192 bytes) | 1000 | 13.6 us | 23 us | 8KB broadcast data |
+| RPC EchoBytes (0 bytes) | 1000 | 14.9 us | 49 us | Empty payload, protocol scheduling overhead |
+| RPC EchoBytes (64 bytes) | 1000 | 16.6 us | 52 us | Common small payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 17.1 us | 51 us | Common small payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 20.6 us | 53 us | 1KB payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 31.9 us | 62 us | 4KB payload, enlarged SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 61.7 us | 82 us | 8KB payload, enlarged SHM ring |
+| RPC EchoInt32 | 1000 | 8.6 us | 24 us | Small primitive RPC |
+| RPC EchoStruct | 1000 | 11.4 us | 44 us | Struct RPC |
+| RPC Add (2 x int32) | 1000 | 8.7 us | 22 us | Small compute RPC |
+| Topic pub/sub (0 bytes) | 1000 | 12.5 us | 25 us | Empty broadcast payload |
+| Topic pub/sub (64 bytes) | 1000 | 12.0 us | 24 us | Small broadcast data |
+| Topic pub/sub (256 bytes) | 1000 | 13.0 us | 27 us | Common small broadcast data |
+| Topic pub/sub (1024 bytes) | 1000 | 12.8 us | 27 us | 1KB broadcast data |
+| Topic pub/sub (4096 bytes) | 1000 | 16.4 us | 33 us | 4KB broadcast data |
+| Topic pub/sub (8192 bytes) | 1000 | 21.2 us | 43 us | 8KB broadcast data |
 
-Based on the full report:
+> **Performance note**: the table uses `start(0, nullptr)` (busy-poll, 100% CPU on the owner thread).
+> Default `start()` blocks in the kernel event loop; on WSL2 each RPC/topic additionally pays a wakeup
+> and scheduler hop (about 151 us RPC / 94 us topic — see the [blocking-mode report](docs/performance-report-blocking.md)).
+> Use busy-poll only for latency-sensitive dedicated processes; prefer the default blocking mode otherwise.
+> Data collected on WSL2, affected by virtualization jitter — absolute values are for reference only.
 
-- **Common 0~1024 byte RPC** trimmed mean around **24.8~28.0 us** (WSL2 environment)
-- **4096~8192 byte RPC payloads** around **38.0~57.4 us** under enlarged SHM-ring configuration
-- **Topic pub/sub** around **5.2~13.6 us** (one-way broadcast, no RPC round-trip overhead)
-
-> **Performance note**: Data collected on WSL2, affected by virtualization jitter — absolute values are for reference only.
-> "Trimmed mean" excludes the lowest/highest 1% of samples, providing a more accurate picture of typical performance by filtering out OS scheduling noise.
+See the [default low-latency report](docs/performance-report.md) and [blocking-mode report](docs/performance-report-blocking.md) for full data.
 
 ---
 
@@ -402,12 +402,15 @@ int main() {
     runtime.publishTopic("SensorUpdate");
     runtime.publishTopic("AsyncResultReady");
 
+    std::thread owner([&runtime]() { runtime.start(); });
     while (running) {
-        runtime.pollOnce(100);
         demo::SensorUpdate msg;
         ...
         service.BroadcastSensorUpdate(msg);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    runtime.stop();
+    owner.join();
 }
 ```
 
@@ -421,7 +424,10 @@ int main() {
     runtime.init("127.0.0.1", 9900);
 
     demo::SensorServiceProxy proxy(runtime);
-    proxy.connect();
+    std::thread owner([&runtime]() { runtime.start(); });
+    while (!proxy.isConnected()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 
     bool echo_bool = unwrap(proxy.EchoBool(false));
 
@@ -457,8 +463,10 @@ int main() {
     });
 
     while (running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    runtime.stop();
+    owner.join();
 }
 ```
 
@@ -541,7 +549,8 @@ Related tests include:
 | [Examples Guide (EN)](docs/examples.en.md) | English version of the examples guide |
 | [Downstream Example](examples/artifact_examples/README.en.md) | Building downstream projects with installed OmniBinder artifacts |
 | [Release Features](RELEASE_FEATURES.md) | Core capabilities, deliverables, and applicable scenarios of the current release |
-| [Performance Report](docs/performance-report.md) | RPC and topic latency test data (microsecond level) |
+| [Performance Report (default low-latency)](docs/performance-report.md) | RPC/topic latency with `start(0, nullptr)` |
+| [Performance Report (blocking)](docs/performance-report-blocking.md) | RPC/topic latency with the default blocking `start()` |
 
 The Chinese documentation remains available in the original `.md` files.
 
@@ -589,8 +598,11 @@ cd build
 
 ctest --output-on-failure
 
-# Run the performance benchmark and regenerate the report
+# Run the performance benchmark (default: low-latency busy-poll mode)
 ./target/test/test_performance -o ../docs/performance-report.md
+
+# Blocking event-loop mode with lower CPU usage
+./target/test/test_performance --poll-timeout-ms -1 -o ../docs/performance-report-blocking.md
 ```
 
 > **Note**: the available tests depend on the platform and build configuration; Windows builds skip some tests that rely on POSIX/Linux behavior. Use the current output of `ctest -N` as the source of truth.

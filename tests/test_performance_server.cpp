@@ -51,13 +51,20 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signalHandler);
 
     uint16_t sm_port = 0;
+    int poll_timeout_ms = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--sm-port") == 0 && i + 1 < argc) {
             sm_port = static_cast<uint16_t>(atoi(argv[++i]));
+        } else if (strcmp(argv[i], "--poll-timeout-ms") == 0 && i + 1 < argc) {
+            poll_timeout_ms = atoi(argv[++i]);
         }
     }
     if (sm_port == 0) {
         fprintf(stderr, "SERVER: --sm-port is required\n");
+        return 1;
+    }
+    if (poll_timeout_ms < -1) {
+        fprintf(stderr, "SERVER: --poll-timeout-ms must be -1, 0, or positive\n");
         return 1;
     }
 
@@ -75,7 +82,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::thread owner([&runtime]() { runtime.start(); });
+    std::thread owner([&runtime, poll_timeout_ms]() {
+        runtime.start(poll_timeout_ms, omnibinder::LoopTickCallback());
+    });
     for (int i = 0; i < 200 && service.port() == 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }

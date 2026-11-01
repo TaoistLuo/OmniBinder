@@ -81,6 +81,7 @@ public:
     // ============================================================
     int  init(const std::string& sm_host, uint16_t sm_port);
     int  start();
+    int  start(int poll_timeout_ms, const LoopTickCallback& on_tick);
     void registerProxy(ServiceProxyBase* proxy);
     void unregisterProxy(ServiceProxyBase* proxy);
     int connectDeclaredProxiesInternal();

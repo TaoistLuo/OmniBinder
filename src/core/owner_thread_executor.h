@@ -48,68 +48,89 @@ namespace omnibinder {
 template<typename T>
 class SyncCallState {
 public:
-    SyncCallState()
+    explicit SyncCallState(bool spin_wait = false)
         : done_(false)
+        , spin_wait_(spin_wait)
         , value_() {
     }
 
     void completeSuccess(const T& value) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!done_) {
+        if (!done_.load(std::memory_order_relaxed)) {
             value_ = value;
-            done_ = true;
+            done_.store(true, std::memory_order_release);
             cond_.notify_one();
         }
     }
 
     T wait() {
+        if (spin_wait_) {
+            while (!done_.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            return value_;
+        }
         std::unique_lock<std::mutex> lock(mutex_);
-        cond_.wait(lock, [this]{ return done_; });
+        cond_.wait(lock, [this]{ return done_.load(std::memory_order_acquire); });
         return value_;
     }
 
 private:
     std::mutex mutex_;
     std::condition_variable cond_;
-    bool done_;
+    std::atomic<bool> done_;
+    bool spin_wait_;
     T value_;
 };
 
 template<>
 class SyncCallState<void> {
 public:
-    SyncCallState()
-        : done_(false) {
+    explicit SyncCallState(bool spin_wait = false)
+        : done_(false)
+        , spin_wait_(spin_wait) {
     }
 
     void completeSuccess() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!done_) {
-            done_ = true;
+        if (!done_.load(std::memory_order_relaxed)) {
+            done_.store(true, std::memory_order_release);
             cond_.notify_one();
         }
     }
 
     void wait() {
+        if (spin_wait_) {
+            while (!done_.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            return;
+        }
         std::unique_lock<std::mutex> lock(mutex_);
-        cond_.wait(lock, [this]{ return done_; });
+        cond_.wait(lock, [this]{ return done_.load(std::memory_order_acquire); });
     }
 
 private:
     std::mutex mutex_;
     std::condition_variable cond_;
-    bool done_;
+    std::atomic<bool> done_;
+    bool spin_wait_;
 };
 
 class OwnerThreadExecutor {
 public:
     OwnerThreadExecutor()
         : loop_(NULL)
-        , owner_thread_id_() {
+        , owner_thread_id_()
+        , spin_wait_(false) {
     }
 
     void bindLoop(EventLoop* loop) {
         loop_ = loop;
+    }
+
+    void setSpinWait(bool enabled) {
+        spin_wait_.store(enabled);
     }
 
     void setOwnerThread(const std::thread::id& tid) {
@@ -142,7 +163,7 @@ public:
         }
 
         std::shared_ptr< SyncCallState<Result> > state =
-            std::make_shared< SyncCallState<Result> >();
+            std::make_shared< SyncCallState<Result> >(spin_wait_.load());
         if (!loop_->post([func, state]() {
                 state->completeSuccess(func());
             })) {
@@ -162,7 +183,7 @@ public:
         }
 
         std::shared_ptr< SyncCallState<void> > state =
-            std::make_shared< SyncCallState<void> >();
+            std::make_shared< SyncCallState<void> >(spin_wait_.load());
         if (!loop_->post([func, state]() {
                 func();
                 state->completeSuccess();
@@ -175,9 +196,10 @@ public:
     }
 
     EventLoop* loop_;
-    // atomic：owner_thread_id_ 可能被多线程并发首设（run/pollOnce 的 driver 争夺），
+    // atomic：owner_thread_id_ 可能被多线程并发首设（run 的 driver 争夺），
     // 无锁读写 std::thread::id 有数据竞争，改为 atomic 消除
     std::atomic<std::thread::id> owner_thread_id_;
+    std::atomic<bool> spin_wait_;
 };
 
 }

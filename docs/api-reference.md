@@ -330,6 +330,11 @@ public:
     // 业务必须自行创建线程调用 start()；runtime 不创建线程。
     int start();
 
+    // 指定 owner event-loop 轮询策略与每轮 tick 回调。
+    // poll_timeout_ms: -1 阻塞；0 忙轮询；N>0 最多等待 N ms。
+    // on_tick 在 owner 线程每轮 poll 后执行；-1 时回调必须为空。
+    int start(int poll_timeout_ms, const LoopTickCallback& on_tick);
+
     // 停止 event-loop；可从任意线程调用
     void stop();
 
@@ -1385,11 +1390,17 @@ int            omni_buffer_view_set_position(omni_buffer_view_t* view, size_t po
 ### 6.3 Runtime API
 
 ```c
+typedef void (*omni_runtime_tick_fn)(void* user_data);
+
 /* 客户端生命周期 */
 omni_runtime_t* omni_runtime_create(void);
 void           omni_runtime_destroy(omni_runtime_t* runtime);
 int            omni_runtime_init(omni_runtime_t* runtime, const char* sm_host, uint16_t sm_port);
 int            omni_runtime_start(omni_runtime_t* runtime); /* 阻塞；业务自行创建线程 */
+/* poll_timeout_ms: -1 阻塞；0 忙轮询；N>0 最多等待 N ms。
+ * on_tick 在 owner 线程每轮 poll 后执行；-1 时 on_tick 必须为 NULL。 */
+int            omni_runtime_start_ex(omni_runtime_t* runtime, int poll_timeout_ms,
+                                    omni_runtime_tick_fn on_tick, void* user_data);
 void           omni_runtime_stop(omni_runtime_t* runtime);
 int            omni_runtime_is_running(const omni_runtime_t* runtime);
 int            omni_runtime_is_ready(const omni_runtime_t* runtime);

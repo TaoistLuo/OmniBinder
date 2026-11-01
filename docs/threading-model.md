@@ -17,7 +17,7 @@
 
 以下 API 支持并发安全调用：
 
-- 生命周期/驱动：`init()`、`start()`、`stop()`、`isRunning()`、`isReady()`
+- 生命周期/驱动：`init()`、`start()`（含 `poll_timeout_ms`/`on_tick` 重载）、`stop()`、`isRunning()`、`isReady()`
 - 服务注册：`registerService()`、`unregisterService()`
 - 服务发现：`lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`
 - 连接管理：`connectService()`、`connectServiceInstance()`、`disconnectService()`、`disconnectServiceInstance()`、`isServiceConnected()`、`isServiceInstanceConnected()`
@@ -124,6 +124,21 @@ std::thread runtime_thread([&runtime]() {
 });
 ```
 
+需要控制 event-loop 轮询间隔或周期性喂狗时，可使用重载：
+
+```cpp
+std::thread runtime_thread([&runtime]() {
+    runtime.start(100, []() { watchdog.feed(); });
+});
+```
+
+- `poll_timeout_ms == -1`：阻塞等待，默认低 CPU 模式；此时 `on_tick` 必须为空
+- `poll_timeout_ms == 0`：非阻塞忙轮询，延迟最低但 CPU 占用 100%
+- `poll_timeout_ms > 0`：最多等待 N ms，空闲时 tick 至少每 N ms 执行一次
+
+`on_tick` 在 owner 线程每轮 poll 后执行；必须短小、非阻塞、不得抛异常。
+owner 线程处于同步 RPC reply-wait 期间不会执行 tick，长阻塞会延迟喂狗。
+
 如果 SM 不可达，`start()` 仍进入 event-loop 并持续重连；`isReady()` 在 SM 连接和服务/
 proxy 激活完成前保持 false。
 
@@ -208,6 +223,6 @@ runtime_thread.join();
 
 - Proxy 构造时登记到 runtime；`start()` 后由 runtime 自动连接
 - `setInstance()` 只设置目标实例与连接键；`connectionKey()` 供生成的方法寻址数据面连接
-- `connect()` / `connect(host_id, instance_id)` 是兼容旧接口，新代码不应调用
+- 生成方法首次调用时自动连接；`setInstance()` 决定连接键，无需手动 connect
 - `enableAutoReconnect()` / `setReconnectInterval()` / `startHeartbeat()` / `stopHeartbeat()` 通过 `callSerialized` 串行执行，并以 `connectionKey()`（默认实例即服务名，绑定实例即实例连接键）为键
 - 死亡通知回调（`onServiceDeath`）在 event-loop 线程执行；绑定实例的代理注册的是实例级死亡订阅

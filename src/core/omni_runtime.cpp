@@ -37,6 +37,9 @@ int OmniRuntime::init(const std::string& sm_host, uint16_t sm_port) {
     return impl_->init(sm_host, sm_port);
 }
 int OmniRuntime::start() { return impl_->start(); }
+int OmniRuntime::start(int poll_timeout_ms, const LoopTickCallback& on_tick) {
+    return impl_->start(poll_timeout_ms, on_tick);
+}
 void OmniRuntime::registerProxy(ServiceProxyBase* proxy) { impl_->registerProxy(proxy); }
 void OmniRuntime::unregisterProxy(ServiceProxyBase* proxy) { impl_->unregisterProxy(proxy); }
 int OmniRuntime::connectProxy(ServiceProxyBase* proxy) {
@@ -448,6 +451,17 @@ int OmniRuntime::Impl::beginRuntimeInternal() {
 }
 
 int OmniRuntime::Impl::start() {
+    return start(-1, LoopTickCallback());
+}
+
+int OmniRuntime::Impl::start(int poll_timeout_ms, const LoopTickCallback& on_tick) {
+    if (poll_timeout_ms < -1) {
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+    }
+    if (poll_timeout_ms == -1 && on_tick) {
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+    }
+
     {
         std::lock_guard<std::recursive_mutex> lock(api_mutex_);
         if (!initialized_) {
@@ -459,6 +473,7 @@ int OmniRuntime::Impl::start() {
 
         bool expected = false;
         if (loop_driver_active_.compare_exchange_strong(expected, true)) {
+            owner_executor_.setSpinWait(poll_timeout_ms == 0);
             owner_executor_.setOwnerThread(std::this_thread::get_id());
         } else {
             return static_cast<int>(ErrorCode::ERR_ALREADY_RUNNING);
@@ -472,7 +487,7 @@ int OmniRuntime::Impl::start() {
         ensureProxyRetryTimerInternal();
     }
 
-    loop_->run();
+    loop_->run(poll_timeout_ms, on_tick);
 
     loop_alive_ = false;
     running_ = false;

@@ -63,6 +63,10 @@ typedef std::function<void(uint32_t topic_id, ErrorCode error, const Buffer& raw
 /* @brief 诊断事件回调（watchPid 订阅的运行时事件流） */
 typedef std::function<void(const Buffer& data)> DiagEventCallback;
 
+/* @brief owner event-loop 每次轮询后的 tick 回调
+ * @note  在 owner 线程执行；必须短小、非阻塞、不得抛异常。 */
+typedef std::function<void()> LoopTickCallback;
+
 /* @brief 话题消息回调（携带来源实例身份，决策 D5）
  * @details 服务级与实例级订阅共用本回调类型：收到消息时回传发布者的 host_id 与
  *          instance_id，订阅方据此区分数据来自哪个实例，无需改动消息 payload。 */
@@ -138,6 +142,21 @@ public:
      * @note   启动后依次连接 SM、激活已声明服务、发布 topic、连接 proxy。
      *         必须由业务线程调用；本函数不创建线程。 */
     int  start();
+
+    /* @brief 启动运行时并指定 owner event-loop 的轮询等待策略
+     * @param[in] poll_timeout_ms 每轮 poll 的最大等待毫秒数：
+     *                            -1 无限阻塞（默认低 CPU 模式）；
+     *                            0  非阻塞忙轮询（最低延迟，CPU 占用 100%）；
+     *                            N>0 最多等待 N ms。
+     * @param[in] on_tick 每轮 poll 处理完后在 owner 线程执行的回调；
+     *                    可为空。必须短小、非阻塞、不得抛异常。
+     * @return 0 正常结束；<0 生命周期/参数错误
+     * @note   poll_timeout_ms == -1 时 on_tick 必须为空，否则返回 ERR_INVALID_PARAM；
+     *         需要喂狗时使用 N>0，避免空闲期间无法执行 tick。
+     *         on_tick 只在 start() 的 event-loop 轮询循环中执行；owner 线程处于同步 RPC
+     *         reply-wait 期间不会执行，长阻塞会延迟喂狗。
+     *         本函数仍然只驱动同一个 owner event-loop，不创建线程。 */
+    int  start(int poll_timeout_ms, const LoopTickCallback& on_tick);
 
     /* @brief 停止 event-loop（线程安全，可从任意线程调用）
      * @note   仅标记停止；实际退出在下一轮事件循环检查时生效 */

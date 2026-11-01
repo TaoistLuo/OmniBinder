@@ -719,6 +719,16 @@ int omni_runtime_start(omni_runtime_t* runtime) {
     return runtime->runtime.start();
 }
 
+int omni_runtime_start_ex(omni_runtime_t* runtime, int poll_timeout_ms,
+                          omni_runtime_tick_fn on_tick, void* user_data) {
+    if (!runtime) return OMNI_ERR_INVALID_PARAM;
+    omnibinder::LoopTickCallback tick;
+    if (on_tick) {
+        tick = [on_tick, user_data]() { on_tick(user_data); };
+    }
+    return runtime->runtime.start(poll_timeout_ms, tick);
+}
+
 void omni_runtime_set_register_host(omni_runtime_t* runtime, const char* host) {
     if (runtime) {
         runtime->runtime.setRegisterHost(host ? host : "");

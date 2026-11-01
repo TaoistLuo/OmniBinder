@@ -271,8 +271,26 @@ omni_runtime_t* omni_runtime_create(void);
 void           omni_runtime_destroy(omni_runtime_t* client);
 
 int  omni_runtime_init(omni_runtime_t* client, const char* sm_host, uint16_t sm_port);
+
+/* @brief owner event-loop 每次轮询后的 tick 回调
+ * @param[in] user_data 调用方通过 omni_runtime_start_ex 传入的上下文
+ * @note  在 runtime owner 线程执行；必须短小、非阻塞、不得抛异常。 */
+typedef void (*omni_runtime_tick_fn)(void* user_data);
+
 /* @brief 阻塞启动运行时；业务需自行创建线程调用（runtime 不创建线程） */
 int  omni_runtime_start(omni_runtime_t* client);
+
+/* @brief 阻塞启动运行时并指定 owner event-loop 轮询策略
+ * @param[in] client           runtime
+ * @param[in] poll_timeout_ms  -1 无限等待；0 忙轮询；N>0 最多等待 N ms
+ * @param[in] on_tick          每轮 poll 后执行的回调，可为 NULL
+ * @param[in] user_data        传给 on_tick 的上下文
+ * @return 0 正常结束；<0 生命周期/参数错误
+ * @note  poll_timeout_ms == -1 时 on_tick 必须为 NULL；
+ *        需要喂狗时使用 N>0。on_tick 在 owner 线程执行。 */
+int  omni_runtime_start_ex(omni_runtime_t* client, int poll_timeout_ms,
+                           omni_runtime_tick_fn on_tick, void* user_data);
+
 void omni_runtime_stop(omni_runtime_t* client);
 int  omni_runtime_is_running(const omni_runtime_t* client);
 int  omni_runtime_is_ready(const omni_runtime_t* client);

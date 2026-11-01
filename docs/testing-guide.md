@@ -472,8 +472,28 @@ cd build
 - RPC Echo 延迟
 - RPC Add 延迟
 - topic pub/sub 延迟
-- CTest 通过显式 `-o` 参数更新仓库中的 `docs/performance-report.md`
+- CTest 通过显式 `-o` 参数更新构建目录中的 `performance-report.md`
 - 验证显式错误处理与等待模型改造没有引入明显性能回退
+
+`test_performance` 支持两种 event-loop 模式：
+
+```bash
+cd build
+
+# 默认低延迟忙轮询模式（CPU 100%）
+./target/test/test_performance -o ../docs/performance-report.md
+
+# 阻塞模式（低 CPU）
+./target/test/test_performance --poll-timeout-ms -1 -o ../docs/performance-report-blocking.md
+```
+
+`--poll-timeout-ms` 的值直接传给客户端和服务端的 `OmniRuntime::start()`：
+
+- `-1`：阻塞，低 CPU
+- `0`：busy-spin，默认性能测试模式，最低延迟
+- `N>0`：最多等待 N ms
+
+报告中的 `event-loop:` 字段记录实际模式，比较性能时必须确认该字段一致。
 
 ### 7.2 `test_soak_runner`
 
@@ -513,6 +533,7 @@ ctest --test-dir build --output-on-failure -R test_performance
 ```bash
 cd build
 ./target/test/test_performance -o ../docs/performance-report.md
+./target/test/test_performance --poll-timeout-ms -1 -o ../docs/performance-report-blocking.md
 ```
 
 ### 7.5 常见执行错误来源
@@ -545,7 +566,8 @@ cd build
 
 通过 CTest 或以上带 `-o` 的手工命令成功执行后，会更新：
 
-- `docs/performance-report.md`
+- `docs/performance-report.md`（默认低延迟忙轮询模式）
+- `docs/performance-report-blocking.md`（`--poll-timeout-ms -1` 阻塞模式）
 
 ### 7.7 一周长测（7x24 小时）推荐方法
 

@@ -135,37 +135,42 @@ OmniBinder 有两层独立心跳：
 - 话题模式：服务端每 500us 轮转发布 topic，客户端 owner event-loop 收包
 - 测试服务 SHM ring：64KB / 64KB
 - Topic 预热轮数：100；Topic 测试轮数：1000 / 用例
+- event-loop：`start(0, nullptr)` 低延迟忙轮询模式
 
-> **测试环境**：Windows WSL2 Ubuntu 20.04，以下数据仅供参考相对量级。裸金属 Linux 性能更高，详见[性能测试报告](docs/performance-report.md)。
+> **测试环境**：Windows WSL2 Ubuntu 20.04，以下数据仅供参考相对量级。裸金属 Linux 性能更高，详见[默认低延迟性能报告](docs/performance-report.md)。
 
 | 测试项 | 样本数 | 去极值均值 | 95% 情况 | 说明 |
 |--------|--------|-----------|-----------|------|
-| RPC EchoBytes (0 bytes) | 1000 | 24.8 us | 44 us | 空 payload，主要反映协议与调度开销 |
-| RPC EchoBytes (64 bytes) | 1000 | 26.3 us | 47 us | 常见小 payload RPC |
-| RPC EchoBytes (256 bytes) | 1000 | 26.2 us | 46 us | 常见小 payload RPC |
-| RPC EchoBytes (1024 bytes) | 1000 | 28.0 us | 49 us | 1KB 级 payload |
-| RPC EchoBytes (4096 bytes) | 1000 | 38.0 us | 62 us | 4KB payload，测试服务显式放大 SHM ring |
-| RPC EchoBytes (8192 bytes) | 1000 | 57.4 us | 79 us | 8KB payload，测试服务显式放大 SHM ring |
-| RPC EchoInt32 | 1000 | 13.1 us | 43 us | 小基础类型 RPC |
-| RPC EchoStruct | 1000 | 15.0 us | 40 us | 结构体 RPC |
-| RPC Add (2 x int32) | 1000 | 16.1 us | 43 us | 小计算型 RPC |
-| Topic pub/sub (0 bytes) | 1000 | 5.2 us | 12 us | 空广播 payload |
-| Topic pub/sub (64 bytes) | 1000 | 5.6 us | 11 us | 小广播数据 |
-| Topic pub/sub (256 bytes) | 1000 | 5.2 us | 11 us | 常见小广播数据 |
-| Topic pub/sub (1024 bytes) | 1000 | 6.2 us | 12 us | 1KB 广播数据 |
-| Topic pub/sub (4096 bytes) | 1000 | 9.7 us | 18 us | 4KB 广播数据 |
-| Topic pub/sub (8192 bytes) | 1000 | 13.6 us | 23 us | 8KB 广播数据 |
+| RPC EchoBytes (0 bytes) | 1000 | 14.9 us | 49 us | 空 payload，主要反映协议与调度开销 |
+| RPC EchoBytes (64 bytes) | 1000 | 16.6 us | 52 us | 常见小 payload RPC |
+| RPC EchoBytes (256 bytes) | 1000 | 17.1 us | 51 us | 常见小 payload RPC |
+| RPC EchoBytes (1024 bytes) | 1000 | 20.6 us | 53 us | 1KB 级 payload |
+| RPC EchoBytes (4096 bytes) | 1000 | 31.9 us | 62 us | 4KB payload，测试服务显式放大 SHM ring |
+| RPC EchoBytes (8192 bytes) | 1000 | 61.7 us | 82 us | 8KB payload，测试服务显式放大 SHM ring |
+| RPC EchoInt32 | 1000 | 8.6 us | 24 us | 小基础类型 RPC |
+| RPC EchoStruct | 1000 | 11.4 us | 44 us | 结构体 RPC |
+| RPC Add (2 x int32) | 1000 | 8.7 us | 22 us | 小计算型 RPC |
+| Topic pub/sub (0 bytes) | 1000 | 12.5 us | 25 us | 空广播 payload |
+| Topic pub/sub (64 bytes) | 1000 | 12.0 us | 24 us | 小广播数据 |
+| Topic pub/sub (256 bytes) | 1000 | 13.0 us | 27 us | 常见小广播数据 |
+| Topic pub/sub (1024 bytes) | 1000 | 12.8 us | 27 us | 1KB 广播数据 |
+| Topic pub/sub (4096 bytes) | 1000 | 16.4 us | 33 us | 4KB 广播数据 |
+| Topic pub/sub (8192 bytes) | 1000 | 21.2 us | 43 us | 8KB 广播数据 |
 
 从报告中的完整数据看：
 
-- **0~1024 bytes 常见 RPC** 在当前 WSL2 环境下的去极值均值约为 **24.8~28.0 us**
-- **4096~8192 bytes payload RPC** 在显式放大 SHM ring 的测试配置下，约为 **38.0~57.4 us**
-- **Topic pub/sub** 约为 **5.2~13.6 us**（单向广播，无 RPC 往返开销）
+- **0~1024 bytes 常见 RPC** 在当前 WSL2 环境下的去极值均值约为 **8.6~20.6 us**
+- **4096~8192 bytes payload RPC** 在显式放大 SHM ring 的测试配置下，约为 **31.9~61.7 us**
+- **Topic pub/sub** 约为 **12.0~21.2 us**（单向广播，无 RPC 往返开销）
 
-> **性能说明**：数据在 WSL2 上采集，受虚拟化抖动影响，绝对数值仅供参考——裸金属 Linux 上延迟更低更稳定。
+> **性能说明**：上表使用 `start(0, nullptr)` 低延迟模式，owner event-loop 忙轮询，CPU 占用 100%。
+> 默认 `start()` 使用阻塞 event-loop，在 WSL2 下单次 RPC/topic 需额外承担内核唤醒和线程调度开销
+> （RPC 约 151 us、topic 约 94 us，见 [阻塞模式报告](docs/performance-report-blocking.md)）。
+> 忙轮询适合延迟敏感的专用进程；普通服务优先使用默认阻塞模式以降低 CPU 占用。
+> 数据在 WSL2 上采集，受虚拟化抖动影响，绝对数值仅供参考——裸金属 Linux 上延迟更低更稳定。
 > "去极值均值"是去掉最低/最高各 1% 后的均值，能更准确反映典型性能（排除 OS 调度抖动污染）。
 
-详细数据和分析见 [性能测试报告](docs/performance-report.md)。
+详细数据和分析见 [默认低延迟报告](docs/performance-report.md) 与 [阻塞模式报告](docs/performance-report-blocking.md)。
 
 ---
 
@@ -564,7 +569,8 @@ int main() {
 | [使用示例](docs/examples.md) | 完整的服务端/客户端示例、跨板通信示例 |
 | [下游 Sensor/HMI 示例](examples/artifact_examples/README.md) | 使用已构建 `lib` 与 `omni-idlc` 独立构建的 C/C++ 业务示例 |
 | [发布特性](RELEASE_FEATURES.md) | 当前版本核心能力、交付内容与适用场景 |
-| [性能报告](docs/performance-report.md) | RPC 和话题的延迟测试数据（微秒级） 
+| [性能报告（默认低延迟）](docs/performance-report.md) | `start(0, nullptr)` 忙轮询的 RPC 和话题延迟数据 |
+| [性能报告（阻塞模式）](docs/performance-report-blocking.md) | 默认 `start()` 阻塞 event-loop 的延迟数据 |
 
 ---
 
@@ -620,8 +626,11 @@ cd build
 # 运行全部测试（Linux / Windows（部分不支持） 均支持）
 ctest --output-on-failure
 
-# 单独运行性能测试（结果输出到 docs/performance-report.md）
+# 单独运行性能测试（默认低延迟忙轮询，结果输出到 docs/performance-report.md）
 ./target/test/test_performance -o ../docs/performance-report.md
+
+# 阻塞模式（低 CPU，结果输出到 docs/performance-report-blocking.md）
+./target/test/test_performance --poll-timeout-ms -1 -o ../docs/performance-report-blocking.md
 ```
 
 > **注意**：可用测试由平台和构建配置决定；Windows 构建会跳过依赖 POSIX/Linux 行为的部分测试。请以 `ctest -N` 的当前输出为准。

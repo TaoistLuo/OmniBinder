@@ -100,6 +100,44 @@ TEST(RuntimeLifecycleTest, InitOnlyCreatesResources) {
     runtime.stop();
 }
 
+TEST(RuntimeLifecycleTest, RejectsTickWithBlockingPoll) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", 19983), 0);
+    EXPECT_EQ(runtime.start(-1, []() {}), static_cast<int>(ErrorCode::ERR_INVALID_PARAM));
+    EXPECT_FALSE(runtime.isRunning());
+}
+
+TEST(RuntimeLifecycleTest, TickCallbackRunsOnOwnerAndStops) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", 19983), 0);
+    std::atomic<int> ticks(0);
+    std::thread::id tick_thread;
+    std::thread::id main_thread = std::this_thread::get_id();
+    int start_ret = 1;
+    std::thread owner([&]() {
+        start_ret = runtime.start(1, [&runtime, &ticks, &tick_thread]() {
+            tick_thread = std::this_thread::get_id();
+            if (++ticks >= 3) runtime.stop();
+        });
+    });
+    owner.join();
+    EXPECT_EQ(start_ret, 0);
+    EXPECT_GE(ticks.load(), 3);
+    EXPECT_NE(tick_thread, main_thread);
+}
+
+TEST(RuntimeLifecycleTest, SpinPollModeStops) {
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", 19983), 0);
+    std::thread owner([&runtime]() {
+        EXPECT_EQ(runtime.start(0, LoopTickCallback()), 0);
+    });
+    EXPECT_TRUE(waitUntil([&runtime]() { return runtime.isRunning(); }, 30));
+    runtime.stop();
+    owner.join();
+    EXPECT_FALSE(runtime.isRunning());
+}
+
 TEST(RuntimeLifecycleTest, StartWaitsForLateServiceManager) {
     TestPid sm = 0;
     OmniRuntime runtime;

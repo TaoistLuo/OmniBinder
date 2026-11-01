@@ -16,8 +16,13 @@ namespace test {
  */
 class RuntimeThread {
 public:
-    explicit RuntimeThread(OmniRuntime& runtime)
-        : runtime_(runtime), stopped_(false), thread_([this]() { runtime_.start(); }) {
+    explicit RuntimeThread(OmniRuntime& runtime,
+                           int poll_timeout_ms = -1,
+                           const LoopTickCallback& on_tick = LoopTickCallback())
+        : runtime_(runtime), stopped_(false),
+          thread_([this, poll_timeout_ms, on_tick]() {
+              runtime_.start(poll_timeout_ms, on_tick);
+          }) {
         for (int i = 0; i < 200 && !runtime_.isRunning(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }

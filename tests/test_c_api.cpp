@@ -273,3 +273,30 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     owner.join();
     omni_runtime_destroy(runtime);
 }
+
+static std::atomic<int> g_tick_count(0);
+
+static void tickAndStop(void* user_data) {
+    omni_runtime_t* runtime = static_cast<omni_runtime_t*>(user_data);
+    if (++g_tick_count >= 3) {
+        omni_runtime_stop(runtime);
+    }
+}
+
+TEST(CApiStartExTest, TickCallbackStopsRuntime) {
+    omni_runtime_t* runtime = omni_runtime_create();
+    ASSERT_NE(runtime, nullptr);
+    ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", 19942), 0);
+    g_tick_count.store(0);
+    EXPECT_EQ(omni_runtime_start_ex(runtime, 0, tickAndStop, runtime), 0);
+    omni_runtime_destroy(runtime);
+}
+
+TEST(CApiStartExTest, RejectsTickWithBlockingPoll) {
+    omni_runtime_t* runtime = omni_runtime_create();
+    ASSERT_NE(runtime, nullptr);
+    ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", 19942), 0);
+    EXPECT_EQ(omni_runtime_start_ex(runtime, -1, tickAndStop, runtime),
+              OMNI_ERR_INVALID_PARAM);
+    omni_runtime_destroy(runtime);
+}

@@ -91,6 +91,37 @@ TEST(OwnerThreadExecutorTest, VoidInvokePropagatesCompletion) {
     EXPECT_TRUE(called.load());
 }
 
+TEST(OwnerThreadExecutorTest, SpinWaitCrossThreadCompletes) {
+    EventLoop loop;
+    OwnerThreadExecutor executor;
+    executor.bindLoop(&loop);
+    executor.setSpinWait(true);
+
+    std::atomic<bool> ready(false);
+    std::atomic<bool> called(false);
+
+    std::thread loop_thread([&]() {
+        executor.setOwnerThread(std::this_thread::get_id());
+        ready.store(true);
+        loop.run();
+    });
+
+    while (!ready.load()) {
+        std::this_thread::yield();
+    }
+
+    std::thread worker([&]() {
+        EXPECT_TRUE(executor.tryInvokeOnOwner([&called]() {
+            called.store(true);
+        }));
+        loop.stop();
+    });
+
+    worker.join();
+    loop_thread.join();
+    EXPECT_TRUE(called.load());
+}
+
 TEST(OwnerThreadExecutorTest, InlineWhenLoopBoundButNoOwnerThread) {
     // 与 InlineWhenLoopNotOwned 互补：loop_ != NULL 但尚未 setOwnerThread，
     // 任意线程都必须就地执行（hasOwnerThread()==false 分支）

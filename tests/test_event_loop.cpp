@@ -85,3 +85,21 @@ TEST(EventLoopTest, PostBeforeStopIsDrainedByRun) {
     loop.run();
     EXPECT_TRUE(called.load());
 }
+
+TEST(EventLoopTest, RunTickAndStop) {
+    EventLoop loop;
+    int ticks = 0;
+    loop.run(1, [&loop, &ticks]() {
+        ++ticks;
+        if (ticks >= 3) loop.stop();
+    });
+    EXPECT_GE(ticks, 3);
+}
+
+TEST(EventLoopTest, StopBeforeRunSkipsTick) {
+    EventLoop loop;
+    loop.stop();
+    int ticks = 0;
+    loop.run(0, [&ticks]() { ++ticks; });
+    EXPECT_EQ(ticks, 0);
+}

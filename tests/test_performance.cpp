@@ -164,6 +164,7 @@ static const int RPC_ROUNDS = 1000;
 static const int RPC_WARMUP = 50;
 static const int TOPIC_ROUNDS = 1000;
 static const int TOPIC_WARMUP = 100;
+static int g_poll_timeout_ms = 0;
 
 static TestPid g_sm_pid = -1;
 static TestPid g_srv_pid = -1;
@@ -182,7 +183,13 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             report_path = argv[++i];
+        } else if (strcmp(argv[i], "--poll-timeout-ms") == 0 && i + 1 < argc) {
+            g_poll_timeout_ms = atoi(argv[++i]);
         }
+    }
+    if (g_poll_timeout_ms < -1) {
+        fprintf(stderr, "FATAL: --poll-timeout-ms must be -1, 0, or positive\n");
+        return 1;
     }
 
     omnibinder::setLogLevel(omnibinder::LOG_ERROR);
@@ -208,7 +215,9 @@ int main(int argc, char* argv[]) {
         stopProcess(sm_pid);
         return 1;
     }
-    TestPid srv_pid = startProcess(srv_bin, "--sm-port", "19910");
+    std::string timeout_arg = std::to_string(g_poll_timeout_ms);
+    TestPid srv_pid = startProcess(srv_bin, "--sm-port", "19910",
+                                    "--poll-timeout-ms", timeout_arg.c_str());
     g_srv_pid = srv_pid;
 
     if (!waitForService("PerfService", SM_PORT, 10)) {
@@ -229,7 +238,7 @@ int main(int argc, char* argv[]) {
         omnibinder::OmniRuntime rt;
         rt.init("127.0.0.1", SM_PORT);
         perf::PerfServiceProxy proxy(rt);
-        omnibinder::test::RuntimeThread owner(rt);
+        omnibinder::test::RuntimeThread owner(rt, g_poll_timeout_ms);
         for (int i = 0; i < 100 && !proxy.isConnected(); ++i) {
             omnibinder::platform::sleepMs(20);
         }
@@ -355,7 +364,7 @@ int main(int argc, char* argv[]) {
         omnibinder::OmniRuntime rt;
         rt.init("127.0.0.1", SM_PORT);
         perf::PerfServiceProxy proxy(rt);
-        omnibinder::test::RuntimeThread owner(rt);
+        omnibinder::test::RuntimeThread owner(rt, g_poll_timeout_ms);
         for (int i = 0; i < 100 && !proxy.isConnected(); ++i) {
             omnibinder::platform::sleepMs(20);
         }
@@ -445,10 +454,18 @@ int main(int argc, char* argv[]) {
             std::strftime(now_str, sizeof(now_str), "%Y-%m-%d %H:%M:%S",
                           std::localtime(&now_time));
 
+            std::string loop_mode = "spin (0)";
+            if (g_poll_timeout_ms == -1) {
+                loop_mode = "blocking (-1)";
+            } else if (g_poll_timeout_ms > 0) {
+                loop_mode = "poll " + std::to_string(g_poll_timeout_ms) + " ms";
+            }
+
             ofs << "# OmniBinder 性能测试报告\n\n"
                 << "**生成时间:** " << now_str << "\n\n"
                 << "**测试环境:**\n"
                 << "- 传输方式: TCP + SHM（自动选择，同机通信使用 SHM）\n"
+                << "- event-loop: " << loop_mode << "\n"
                 << "- RPC 预热轮数: " << RPC_WARMUP << "\n"
                 << "- RPC 测试轮数: " << RPC_ROUNDS << "（每个用例）\n"
                 << "- 话题模式: 服务端每 500us 轮转发布 topic，客户端 owner event-loop 收包，统计服务端 publish 时间戳到客户端 callback 的延迟\n"

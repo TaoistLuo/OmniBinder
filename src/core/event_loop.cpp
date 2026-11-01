@@ -64,6 +64,11 @@ EventLoop::~EventLoop()
 
 void EventLoop::run()
 {
+    run(-1, Functor());
+}
+
+void EventLoop::run(int timeout_ms, const Functor& on_tick)
+{
     // 后端构造失败时 pollOnce 会立即返回，直接进入 while 将 100% CPU 忙转
     if (!backend_) {
         OMNI_LOG_ERROR(LOG_TAG, "EventLoop run skipped: backend not initialized");
@@ -83,7 +88,10 @@ void EventLoop::run()
     OMNI_LOG_INFO(LOG_TAG, "EventLoop started");
 
     while (running_ && !stop_requested_.load()) {
-        pollOnce(-1);
+        pollOnce(timeout_ms);
+        if (on_tick && running_ && !stop_requested_.load()) {
+            on_tick();
+        }
     }
 
     processPendingFunctors();
