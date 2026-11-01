@@ -177,13 +177,10 @@ const char* messageTypeToString(MessageType type) {
     case MessageType::MSG_QUERY_INTERFACES_REPLY:  return "QUERY_INTERFACES_REPLY";
     case MessageType::MSG_LIST_INSTANCES:          return "LIST_INSTANCES";
     case MessageType::MSG_LIST_INSTANCES_REPLY:    return "LIST_INSTANCES_REPLY";
-    case MessageType::MSG_SUBSCRIBE_SERVICE:       return "SUBSCRIBE_SERVICE";
-    case MessageType::MSG_SUBSCRIBE_SERVICE_REPLY: return "SUBSCRIBE_SERVICE_REPLY";
-    case MessageType::MSG_UNSUBSCRIBE_SERVICE:     return "UNSUBSCRIBE_SERVICE";
-    case MessageType::MSG_DEATH_NOTIFY:            return "DEATH_NOTIFY";
-    case MessageType::MSG_DEATH_NOTIFY_INSTANCE:   return "DEATH_NOTIFY_INSTANCE";
-    case MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE:   return "SUBSCRIBE_SERVICE_INSTANCE";
-    case MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE: return "UNSUBSCRIBE_SERVICE_INSTANCE";
+    case MessageType::MSG_SUBSCRIBE_SERVICE_WATCH:       return "SUBSCRIBE_SERVICE_WATCH";
+    case MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY: return "SUBSCRIBE_SERVICE_WATCH_REPLY";
+    case MessageType::MSG_UNSUBSCRIBE_SERVICE_WATCH:     return "UNSUBSCRIBE_SERVICE_WATCH";
+    case MessageType::MSG_SERVICE_WATCH_NOTIFY:          return "SERVICE_WATCH_NOTIFY";
     case MessageType::MSG_PUBLISH_TOPIC:           return "PUBLISH_TOPIC";
     case MessageType::MSG_PUBLISH_TOPIC_REPLY:     return "PUBLISH_TOPIC_REPLY";
     case MessageType::MSG_SUBSCRIBE_TOPIC:         return "SUBSCRIBE_TOPIC";

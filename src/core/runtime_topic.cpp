@@ -25,115 +25,190 @@ uint8_t selectorWireMode(const TopicSubscriptionSelector& selector) {
     return selector.instance_level ? TOPIC_SUB_MODE_INSTANCE : TOPIC_SUB_MODE_SERVICE;
 }
 
+bool watchesOverlap(const ServiceWatchRequest& a, const ServiceWatchRequest& b) {
+    if (a.service_name != b.service_name) return false;
+    if (!a.host_id.empty() && !b.host_id.empty() && a.host_id != b.host_id) return false;
+    if (!a.instance_id.empty() && !b.instance_id.empty()
+        && a.instance_id != b.instance_id) return false;
+    return true;
+}
+
+bool validWatchRequests(const std::vector<ServiceWatchRequest>& requests) {
+    if (requests.empty() || requests.size() > 64) return false;
+    for (size_t i = 0; i < requests.size(); ++i) {
+        if (requests[i].service_name.empty()
+            || requests[i].service_name.size() > MAX_SERVICE_NAME_LENGTH
+            || requests[i].host_id.size() > MAX_SERVICE_NAME_LENGTH
+            || requests[i].instance_id.size() > MAX_SERVICE_NAME_LENGTH) {
+            return false;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            if (watchesOverlap(requests[i], requests[j])) return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 // ============================================================
-// 死亡通知
+// 服务状态 watch
 // ============================================================
 
-int OmniRuntime::Impl::subscribeServiceDeath(const std::string& service_name,
-                                               const DeathCallback& callback) {
-    return callSerialized([this, &service_name, &callback]() -> int {
-        return subscribeServiceDeathInternal(service_name, callback);
+int OmniRuntime::Impl::watchServices(const std::vector<ServiceWatchRequest>& requests,
+                                     const ServiceWatchCallback& callback,
+                                     uint64_t& watch_id) {
+    return callSerialized([this, &requests, &callback, &watch_id]() -> int {
+        return watchServicesInternal(requests, callback, watch_id);
     });
 }
 
-int OmniRuntime::Impl::subscribeServiceDeathInternal(const std::string& service_name,
-                                                    const DeathCallback& callback) {
-    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE, allocSequence());
-    msg.payload.writeString(service_name);
-    
+int OmniRuntime::Impl::watchServicesInternal(
+    const std::vector<ServiceWatchRequest>& requests,
+    const ServiceWatchCallback& callback, uint64_t& watch_id) {
+    if (!validWatchRequests(requests) || !callback) {
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+    }
+
+    uint64_t id = next_watch_id_++;
+    if (id == 0) id = next_watch_id_++;
+    while (service_watches_.find(id) != service_watches_.end()) {
+        id = next_watch_id_++;
+        if (id == 0) id = next_watch_id_++;
+    }
+
+    ServiceWatchSubscription pending_sub;
+    pending_sub.watch_id = id;
+    pending_sub.requests = requests;
+    pending_sub.callback = callback;
+    pending_sub.active = false;
+    service_watches_[id] = pending_sub;
+
+    // SM 尚未就绪时先保留本地登记，等 SM 连接成功后由
+    // restoreControlPlaneState() 重放；否则启动早于 SM 的客户端会永久丢失 watch。
+    if (!ready_ || !sm_channel_.isConnected()) {
+        watch_id = id;
+        OMNI_LOG_INFO(LOG_TAG,
+                      "watchServices deferred until SM ready watch_id=%llu",
+                      (unsigned long long)id);
+        return 0;
+    }
+
+    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE_WATCH, allocSequence());
+    if (!msg.payload.writeUint64(id) || !msg.payload.writeUint32(
+            static_cast<uint32_t>(requests.size()))) {
+        service_watches_.erase(id);
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+    for (size_t i = 0; i < requests.size(); ++i) {
+        if (!msg.payload.writeString(requests[i].service_name)
+            || !msg.payload.writeString(requests[i].host_id)
+            || !msg.payload.writeString(requests[i].instance_id)) {
+            service_watches_.erase(id);
+            return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+        }
+    }
+
     Message reply;
     int ret = sendSMRequestAndWaitReply(msg, reply);
-    if (ret != 0) return ret;
-
+    if (ret != 0) {
+        service_watches_.erase(id);
+        return ret;
+    }
     bool accepted = false;
     if (!decodeBoolReplyPayload(reply, accepted)) {
+        service_watches_.erase(id);
         return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
     }
     if (!accepted) {
-        return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
+        service_watches_.erase(id);
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
     }
 
-    ServiceState& svc_state = ensureServiceState(service_name);
-    svc_state.death_cb = callback;
-    svc_state.has_death = true;
+    std::map<uint64_t, ServiceWatchSubscription>::iterator it = service_watches_.find(id);
+    if (it == service_watches_.end()) {
+        // 初始通知回调里已经 unwatch 本组
+        watch_id = id;
+        return 0;
+    }
+    it->second.active = true;
+    std::vector<ServiceWatchEvent> pending;
+    pending.swap(it->second.pending);
+    ServiceWatchCallback cb = it->second.callback;
+    for (size_t i = 0; i < pending.size(); ++i) {
+        if (service_watches_.find(id) == service_watches_.end()) break;
+        cb(id, pending[i].identity, pending[i].online);
+    }
+    watch_id = id;
     return 0;
 }
 
-int OmniRuntime::Impl::subscribeServiceInstanceDeath(const std::string& name,
-                                                     const std::string& host_id,
-                                                     const std::string& instance_id,
-                                                     const DeathSourceCallback& callback) {
-    return callSerialized([this, &name, &host_id, &instance_id, &callback]() -> int {
-        return subscribeServiceInstanceDeathInternal(name, host_id, instance_id, callback);
+int OmniRuntime::Impl::unwatchServices(uint64_t watch_id) {
+    return callSerialized([this, watch_id]() -> int {
+        return unwatchServicesInternal(watch_id);
     });
 }
 
-int OmniRuntime::Impl::subscribeServiceInstanceDeathInternal(
-    const std::string& name, const std::string& host_id,
-    const std::string& instance_id, const DeathSourceCallback& callback) {
-    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE, allocSequence());
-    if (!writeServiceIdentityPayload(msg.payload, name, host_id, instance_id)) {
+int OmniRuntime::Impl::unwatchServicesInternal(uint64_t watch_id) {
+    if (watch_id == 0) {
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+    }
+    Message msg(MessageType::MSG_UNSUBSCRIBE_SERVICE_WATCH, allocSequence());
+    if (!msg.payload.writeUint64(watch_id)) {
         return static_cast<int>(ErrorCode::ERR_SERIALIZE);
     }
+    sendToSM(msg);
+    service_watches_.erase(watch_id);
+    return 0;
+}
 
+int OmniRuntime::Impl::restoreServiceWatch(uint64_t watch_id) {
+    std::map<uint64_t, ServiceWatchSubscription>::iterator it =
+        service_watches_.find(watch_id);
+    if (it == service_watches_.end()) {
+        return 0;
+    }
+    it->second.active = false;
+    it->second.pending.clear();
+    const ServiceWatchSubscription sub = it->second;
+    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE_WATCH, allocSequence());
+    if (!msg.payload.writeUint64(sub.watch_id)
+        || !msg.payload.writeUint32(static_cast<uint32_t>(sub.requests.size()))) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+    for (size_t i = 0; i < sub.requests.size(); ++i) {
+        if (!msg.payload.writeString(sub.requests[i].service_name)
+            || !msg.payload.writeString(sub.requests[i].host_id)
+            || !msg.payload.writeString(sub.requests[i].instance_id)) {
+            return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+        }
+    }
     Message reply;
     int ret = sendSMRequestAndWaitReply(msg, reply);
     if (ret != 0) return ret;
-
     bool accepted = false;
     if (!decodeBoolReplyPayload(reply, accepted)) {
-        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+        OMNI_LOG_WARN(LOG_TAG, "restore service watch malformed reply watch_id=%llu",
+                      (unsigned long long)watch_id);
+        return 0;
     }
     if (!accepted) {
-        return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
+        OMNI_LOG_WARN(LOG_TAG, "restore service watch failed for watch_id=%llu",
+                      (unsigned long long)watch_id);
+        return 0;
     }
 
-    const std::string key = makeServiceIdentityKey(ServiceIdentity(name, host_id, instance_id));
-    InstanceDeathSubscription& sub = instance_deaths_[key];
-    sub.name = name;
-    sub.host_id = host_id;
-    sub.instance_id = instance_id;
-    sub.callback = callback;
-    return 0;
-}
-
-int OmniRuntime::Impl::unsubscribeServiceInstanceDeath(const std::string& name,
-                                                      const std::string& host_id,
-                                                      const std::string& instance_id) {
-    return callSerialized([this, &name, &host_id, &instance_id]() -> int {
-        return unsubscribeServiceInstanceDeathInternal(name, host_id, instance_id);
-    });
-}
-
-int OmniRuntime::Impl::unsubscribeServiceInstanceDeathInternal(
-    const std::string& name, const std::string& host_id,
-    const std::string& instance_id) {
-    Message msg(MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE, allocSequence());
-    if (!writeServiceIdentityPayload(msg.payload, name, host_id, instance_id)) {
-        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    it = service_watches_.find(watch_id);
+    if (it == service_watches_.end()) {
+        return 0;
     }
-    sendToSM(msg);
-    instance_deaths_.erase(makeServiceIdentityKey(ServiceIdentity(name, host_id, instance_id)));
-    return 0;
-}
-
-int OmniRuntime::Impl::unsubscribeServiceDeath(const std::string& service_name) {
-    return callSerialized([this, &service_name]() -> int {
-        return unsubscribeServiceDeathInternal(service_name);
-    });
-}
-
-int OmniRuntime::Impl::unsubscribeServiceDeathInternal(const std::string& service_name) {
-    Message msg(MessageType::MSG_UNSUBSCRIBE_SERVICE, allocSequence());
-    msg.payload.writeString(service_name);
-    sendToSM(msg);
-    ServiceState* svc_state = findServiceState(service_name);
-    if (svc_state) {
-        svc_state->death_cb = DeathCallback();
-        svc_state->has_death = false;
-        eraseServiceStateIfUnused(service_name);
+    it->second.active = true;
+    std::vector<ServiceWatchEvent> pending;
+    pending.swap(it->second.pending);
+    ServiceWatchCallback callback = it->second.callback;
+    for (size_t i = 0; i < pending.size(); ++i) {
+        if (service_watches_.find(watch_id) == service_watches_.end()) break;
+        callback(watch_id, pending[i].identity, pending[i].online);
     }
     return 0;
 }

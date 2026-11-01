@@ -6,7 +6,7 @@
 
 本文档展示 OmniBinder 的完整使用示例，包括：
 - C++ 服务端（SensorService）：提供传感器数据接口，定时广播传感器数据
-- C++ 客户端（SensorClient）：调用服务端接口，订阅广播，监听死亡通知
+- C++ 客户端（SensorClient）：调用服务端接口，订阅广播，关注服务上线/离线状态
 - C 服务端 / C 客户端：纯 C 语言实现，功能与 C++ 示例等价
 - 下游消费式 Sensor/HMI 示例：使用已构建出的 `lib` 与 `omni-idlc` 独立构建
 - omni-cli：查询在线服务和调用接口
@@ -250,7 +250,7 @@ endif()
 - 普通服务接口（`GetLatestData`、`SetThreshold`、`ResetSensor`、`GetSensorCount`）
 - 话题订阅（`SensorUpdate`）
 - callback-like 异步结果接收（`AsyncResultReady`）
-- 死亡通知
+- 服务状态通知
 
 典型调用形态如下：
 
@@ -368,7 +368,7 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 - 数组 RPC 调用
 - 普通 pub/sub（`SensorUpdate`）
 - callback-like 异步结果接收（`AsyncResultReady`）
-- 死亡通知回调
+- 服务状态通知回调
 
 典型调用形态如下：
 
@@ -739,13 +739,13 @@ cd build
 ./target/test/test_transport
 ./target/test/test_shm_transport
 ./target/test/test_service_registry
-./target/test/test_heartbeat_death
+./target/test/test_service_watch_notifier
 ./target/test/test_topic_manager
 ./target/test/test_idl_compiler
 
 # 运行集成测试（自动启动 ServiceManager）
 ./target/test/test_integration           # 基础集成测试
-./target/test/test_full_integration      # 完整集成测试（含 SHM 多客户端、广播、死亡通知）
+./target/test/test_full_integration      # 完整集成测试（含 SHM 多客户端、广播、服务状态通知）
 
 # 或使用 ctest 运行全部
 ctest --output-on-failure
@@ -760,10 +760,10 @@ ctest --output-on-failure
 | SHM 自动选择 | 同机客户端自动创建 per-client SHM 并通过 UDS 握手 |
 | 多客户端独立 SHM | 3 个客户端并发 + 5 个客户端顺序使用各自独立 SHM ring |
 | 广播/订阅 | 发布者通过 SHM 广播数据到订阅者 |
-| 死亡通知 | 服务进程崩溃后收到死亡回调 |
+| 服务状态 watch | 服务进程上线/离线时收到状态回调 |
 | 生命周期 | 服务注销后 SM 查询不到 |
 
-### 8.4 验证死亡通知
+### 8.4 验证服务状态 watch
 
 在终端2中按 `Ctrl+C` 杀掉 C++ 服务端，观察终端3的输出：
 
@@ -779,7 +779,7 @@ ctest --output-on-failure
 ```
 [WARN][ServiceManager] session_timeout fd=... runtime_id=... timeout_ms=...
 [WARN][ServiceManager] Service timed out: SensorService (host_id=<host_id>, instance_id=)
-[INFO][DeathNotifier] Instance SensorService (host_id=<host_id>, instance_id=) died, name_gone=1, notifying 1 subscribers
+[INFO][ServiceWatchNotifier] service state notification: SensorService host_id=<host_id> instance_id= online=0
 ```
 
 ### 8.5 单板运行两个同名服务实例
@@ -1129,7 +1129,7 @@ int main() {
         printf("[Broadcast] id=%d status=%s\n", msg.id, msg.status.c_str());
     });
 
-    // 订阅死亡通知
+    // 订阅服务状态通知
     proxy.OnServiceDied([]() {
         printf("!!! MyService DIED !!!\n");
     });
@@ -1326,7 +1326,7 @@ int main(void) {
     /* 订阅广播 */
     myapp_MyService_proxy_subscribe_status_update(&proxy, on_status_update, NULL);
 
-    /* 订阅死亡通知 */
+    /* 订阅服务状态通知 */
     myapp_MyService_proxy_on_service_died(&proxy, on_service_died, NULL);
 
     while (g_running) {
@@ -1407,6 +1407,6 @@ ${CC:-gcc} -std=c99 -I$OMNIBINDER_DIR/include \
 | RPC 调用 | `Return r = proxy.Method(req)` | `xxx_proxy_method(&proxy, &req, &resp)` |
 | 广播 | `stub.BroadcastTopic(msg)` | `xxx_broadcast_topic(runtime, &msg)` |
 | 订阅 | `proxy.SubscribeTopic(lambda)` | `xxx_proxy_subscribe_topic(&proxy, callback, ud)` |
-| 死亡通知 | `proxy.OnServiceDied(lambda)` | `xxx_proxy_on_service_died(&proxy, callback, ud)` |
+| 服务状态通知 | `proxy.OnServiceDied(lambda)` | `xxx_proxy_on_service_died(&proxy, callback, ud)` |
 | string | `std::string` | `char*`（NUL 结尾），手动 `omni_malloc()` / `omni_free()`（详见[内存使用说明](memory-guide.md)） |
 | 结构体生命周期 | 自动（RAII） | 手动 `_init()` / `_destroy()` |

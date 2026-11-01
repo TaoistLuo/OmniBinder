@@ -24,6 +24,14 @@ static void signalHandler(int) {
     g_running = false;
 }
 
+static void printServiceState(uint64_t watch_id, const omnibinder::ServiceIdentity& identity,
+                              bool online) {
+    (void)watch_id;
+    std::printf("[Service] %s host_id=%s instance_id=%s %s\n",
+                identity.name.c_str(), identity.host_id.c_str(),
+                identity.instance_id.c_str(), online ? "ONLINE" : "OFFLINE");
+}
+
 static demo::SensorConfig makeConfig() {
     demo::SensorConfig cfg;
     cfg.enabled = true;
@@ -90,6 +98,13 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    uint64_t service_watch_id = 0;
+    std::vector<omnibinder::ServiceWatchRequest> watch_requests;
+    watch_requests.push_back(omnibinder::ServiceWatchRequest("SensorService", "", ""));
+    if (runtime.watchServices(watch_requests, printServiceState, service_watch_id) != 0) {
+        std::fprintf(stderr, "Failed to watch SensorService state\n");
+    }
+
     std::vector<omnibinder::ServiceInfo> instances;
     if (runtime.listServiceInstances("SensorService", instances) == 0) {
         std::printf("Discovered %zu SensorService instance(s):\n", instances.size());
@@ -99,36 +114,52 @@ int main(int argc, char* argv[]) {
                         instances[i].host.c_str(), instances[i].port);
         }
     } else {
-        std::printf("No SensorService instance discovered yet\n");
+        std::printf("No SensorService instance discovered yet, waiting...\n");
     }
 
-    if (instance_id) {
-        bool found = false;
-        for (size_t i = 0; i < instances.size(); ++i) {
-            if (instances[i].instance_id == instance_id) {
-                proxy.setInstance(instances[i].host_id, instances[i].instance_id);
-                bound_host_id = instances[i].host_id;
-                bound_instance_id = instances[i].instance_id;
-                found = true;
-                break;
+    bool instance_found = (instance_id == NULL);
+    bool waiting_instance_printed = false;
+    while (g_running && !instance_found) {
+        std::vector<omnibinder::ServiceInfo> current;
+        if (runtime.listServiceInstances("SensorService", current) == 0) {
+            for (size_t i = 0; i < current.size(); ++i) {
+                if (current[i].instance_id == instance_id) {
+                    proxy.setInstance(current[i].host_id, current[i].instance_id);
+                    bound_host_id = current[i].host_id;
+                    bound_instance_id = current[i].instance_id;
+                    instance_found = true;
+                    break;
+                }
             }
         }
-        if (!found) {
-            std::fprintf(stderr, "No SensorService instance with instance_id='%s'\n", instance_id);
-            runtime.stop();
-            runtime_thread.join();
-            return 1;
+        if (!instance_found) {
+            if (!waiting_instance_printed) {
+                std::printf("Waiting for SensorService instance_id='%s'...\n", instance_id);
+                waiting_instance_printed = true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     }
-
-    for (int i = 0; i < 50 && g_running && !proxy.isConnected(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    if (!proxy.isConnected()) {
-        std::fprintf(stderr, "SensorService not found\n");
+    if (!g_running) {
+        if (service_watch_id != 0) runtime.unwatchServices(service_watch_id);
         runtime.stop();
         runtime_thread.join();
-        return 1;
+        return 0;
+    }
+
+    bool waiting_connection_printed = false;
+    while (g_running && !proxy.isConnected()) {
+        if (!waiting_connection_printed) {
+            std::printf("Waiting for SensorService data connection...\n");
+            waiting_connection_printed = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!g_running) {
+        if (service_watch_id != 0) runtime.unwatchServices(service_watch_id);
+        runtime.stop();
+        runtime_thread.join();
+        return 0;
     }
 
     std::printf("Connected to SensorService%s%s\n\n",
@@ -273,7 +304,7 @@ int main(int argc, char* argv[]) {
     common::StatusResponse ack = resultValue(proxy.RequestLatestDataAsync(async_req));
     std::printf("RequestLatestDataAsync => code=%d message=%s\n", ack.code, ack.message.c_str());
 
-    // 注册服务死亡通知：感知服务异常退出（自动重连已默认开启）
+    // 数据面连接断开回调：感知已连接服务异常退出（自动重连已默认开启）
     proxy.OnServiceDied([]() {
         std::printf("\n!!! [DeathNotify] SensorService has DIED !!!\n\n");
     });
@@ -283,6 +314,9 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    if (service_watch_id != 0) {
+        runtime.unwatchServices(service_watch_id);
+    }
     runtime.stop();
     runtime_thread.join();
     return 0;

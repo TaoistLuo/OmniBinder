@@ -7,7 +7,7 @@ add_executable(service_manager
     sm_topic.cpp
     sm_diag.cpp
     service_registry.cpp
-    death_notifier.cpp
+    service_watch_notifier.cpp
     topic_manager.cpp
 )
 

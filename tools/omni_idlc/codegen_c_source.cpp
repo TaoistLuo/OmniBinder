@@ -551,9 +551,12 @@ void CCodeGen::genServiceStubSource(const ServiceDef& svc, const AstFile& ast, s
 
 static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
                                      const std::string& prefix) {
-    os << "static void " << prefix << "_internal_death_cb(const char* service_name, void* user_data) {\n";
-    os << "    (void)service_name;\n";
+    os << "static void " << prefix << "_internal_watch_cb(uint64_t watch_id,\n";
+    os << "    const char* service_name, const char* host_id, const char* instance_id,\n";
+    os << "    int online, void* user_data) {\n";
+    os << "    (void)service_name; (void)host_id; (void)instance_id;\n";
     os << "    " << prefix << "_proxy* p = (" << prefix << "_proxy*)user_data;\n";
+    os << "    if (!p || watch_id != p->watch_id || online) return;\n";
     os << "    p->connected = 0;\n";
     os << "    if (p->death_callback) {\n";
     os << "        p->death_callback(p->death_user_data);\n";
@@ -567,6 +570,7 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "    p->reconnect_interval_ms = 1000;\n";
     os << "    p->death_callback = NULL;\n";
     os << "    p->death_user_data = NULL;\n";
+    os << "    p->watch_id = 0;\n";
     os << "    memset(p->_sub_ctxs, 0, sizeof(p->_sub_ctxs));\n";
     os << "    memset(p->_sub_topics, 0, sizeof(p->_sub_topics));\n";
     os << "    p->_sub_ctx_count = 0;\n";
@@ -581,6 +585,26 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "    if (n > 0) memcpy(dst, src, n);\n";
     os << "    dst[n] = '\\0';\n";
     os << "    return 0;\n";
+    os << "}\n\n";
+
+    os << "typedef struct " << prefix << "_first_instance {\n";
+    os << "    char host[257];\n";
+    os << "    char instance[257];\n";
+    os << "    int found;\n";
+    os << "} " << prefix << "_first_instance;\n\n";
+    os << "static void " << prefix << "_capture_first_instance(\n";
+    os << "    const omni_service_instance_t* info, void* user_data) {\n";
+    os << "    " << prefix << "_first_instance* first = (" << prefix << "_first_instance*)user_data;\n";
+    os << "    if (!info || first->found) return;\n";
+    os << "    size_t host_len = strlen(info->host_id ? info->host_id : \"\");\n";
+    os << "    if (host_len >= sizeof(first->host)) host_len = sizeof(first->host) - 1;\n";
+    os << "    memcpy(first->host, info->host_id ? info->host_id : \"\", host_len);\n";
+    os << "    first->host[host_len] = '\\0';\n";
+    os << "    size_t instance_len = strlen(info->instance_id ? info->instance_id : \"\");\n";
+    os << "    if (instance_len >= sizeof(first->instance)) instance_len = sizeof(first->instance) - 1;\n";
+    os << "    memcpy(first->instance, info->instance_id ? info->instance_id : \"\", instance_len);\n";
+    os << "    first->instance[instance_len] = '\\0';\n";
+    os << "    first->found = 1;\n";
     os << "}\n\n";
 
     os << "static const char* " << prefix << "_proxy_connection_key(const " << prefix << "_proxy* p) {\n";
@@ -600,8 +624,17 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "        p->auto_reconnect_enabled = 1;\n";
     // 数据面心跳由 omni_runtime_connect_* 内的 Session Hello 自动启动；
     // C proxy 不再用硬编码默认值覆盖用户预先配置的策略。
-    os << "        omni_runtime_subscribe_death(p->runtime, \"" << svc.name << "\",\n";
-    os << "            " << prefix << "_internal_death_cb, p);\n";
+    os << "        if (p->watch_id == 0) {\n";
+    os << "            " << prefix << "_first_instance first;\n";
+    os << "            memset(&first, 0, sizeof(first));\n";
+    os << "            omni_runtime_list_instances(p->runtime, \"" << svc.name << "\",\n";
+    os << "                " << prefix << "_capture_first_instance, &first);\n";
+    os << "            omni_service_watch_request_t request = { \"" << svc.name << "\",\n";
+    os << "                first.found ? first.host : NULL,\n";
+    os << "                first.found ? first.instance : NULL };\n";
+    os << "            omni_runtime_watch_services(p->runtime, &request, 1,\n";
+    os << "                " << prefix << "_internal_watch_cb, p, &p->watch_id);\n";
+    os << "        }\n";
     os << "    }\n";
     os << "    return ret;\n";
     os << "}\n\n";
@@ -624,8 +657,12 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "        omni_runtime_enable_auto_reconnect(p->runtime, key, 1);\n";
     os << "        p->auto_reconnect_enabled = 1;\n";
     // 同上：不覆盖用户策略；需要自定义时调用 *_proxy_start_heartbeat。
-    os << "        omni_runtime_subscribe_death_instance(p->runtime, \"" << svc.name << "\",\n";
-    os << "            p->instance_host_id, p->instance_id, " << prefix << "_internal_death_cb, p);\n";
+    os << "        if (p->watch_id == 0) {\n";
+    os << "            omni_service_watch_request_t request = { \"" << svc.name << "\",\n";
+    os << "                p->instance_host_id, p->instance_id };\n";
+    os << "            omni_runtime_watch_services(p->runtime, &request, 1,\n";
+    os << "                " << prefix << "_internal_watch_cb, p, &p->watch_id);\n";
+    os << "        }\n";
     os << "    }\n";
     os << "    return ret;\n";
     os << "}\n\n";
@@ -658,13 +695,18 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "        const char* key = omni_runtime_service_connection_key(\"" << svc.name << "\",\n";
     os << "            p->instance_host_id, p->instance_id);\n";
     os << "        omni_runtime_stop_heartbeat(p->runtime, key);\n";
-    os << "        omni_runtime_unsubscribe_death_instance(p->runtime, \"" << svc.name << "\",\n";
-    os << "            p->instance_host_id, p->instance_id);\n";
+    os << "        if (p->watch_id != 0) {\n";
+    os << "            omni_runtime_unwatch_services(p->runtime, p->watch_id);\n";
+    os << "            p->watch_id = 0;\n";
+    os << "        }\n";
     os << "        omni_runtime_disconnect_service_instance(p->runtime, \"" << svc.name << "\",\n";
     os << "            p->instance_host_id, p->instance_id);\n";
     os << "    } else {\n";
     os << "        omni_runtime_stop_heartbeat(p->runtime, \"" << svc.name << "\");\n";
-    os << "        omni_runtime_unsubscribe_death(p->runtime, \"" << svc.name << "\");\n";
+    os << "        if (p->watch_id != 0) {\n";
+    os << "            omni_runtime_unwatch_services(p->runtime, p->watch_id);\n";
+    os << "            p->watch_id = 0;\n";
+    os << "        }\n";
     os << "        omni_runtime_disconnect_service(p->runtime, \"" << svc.name << "\");\n";
     os << "    }\n";
     os << "    p->connected = 0;\n";

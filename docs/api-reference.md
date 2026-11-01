@@ -212,7 +212,7 @@ OmniRuntime 是用户使用 OmniBinder 的主要入口，负责与 ServiceManage
 - `OmniRuntime` 对外提供**线程安全公共 API**
 - 内部核心状态由单个 owner event-loop 串行驱动
 - 非 owner 线程发起的同步调用，会投递到 owner event-loop 执行并等待结果
-- `TopicCallback` 与 `DeathCallback` 默认在 owner event-loop 线程执行
+- `TopicCallback` 与 `ServiceWatchCallback` 默认在 owner event-loop 线程执行
 - `start()` / `stop()` 的并发协作规则见 [线程模型文档](threading-model.md)
 
 #### 并发语义摘要
@@ -221,9 +221,9 @@ OmniRuntime 是用户使用 OmniBinder 的主要入口，负责与 ServiceManage
 |---|---|---|
 | 持续驱动 | `start()` | 线程安全；同一时刻只允许一个线程驱动 event-loop |
 | 停止 | `stop()` | 可从任意线程并发调用 |
-| 同步阻塞 | `lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`、`invoke()`、`connectServiceInstance()`、`disconnectServiceInstance()`、`subscribeServiceDeath()`、`subscribeServiceInstanceDeath()`、`publishTopic()`、`subscribeTopic()` | 可从任意线程安全调用，但内部发送/等待/状态写入由 owner event-loop 串行处理 |
+| 同步阻塞 | `lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`、`invoke()`、`connectServiceInstance()`、`disconnectServiceInstance()`、`publishTopic()`、`subscribeTopic()` | 可从任意线程安全调用，但内部发送/等待/状态写入由 owner event-loop 串行处理 |
 | 异步/配置 | `invokeOneWay()`、`broadcast()`、`setHeartbeatPolicy()`、`setDefaultTimeout()` | 可从任意线程安全调用；`setHeartbeatPolicy` 必须在 `init()` 前调用，不投递 event-loop |
-| 回调 | `TopicCallback`、`DeathCallback` | 默认在 owner event-loop 线程执行 |
+| 回调 | `TopicCallback`、`ServiceWatchCallback` | 默认在 owner event-loop 线程执行 |
 
 #### 超时与阻塞语义
 
@@ -291,13 +291,17 @@ struct MethodInfo {
     std::string return_type;    // 返回类型，void 表示无返回值
 };
 
-// 死亡通知回调（名字级）
-typedef std::function<void(const std::string& service_name)> DeathCallback;
+// 服务实例状态关注条件；host_id/instance_id 为空表示通配
+struct ServiceWatchRequest {
+    std::string service_name;
+    std::string host_id;
+    std::string instance_id;
+};
 
-// 实例级死亡通知回调（携带死亡实例的完整身份）
-typedef std::function<void(const std::string& service_name,
-                           const std::string& host_id,
-                           const std::string& instance_id)> DeathSourceCallback;
+// 服务实例上线/离线回调
+typedef std::function<void(uint64_t watch_id,
+                           const ServiceIdentity& identity,
+                           bool online)> ServiceWatchCallback;
 
 // 话题消息回调
 typedef std::function<void(uint32_t topic_id, const Buffer& data)> TopicCallback;
@@ -512,38 +516,17 @@ public:
                      uint32_t idl_hash,
                      const Buffer& request);
 
-    // ---- 死亡通知 ----
+    // ---- 服务状态 watch ----
 
-    // 订阅服务死亡通知（名字级）
-    // service_name: 要监控的服务名
-    // callback: 死亡时的回调函数（默认在 owner event-loop 线程执行）
-    // 语义: 仅当该服务名已无任何存活实例（最后一个实例消失）时触发；
-    //       同名仍有实例存活时不触发
-    // 返回: 0 成功，负值为错误码
-    int subscribeServiceDeath(const std::string& service_name,
-                              const DeathCallback& callback);
+    // 关注一组服务实例状态（name 必填，host/instance 可单独或同时指定）
+    // list 内条件重叠会整组失败；订阅成功后立即补发当前匹配实例状态。
+    // SM 尚未就绪时先本地登记并返回成功，SM 连接后自动重放。
+    int watchServices(const std::vector<ServiceWatchRequest>& requests,
+                      const ServiceWatchCallback& callback,
+                      uint64_t& watch_id);
 
-    // 取消订阅（名字级）
-    int unsubscribeServiceDeath(const std::string& service_name);
-
-    // 订阅服务实例死亡通知
-    // service_name: 服务名
-    // host_id:      目标板级主机身份
-    // instance_id:  目标实例标识
-    // callback:     死亡回调，携带 (service_name, host_id, instance_id)；
-    //               默认在 owner event-loop 线程执行
-    // 语义: 仅该实例死亡时触发，同名其它实例死亡不影响本订阅；
-    //       重复订阅同一实例为更新回调
-    // 返回: 0 成功，负值为错误码
-    int subscribeServiceInstanceDeath(const std::string& service_name,
-                                      const std::string& host_id,
-                                      const std::string& instance_id,
-                                      const DeathSourceCallback& callback);
-
-    // 取消实例级订阅（不影响名字级或同名其它实例订阅）
-    int unsubscribeServiceInstanceDeath(const std::string& service_name,
-                                        const std::string& host_id,
-                                        const std::string& instance_id);
+    // 取消一个 watch 组
+    int unwatchServices(uint64_t watch_id);
 
     // ---- 话题/广播 ----
 
@@ -1210,7 +1193,7 @@ C API 需要手动管理内存。完整规则（含失败路径、回调借用�
    生成 proxy 返回的 `string/bytes`、`omni_strdup()`。不要用系统 `free()`。
 3. **生成的 struct / 数组 / topic 用 `xxx_destroy()`**：递归释放嵌套动态字段，可重复调用；
    不要逐个裸 `omni_free`。
-4. **回调参数是借用指针，不能释放、不能跨回调保存**：topic `data`、death `service_name`、
+4. **回调参数是借用指针，不能释放、不能跨回调保存**：topic `data`、service watch 的 identity 字段、
    `omni_service_instance_t` 字段、生成 topic 回调的 `const T* msg` 都只在回调期间有效。
 
 | 对象 | 创建 | 释放 | 备注 |
@@ -1229,9 +1212,9 @@ C API 需要手动管理内存。完整规则（含失败路径、回调借用�
 > **实现文件**：`src/core/omnibinder_c.cpp`  
 > **示例代码**：`examples/example_c/`
 
-对于 C 语言用户，提供一套完整的 C 风格 API 封装，覆盖客户端调用、服务端注册、Buffer 操作、话题订阅与死亡通知。
+对于 C 语言用户，提供一套完整的 C 风格 API 封装，覆盖客户端调用、服务端注册、Buffer 操作、话题订阅与服务状态 watch。
 
-句柄 API 对关键 NULL 参数做防御性拒绝：`omni_runtime_init`（runtime/sm_host）、`omni_runtime_invoke`（runtime/service_name/request/response）、`omni_runtime_invoke_oneway`、`omni_runtime_subscribe_death`、`omni_runtime_unsubscribe_death`、`omni_runtime_subscribe_death_instance`、`omni_runtime_unsubscribe_death_instance`、`omni_runtime_unsubscribe_topic`，以及 `omni_runtime_register_service`/`omni_runtime_broadcast`/`omni_runtime_subscribe_topic` 均返回 `-1`；`omni_service_create(NULL, ...)` 返回 `NULL`，`omni_fnv1a_32(NULL)` 返回 `0`。
+句柄 API 对关键 NULL 参数做防御性拒绝：`omni_runtime_init`（runtime/sm_host）、`omni_runtime_invoke`（runtime/service_name/request/response）、`omni_runtime_invoke_oneway`、`omni_runtime_watch_services`、`omni_runtime_unwatch_services`、`omni_runtime_unsubscribe_topic`，以及 `omni_runtime_register_service`/`omni_runtime_broadcast`/`omni_runtime_subscribe_topic` 均返回 `-1`；`omni_service_create(NULL, ...)` 返回 `NULL`，`omni_fnv1a_32(NULL)` 返回 `0`。
 
 ### 6.1 类型定义
 
@@ -1295,7 +1278,15 @@ typedef int (*omni_invoke_callback_t)(uint32_t method_id,
 typedef void (*omni_topic_callback_t)(uint32_t topic_id,
     const omni_buffer_t* data, void* user_data);
 
-typedef void (*omni_death_callback_t)(const char* service_name, void* user_data);
+typedef struct omni_service_watch_request_t {
+    const char* service_name;   /* 必填 */
+    const char* host_id;        /* NULL = 任意 */
+    const char* instance_id;    /* NULL = 任意 */
+} omni_service_watch_request_t;
+
+typedef void (*omni_service_watch_callback_t)(
+    uint64_t watch_id, const char* service_name, const char* host_id,
+    const char* instance_id, int online, void* user_data);
 
 /* 服务实例信息（omni_runtime_list_instances 回调参数；指针仅回调期间有效） */
 typedef struct omni_service_instance_t {
@@ -1484,16 +1475,12 @@ int  omni_runtime_subscribe_topic(omni_runtime_t* runtime, const char* topic_nam
          uint32_t expected_idl_hash, omni_topic_callback_t callback, void* user_data);
 int  omni_runtime_unsubscribe_topic(omni_runtime_t* runtime, const char* topic_name);
 
-/* 死亡通知 */
-int  omni_runtime_subscribe_death(omni_runtime_t* runtime, const char* service_name,
-         omni_death_callback_t callback, void* user_data);
-int  omni_runtime_unsubscribe_death(omni_runtime_t* runtime, const char* service_name);
-/* 实例级死亡通知：仅该 (service_name, host_id, instance_id) 实例死亡时触发 */
-int  omni_runtime_subscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
-         const char* host_id, const char* instance_id,
-         omni_death_callback_t callback, void* user_data);
-int  omni_runtime_unsubscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
-         const char* host_id, const char* instance_id);
+/* 服务状态 watch */
+int  omni_runtime_watch_services(omni_runtime_t* runtime,
+         const omni_service_watch_request_t* requests, uint32_t count,
+         omni_service_watch_callback_t callback, void* user_data,
+         uint64_t* out_watch_id);
+int  omni_runtime_unwatch_services(omni_runtime_t* runtime, uint64_t watch_id);
 
 /* 运行时统计 */
 int  omni_runtime_get_stats(omni_runtime_t* runtime, omni_runtime_stats_t* stats);
@@ -1508,6 +1495,15 @@ omni_service_t* omni_service_create(const char* name,
                                     uint32_t interface_id,
                                     omni_invoke_callback_t callback,
                                     void* user_data);
+
+/* 客户端连接/断开回调（owner event-loop 线程执行） */
+typedef void (*omni_service_client_callback_t)(const char* client_info, void* user_data);
+/* 必须在 omni_runtime_register_service() 前调用；回调在 owner 线程执行 */
+void omni_service_set_client_callbacks(omni_service_t* svc,
+                                       omni_service_client_callback_t on_connected,
+                                       omni_service_client_callback_t on_disconnected,
+                                       void* user_data);
+
 void            omni_service_destroy(omni_service_t* svc);
 void*           omni_service_get_user_data(omni_service_t* svc);
 
@@ -1654,7 +1650,7 @@ target_link_libraries(my_c_client omnibinder_static)
 
 ### 6.8 特性说明
 
-- ✅ **完整功能**：覆盖客户端调用、服务端注册、Buffer 操作、话题订阅与死亡通知
+- ✅ **完整功能**：覆盖客户端调用、服务端注册、Buffer 操作、话题订阅与服务状态 watch
 - ✅ **类型安全**：使用不透明句柄避免内存泄漏
 - ✅ **零拷贝**：Buffer 操作高效
 - ✅ **IDL 支持**：omni-idlc 自动生成 C 代码

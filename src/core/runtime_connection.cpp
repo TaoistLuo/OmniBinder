@@ -50,7 +50,7 @@ void OmniRuntime::Impl::eraseServiceStateIfUnused(const std::string& name) {
     if (it == services_.end()) {
         return;
     }
-    if (!it->second.has_info && !it->second.has_death
+    if (!it->second.has_info
         && !it->second.has_reconnect && !it->second.has_heartbeat) {
         services_.erase(it);
     }

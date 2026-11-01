@@ -7,7 +7,7 @@
 文档目标是：
 
 - 准确描述当前实现中的核心模块、职责边界和关键数据结构
-- 说明控制面、数据面、SHM、RPC、发布订阅、死亡通知的完整数据流
+- 说明控制面、数据面、SHM、RPC、发布订阅、服务状态通知的完整数据流
 - 说明运行时内存模型、连接模型和事件模型
 - 让开发者读完后能快速定位代码、理解调用路径，并在不破坏整体设计的前提下继续扩展
 
@@ -34,7 +34,7 @@
 |   Transport Layer: TcpConnection / ShmClientConnection         |
 +-------------------------------------------------------------------+
 |                     ServiceManager（独立进程）                      |
-|   ServiceRegistry / Session deadline / DeathNotifier / TopicManager |
+|   ServiceRegistry / Session deadline / ServiceWatchNotifier / TopicManager |
 +-------------------------------------------------------------------+
 ```
 
@@ -42,7 +42,7 @@
 
 OmniBinder 的内部实现分成两个平面：
 
-- **控制面**：注册、发现、心跳、死亡通知、topic 关系管理
+- **控制面**：注册、发现、心跳、服务状态通知、topic 关系管理
 - **数据面**：RPC、one-way、broadcast 数据传输
 
 控制面由 `ServiceManager` 统一处理，数据面由服务间直连处理。
@@ -103,8 +103,8 @@ OmniBinder 的内部实现分成两个平面：
 - `service_manager/sm_diag.cpp` — 诊断 watch 控制面
 - `service_manager/service_registry.h`
 - `service_manager/service_registry.cpp`
-- `service_manager/death_notifier.h`
-- `service_manager/death_notifier.cpp`
+- `service_manager/service_watch_notifier.h`
+- `service_manager/service_watch_notifier.cpp`
 - `service_manager/topic_manager.h`
 - `service_manager/topic_manager.cpp`
 
@@ -118,7 +118,7 @@ OmniBinder 的内部实现分成两个平面：
 - 管理 `ServiceManager` 连接生命周期
 - 注册和注销本地服务
 - 协调控制面、RPC、topic、本地服务托管、连接管理之间的交互
-- 持有高层缓存和全局状态（如服务缓存、死亡回调、本地服务表）
+- 持有高层缓存和全局状态（如服务缓存、服务状态回调、本地服务表）
 
 ### 4.2 关键成员
 
@@ -131,8 +131,8 @@ OmniBinder 的内部实现分成两个平面：
 - `ConnectionManager* conn_mgr_`
 - `std::map<std::string, LocalServiceEntry*> local_services_`
 - `std::map<int, std::string> client_id_to_service_`
-- `std::map<std::string, ServiceState> services_`（按**连接键**索引：默认实例键即服务名，显式实例键由 `makeServiceConnectionKey` 生成；统一归并服务缓存 / 死亡回调 / 重连配置 / 心跳状态）
-- `std::map<std::string, InstanceDeathSubscription> instance_deaths_`（实例级死亡订阅，键为 `makeServiceIdentityKey`）
+- `std::map<std::string, ServiceState> services_`（按**连接键**索引：默认实例键即服务名，显式实例键由 `makeServiceConnectionKey` 生成；统一归并服务缓存 / 服务状态回调 / 重连配置 / 心跳状态）
+- `std::map<uint64_t, ServiceWatchSubscription> service_watches_`（服务状态 watch 组）
 
 ### 4.3 LocalServiceEntry
 
@@ -438,7 +438,7 @@ ShmServerConnection:
 
 - `ServiceRegistry`
 - `Session deadline`（控制面 runtime / 数据面 client）
-- `DeathNotifier`
+- `ServiceWatchNotifier`
 - `TopicManager`
 
 ### 11.1 ServiceRegistry
@@ -460,11 +460,12 @@ ShmServerConnection:
 - 数据面：每个 client session 一个 deadline 定时器，`MSG_HEARTBEAT` 到达后续期；超时 `onServiceClientDisconnected` 清理该 client 的订阅与缓冲
 - 低功耗长超时：无固定上限，deadline 可到分钟/小时级
 
-### 11.3 DeathNotifier
+### 11.3 ServiceWatchNotifier
 
 负责：
 
-- 通知所有订阅了目标服务死亡事件的客户端
+- 管理按 service_name / host_id / instance_id 过滤的持久 watch 组
+- 实例注册、注销、心跳超时与 takeover 时向匹配客户端下发 online/offline 通知
 
 ### 11.4 TopicManager
 
@@ -508,28 +509,29 @@ Client（需要枚举同名全部实例时）
   -> 返回 ServiceInfo 列表
 ```
 
-### 12.3 服务死亡订阅数据流
+### 12.3 服务状态 watch 数据流
 
 ```text
 Client
-  -> OmniRuntime::subscribeServiceDeath()
-  -> SmControlChannel::sendMessage(MSG_SUBSCRIBE_SERVICE)
-  -> ServiceManagerApp::handleSubscribeService()
-  -> DeathNotifier 记录订阅关系
-  -> 返回 MSG_SUBSCRIBE_SERVICE_REPLY
-  -> OmniRuntime 仅在 reply 成功后更新本地 death callback
+  -> OmniRuntime::watchServices()
+  -> SmControlChannel::sendMessage(MSG_SUBSCRIBE_SERVICE_WATCH)
+  -> ServiceManagerApp::handleSubscribeServiceWatch()
+  -> ServiceWatchNotifier 记录订阅关系
+  -> 返回 MSG_SUBSCRIBE_SERVICE_WATCH_REPLY
+  -> OmniRuntime 先登记本地 watch；reply 成功后标记 active 并派发补发事件
+  -> SM 未就绪/重连时保留本地登记，连接恢复后重放 MSG_SUBSCRIBE_SERVICE_WATCH
 ```
 
-### 12.4 服务死亡通知数据流
+### 12.4 服务状态通知数据流
 
 ```text
 ServiceManager
   -> Session deadline 检测超时 / 连接断开
   -> ServiceRegistry 删除服务
-  -> DeathNotifier 生成死亡通知
+  -> ServiceWatchNotifier 生成服务状态通知
   -> 通过控制面 TCP 发送给订阅者
   -> OmniRuntime::onSMMessage()
-  -> 执行本地 death callback
+  -> 执行本地 service state callback
 ```
 
 ## 13. RPC 完整数据流
@@ -756,12 +758,10 @@ class OmniRuntime {
                         uint32_t timeout_ms = DEFAULT_HEARTBEAT_TIMEOUT);
     void stopHeartbeat(const std::string& service_name);
 
-    // 死亡通知（名字级 / 实例级）
-    int subscribeServiceDeath(const std::string& service_name, const DeathCallback& cb);
-    int subscribeServiceInstanceDeath(const std::string& service_name,
-                                      const std::string& host_id,
-                                      const std::string& instance_id,
-                                      const DeathSourceCallback& cb);
+    // 服务实例状态 watch
+    int watchServices(const std::vector<ServiceWatchRequest>& requests,
+                      const ServiceWatchCallback& callback, uint64_t& watch_id);
+    int unwatchServices(uint64_t watch_id);
 };
 ```
 
@@ -774,7 +774,7 @@ class OmniRuntime {
 ```cpp
 class ServiceProxyBase {
 public:
-    int connect();           // 查询服务 + 建立连接 + 注册死亡通知
+    int connect();           // 查询服务 + 建立连接 + 注册服务状态通知
     int connect(const std::string& host_id, const std::string& instance_id);  // 绑定实例后连接
     void setInstance(const std::string& host_id, const std::string& instance_id);  // 设置下次 connect 目标
     void disconnect();       // 断开连接 + 停止心跳
@@ -796,7 +796,7 @@ protected:
 
 #### 触发条件
 
-1. **服务死亡通知**：SM 发送 `MSG_DEATH_NOTIFY`
+1. **服务状态通知**：SM 发送 `MSG_SERVICE_WATCH_NOTIFY`
 2. **心跳超时**：心跳 ACK 超时未收到
 
 #### 重连流程
@@ -848,7 +848,7 @@ init()
   每个 runtime 一个会话 + 一个 deadline timer
   -> MSG_CONTROL_HEARTBEAT { incarnation } 到达后重挂 deadline
   -> MSG_CONTROL_HEARTBEAT_ACK { sm_incarnation } 清除 runtime 侧 ACK deadline
-  -> 超时: closeClient(fd) 注销该 runtime 全部服务/订阅/诊断并逐服务发死亡通知
+  -> 超时: closeClient(fd) 注销该 runtime 全部服务/订阅/诊断并逐服务发服务状态通知
 ```
 
 数据面（Client ↔ Service）：
@@ -924,7 +924,7 @@ public:
 // 创建 Proxy
 demo::SensorServiceProxy proxy(runtime);
 
-// 连接服务（建立连接 + 注册死亡通知）
+// 连接服务（建立连接 + 注册服务状态通知）
 // proxy 构造后由 runtime start()/重连自动连接；实例绑定使用 setInstance()
 
 // 或：绑定到指定实例（同名多实例场景）

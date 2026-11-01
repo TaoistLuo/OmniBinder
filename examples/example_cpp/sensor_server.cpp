@@ -139,6 +139,15 @@ public:
         hum_ += (rand() % 100 - 50) / 100.0;
     }
 
+protected:
+    void onClientConnected(const std::string& client_info) override {
+        std::printf("[Server] client connected: %s\n", client_info.c_str());
+    }
+
+    void onClientDisconnected(const std::string& client_info) override {
+        std::printf("[Server] client disconnected: %s\n", client_info.c_str());
+    }
+
 private:
     demo::SensorData makeSensorData(int32_t id, const std::string& location) const {
         demo::SensorData data;

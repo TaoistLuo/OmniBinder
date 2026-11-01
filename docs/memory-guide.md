@@ -526,7 +526,7 @@ omni_runtime_destroy(rt);
 | 你拿到的东西 | 为什么不能释放 |
 |---|---|
 | topic 回调的 `data` / `const T* msg` | 框架借用，回调结束即失效 |
-| death 回调的 `service_name` | 同上；要留用请拷贝 |
+| service watch 的 identity 字段 | 同上；要留用请拷贝 |
 | `omni_runtime_list_instances` 的 `info` 字段 | 同上 |
 | handler 入参（字符串/struct/数组） | 框架反序列化，handler 返回后框架释放 |
 | handler 返回 struct 的动态字段 | 框架序列化后释放；提前释放会 UAF/double free |
@@ -581,14 +581,14 @@ A：不行。库内走 C++ `new`，必须 `omni_free()`。
 | 回调 | 参数 | 有效期 | 能否保存 |
 |---|---|---|---|
 | topic | `const T&` / `const T*` / `data` buffer | 仅本次回调 | 不能；要留用请拷贝 |
-| death | `service_name` | 仅本次回调 | 不能；要留用请拷贝 |
+| service watch | `identity` 字段 | 仅本次回调 | 不能；要留用请拷贝 |
 | 实例枚举 | `omni_service_instance_t` 字段 | 仅本次回调 | 不能；要留用请拷贝 |
 | 服务端方法 | 入参 `const T&` / `const T*` | 仅本次调用 | 不能；要留用请拷贝 |
 
 ## 3.2 `user_data` 归你
 
 - 框架只保存指针，不复制、不释放。
-- 生命周期必须覆盖：topic 订阅期间、death 订阅期间、服务注册期间。
+- 生命周期必须覆盖：topic 订阅期间、service watch 期间、服务注册期间。
 - C++ 的 `std::function` 捕获对象同理：proxy/service 活着时捕获对象必须有效。
 
 ## 3.3 分配器规则
@@ -607,7 +607,7 @@ A：不行。库内走 C++ `new`，必须 `omni_free()`。
 
 ## 3.4 线程与回调
 
-- 所有回调（topic / death / onInvoke / onClientConnected）默认在 owner event-loop 线程执行。
+- 所有回调（topic / service watch / onInvoke / onClientConnected）默认在 owner event-loop 线程执行。
 - 不要在回调里做长时间阻塞操作；回调是重入点，回调内注销服务/取消订阅属于已接受的边界场景（见 AGENTS.md）。
 - 回调里申请的内存，业务自己负责释放（C++ RAII 自动；C 按第 2 部分规则）。
 

@@ -22,7 +22,7 @@
 - 服务发现：`lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`
 - 连接管理：`connectService()`、`connectServiceInstance()`、`disconnectService()`、`disconnectServiceInstance()`、`isServiceConnected()`、`isServiceInstanceConnected()`
 - RPC：`invoke()`、`invokeOneWay()`
-- 死亡通知：`subscribeServiceDeath()`、`unsubscribeServiceDeath()`、`subscribeServiceInstanceDeath()`、`unsubscribeServiceInstanceDeath()`
+- 服务状态 watch：`watchServices()`、`unwatchServices()`
 - 话题：`publishTopic()`、`broadcast()`、`subscribeTopic()`、`unsubscribeTopic()`（含 `TopicSubscriptionSelector` 重载）
 - 配置：`setHeartbeatPolicy()`、`setDefaultTimeout()`、`setHostId()`、`hostId()`、`setRuntimeId()`、`runtimeId()`
 
@@ -45,7 +45,7 @@
 | 连接管理 | `connectService()`、`connectServiceInstance()`、`disconnectService()`、`disconnectServiceInstance()`、`isServiceConnected()`、`isServiceInstanceConnected()` | 可从任意线程安全调用；连接建立/断开与 SM 交互由 owner event-loop 串行处理 |
 | RPC | `invoke()`、`invokeOneWay()` | 可从任意线程安全调用；同步调用允许阻塞调用线程，但内部发送/等待/状态更新由 owner event-loop 串行处理 |
 | 服务注册 | `registerService()`、`unregisterService()` | 可从任意线程安全调用；监听 socket、SHM、SM 注册状态仍由 owner event-loop 管理 |
-| topic / death | `publishTopic()`、`broadcast()`、`subscribeTopic()`、`unsubscribeTopic()`（含选择器重载）、`subscribeServiceDeath()`、`unsubscribeServiceDeath()`、`subscribeServiceInstanceDeath()`、`unsubscribeServiceInstanceDeath()` | 可从任意线程安全调用；回调注册和派发在 owner event-loop 串行处理 |
+| topic / service watch | `publishTopic()`、`broadcast()`、`subscribeTopic()`、`unsubscribeTopic()`（含选择器重载）、`watchServices()`、`unwatchServices()` | 可从任意线程安全调用；回调注册和派发在 owner event-loop 串行处理 |
 
 ### 2.1.2 同步阻塞 API 的额外约束
 
@@ -58,8 +58,7 @@
 - `invoke()`
 - `connectService()`
 - `connectServiceInstance()`
-- `subscribeServiceDeath()`
-- `subscribeServiceInstanceDeath()`
+- `watchServices()`
 - `publishTopic()`
 - `subscribeTopic()`（含选择器重载）
 
@@ -83,13 +82,13 @@
 以下回调统一在 owner event-loop 线程执行：
 
 - `TopicCallback` / `TopicSourceCallback`（后者携带发布者 host_id + instance_id）
-- `DeathCallback` / `DeathSourceCallback`（后者携带死亡实例的 name + host_id + instance_id）
+- `ServiceWatchCallback`（携带实例 name + host_id + instance_id 与 online 状态）
 - 服务端请求处理相关回调
 - 连接断开、topic 发布者通知等内部派发回调
 
 **重要限制：**
 
-- 不建议在 `TopicCallback`、`DeathCallback`、服务端 `onInvoke()`、`onStart()`、`onStop()` 等 owner event-loop 线程回调中，再对同一个 `OmniRuntime` 发起**同步阻塞 API**（如 `invoke()`、`lookupService()`、`subscribeTopic()`）
+- 不建议在 `TopicCallback`、`ServiceWatchCallback`、服务端 `onInvoke()`、`onStart()`、`onStop()` 等 owner event-loop 线程回调中，再对同一个 `OmniRuntime` 发起**同步阻塞 API**（如 `invoke()`、`lookupService()`、`subscribeTopic()`）
 - 回调中应尽量只做轻量处理，必要时把后续同步工作转交给其他线程或异步任务
 
 当前实现采用纯错误码模型，不依赖 C++ 异常。所有业务回调（`onInvoke`、`onClientConnected`、`onClientDisconnected` 等）均不应抛出异常。如果业务代码抛出未捕获异常，程序将直接终止。
@@ -182,7 +181,7 @@ runtime_thread.join();
 
 ## 5. 回调线程语义（不变）
 
-所有 topic / death / onInvoke / onStart 回调在 owner event-loop 线程执行。
+所有 topic / service watch / onInvoke / onStart 回调在 owner event-loop 线程执行。
 `onStart()` 在 `start()` 的激活流程中执行，不在 `registerService()` 中提前执行。
 
 ---
@@ -198,7 +197,7 @@ runtime_thread.join();
 
 ### 7.2 自动重连
 
-- 服务死亡时通过 `scheduleReconnect` 在 event-loop 上注册定时器
+- 服务离线时通过 `scheduleReconnect` 在 event-loop 上注册定时器
 - 重连定时器回调在 event-loop 线程执行
 - 重连过程中会查询 SM：显式实例绑定按 `(name, host_id, instance_id)` 经 `listServiceInstances` 重新解析，未绑定实例按名 `lookupServiceInfo`，均同步等待回复
 
@@ -225,4 +224,4 @@ runtime_thread.join();
 - `setInstance()` 只设置目标实例与连接键；`connectionKey()` 供生成的方法寻址数据面连接
 - 生成方法首次调用时自动连接；`setInstance()` 决定连接键，无需手动 connect
 - `enableAutoReconnect()` / `setReconnectInterval()` / `startHeartbeat()` / `stopHeartbeat()` 通过 `callSerialized` 串行执行，并以 `connectionKey()`（默认实例即服务名，绑定实例即实例连接键）为键
-- 死亡通知回调（`onServiceDeath`）在 event-loop 线程执行；绑定实例的代理注册的是实例级死亡订阅
+- 服务状态通告（`onServiceDeath`）在 event-loop 线程执行；Proxy 内部使用精确实例 watch，不依赖业务订阅

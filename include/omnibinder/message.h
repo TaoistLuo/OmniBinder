@@ -3,7 +3,7 @@
  * @brief       协议栈消息定义
  * @details     定义 OmniBinder 通信协议的消息格式，包括 16 字节固定消息头
  *              （magic + version + type + sequence + length）、消息类型枚举
- *              （控制通道：注册/发现/死亡通知/话题；数据通道：RPC 调用/广播），
+ *              （控制通道：注册/发现/服务状态通知/话题；数据通道：RPC 调用/广播），
  *              以及 ServiceInfo/InterfaceInfo 的序列化辅助函数。
  *
  * @author      taoist.luo
@@ -76,17 +76,11 @@ enum class MessageType : uint16_t {
     MSG_LIST_INSTANCES        = 0x0016,
     MSG_LIST_INSTANCES_REPLY  = 0x0017,
 
-    // 控制通道 - 死亡通知
-    // 名字级：MSG_SUBSCRIBE_SERVICE / MSG_UNSUBSCRIBE_SERVICE / MSG_DEATH_NOTIFY
-    // 实例级：MSG_SUBSCRIBE_SERVICE_INSTANCE / MSG_UNSUBSCRIBE_SERVICE_INSTANCE /
-    //         MSG_DEATH_NOTIFY_INSTANCE（仅指定实例死亡时下发）
-    MSG_SUBSCRIBE_SERVICE     = 0x0020,
-    MSG_SUBSCRIBE_SERVICE_REPLY = 0x0021,
-    MSG_UNSUBSCRIBE_SERVICE   = 0x0022,
-    MSG_DEATH_NOTIFY          = 0x0023,
-    MSG_DEATH_NOTIFY_INSTANCE = 0x0024,
-    MSG_SUBSCRIBE_SERVICE_INSTANCE = 0x0025,
-    MSG_UNSUBSCRIBE_SERVICE_INSTANCE = 0x0026,
+    // 控制通道 - 服务状态订阅（按 name/host/instance 过滤，持久订阅）
+    MSG_SUBSCRIBE_SERVICE_WATCH       = 0x0027,
+    MSG_SUBSCRIBE_SERVICE_WATCH_REPLY = 0x0028,
+    MSG_UNSUBSCRIBE_SERVICE_WATCH     = 0x0029,
+    MSG_SERVICE_WATCH_NOTIFY          = 0x002A,
 
     // 控制通道 - 话题
     MSG_PUBLISH_TOPIC         = 0x0030,
@@ -222,8 +216,8 @@ const char* messageTypeToString(MessageType type);
 bool serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
 
 // ============================================================
-// 服务实例身份线格式（MSG_DEATH_NOTIFY / MSG_DEATH_NOTIFY_INSTANCE /
-// 实例级死亡订阅请求共用）：service_name + host_id + instance_id
+// 服务实例身份线格式（MSG_SERVICE_WATCH_NOTIFY /
+// 服务状态 watch 共用）：service_name + host_id + instance_id
 // ============================================================
 /* @brief 序列化服务实例身份 payload
  * @param[out] buf          输出缓冲
@@ -242,7 +236,7 @@ bool writeServiceIdentityPayload(Buffer& buf, const std::string& name,
  * @param[out] instance_id  实例标识
  * @return true 成功；畸形/截断/超长/尾随字节返回 false 且不改动输出参数
  * @note   tryReadString 自带边界检查，恶意长度前缀不会越界读；本函数在此之上
- *         追加非空与长度上限校验，作为 MSG_DEATH_NOTIFY 的防御性入口。 */
+ *         追加非空与长度上限校验，作为 MSG_SERVICE_WATCH_NOTIFY 的防御性入口。 */
 template <typename BufT>
 bool readServiceIdentityPayload(BufT& buf, std::string& name,
                                 std::string& host_id, std::string& instance_id) {

@@ -434,7 +434,7 @@ int  demo_SensorService_proxy_subscribe_sensor_update(
     void* user_data);
 ```
 
-After `..._proxy_set_instance()`, the C proxy routes its method calls through `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance`, and its auto-reconnect / heartbeat / death subscription through the instance connection key (`omni_runtime_service_connection_key(...)`) and `omni_runtime_subscribe_death_instance(...)`. The C topic subscribe helper is topic-only (no source identity).
+After `..._proxy_set_instance()`, the C proxy routes its method calls through `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance`, and its auto-reconnect / heartbeat / service-state watch through the instance connection key (`omni_runtime_service_connection_key(...)`) and `omni_runtime_watch_services(...)`. The C topic subscribe helper is topic-only (no source identity).
 
 ---
 

@@ -163,6 +163,53 @@ TEST(RuntimeLifecycleTest, StartWaitsForLateServiceManager) {
     stopProcess(sm);
 }
 
+TEST(RuntimeLifecycleTest, WatchSurvivesLateServiceManager) {
+    TestPid sm = 0;
+    OmniRuntime runtime;
+    ASSERT_EQ(runtime.init("127.0.0.1", 19987), 0);
+
+    std::thread owner([&runtime]() { runtime.start(); });
+    EXPECT_TRUE(waitUntil([&runtime]() { return runtime.isRunning(); }, 30));
+    EXPECT_FALSE(runtime.isReady());
+
+    std::atomic<int> online(0);
+    std::atomic<int> offline(0);
+    uint64_t watch_id = 0;
+    std::vector<ServiceWatchRequest> filters;
+    filters.push_back(ServiceWatchRequest("LifecycleService", "", ""));
+    ASSERT_EQ(runtime.watchServices(filters,
+        [&online, &offline](uint64_t, const ServiceIdentity&, bool is_online) {
+            if (is_online) online.fetch_add(1, std::memory_order_release);
+            else offline.fetch_add(1, std::memory_order_release);
+        }, watch_id), 0);
+    ASSERT_NE(watch_id, 0u);
+
+    sm = startProcess("./target/bin/service_manager", "--port", "19987", "--log-level", "3");
+    ASSERT_GT(sm, 0);
+    ASSERT_TRUE(waitPortReady(19987, 30));
+    ASSERT_TRUE(waitUntil([&runtime]() { return runtime.isReady(); }, 80));
+    ASSERT_TRUE(waitUntil([&offline]() {
+        return offline.load(std::memory_order_acquire) >= 1;
+    }, 50)) << "watch must replay OFFLINE after late SM startup";
+
+    OmniRuntime server;
+    ASSERT_EQ(server.init("127.0.0.1", 19987), 0);
+    LifecycleService service;
+    ASSERT_EQ(server.registerService(&service), 0);
+    std::thread server_owner([&server]() { server.start(); });
+    ASSERT_TRUE(waitUntil([&server]() { return server.isReady(); }, 80));
+    ASSERT_TRUE(waitUntil([&online]() {
+        return online.load(std::memory_order_acquire) >= 1;
+    }, 80)) << "watch must receive ONLINE after service starts";
+
+    runtime.unwatchServices(watch_id);
+    runtime.stop();
+    owner.join();
+    server.stop();
+    server_owner.join();
+    stopProcess(sm);
+}
+
 TEST(RuntimeLifecycleTest, StartAutoConnectsDeclaredProxy) {
     TestPid sm = startProcess("./target/bin/service_manager", "--port", "19986", "--log-level", "3");
     ASSERT_GT(sm, 0);

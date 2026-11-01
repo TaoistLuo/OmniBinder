@@ -47,15 +47,25 @@ namespace omnibinder {
 class Service;
 class ServiceProxyBase;
 
-/* @brief 名字级死亡通知回调
- * @param[in] service_name 已离线的服务名称（该名字下最后一个存活实例消失时触发） */
-typedef std::function<void(const std::string& service_name)> DeathCallback;
+/* @brief 服务实例状态关注条件；host_id/instance_id 为空表示通配 */
+struct ServiceWatchRequest {
+    std::string service_name;
+    std::string host_id;
+    std::string instance_id;
 
-/* @brief 实例级死亡通知回调
- * @details 目标实例死亡时回传其完整身份 (service_name, host_id, instance_id)，
- *          订阅方据此定位是哪个实例消失；与名字级 DeathCallback 并存。 */
-typedef std::function<void(const std::string& service_name, const std::string& host_id,
-                           const std::string& instance_id)> DeathSourceCallback;
+    ServiceWatchRequest() {}
+    ServiceWatchRequest(const std::string& name, const std::string& host,
+                        const std::string& instance)
+        : service_name(name), host_id(host), instance_id(instance) {}
+};
+
+/* @brief 服务实例上线/离线关注回调
+ * @param[in] watch_id 注册时返回的 watch 组 ID
+ * @param[in] identity 实际实例身份；初始无匹配时为 filter 身份
+ * @param[in] online   true 上线，false 离线 */
+typedef std::function<void(uint64_t watch_id, const ServiceIdentity& identity,
+                           bool online)> ServiceWatchCallback;
+
 /* @brief 话题消息回调（仅携带 topic_id 与数据，不区分发布者实例） */
 typedef std::function<void(uint32_t topic_id, const Buffer& data)> TopicCallback;
 /* @brief 话题错误回调（topic 不存在 / 发布者离线 / IDL 不匹配时触发） */
@@ -119,7 +129,7 @@ std::string makeServiceConnectionKey(const std::string& name,
                                      const std::string& host_id,
                                      const std::string& instance_id);
 
-/* @brief 进程级运行时入口：控制面（注册/发现/心跳/死亡通知）+ 数据面（直连 RPC/广播）+ 诊断 */
+/* @brief 进程级运行时入口：控制面（注册/发现/心跳/服务状态关注）+ 数据面（直连 RPC/广播）+ 诊断 */
 class OmniRuntime {
 public:
     OmniRuntime();
@@ -185,7 +195,7 @@ public:
     /* @brief 从 ServiceManager 注销本地服务
      * @param[in]  service 之前注册的服务实例指针
      * @return 0 成功，<0 失败（未注册或 SM 通信错误）
-     * @note   注销后所有已连接的 Proxy 将收到死亡通知 */
+     * @note   注销后所有已连接的 Proxy 将收到服务离线状态通知 */
     int unregisterService(Service* service);
 
     /* @brief 按名称查找远程服务
@@ -278,45 +288,24 @@ public:
     int unsubscribeTopic(const TopicSubscriptionSelector& selector,
                          const std::string& topic_name);
 
-    // 死亡通知订阅
+    // 服务状态关注
 
-    /* @brief 订阅指定服务的死亡通知
-     * @param[in]  name 服务名称
-     * @param[in]  cb   死亡回调（服务离线时在 owner event-loop 线程执行）
-     * @return 0 成功，<0 失败
-     * @note   服务因崩溃/注销离线时触发；可用于触发重连或降级逻辑 */
-    int subscribeServiceDeath(const std::string& name, const DeathCallback& cb);
+    /* @brief 关注服务实例状态（按 name/host/instance 过滤，持久订阅）
+     * @param[in]  requests  关注条件列表；service_name 必填，host/instance 可空
+     * @param[in]  callback  状态变化回调（owner event-loop 线程执行）
+     * @param[out] watch_id  本次注册的 watch 组 ID
+     * @return 0 成功（SM 未就绪时先本地登记，连接后自动重放）；
+     *         ERR_INVALID_PARAM 参数/重叠条件；其它 SM 通信错误
+     * @note   订阅成功后立即补发当前匹配实例状态；list 内条件重叠会整组拒绝。
+     *         SM 尚未启动/连接时仍返回成功并保留 watch，SM 恢复后自动重新注册。 */
+    int watchServices(const std::vector<ServiceWatchRequest>& requests,
+                      const ServiceWatchCallback& callback,
+                      uint64_t& watch_id);
 
-    /* @brief 取消服务死亡通知订阅
-     * @param[in]  name 服务名称
-     * @return 0 成功，<0 失败 */
-    int unsubscribeServiceDeath(const std::string& name);
-
-    /* @brief 订阅指定服务实例的死亡通知
-     * @param[in]  name        服务名称
-     * @param[in]  host_id     目标板级主机身份
-     * @param[in]  instance_id 目标实例标识
-     * @param[in]  cb          死亡回调，在 owner event-loop 线程执行并携带实例身份
-     * @return 0 成功，<0 失败
-     * @note   仅当该 (name, host_id, instance_id) 实例死亡时触发，同名的其它实例
-     *         死亡不影响本订阅；同一目标已订阅时返回 ERR_REGISTER_FAILED（需先
-     *         unsubscribeServiceInstanceDeath 再重订阅以更换回调）。
-     *         名字级 subscribeServiceDeath 语义不变：仅当该服务名已无任何存活实例
-     *         （最后一个实例消失）时才触发。 */
-    int subscribeServiceInstanceDeath(const std::string& name,
-                                      const std::string& host_id,
-                                      const std::string& instance_id,
-                                      const DeathSourceCallback& cb);
-
-    /* @brief 取消指定服务实例的死亡通知订阅
-     * @param[in]  name        服务名称
-     * @param[in]  host_id     目标板级主机身份
-     * @param[in]  instance_id 目标实例标识
-     * @return 0 成功，<0 失败
-     * @note   仅移除该实例的订阅，不影响名字级订阅或同名其它实例订阅 */
-    int unsubscribeServiceInstanceDeath(const std::string& name,
-                                        const std::string& host_id,
-                                        const std::string& instance_id);
+    /* @brief 取消一个 watch 组
+     * @param[in] watch_id watchServices 返回的 ID
+     * @return 0 成功；<0 参数/状态错误 */
+    int unwatchServices(uint64_t watch_id);
 
     // ============================================================
     // 数据面 — 服务间直连通信

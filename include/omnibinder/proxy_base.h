@@ -108,9 +108,9 @@ protected:
 
     /* @brief 服务死亡回调（子类可重写）
      * @note   默认行为：标记已断开 + 调用 OnServiceDied 注册的回调。
-     *         本函数在 owner event-loop 的死亡通知分发过程中被调用，不得在此
+     *         本函数在 owner event-loop 的服务状态通知分发过程中被调用，不得在此
      *         直接退订（会修改正在遍历的订阅容器，违反约束 2）；退订由
-     *         disconnect() 依据 death_subscribed_ 在析构/主动断开时完成。 */
+     *         disconnect() 依据 watch_id_ 在析构/主动断开时完成。 */
     virtual void onServiceDeath();
     
     OmniRuntime& runtime_;
@@ -121,10 +121,10 @@ protected:
     std::atomic<bool> connected_;
     std::atomic<bool> auto_connect_enabled_;
     std::atomic<bool> ever_connected_;
-    // 是否已向 runtime 订阅死亡通知。与 connected_ 分开：服务死亡会把 connected_
-    // 置 false，但订阅仍然存在且 lambda 捕获 this，析构时必须据此退订，否则
-    // 服务重启再死会回调已析构的 proxy（UAF）
-    std::atomic<bool> death_subscribed_;
+    // 是否已向 runtime 注册服务状态 watch。与 connected_ 分开：服务离线会把
+    // connected_ 置 false，但 watch lambda 捕获 this，析构时必须据此退订，否则
+    // 服务重启后状态事件会回调已析构的 proxy（UAF）
+    std::atomic<uint64_t> watch_id_;
     // 是否绑定到显式实例（setInstance 时确定）。取代脆弱的
     // connection_key_ == service_name_ 字符串比较
     bool instance_bound_;

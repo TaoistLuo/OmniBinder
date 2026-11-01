@@ -3,13 +3,13 @@
 // 测试内容：
 // 1. HeartbeatTimeoutDetected     — proxy 侧心跳快速检测服务死亡
 // 2. AutoReconnectAfterDeath       — 自动重连在服务重启后恢复连接
-// 3. OnServiceDiedCallbackFires    — SM 死亡通知触发 proxy 回调
+// 3. OnServiceDiedCallbackFires    — 服务离线 watch 触发 proxy 回调
 // 4. TimeoutDisconnectTriggersReregistration — 阻塞的 runtime 在 SM 关闭超时控制连接后重新注册
 //    （不会永久漂移）
 // 5. StopHeartbeatKeepsSmLiveness — stopHeartbeat 只影响数据面检测，不会造成 SM 超时 → 重连循环
 // 6. PureClientConnectionNotClosedByPeerTimeout — 从未注册过任何服务的连接不会被心跳超时规则关闭
 // 7. SessionHeartbeatTimeoutRemovesAllServices — 会话超时同时摘除该会话下全部服务
-// 8. 多实例寻址 / 实例级死亡通知
+// 8. 多实例寻址 / 实例级状态 watch
 //
 // 新生命周期：业务线程调用 runtime.start() 阻塞驱动 event-loop；proxy 由 start() 自动连接。
 
@@ -965,10 +965,11 @@ TEST_F(InstanceAddressingTest, BoundProxyReconnectDisableIsInstanceKeyed) {
 // ============================================================
 // P4b Test 1 — InstanceDeathNotifiesOnlyTargetInstance
 //
-// @brief   实例级死亡通知只命中目标实例，名字级通知仅在最后一个实例消失时触发
-// @details 启动 inst-a / inst-b；同一 runtime 同时注册实例级（a、b）与名字级订阅。
-//          杀死 inst-a：仅 a 的实例级回调触发并携带其身份；b 的实例级与名字级均不触发。
-//          再杀死 inst-b（最后一个）：b 的实例级与名字级回调均触发。
+// @brief   实例级 watch 只命中目标实例，名字级 watch 命中每个实例的上下线
+// @details 启动 inst-a / inst-b；同一 runtime 同时注册实例级（a、b）与名字级 watch。
+//          杀死 inst-a：仅 a 的实例级 offline 触发并携带其身份；b 的实例级不触发，
+//          名字级 watch 收到 inst-a 的 offline。
+//          再杀死 inst-b：b 的实例级与名字级 offline 均触发。
 // ============================================================
 TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
     child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
@@ -999,22 +1000,32 @@ TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
     std::string fired_name;
     std::string fired_host;
     std::string fired_instance;
+    uint64_t watch_a = 0;
+    uint64_t watch_b = 0;
+    uint64_t watch_name = 0;
 
-    ASSERT_EQ(rt.subscribeServiceInstanceDeath(INSTANCE_SERVICE_NAME, host_a, "inst-a",
-        [&](const std::string& n, const std::string& h, const std::string& i) {
-            fired_name = n;
-            fired_host = h;
-            fired_instance = i;
+    std::vector<ServiceWatchRequest> a_filters;
+    a_filters.push_back(ServiceWatchRequest(INSTANCE_SERVICE_NAME, host_a, "inst-a"));
+    ASSERT_EQ(rt.watchServices(a_filters,
+        [&](uint64_t, const ServiceIdentity& identity, bool online) {
+            if (online) return;
+            fired_name = identity.name;
+            fired_host = identity.host_id;
+            fired_instance = identity.instance_id;
             a_fires.fetch_add(1, std::memory_order_release);
-        }), 0);
-    ASSERT_EQ(rt.subscribeServiceInstanceDeath(INSTANCE_SERVICE_NAME, host_b, "inst-b",
-        [&](const std::string&, const std::string&, const std::string&) {
-            b_fires.fetch_add(1, std::memory_order_release);
-        }), 0);
-    ASSERT_EQ(rt.subscribeServiceDeath(INSTANCE_SERVICE_NAME,
-        [&](const std::string&) {
-            name_fires.fetch_add(1, std::memory_order_release);
-        }), 0);
+        }, watch_a), 0);
+    std::vector<ServiceWatchRequest> b_filters;
+    b_filters.push_back(ServiceWatchRequest(INSTANCE_SERVICE_NAME, host_b, "inst-b"));
+    ASSERT_EQ(rt.watchServices(b_filters,
+        [&](uint64_t, const ServiceIdentity&, bool online) {
+            if (!online) b_fires.fetch_add(1, std::memory_order_release);
+        }, watch_b), 0);
+    std::vector<ServiceWatchRequest> name_filters;
+    name_filters.push_back(ServiceWatchRequest(INSTANCE_SERVICE_NAME, "", ""));
+    ASSERT_EQ(rt.watchServices(name_filters,
+        [&](uint64_t, const ServiceIdentity&, bool online) {
+            if (!online) name_fires.fetch_add(1, std::memory_order_release);
+        }, watch_name), 0);
 
     stopProcess(child_a_);
     child_a_ = 0;
@@ -1028,8 +1039,8 @@ TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
         << "death callback must carry the dead instance identity";
     EXPECT_EQ(b_fires.load(std::memory_order_acquire), 0)
         << "instance-b subscriber must not fire for inst-a's death";
-    EXPECT_EQ(name_fires.load(std::memory_order_acquire), 0)
-        << "name-level subscriber must not fire while inst-b is still alive";
+    EXPECT_EQ(name_fires.load(std::memory_order_acquire), 1)
+        << "name-level watch must fire for inst-a offline while inst-b is still alive";
 
     EXPECT_TRUE(waitUntil([&]() {
         std::vector<ServiceInfo> now;
@@ -1041,11 +1052,14 @@ TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
     child_b_ = 0;
 
     ASSERT_TRUE(waitUntil([&]() {
-        return name_fires.load(std::memory_order_acquire) > 0;
-    }, 120, 50)) << "name-level subscriber should fire when the last instance dies";
+        return name_fires.load(std::memory_order_acquire) >= 2;
+    }, 120, 50)) << "name-level watch should fire for each instance offline";
     EXPECT_GE(b_fires.load(std::memory_order_acquire), 1)
-        << "instance-b subscriber should fire when inst-b dies";
+        << "instance-b watch should fire when inst-b dies";
 
+    rt.unwatchServices(watch_a);
+    rt.unwatchServices(watch_b);
+    rt.unwatchServices(watch_name);
     owner.stop();
 }
 

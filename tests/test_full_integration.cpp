@@ -5,7 +5,7 @@
 // 2. SM lookup 返回 shm_name，客户端对同机服务自动选择 SHM
 // 3. 多客户端共享同一个 SHM
 // 4. 广播 / 订阅（pub/sub）
-// 5. 死亡通知
+// 5. 服务状态 watch
 // 6. 服务注销清理
 
 #include <gtest/gtest.h>
@@ -625,7 +625,7 @@ TEST_F(FullIntegrationTest, SameTopicMultiSelectorUnsubscribeKeepsServiceLevel) 
 }
 
 // ============================================================
-// 测试组 5：死亡通知
+// 测试组 5：服务状态 watch
 // ============================================================
 
 TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
@@ -651,18 +651,21 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
     }
     ASSERT_TRUE(found) << "EphemeralService not found";
 
-    // 订阅死亡通知
+    // 观察服务状态：初始 online 忽略，只关心服务崩溃后的 offline
     std::atomic<bool> death_received(false);
-    int ret = watcher.subscribeServiceDeath("EphemeralService",
-        [&death_received](const std::string& name) {
-            (void)name;
-            death_received = true;
-        });
-    ASSERT_EQ(ret, 0) << "subscribeServiceDeath failed";
+    uint64_t watch_id = 0;
+    std::vector<ServiceWatchRequest> filters;
+    filters.push_back(ServiceWatchRequest("EphemeralService", "", ""));
+    int ret = watcher.watchServices(filters,
+        [&death_received](uint64_t, const ServiceIdentity&, bool online) {
+            if (!online) death_received = true;
+        }, watch_id);
+    ASSERT_EQ(ret, 0) << "watchServices failed";
+    ASSERT_NE(watch_id, 0u);
 
     stopProcess(child);
 
-    // 等待死亡通知（SM 心跳超时约 10s，最多等 15s）
+    // 等待服务离线通知（SM 心跳超时约 10s，最多等 15s）
     for (int i = 0; i < 150 && !death_received.load(); i++) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -671,7 +674,7 @@ TEST_F(FullIntegrationTest, DeathNotificationOnServiceCrash) {
     owner.stop();
 }
 
-TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
+TEST_F(FullIntegrationTest, UnwatchServiceStopsCallback) {
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%u", SM_PORT);
     TestPid child = startProcess(g_program_path, "--child-death", port_str, "EphemeralService2");
@@ -694,15 +697,17 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
     ASSERT_TRUE(found) << "EphemeralService2 not found";
 
     std::atomic<bool> death_received(false);
-    int ret = watcher.subscribeServiceDeath("EphemeralService2",
-        [&death_received](const std::string& name) {
-            (void)name;
-            death_received = true;
-        });
-    ASSERT_EQ(ret, 0) << "subscribeServiceDeath failed";
+    uint64_t watch_id = 0;
+    std::vector<ServiceWatchRequest> filters;
+    filters.push_back(ServiceWatchRequest("EphemeralService2", "", ""));
+    int ret = watcher.watchServices(filters,
+        [&death_received](uint64_t, const ServiceIdentity&, bool online) {
+            if (!online) death_received = true;
+        }, watch_id);
+    ASSERT_EQ(ret, 0) << "watchServices failed";
 
-    ret = watcher.unsubscribeServiceDeath("EphemeralService2");
-    ASSERT_EQ(ret, 0) << "unsubscribeServiceDeath failed";
+    ret = watcher.unwatchServices(watch_id);
+    ASSERT_EQ(ret, 0) << "unwatchServices failed";
 
     stopProcess(child);
 
@@ -711,6 +716,102 @@ TEST_F(FullIntegrationTest, UnsubscribeServiceDeathStopsCallback) {
     }
 
     EXPECT_FALSE(death_received.load()) << "death callback should not be delivered after unsubscribe";
+    owner.stop();
+}
+
+TEST_F(FullIntegrationTest, WatchInitialOfflineForMissingService) {
+    OmniRuntime watcher;
+    ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(watcher);
+    ASSERT_TRUE(waitReady(watcher));
+
+    std::atomic<int> offline(0);
+    std::string seen_name;
+    std::string seen_host;
+    std::string seen_instance;
+    uint64_t watch_id = 0;
+    std::vector<ServiceWatchRequest> filters;
+    filters.push_back(ServiceWatchRequest("NeverRegisteredService", "host-A", "id-1"));
+    ASSERT_EQ(watcher.watchServices(filters,
+        [&](uint64_t, const ServiceIdentity& identity, bool online) {
+            if (!online) {
+                seen_name = identity.name;
+                seen_host = identity.host_id;
+                seen_instance = identity.instance_id;
+                offline.fetch_add(1);
+            }
+        }, watch_id), 0);
+    for (int i = 0; i < 50 && offline.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_EQ(offline.load(), 1);
+    EXPECT_EQ(seen_name, "NeverRegisteredService");
+    EXPECT_EQ(seen_host, "host-A");
+    EXPECT_EQ(seen_instance, "id-1");
+    watcher.unwatchServices(watch_id);
+    owner.stop();
+}
+
+TEST_F(FullIntegrationTest, WatchTakeoverEmitsOfflineThenOnline) {
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%u", SM_PORT);
+    TestPid first = startProcess(g_program_path, "--child-death", port_str, "TakeoverService");
+    ASSERT_GT(first, 0);
+
+    OmniRuntime watcher;
+    ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(watcher);
+    ASSERT_TRUE(waitReady(watcher));
+    for (int i = 0; i < 50; ++i) {
+        ServiceInfo info;
+        if (watcher.lookupService("TakeoverService", info) == 0) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    std::atomic<int> online(0);
+    std::atomic<int> offline(0);
+    uint64_t watch_id = 0;
+    std::vector<ServiceWatchRequest> filters;
+    filters.push_back(ServiceWatchRequest("TakeoverService", "", ""));
+    ASSERT_EQ(watcher.watchServices(filters,
+        [&](uint64_t, const ServiceIdentity&, bool is_online) {
+            if (is_online) online.fetch_add(1);
+            else offline.fetch_add(1);
+        }, watch_id), 0);
+    for (int i = 0; i < 50 && online.load() < 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    ASSERT_GE(online.load(), 1);
+
+    TestPid second = startProcess(g_program_path, "--child-death", port_str, "TakeoverService");
+    ASSERT_GT(second, 0);
+    for (int i = 0; i < 100; ++i) {
+        if (offline.load() >= 1 && online.load() >= 2) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    EXPECT_GE(offline.load(), 1);
+    EXPECT_GE(online.load(), 2) << "takeover must emit offline then online";
+
+    stopProcess(second);
+    stopProcess(first);
+    watcher.unwatchServices(watch_id);
+    owner.stop();
+}
+
+TEST_F(FullIntegrationTest, WatchRejectsOverlappingFilters) {
+    OmniRuntime watcher;
+    ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(watcher);
+    ASSERT_TRUE(waitReady(watcher));
+
+    std::vector<ServiceWatchRequest> filters;
+    filters.push_back(ServiceWatchRequest("AnyService", "", ""));
+    filters.push_back(ServiceWatchRequest("AnyService", "host-A", ""));
+    uint64_t watch_id = 0;
+    EXPECT_EQ(watcher.watchServices(filters,
+        [](uint64_t, const ServiceIdentity&, bool) {}, watch_id),
+        static_cast<int>(ErrorCode::ERR_INVALID_PARAM));
+    EXPECT_EQ(watch_id, 0u);
     owner.stop();
 }
 

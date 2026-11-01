@@ -181,13 +181,15 @@ TEST(MessageTest, ServiceIdentityPayloadRejectsMalformedAndTruncated) {
     EXPECT_EQ(instance_id, keep_instance);
 }
 
-TEST(MessageTest, InstanceDeathMessageTypeStrings) {
-    EXPECT_STREQ(messageTypeToString(MessageType::MSG_DEATH_NOTIFY_INSTANCE),
-                 "DEATH_NOTIFY_INSTANCE");
-    EXPECT_STREQ(messageTypeToString(MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE),
-                 "SUBSCRIBE_SERVICE_INSTANCE");
-    EXPECT_STREQ(messageTypeToString(MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE),
-                 "UNSUBSCRIBE_SERVICE_INSTANCE");
+TEST(MessageTest, ServiceWatchMessageTypeStrings) {
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_SUBSCRIBE_SERVICE_WATCH),
+                 "SUBSCRIBE_SERVICE_WATCH");
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY),
+                 "SUBSCRIBE_SERVICE_WATCH_REPLY");
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_UNSUBSCRIBE_SERVICE_WATCH),
+                 "UNSUBSCRIBE_SERVICE_WATCH");
+    EXPECT_STREQ(messageTypeToString(MessageType::MSG_SERVICE_WATCH_NOTIFY),
+                 "SERVICE_WATCH_NOTIFY");
 }
 
 TEST(MessageTest, PublishedTopicsReplyRoundTrip) {

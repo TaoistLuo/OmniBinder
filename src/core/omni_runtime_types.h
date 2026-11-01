@@ -181,36 +181,42 @@ struct HeartbeatState {
 };
 
 /*
- * @brief  单个远端服务的全部本地状态，取代此前四张并行 map
- *         （service_cache_/death_callbacks_/reconnect_configs_/heartbeat_states_）
+ * @brief  单个远端服务的全部本地状态，统一服务缓存/重连配置/心跳状态
  * @note   约束 6：新增每服务状态必须在此统一登记与清理
  */
 struct ServiceState {
     ServiceInfo     info;
     bool            has_info;
-    DeathCallback   death_cb;
-    bool            has_death;
     ReconnectConfig reconnect;
     bool            has_reconnect;
     HeartbeatState  heartbeat;
     bool            has_heartbeat;
 
     ServiceState()
-        : has_info(false), has_death(false), has_reconnect(false), has_heartbeat(false) {}
+        : has_info(false), has_reconnect(false), has_heartbeat(false) {}
 };
 
 /*
- * @brief  实例级死亡订阅的本地登记
- * @note   约束 6：SM 重连后按此重放实例级死亡订阅（与控制面名字级订阅同等恢复）
+ * @brief  服务状态 watch 的本地登记
+ * @note   约束 6：SM 重连后按此重放 watch 订阅
  */
-struct InstanceDeathSubscription {
-    std::string         name;
-    std::string         host_id;
-    std::string         instance_id;
-    DeathSourceCallback callback;
+struct ServiceWatchEvent {
+    ServiceIdentity identity;
+    bool online;
 
-    InstanceDeathSubscription() {}
+    ServiceWatchEvent() : online(false) {}
 };
+
+struct ServiceWatchSubscription {
+    uint64_t watch_id;
+    std::vector<ServiceWatchRequest> requests;
+    ServiceWatchCallback callback;
+    bool active;
+    std::vector<ServiceWatchEvent> pending;
+
+    ServiceWatchSubscription() : watch_id(0), active(false) {}
+};
+
 
 /*
  * @brief  本运行时作为 watcher 的本地登记项

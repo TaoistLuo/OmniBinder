@@ -74,7 +74,7 @@ ctest --test-dir build -N
 - `test_event_loop`
 - `test_transport`
 - `test_service_registry`
-- `test_heartbeat_death`
+- `test_service_watch_notifier`
 - `test_topic_manager`
 - `test_shm_transport`
 - `test_idl_compiler`
@@ -173,16 +173,16 @@ ctest --test-dir build --output-on-failure -R test_transport
 ctest --test-dir build --output-on-failure -R test_service_registry
 ```
 
-### 4.6 `test_heartbeat_death`
+### 4.6 `test_service_watch_notifier`
 
 用途：
 
-- 验证 `DeathNotifier` 的基础行为（会话超时由 `test_heartbeat_reconnect` / `test_control_plane_and_fallback` 覆盖）
+- 验证 `ServiceWatchNotifier` 的基础行为（会话超时由 `test_heartbeat_reconnect` / `test_control_plane_and_fallback` 覆盖）
 
 推荐运行：
 
 ```bash
-ctest --test-dir build --output-on-failure -R test_heartbeat_death
+ctest --test-dir build --output-on-failure -R test_service_watch_notifier
 ```
 
 ### 4.7 `test_topic_manager`
@@ -295,7 +295,7 @@ cd build
 
 - 验证 SHM 多客户端
 - topic 发布/订阅
-- death notification
+- service state notification
 - interface mismatch 硬拒绝
 - 验证 per-client SHM ring 大小配置 (ServiceInfo.shm_config)
 
@@ -745,7 +745,7 @@ mkdir -p /tmp/omni-idlc_out
    - `test_event_loop`
    - `test_transport`
    - `test_service_registry`
-   - `test_heartbeat_death`
+   - `test_service_watch_notifier`
    - `test_topic_manager`
    - `test_shm_transport`
    - `test_idl_compiler`

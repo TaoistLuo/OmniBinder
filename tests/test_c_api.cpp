@@ -44,6 +44,21 @@ struct CApiServerCtx {
     CApiServerCtx() : runtime(NULL), service(NULL) {}
 };
 
+static std::atomic<int> g_server_client_connected(0);
+static std::atomic<int> g_server_client_disconnected(0);
+
+static void onServerClientConnected(const char* client_info, void* user_data) {
+    (void)client_info;
+    (void)user_data;
+    g_server_client_connected.fetch_add(1);
+}
+
+static void onServerClientDisconnected(const char* client_info, void* user_data) {
+    (void)client_info;
+    (void)user_data;
+    g_server_client_disconnected.fetch_add(1);
+}
+
 static bool waitRuntimeReady(omni_runtime_t* runtime, int attempts) {
     for (int i = 0; i < attempts; ++i) {
         if (omni_runtime_is_ready(runtime)) return true;
@@ -73,6 +88,8 @@ protected:
         omni_service_add_method_ex(server_ctx_->service, METHOD_ECHO_BYTES, "EchoBytes", "std::vector<uint8_t>", "std::vector<uint8_t>", HASH_ECHO_BYTES);
 
         ASSERT_EQ(omni_runtime_init(server_ctx_->runtime, "127.0.0.1", SM_PORT), 0);
+        omni_service_set_client_callbacks(server_ctx_->service,
+            onServerClientConnected, onServerClientDisconnected, NULL);
         ASSERT_EQ(omni_runtime_register_service(server_ctx_->runtime, server_ctx_->service), 0);
         server_tid_ = std::thread([]() { omni_runtime_start(server_ctx_->runtime); });
         ASSERT_TRUE(waitRuntimeReady(server_ctx_->runtime, 100));
@@ -194,6 +211,59 @@ TEST_F(CApiTest, StrdupWorks) {
     EXPECT_EQ(omni_strdup(nullptr), nullptr);
 }
 
+TEST_F(CApiTest, ServiceClientCallbacks) {
+    int before = g_server_client_connected.load();
+    omni_runtime_t* runtime = omni_runtime_create();
+    ASSERT_NE(runtime, nullptr);
+    ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
+    std::thread owner([runtime]() { omni_runtime_start(runtime); });
+    ASSERT_TRUE(waitRuntimeReady(runtime, 100));
+    ASSERT_EQ(omni_runtime_connect_service(runtime, "CService"), 0);
+    for (int i = 0; i < 100 && g_server_client_connected.load() == before; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_GT(g_server_client_connected.load(), before);
+    omni_runtime_stop(runtime);
+    owner.join();
+    omni_runtime_destroy(runtime);
+}
+
+static std::atomic<int> g_tick_count(0);
+
+static std::atomic<int> g_watch_online(0);
+
+static void onServiceWatch(uint64_t watch_id, const char* service_name,
+                           const char* host_id, const char* instance_id,
+                           int online, void* user_data) {
+    (void)watch_id; (void)service_name; (void)host_id; (void)instance_id;
+    (void)user_data;
+    if (online) g_watch_online.fetch_add(1);
+}
+
+TEST_F(CApiTest, WatchServiceState) {
+    omni_runtime_t* runtime = omni_runtime_create();
+    ASSERT_NE(runtime, nullptr);
+    ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
+    std::thread owner([runtime]() { omni_runtime_start(runtime); });
+    ASSERT_TRUE(waitRuntimeReady(runtime, 100));
+
+    g_watch_online.store(0);
+    omni_service_watch_request_t request = { "CService", NULL, NULL };
+    uint64_t watch_id = 0;
+    ASSERT_EQ(omni_runtime_watch_services(runtime, &request, 1,
+        onServiceWatch, NULL, &watch_id), 0);
+    ASSERT_NE(watch_id, 0u);
+    for (int i = 0; i < 50 && g_watch_online.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    EXPECT_GT(g_watch_online.load(), 0);
+
+    EXPECT_EQ(omni_runtime_unwatch_services(runtime, watch_id), 0);
+    omni_runtime_stop(runtime);
+    owner.join();
+    omni_runtime_destroy(runtime);
+}
+
 TEST_F(CApiTest, RegisterInvokeAndStats) {
     omni_runtime_t* runtime = omni_runtime_create();
     ASSERT_NE(runtime, nullptr);
@@ -273,8 +343,6 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     owner.join();
     omni_runtime_destroy(runtime);
 }
-
-static std::atomic<int> g_tick_count(0);
 
 static void tickAndStop(void* user_data) {
     omni_runtime_t* runtime = static_cast<omni_runtime_t*>(user_data);

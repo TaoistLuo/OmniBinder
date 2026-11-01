@@ -43,7 +43,7 @@ OmniBinder is not trying to replace every existing communication framework. It t
 OmniBinder is especially suitable when:
 
 - you want to unify **same-host process communication** and **cross-device service invocation** under one interface model
-- you need more than just data transport, including **service registration/discovery, event broadcast, death notifications, and runtime debugging**
+- you need more than just data transport, including **service registration/discovery, event broadcast, service online/offline watchs, and runtime debugging**
 - you want **unified IDL, generated Stub/Proxy code, and a consistent integration model** to reduce repetitive protocol adaptation work
 - your deployment targets embedded / resource-constrained systems and you want a relatively lightweight runtime with both **C and C++** support
 - you want business code to focus on *which service to call*, not on transport details, connection state, or serialization plumbing
@@ -61,11 +61,11 @@ OmniBinder covers both **service management** and **service-to-service data path
 - **Service registration and discovery** — centralized ServiceManager for service lifecycle tracking
 - **Remote method invocation (RPC)** — synchronous request/response and one-way calls
 - **Publish/subscribe broadcast** — topic-based broadcast with real-time subscribers
-- **Death notification** — automatic notification when a service exits unexpectedly
+- **Service state watch** — automatic notification when a service exits unexpectedly
 - **Automatic proxy connection** — proxies connect on first use; `disconnect()` remains available for explicit teardown
 - **Auto-reconnect** — automatic reconnection on service recovery with configurable exponential backoff
 - **Heartbeat detection** — periodic heartbeat for service liveness detection, auto-triggers reconnect on timeout
-- **Multi-instance service identity**: same-name services coexist with distinct `instance_id`; an instance is identified by `(service_name, host_id, instance_id)`, with per-instance discovery, addressing, subscription, and death notification
+- **Multi-instance service identity**: same-name services coexist with distinct `instance_id`; an instance is identified by `(service_name, host_id, instance_id)`, with per-instance discovery, addressing, subscription, and service online/offline watch
 - **Automatic transport selection** — SHM for same-host communication, TCP for cross-host communication
 - **Per-service SHM configuration** — default small SHM rings (`4KB / 4KB`) with optional per-service enlargement
 - **IDL code generation** — generate Stub/Proxy code from `.bidl` files
@@ -89,7 +89,7 @@ See the "Run two same-name service instances on one board" section of the [examp
 
 - `OmniRuntime` exposes thread-safe public APIs
 - the internal runtime is serialized by a single owner event loop
-- callbacks (such as topic callbacks and death callbacks) run on the owner event-loop thread by default
+- callbacks (such as topic callbacks and service state callbacks) run on the owner event-loop thread by default
 - synchronous reply wait only processes fd/timer events, not new pending API functors
 - see the [threading model document](docs/threading-model.md) for `init()` / `start()` / `stop()` concurrency details
 
@@ -284,7 +284,7 @@ cmake --build build/example_artifacts_c -j$(nproc)
 ```
 
 That example provides both C and CPP versions.
-It demonstrates service-to-service RPC calls, topic subscription, and death-notification handling when the sensor service exits.
+It demonstrates service-to-service RPC calls, topic subscription, and service online/offline tracking when the sensor service exits.
 
 The built-in demo in `examples/sensor_service.bidl` / `examples/example_cpp/*` / `examples/example_c/*` has also been expanded into a fuller capability matrix covering:
 
@@ -294,7 +294,7 @@ The built-in demo in `examples/sensor_service.bidl` / `examples/example_cpp/*` /
 - regular service methods (`GetLatestData`, `SetThreshold`, `ResetSensor`, `GetSensorCount`)
 - topic broadcast (`SensorUpdate`)
 - async request + topic result push (`RequestLatestDataAsync` + `AsyncResultReady`)
-- client-side death notification
+- client-side service online/offline watch
 
 For the full example flow, refer to [examples/](examples/) and the [Examples Guide](docs/examples.en.md).
 
@@ -459,7 +459,7 @@ int main() {
     common::StatusResponse ack = unwrap(proxy.RequestLatestDataAsync(req));
 
     proxy.OnServiceDied([]() {
-        // service death notification
+        // service service online/offline watch
     });
 
     while (running) {

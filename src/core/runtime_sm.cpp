@@ -167,7 +167,7 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
         || type == MessageType::MSG_QUERY_INTERFACES_REPLY
         || type == MessageType::MSG_LIST_INSTANCES_REPLY
         || type == MessageType::MSG_QUERY_PUBLISHED_TOPICS_REPLY
-        || type == MessageType::MSG_SUBSCRIBE_SERVICE_REPLY
+        || type == MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY
         || type == MessageType::MSG_REGISTER_REPLY
         || type == MessageType::MSG_UNREGISTER_REPLY
         || type == MessageType::MSG_PUBLISH_TOPIC_REPLY
@@ -182,7 +182,7 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
         }
     }
 
-    // 主动消息（MSG_DEATH_NOTIFY、MSG_TOPIC_PUBLISHER_NOTIFY、MSG_DIAG_* 控制消息等）
+    // 主动消息（MSG_SERVICE_WATCH_NOTIFY、MSG_TOPIC_PUBLISHER_NOTIFY、MSG_DIAG_* 控制消息等）
     // 即使 seq 恰好命中正在等待的槽，也绝不进入 pending 槽——否则会被误当成
     // 请求应答（seq 碰撞应答错配）。SM 侧主动消息已改用 0x40000000 起分配 seq，
     // 此处类型校验是双端配合的客户端侧兜底。
@@ -222,9 +222,8 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
         break;
     case MessageType::MSG_HEARTBEAT_ACK:
         break;
-    case MessageType::MSG_DEATH_NOTIFY:
-    case MessageType::MSG_DEATH_NOTIFY_INSTANCE:
-        handleDeathNotify(msg);
+    case MessageType::MSG_SERVICE_WATCH_NOTIFY:
+        handleServiceWatchNotify(msg);
         break;
     case MessageType::MSG_TOPIC_PUBLISHER_NOTIFY:
         handleTopicPublisherNotify(msg);
@@ -232,71 +231,6 @@ void OmniRuntime::Impl::onSMMessage(Message& msg) {
     default:
         OMNI_LOG_DEBUG(LOG_TAG, "Unhandled SM message: %s", messageTypeToString(type));
         break;
-    }
-}
-
-void OmniRuntime::Impl::handleDeathNotify(const Message& msg) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    ServiceIdentity identity;
-    if (!readServiceIdentityPayload(buf, identity.name, identity.host_id, identity.instance_id)) {
-        OMNI_LOG_WARN(LOG_TAG, "malformed_death_notify seq=%u err=%d",
-                      msg.getSequence(), static_cast<int>(ErrorCode::ERR_DESERIALIZE));
-        return;
-    }
-
-    // MSG_DEATH_NOTIFY：名字已无存活实例（名字级死亡）；MSG_DEATH_NOTIFY_INSTANCE：
-    // 仅该实例死亡，同名仍有存活实例。两者都携带完整实例身份。
-    const bool name_death = (msg.getType() == MessageType::MSG_DEATH_NOTIFY);
-    OMNI_LOG_WARN(LOG_TAG, "Service instance died: %s (host_id=%s, instance_id=%s, name_death=%d)",
-                  identity.name.c_str(), identity.host_id.c_str(),
-                  identity.instance_id.c_str(), name_death ? 1 : 0);
-
-    // 实例级订阅：按身份精确匹配。先拷贝回调再调用：回调内可能
-    // unsubscribeServiceInstanceDeath 清除该节点（约束 1）
-    std::map<std::string, InstanceDeathSubscription>::iterator iit =
-        instance_deaths_.find(makeServiceIdentityKey(identity));
-    if (iit != instance_deaths_.end()) {
-        DeathSourceCallback callback = iit->second.callback;
-        callback(identity.name, identity.host_id, identity.instance_id);
-    }
-
-    if (name_death) {
-        ServiceState* dead_state = findServiceState(identity.name);
-        if (dead_state && dead_state->has_death && dead_state->death_cb) {
-            // 先拷贝到局部变量再调用：回调内可能 unsubscribeServiceDeath 清除该节点，
-            // 消除对失效迭代器/容器状态的脆弱依赖
-            DeathCallback callback = dead_state->death_cb;
-            callback(identity.name);
-        }
-    }
-
-    // 状态清理：实例级只清该实例键；名字级清该名与其全部实例键，不误伤同名其它实例
-    if (name_death) {
-        std::vector<std::string> instance_keys;
-        const std::string prefix = identity.name + '\x1f';
-        for (std::map<std::string, ServiceState>::iterator it = services_.begin();
-             it != services_.end(); ++it) {
-            if (it->first.compare(0, prefix.size(), prefix) == 0) {
-                instance_keys.push_back(it->first);
-            }
-        }
-        handleServiceLost(identity.name);
-        for (size_t i = 0; i < instance_keys.size(); ++i) {
-            handleServiceLost(instance_keys[i]);
-        }
-        return;
-    }
-
-    // 默认（按名）连接恰好指向该实例时也一并清理其按名状态
-    ServiceState* name_state = findServiceState(identity.name);
-    const bool name_key_is_dead_instance = name_state && name_state->has_info
-        && name_state->info.host_id == identity.host_id
-        && name_state->info.instance_id == identity.instance_id;
-
-    handleServiceLost(
-        makeServiceConnectionKey(identity.name, identity.host_id, identity.instance_id));
-    if (name_key_is_dead_instance) {
-        handleServiceLost(identity.name);
     }
 }
 
@@ -361,9 +295,59 @@ void OmniRuntime::Impl::handleTopicPublisherNotify(const Message& msg) {
     }
 }
 
-// ============================================================
-// SM 连接生命周期
-// ============================================================
+
+void OmniRuntime::Impl::handleServiceWatchNotify(const Message& msg) {
+    BufferView buf(msg.payload.data(), msg.payload.size());
+    uint64_t watch_id = 0;
+    ServiceIdentity identity;
+    bool online = false;
+    if (!buf.tryReadUint64(watch_id)
+        || !buf.tryReadString(identity.name)
+        || !buf.tryReadString(identity.host_id)
+        || !buf.tryReadString(identity.instance_id)
+        || !buf.tryReadBool(online)
+        || identity.name.empty()) {
+        OMNI_LOG_WARN(LOG_TAG, "malformed_service_watch_notify seq=%u err=%d",
+                      msg.getSequence(), static_cast<int>(ErrorCode::ERR_DESERIALIZE));
+        return;
+    }
+
+    std::map<uint64_t, ServiceWatchSubscription>::iterator it =
+        service_watches_.find(watch_id);
+    if (it == service_watches_.end()) {
+        return;
+    }
+    if (!it->second.active) {
+        ServiceWatchEvent event;
+        event.identity = identity;
+        event.online = online;
+        it->second.pending.push_back(event);
+        return;
+    }
+    ServiceWatchCallback callback = it->second.callback;
+    if (!online) {
+        // 数据面连接与 SM 状态事件解耦：状态事件先清理目标实例连接，
+        // 让 isServiceInstanceConnected()/自动重连立即反映真实状态。
+        const std::string instance_key = makeServiceConnectionKey(
+            identity.name, identity.host_id, identity.instance_id);
+        handleServiceLost(instance_key);
+
+        // 未绑定实例的 Proxy 使用服务名作为连接键；仅当它当前连接的就是
+        // 这个实例时，才清理按名连接，避免同名其它实例离线误伤。
+        ServiceState* name_state = findServiceState(identity.name);
+        if (name_state && name_state->has_info
+            && name_state->info.host_id == identity.host_id
+            && name_state->info.instance_id == identity.instance_id) {
+            handleServiceLost(identity.name);
+        }
+    }
+    if (callback) {
+        ServiceWatchEvent event;
+        event.identity = identity;
+        event.online = online;
+        callback(watch_id, event.identity, event.online);
+    }
+}
 
 int OmniRuntime::Impl::reconnectServiceManager() {
     // 未初始化时不算一次重连尝试（此前在 loop_ 检查前自增，会把未 init 的调用
@@ -403,7 +387,7 @@ int OmniRuntime::Impl::reconnectServiceManager() {
          it != services_.end();) {
         it->second.info = ServiceInfo();
         it->second.has_info = false;
-        if (!it->second.has_reconnect && !it->second.has_death && !it->second.has_heartbeat) {
+        if (!it->second.has_reconnect && !it->second.has_heartbeat) {
             it = services_.erase(it);
         } else {
             ++it;
@@ -418,6 +402,7 @@ int OmniRuntime::Impl::reconnectServiceManager() {
     return 0;
 }
 
+
 int OmniRuntime::Impl::restoreControlPlaneState() {
     int hello_ret = sendRuntimeHello();
     if (hello_ret != 0) {
@@ -425,7 +410,7 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
     }
 
     // 先拷贝 key 再遍历：waitForReply 期间 SM 消息可触发用户回调
-    // （如死亡通知回调内 unregisterService）修改 local_services_（约束 2）
+    // （如状态 watch 回调内 unregisterService）修改 local_services_（约束 2）
     std::vector<std::string> service_names;
     service_names.reserve(local_services_.size());
     for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
@@ -439,29 +424,13 @@ int OmniRuntime::Impl::restoreControlPlaneState() {
         }
     }
 
-    // 同上：waitForReply 期间用户可能 unsubscribeServiceDeath 清除该状态（约束 2）
-    std::vector<std::string> death_names;
-    for (std::map<std::string, ServiceState>::iterator it = services_.begin();
-         it != services_.end(); ++it) {
-        if (it->second.has_death) {
-            death_names.push_back(it->first);
-        }
+    std::vector<uint64_t> watch_ids;
+    for (std::map<uint64_t, ServiceWatchSubscription>::iterator it = service_watches_.begin();
+         it != service_watches_.end(); ++it) {
+        watch_ids.push_back(it->first);
     }
-    for (size_t i = 0; i < death_names.size(); ++i) {
-        int ret = restoreSubscribeDeath(death_names[i]);
-        if (ret != 0) {
-            return ret;
-        }
-    }
-
-    // 同上：实例级死亡订阅也须恢复（约束 6），先拷贝 key 再逐个重放
-    std::vector<std::string> instance_death_keys;
-    for (std::map<std::string, InstanceDeathSubscription>::iterator it = instance_deaths_.begin();
-         it != instance_deaths_.end(); ++it) {
-        instance_death_keys.push_back(it->first);
-    }
-    for (size_t i = 0; i < instance_death_keys.size(); ++i) {
-        int ret = restoreSubscribeInstanceDeath(instance_death_keys[i]);
+    for (size_t i = 0; i < watch_ids.size(); ++i) {
+        int ret = restoreServiceWatch(watch_ids[i]);
         if (ret != 0) {
             return ret;
         }
@@ -520,50 +489,6 @@ int OmniRuntime::Impl::restoreRegisterService(const std::string& name) {
         return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
     }
     return ret;
-}
-
-int OmniRuntime::Impl::restoreSubscribeDeath(const std::string& name) {
-    ServiceState* death_state = findServiceState(name);
-    if (!death_state || !death_state->has_death) {
-        return 0;
-    }
-    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE, allocSequence());
-    msg.payload.writeString(name);
-    Message reply;
-    int ret = sendSMRequestAndWaitReply(msg, reply);
-    if (ret != 0) {
-        return ret;
-    }
-    bool accepted = false;
-    if (!decodeBoolReplyPayload(reply, accepted) || !accepted) {
-        OMNI_LOG_WARN(LOG_TAG, "restore subscribe death failed for %s", name.c_str());
-    }
-    return 0;
-}
-
-int OmniRuntime::Impl::restoreSubscribeInstanceDeath(const std::string& instance_key) {
-    std::map<std::string, InstanceDeathSubscription>::iterator it =
-        instance_deaths_.find(instance_key);
-    if (it == instance_deaths_.end()) {
-        return 0;
-    }
-    const InstanceDeathSubscription sub = it->second;  // 拷贝后使用：重放期间用户可改订阅表
-
-    Message msg(MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE, allocSequence());
-    if (!writeServiceIdentityPayload(msg.payload, sub.name, sub.host_id, sub.instance_id)) {
-        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
-    }
-    Message reply;
-    int ret = sendSMRequestAndWaitReply(msg, reply);
-    if (ret != 0) {
-        return ret;
-    }
-    bool accepted = false;
-    if (!decodeBoolReplyPayload(reply, accepted) || !accepted) {
-        OMNI_LOG_WARN(LOG_TAG, "restore subscribe instance death failed for %s",
-                      instance_key.c_str());
-    }
-    return 0;
 }
 
 int OmniRuntime::Impl::restorePublishTopic(const std::string& topic, const std::string& owner,

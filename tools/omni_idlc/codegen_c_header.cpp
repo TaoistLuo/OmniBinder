@@ -280,6 +280,7 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
     os << "    uint32_t reconnect_interval_ms;\n";
     os << "    void (*death_callback)(void* user_data);\n";
     os << "    void* death_user_data;\n";
+    os << "    uint64_t watch_id;\n";
     os << "    void* _sub_ctxs[" << prefix << "_PROXY_MAX_SUBSCRIPTIONS];\n";
     os << "    const char* _sub_topics[" << prefix << "_PROXY_MAX_SUBSCRIPTIONS];\n";
     os << "    int _sub_ctx_count;\n";
@@ -324,7 +325,7 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
         os << "    void (*callback)(const " << topic_type << "* msg, void* user_data), void* user_data);\n";
     }
 
-    // 死亡通知
+    // 数据面连接断开回调
     os << "void " << prefix << "_proxy_on_service_died(" << prefix << "_proxy* p,\n";
     os << "    void (*callback)(void* user_data), void* user_data);\n\n";
 }

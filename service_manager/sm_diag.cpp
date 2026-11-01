@@ -92,7 +92,7 @@ void ServiceManagerApp::handleRuntimeHello(ClientConnection* conn, const Message
     const std::string session_key = makeRuntimeSessionKey(info.host_id, runtime_id);
 
     // 同一 (host_id, runtime_id) 的新会话顶替旧会话。incarnation 相同说明是同一进程
-    // 重连（不触发死亡通知）；不同说明进程重启（保留死亡通知语义）。
+    // 重连（不触发服务状态通知）；不同说明进程重启（触发离线+上线状态通知）。
     std::map<std::string, int>::iterator sit = runtime_sessions_.find(session_key);
     if (sit != runtime_sessions_.end() && sit->second != conn->fd) {
         int old_fd = sit->second;
@@ -104,7 +104,7 @@ void ServiceManagerApp::handleRuntimeHello(ClientConnection* conn, const Message
         OMNI_LOG_INFO(TAG, "Session superseded runtime_id=%s old_fd=%d new_fd=%d same_inc=%d",
                       runtime_id.c_str(), old_fd, conn->fd, same_incarnation ? 1 : 0);
         closeClient(old_fd, !same_incarnation);
-        // 死亡通知回调可能重入并关闭当前连接（约束 1）：重新判活后再继续
+        // 状态 watch 通知发送可能重入并关闭当前连接（约束 1）：重新判活后再继续
         if (clients_.find(conn->fd) == clients_.end()) {
             return;
         }

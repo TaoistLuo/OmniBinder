@@ -34,7 +34,7 @@ OmniBinder 使用自定义的二进制协议进行通信，所有通信（控制
 | Magic | 4 bytes | 固定值 `0x42494E44`（ASCII "BIND"），用于帧同步 |
 | Version | 2 bytes | 协议版本号，当前为 `0x0001` |
 | Type | 2 bytes | 消息类型，见下文 |
-| Sequence | 4 bytes | 序列号，用于请求/响应匹配。客户端请求从小整数递增；SM 主动消息（死亡通知/发布者通知/诊断控制）从 `0x40000000` 起独立分配，避免与客户端等待序列碰撞 |
+| Sequence | 4 bytes | 序列号，用于请求/响应匹配。客户端请求从小整数递增；SM 主动消息（服务状态通知/发布者通知/诊断控制）从 `0x40000000` 起独立分配，避免与客户端等待序列碰撞 |
 | Length | 4 bytes | Payload 长度（字节数） |
 | Payload | N bytes | 消息体，根据 Type 不同有不同结构 |
 
@@ -85,13 +85,10 @@ const size_t MESSAGE_HEADER_SIZE = 16;
 | 0x0015 | MSG_QUERY_INTERFACES_REPLY | SM -> Service | 查询服务接口响应 |
 | 0x0016 | MSG_LIST_INSTANCES | Service -> SM | 按服务名列出全部实例请求 |
 | 0x0017 | MSG_LIST_INSTANCES_REPLY | SM -> Service | 按服务名列出全部实例响应 |
-| 0x0020 | MSG_SUBSCRIBE_SERVICE | Service -> SM | 订阅服务（名字级）死亡通知 |
-| 0x0021 | MSG_SUBSCRIBE_SERVICE_REPLY | SM -> Service | 订阅响应（名字级/实例级共用） |
-| 0x0022 | MSG_UNSUBSCRIBE_SERVICE | Service -> SM | 取消名字级订阅 |
-| 0x0023 | MSG_DEATH_NOTIFY | SM -> Service | 名字死亡通知（该名已无存活实例） |
-| 0x0024 | MSG_DEATH_NOTIFY_INSTANCE | SM -> Service | 实例死亡通知（该名仍有存活实例） |
-| 0x0025 | MSG_SUBSCRIBE_SERVICE_INSTANCE | Service -> SM | 订阅服务实例死亡通知 |
-| 0x0026 | MSG_UNSUBSCRIBE_SERVICE_INSTANCE | Service -> SM | 取消实例级死亡订阅 |
+| 0x0027 | MSG_SUBSCRIBE_SERVICE_WATCH | Service -> SM | 订阅服务实例上下线状态 |
+| 0x0028 | MSG_SUBSCRIBE_SERVICE_WATCH_REPLY | SM -> Service | 状态订阅响应 |
+| 0x0029 | MSG_UNSUBSCRIBE_SERVICE_WATCH | Service -> SM | 取消状态订阅 |
+| 0x002A | MSG_SERVICE_WATCH_NOTIFY | SM -> Service | 服务实例上线/离线通知 |
 | 0x0030 | MSG_PUBLISH_TOPIC | Service -> SM | 声明发布话题 |
 | 0x0031 | MSG_PUBLISH_TOPIC_REPLY | SM -> Service | 声明响应 |
 | 0x0032 | MSG_SUBSCRIBE_TOPIC | Service -> SM | 订阅话题 |
@@ -150,15 +147,11 @@ enum class MessageType : uint16_t {
     MSG_LIST_INSTANCES        = 0x0016,
     MSG_LIST_INSTANCES_REPLY  = 0x0017,
 
-    // 控制通道 - 死亡通知（名字级）
-    MSG_SUBSCRIBE_SERVICE     = 0x0020,
-    MSG_SUBSCRIBE_SERVICE_REPLY = 0x0021,
-    MSG_UNSUBSCRIBE_SERVICE   = 0x0022,
-    MSG_DEATH_NOTIFY          = 0x0023,
-    // 控制通道 - 死亡通知（实例级）
-    MSG_DEATH_NOTIFY_INSTANCE = 0x0024,
-    MSG_SUBSCRIBE_SERVICE_INSTANCE = 0x0025,
-    MSG_UNSUBSCRIBE_SERVICE_INSTANCE = 0x0026,
+    // 控制通道 - 服务实例状态 watch
+    MSG_SUBSCRIBE_SERVICE_WATCH       = 0x0027,
+    MSG_SUBSCRIBE_SERVICE_WATCH_REPLY = 0x0028,
+    MSG_UNSUBSCRIBE_SERVICE_WATCH     = 0x0029,
+    MSG_SERVICE_WATCH_NOTIFY          = 0x002A,
 
     // 控制通道 - 话题
     MSG_PUBLISH_TOPIC         = 0x0030,
@@ -286,7 +279,7 @@ topic/death 订阅与诊断状态。payload 为发送方本次启动代际：
 
 SM 收到后按控制连接 fd 续期该会话的 deadline；不再按服务名逐条发送，也不再用
 `(fd, service_name)` 解析心跳归属。会话超时后 `closeClient(fd)` 统一注销该
-runtime 的所有服务、订阅与诊断状态，并逐服务下发死亡通知。
+runtime 的所有服务、订阅与诊断状态，并逐实例下发离线状态通知。
 
 ### 4.4 控制面心跳响应（MSG_CONTROL_HEARTBEAT_ACK）
 
@@ -406,63 +399,46 @@ found:
   found == 1 → 读取 instance_count，逐项反序列化；instance_count 与剩余字节
                不匹配或任一 ServiceInfo 反序列化失败 → ERR_DESERIALIZE
 
-### 4.9 订阅服务死亡通知
+### 4.9 订阅服务实例状态（Watch）
 
-死亡订阅有两种粒度，共享同一身份线格式 `service_name + host_id + instance_id`：
-
-**名字级（MSG_SUBSCRIBE_SERVICE / MSG_UNSUBSCRIBE_SERVICE）**
+一次订阅请求携带 watch_id、filter 数量以及每个 filter：
 
 ```
++------------------+------------------+
+| watch_id (8)     | filter_count (4) |
 +------------------+------------------+
 | service_name_len | service_name     |
-| (4 bytes)        | (N bytes)        |
-+------------------+------------------+
-```
-
-语义：仅当该服务名**已无任何存活实例**（最后一个实例消失）时，订阅者收到
-`MSG_DEATH_NOTIFY`；同名仍有其它实例存活时不触发（避免把"一个实例死了"
-误报成"整个名字死了"）。SM 在首个死亡通知后移除该订阅，保持去重语义。
-
-**实例级（MSG_SUBSCRIBE_SERVICE_INSTANCE / MSG_UNSUBSCRIBE_SERVICE_INSTANCE）**
-
-```
-+------------------+------------------+------------------+------------------+
-| name_len         | name             | host_id_len      | host_id          |
-| (4 bytes)        | (N bytes)        | (4 bytes)        | (M bytes)        |
-+------------------+------------------+------------------+------------------+
+| host_id_len      | host_id          |
 | instance_id_len  | instance_id      |
-| (4 bytes)        | (K bytes)        |
-+------------------+------------------+
+... 重复 filter_count 次
 ```
 
-语义：仅当该 `(name, host_id, instance_id)` 实例死亡时通知，同名的其它实例
-死亡不影响本订阅。订阅应答复用 `MSG_SUBSCRIBE_SERVICE_REPLY`（bool）。
+`service_name` 必填；`host_id` / `instance_id` 为空表示通配，且两者可只指定其一。
+filter 之间不允许重叠，否则 SM 整组拒绝并记录日志。
 
-### 4.10 死亡通知（MSG_DEATH_NOTIFY / MSG_DEATH_NOTIFY_INSTANCE）
+订阅应答复用 `MSG_SUBSCRIBE_SERVICE_WATCH_REPLY`（bool）。订阅成功后，SM 立即补发当前状态：
 
-两种通知消息共用同一 payload：死亡实例的完整身份。
+- 当前有匹配在线实例：每个实例发送一次 `online=true`
+- 当前没有匹配实例：发送一次 `online=false`，identity 使用该 filter 的字段
+
+### 4.10 服务实例状态通知（MSG_SERVICE_WATCH_NOTIFY）
 
 ```
 +------------------+------------------+------------------+------------------+
-| name_len         | name             | host_id_len      | host_id          |
-| (4 bytes)        | (N bytes)        | (4 bytes)        | (M bytes)        |
+| watch_id (8)     | name_len         | name             | host_id_len      |
 +------------------+------------------+------------------+------------------+
-| instance_id_len  | instance_id      |
-| (4 bytes)        | (K bytes)        |
+| host_id          | instance_id_len  | instance_id      | online (1)       |
 +------------------+------------------+------------------+------------------+
 ```
 
-| 消息 | 触发时机 | 接收方 |
-|------|----------|--------|
-| `MSG_DEATH_NOTIFY` | 该服务名已无存活实例（最后一个实例消失） | 名字级订阅者 ∪ 该实例的实例级订阅者 |
-| `MSG_DEATH_NOTIFY_INSTANCE` | 该实例死亡，但同名仍有存活实例 | 该实例的实例级订阅者 |
+| 场景 | online |
+|------|--------|
+| 新实例注册 | 1 |
+| 实例注销 / 崩溃 / 心跳超时 | 0 |
+| 同身份 takeover 且 fd/端点变化 | 先 0 后 1 |
 
-客户端解析：三个字段必须完整且无尾随字节，`name` 非空、各字段不超过服务名长度上限；
-畸形/截断 payload 一律丢弃并记录告警，不进入回调分发，不越界读取。
-
-接收端据此分派：名字级回调收到服务名；实例级回调收到 `(name, host_id, instance_id)`。
-实例死亡只清理该实例键（`makeServiceConnectionKey(name, host_id, instance_id)`）对应的
-连接/状态；仅当名字级通知到达（名字已消失）时才清理该名及其全部实例键。
+name-only watch 会收到该名称下每个实例的每次上下线事件；不做名字级聚合。
+客户端解析失败时丢弃并记录告警，不进入回调分发。
 
 ### 4.11 声明发布话题（MSG_PUBLISH_TOPIC）
 
@@ -924,7 +900,7 @@ effective_timeout = max(requested_timeout, heartbeat_interval * 3)
 - SM 裁定后通过 `MSG_RUNTIME_HELLO_REPLY` 返回 accepted_interval / effective_timeout；
 - 每个 runtime 一个会话，一个独立 deadline 定时器；
 - `MSG_CONTROL_HEARTBEAT` 到达后续期；超时 `closeClient(fd)` 一次性移除该 runtime 的
-  全部服务、订阅、诊断状态，并逐服务下发死亡通知。
+  全部服务、订阅、诊断状态，并逐实例下发离线状态通知。
 
 数据面（Client ↔ Service）：
 

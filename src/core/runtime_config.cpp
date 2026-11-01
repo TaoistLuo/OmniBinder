@@ -121,7 +121,7 @@ void OmniRuntime::Impl::clearServiceCache() {
              it != services_.end();) {
             it->second.info = ServiceInfo();
             it->second.has_info = false;
-            if (!it->second.has_reconnect && !it->second.has_death && !it->second.has_heartbeat) {
+            if (!it->second.has_reconnect && !it->second.has_heartbeat) {
                 it = services_.erase(it);
             } else {
                 ++it;

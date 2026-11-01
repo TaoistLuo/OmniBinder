@@ -5,7 +5,7 @@
 This document shows end-to-end OmniBinder usage examples, including:
 
 - a C++ service (`SensorService`) that exposes sensor data and periodically broadcasts updates
-- a C++ client (`SensorClient`) that invokes RPCs, subscribes to topics, and listens for death notifications
+- a C++ client (`SensorClient`) that invokes RPCs, subscribes to topics, and listens for service state notifications
 - pure C server/client examples equivalent to the C++ version
 - a downstream Sensor/HMI example that consumes installed OmniBinder artifacts
 - `omni-cli` usage for service inspection and invocation
@@ -25,7 +25,7 @@ The built-in examples demonstrate how to:
 - implement services and clients
 - invoke RPC methods
 - broadcast and subscribe to topics
-- receive service death notifications
+- receive service service state notifications
 - run the same model both in-tree and from downstream projects
 
 The main example uses two IDL files to demonstrate cross-file `import` resolution.
@@ -258,7 +258,7 @@ The current `examples/example_cpp/sensor_client.cpp` has also been expanded into
 - regular service calls (`GetLatestData`, `SetThreshold`, `ResetSensor`, `GetSensorCount`)
 - topic subscriptions (`SensorUpdate`)
 - callback-like asynchronous result reception (`AsyncResultReady`)
-- death notification handling
+- service state notification handling
 
 Core shape:
 
@@ -345,7 +345,7 @@ The current `examples/example_c/sensor_client.c` is also a comprehensive demo cl
 - array RPC calls
 - regular pub/sub (`SensorUpdate`)
 - callback-like asynchronous result reception (`AsyncResultReady`)
-- death notification callbacks
+- service state notification callbacks
 
 Core shape:
 
@@ -387,7 +387,7 @@ This C client now demonstrates the same feature matrix as the C++ client:
 - array RPC calls
 - regular topic subscription
 - callback-like asynchronous result reception via `AsyncResultReady`
-- death notification handling
+- service state notification handling
 
 ---
 
@@ -549,7 +549,7 @@ The client side will:
 - call primitive / struct / nested / array RPCs
 - subscribe to `SensorUpdate`
 - subscribe to `AsyncResultReady`
-- wait for death notification callbacks until stopped
+- wait for service state notification callbacks until stopped
 
 Example commands:
 
@@ -597,7 +597,7 @@ cd build
 ./target/test/test_transport
 ./target/test/test_shm_transport
 ./target/test/test_service_registry
-./target/test/test_heartbeat_death
+./target/test/test_service_watch_notifier
 ./target/test/test_topic_manager
 ./target/test/test_idl_compiler
 
@@ -617,10 +617,10 @@ Integration tests automatically fork a ServiceManager child process and clean it
 - automatic SHM selection for same-host clients
 - independent per-client SHM regions (3 clients concurrent + 5 clients sequential)
 - broadcast / subscribe delivery over SHM
-- death notifications after service crash
+- service state notifications after service crash
 - service lifecycle changes after unregistering
 
-### 8.4 Validate death notifications
+### 8.4 Validate service state notifications
 
 If you stop the C++ server with `Ctrl+C`, the client should print a death-notification message, and ServiceManager should log that the service timed out and subscribers were notified.
 
@@ -638,7 +638,7 @@ Typical ServiceManager-side output:
 ```text
 [WARN][ServiceManager] session_timeout fd=... runtime_id=... timeout_ms=...
 [WARN][ServiceManager] Service timed out: SensorService (host_id=<host_id>, instance_id=)
-[INFO][DeathNotifier] Instance SensorService (host_id=<host_id>, instance_id=) died, name_gone=1, notifying 1 subscribers
+[INFO][ServiceWatchNotifier] service state notification: SensorService host_id=<host_id> instance_id= online=0
 ```
 
 ### 8.5 Run two same-name service instances on one board
@@ -955,7 +955,7 @@ int main() {
         printf("[Broadcast] id=%d status=%s\n", msg.id, msg.status.c_str());
     });
 
-    // Subscribe to death notification
+    // Subscribe to service state notification
     proxy.OnServiceDied([]() {
         printf("!!! MyService DIED !!!\n");
     });

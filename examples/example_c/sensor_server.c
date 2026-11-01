@@ -15,6 +15,20 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
+static void on_client_connected(const char* client_info, void* user_data) {
+    (void)user_data;
+    printf("[Server] client connected: %s\n", client_info ? client_info : "unknown");
+}
+
+static void on_client_disconnected(const char* client_info, void* user_data) {
+    (void)user_data;
+    printf("[Server] client disconnected: %s\n", client_info ? client_info : "unknown");
+}
+
+static void runtime_entry(void* arg) {
+    omni_runtime_start((omni_runtime_t*)arg);
+}
+
 static void fill_sensor_data(demo_SensorData* data, int32_t id, const char* location) {
     data->sensor_id = id;
     data->temperature = g_temp;
@@ -264,10 +278,6 @@ omni_impl demo_SensorService_impl_request_latest_data_async(
     fill_status(result, 0, "accepted");
 }
 
-static void runtime_entry(void* arg) {
-    omni_runtime_start((omni_runtime_t*)arg);
-}
-
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
     const char* register_host = NULL;
@@ -316,6 +326,9 @@ int main(int argc, char* argv[]) {
         omni_runtime_destroy(runtime);
         return 1;
     }
+    omni_service_set_client_callbacks(svc,
+        on_client_connected, on_client_disconnected, NULL);
+
     /* runtime 不创建线程；业务线程执行 start()。 */
     app_thread_t* runtime_thread = app_thread_create(runtime_entry, runtime);
     if (!runtime_thread) {

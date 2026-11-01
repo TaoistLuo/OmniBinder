@@ -119,22 +119,13 @@ int OmniRuntime::invokeOneWay(const std::string& name, uint32_t iface_id,
     return impl_->invokeOneWay(name, iface_id, method_id, idl_hash, req);
 }
 
-int OmniRuntime::subscribeServiceDeath(const std::string& name, const DeathCallback& cb) {
-    return impl_->subscribeServiceDeath(name, cb);
+int OmniRuntime::watchServices(const std::vector<ServiceWatchRequest>& requests,
+                               const ServiceWatchCallback& callback,
+                               uint64_t& watch_id) {
+    return impl_->watchServices(requests, callback, watch_id);
 }
-int OmniRuntime::unsubscribeServiceDeath(const std::string& name) {
-    return impl_->unsubscribeServiceDeath(name);
-}
-int OmniRuntime::subscribeServiceInstanceDeath(const std::string& name,
-                                               const std::string& host_id,
-                                               const std::string& instance_id,
-                                               const DeathSourceCallback& cb) {
-    return impl_->subscribeServiceInstanceDeath(name, host_id, instance_id, cb);
-}
-int OmniRuntime::unsubscribeServiceInstanceDeath(const std::string& name,
-                                                 const std::string& host_id,
-                                                 const std::string& instance_id) {
-    return impl_->unsubscribeServiceInstanceDeath(name, host_id, instance_id);
+int OmniRuntime::unwatchServices(uint64_t watch_id) {
+    return impl_->unwatchServices(watch_id);
 }
 
 int OmniRuntime::publishTopic(const std::string& topic, uint32_t idl_hash) {
@@ -218,6 +209,7 @@ OmniRuntime::Impl::Impl()
     , sm_incarnation_id_(0)
     , conn_mgr_(NULL)
     , register_host_()
+    , next_watch_id_(1)
     , reply_send_timeout_ms_(DEFAULT_REPLY_SEND_TIMEOUT)
     , proxy_retry_timer_id_(0)
     , client_session_generation_(0)

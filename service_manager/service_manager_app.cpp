@@ -7,7 +7,7 @@
 
 namespace omnibinder {
 
-// SM 主动下发消息（MSG_DEATH_NOTIFY、MSG_TOPIC_PUBLISHER_NOTIFY、MSG_DIAG_* 控制消息）
+// SM 主动下发消息（MSG_SERVICE_WATCH_NOTIFY、MSG_TOPIC_PUBLISHER_NOTIFY、MSG_DIAG_* 控制消息）
 // 使用的序列号基础值。客户端请求的 seq 由其 RpcRuntime 从小整数（1,2,3...）递增分配，
 // SM 主动消息若继续使用独立的小整数序列号，可能恰好命中客户端正在等待的请求 seq，
 // 导致客户端把主动消息误当作请求应答（onSMMessage 的 isWaiting() 分支）。从大值起点
@@ -262,17 +262,11 @@ void ServiceManagerApp::dispatchMessage(ClientConnection* conn, const Message& m
         case MessageType::MSG_QUERY_PUBLISHED_TOPICS:
             handleQueryPublishedTopics(conn, msg);
             break;
-        case MessageType::MSG_SUBSCRIBE_SERVICE:
-            handleSubscribeService(conn, msg);
+        case MessageType::MSG_SUBSCRIBE_SERVICE_WATCH:
+            handleSubscribeServiceWatch(conn, msg);
             break;
-        case MessageType::MSG_UNSUBSCRIBE_SERVICE:
-            handleUnsubscribeService(conn, msg);
-            break;
-        case MessageType::MSG_SUBSCRIBE_SERVICE_INSTANCE:
-            handleSubscribeServiceInstance(conn, msg);
-            break;
-        case MessageType::MSG_UNSUBSCRIBE_SERVICE_INSTANCE:
-            handleUnsubscribeServiceInstance(conn, msg);
+        case MessageType::MSG_UNSUBSCRIBE_SERVICE_WATCH:
+            handleUnsubscribeServiceWatch(conn, msg);
             break;
         case MessageType::MSG_PUBLISH_TOPIC:
             handlePublishTopic(conn, msg);
@@ -384,7 +378,7 @@ void ServiceManagerApp::closeClient(int fd, bool notify_service_death) {
     }
 
     ClientConnection* conn = it->second;
-    // 先从表中摘除：notifyServiceDeath → sendDeathNotify → sendMessage 发送失败时
+    // 先从表中摘除：notifyServiceRemoved → SERVICE_WATCH_NOTIFY 发送失败时
     // 可能再次 closeClient(fd)，早摘除可让重入在开头直接返回，避免 conn 被二次删除
     clients_.erase(it);
     cancelSessionTimers(conn);
@@ -409,8 +403,8 @@ void ServiceManagerApp::closeClient(int fd, bool notify_service_death) {
         }
     }
 
-    // 清理死亡通知订阅
-    death_notifier_.removeSubscriber(fd);
+    // 清理服务状态 watch 订阅
+    watch_notifier_.removeSubscriber(fd);
 
     // 清理话题订阅与发布关系
     topic_manager_.removeByFd(fd);

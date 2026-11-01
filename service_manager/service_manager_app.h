@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * @file        service_manager_app.h
  * @brief       ServiceManager 应用类
- * @details     ServiceManager 进程的核心协调类。管理 TCP 监听、客户端连接生命周期、消息分发、心跳检测、死亡通知和话题管理。基于 EventLoop 的单线程事件驱动模型。
+ * @details     ServiceManager 进程的核心协调类。管理 TCP 监听、客户端连接生命周期、消息分发、心跳检测、服务状态 watch 和话题管理。基于 EventLoop 的单线程事件驱动模型。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -39,7 +39,7 @@
 #include "core/event_loop.h"
 #include "transport/transport_selector.h"
 #include "service_registry.h"
-#include "death_notifier.h"
+#include "service_watch_notifier.h"
 #include "topic_manager.h"
 #include <string>
 #include <map>
@@ -186,10 +186,13 @@ private:
     void sendQueryInterfacesReply(ClientConnection* conn, uint32_t seq, bool found, const std::vector<InterfaceInfo>& interfaces);
     void handleQueryPublishedTopics(ClientConnection* conn, const Message& msg);
     void sendQueryPublishedTopicsReply(ClientConnection* conn, uint32_t seq, bool found, const std::vector<std::string>& topics);
-    void handleSubscribeService(ClientConnection* conn, const Message& msg);
-    void handleUnsubscribeService(ClientConnection* conn, const Message& msg);
-    void handleSubscribeServiceInstance(ClientConnection* conn, const Message& msg);
-    void handleUnsubscribeServiceInstance(ClientConnection* conn, const Message& msg);
+    void handleSubscribeServiceWatch(ClientConnection* conn, const Message& msg);
+    void handleUnsubscribeServiceWatch(ClientConnection* conn, const Message& msg);
+    void notifyServiceWatch(const ServiceIdentity& identity, bool online);
+    void sendServiceWatchNotify(ClientConnection* conn, uint64_t watch_id,
+                                const ServiceIdentity& identity, bool online);
+    void sendInitialServiceWatch(ClientConnection* conn, uint64_t watch_id,
+                                 const ServiceWatchFilter& filter);
     void handlePublishTopic(ClientConnection* conn, const Message& msg);
     void handleUnpublishTopic(ClientConnection* conn, const Message& msg);
     void handleSubscribeTopic(ClientConnection* conn, const Message& msg);
@@ -197,13 +200,6 @@ private:
     void handleUnsubscribeTopic(ClientConnection* conn, const Message& msg);
     void sendTopicPublisherNotify(int subscriber_fd, const std::string& topic,
                                   const ServiceInfo& pub_info, uint32_t idl_hash);
-    /*
-     * @brief  服务实例摘除后通知死亡订阅者
-     * @param[in]  identity 被摘除的服务实例身份
-     * @note   实例级订阅者始终收到该实例的死亡通知；仅当该服务名下已无任何存活
-     *         实例时，名字级订阅者才收到"名字死亡"通知（见 notifyServiceRemoved）
-     */
-    void notifyServiceInstanceDeath(const ServiceIdentity& identity);
     /*
      * @brief  服务实例摘除后的统一收尾：停止该实例心跳跟踪并通知死亡订阅者
      * @param[in]  identity 被摘除的服务实例身份
@@ -218,8 +214,6 @@ private:
      * @return true 表示注册表确实移除了该实例；false 表示该实例未注册
      */
     bool removeServiceAndNotify(const ServiceIdentity& identity, int fd);
-    void sendDeathNotify(ClientConnection* conn, const ServiceIdentity& identity,
-                         MessageType type);
     void sendMessage(ClientConnection* conn, Message& msg);
     bool flushPendingSends(ClientConnection* conn);
     void enableClientWriteEvents(ClientConnection* conn);
@@ -235,7 +229,7 @@ private:
     std::map<uint32_t, std::vector<int> > pid_watchers_;
     std::map<int, std::set<uint32_t> > watcher_to_pids_;
     ServiceRegistry registry_;
-    DeathNotifier death_notifier_;
+    ServiceWatchNotifier watch_notifier_;
     TopicManager topic_manager_;
     // (host_id, runtime_id) -> 控制连接 fd；用于同运行时新会话顶替旧会话
     std::map<std::string, int> runtime_sessions_;

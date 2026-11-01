@@ -14,7 +14,7 @@ OmniBinder 的运行时分成控制面和数据面：
 - **Topic 状态**：`TopicRuntime` 保存本地订阅回调、已发布 topic、TCP 订阅者 fd 和 SHM 订阅者 `(service_name, client_id)`。
 - **同步等待**：`RpcRuntime` 管理 sequence、默认超时和 `waitForReply()` 的等待状态；控制面 reply 存储在 `SmControlChannel::pending_replies_`，数据面 reply 存储在 `RpcRuntime` 独立的 `dataReplies()` 槽表，SM 重连只清理控制面槽。
 
-ServiceManager 只负责服务注册发现、Topic 发布/订阅关系、死亡通知和诊断控制面；RPC request/response 与 topic broadcast 一旦建立数据面直连后不再经过 ServiceManager。
+ServiceManager 只负责服务注册发现、Topic 发布/订阅关系、服务状态通知和诊断控制面；RPC request/response 与 topic broadcast 一旦建立数据面直连后不再经过 ServiceManager。
 
 ---
 
@@ -63,8 +63,8 @@ ServiceProxyBase::connect()
   -> enableAutoReconnect(true)
   -> connectService 内 ensureDataSession()：MSG_SESSION_HELLO/ACK；数据面心跳自动启动
      （可选：startHeartbeat(interval, timeout) 自定义策略/重新协商）
-  -> 未绑定实例：subscribeServiceDeath()；绑定实例：subscribeServiceInstanceDeath()
-     - 分别向 SM 发 MSG_SUBSCRIBE_SERVICE / MSG_SUBSCRIBE_SERVICE_INSTANCE 注册死亡通知
+  -> watchServices()：按目标实例（未绑定时使用 lookupService 解析到的实例身份）注册状态 watch
+     - 向 SM 发 MSG_SUBSCRIBE_SERVICE_WATCH
 ```
 
 连接以 `makeServiceConnectionKey(name, host_id, instance_id)` 为索引键：生成的 Proxy 方法据此调用 `runtime_.invoke(connectionKey(), ...)` / `invokeOneWay(connectionKey(), ...)`；`ServiceProxyBase` 的 `disconnect()`、`enableAutoReconnect()`、`setReconnectInterval()`、`startHeartbeat()`、`stopHeartbeat()` 也都以 `connectionKey()` 为键。默认实例（未显式指定）的连接键即服务名本身。
@@ -268,20 +268,22 @@ SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo{name, hos
 
 ---
 
-## 8. 死亡通知、心跳和自动重连
+## 8. 服务状态通知、心跳和自动重连
 
-### 8.1 ServiceManager 侧死亡通知
+### 8.1 ServiceManager 侧服务状态通知
 
-客户端可通过 `MSG_SUBSCRIBE_SERVICE`（名字级）或 `MSG_SUBSCRIBE_SERVICE_INSTANCE`（实例级）注册死亡通知。服务 unregister、连接断开或 ServiceManager 判定服务死亡时，SM 调用 `notifyServiceInstanceDeath()`：
+客户端通过 `watchServices()` 注册持久状态 watch，filter 支持 service_name + 可选 host_id / instance_id：
 
-- 实例级订阅者收到该实例的死亡通知；仅当该服务名已无任何存活实例时，名字级订阅者才收到"名字死亡"通知。
-- 名字级通知用 `MSG_DEATH_NOTIFY`，实例级（同名仍有存活实例）用 `MSG_DEATH_NOTIFY_INSTANCE`，两者 payload 均为 `service_name + host_id + instance_id`。
+- 服务实例注册 → `MSG_SERVICE_WATCH_NOTIFY`，online=true
+- 实例注销、连接断开、心跳超时 → `MSG_SERVICE_WATCH_NOTIFY`，online=false
+- 同身份 takeover 且 fd/端点变化 → 先 offline，再 online
+- name-only watch 会收到每个匹配实例的每次上下线事件
 
-runtime 在 `onSMMessage()` 中处理死亡通知：
+runtime 在 `onSMMessage()` 的 `handleServiceWatchNotify()` 中解析 watch_id 与实例身份，
+先清理离线实例的数据面连接/重连状态，再调用 `ServiceWatchCallback`。
 
-- 解析实例身份：按 `makeServiceIdentityKey` 匹配并触发实例级 `DeathSourceCallback`；`MSG_DEATH_NOTIFY` 额外触发名字级 `DeathCallback`。
-- `handleServiceLost()`：实例死亡只清理该实例键（`makeServiceConnectionKey`）的连接/状态；名字死亡才清理该名及其全部实例键。随后暂停 heartbeat、清除对应 `ServiceState.info`。
-- 如果启用了自动重连，`scheduleReconnect()` 在退避延迟后调度 `tryReconnectService()`。
+`watchServices()` 在 SM 尚未启动/未就绪时先本地登记并返回成功；SM 连接后由
+`restoreControlPlaneState()` 重放 watch，SM 补发初始状态（无匹配实例时为 OFFLINE）。
 
 ### 8.2 数据面会话与 heartbeat
 
@@ -352,7 +354,7 @@ watcher runtime
 | 文件 | 当前职责 |
 |------|----------|
 | `src/core/omni_runtime.cpp` | Runtime 编排入口（已拆分为多个 runtime_*.cpp） |
-| `src/core/runtime_sm.cpp` | ServiceManager 控制面通信（注册/发现/心跳/死亡通知/重连恢复） |
+| `src/core/runtime_sm.cpp` | ServiceManager 控制面通信（注册/发现/心跳/服务状态通知/重连恢复） |
 | `src/core/runtime_service.cpp` | 本地服务注册 / 注销 |
 | `src/core/runtime_connection.cpp` | 数据面连接管理与服务心跳 |
 | `src/core/runtime_rpc.cpp` | RPC 调用与回复 |

@@ -12,6 +12,10 @@ static void signal_handler(int sig) {
     g_running = 0;
 }
 
+static void runtime_entry(void* arg) {
+    omni_runtime_start((omni_runtime_t*)arg);
+}
+
 /* 实例发现回调的上下文：打印全部实例，并记录 --instance 指定实例的 host_id */
 typedef struct instance_lookup {
     const char* want_instance_id;
@@ -106,8 +110,13 @@ static void on_service_died(void* user_data) {
     printf("\n!!! [DeathNotify] SensorService has DIED !!!\n\n");
 }
 
-static void runtime_entry(void* arg) {
-    omni_runtime_start((omni_runtime_t*)arg);
+static void on_service_state(uint64_t watch_id, const char* service_name,
+                             const char* host_id, const char* instance_id,
+                             int online, void* user_data) {
+    (void)watch_id;
+    (void)user_data;
+    printf("[Service] %s host_id=%s instance_id=%s %s\n",
+           service_name, host_id, instance_id, online ? "ONLINE" : "OFFLINE");
 }
 
 int main(int argc, char* argv[]) {
@@ -150,6 +159,13 @@ int main(int argc, char* argv[]) {
         app_sleep_ms(100);
     }
 
+    uint64_t service_watch_id = 0;
+    omni_service_watch_request_t watch_request = { "SensorService", NULL, NULL };
+    if (omni_runtime_watch_services(runtime, &watch_request, 1,
+            on_service_state, NULL, &service_watch_id) != 0) {
+        fprintf(stderr, "Failed to watch SensorService state\n");
+    }
+
     instance_lookup lookup;
     memset(&lookup, 0, sizeof(lookup));
     lookup.want_instance_id = instance_id;
@@ -157,13 +173,23 @@ int main(int argc, char* argv[]) {
     omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
 
     if (instance_id) {
-        if (!lookup.found) {
-            fprintf(stderr, "No SensorService instance with instance_id='%s'\n", instance_id);
+        int waiting_instance_printed = 0;
+        while (g_running && !lookup.found) {
+            if (!waiting_instance_printed) {
+                printf("Waiting for SensorService instance_id='%s'...\n", instance_id);
+                waiting_instance_printed = 1;
+            }
+            app_sleep_ms(500);
+            memset(&lookup, 0, sizeof(lookup));
+            lookup.want_instance_id = instance_id;
+            omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
+        }
+        if (!g_running) {
             omni_runtime_stop(runtime);
             app_thread_join(runtime_thread);
             demo_SensorService_proxy_destroy(&proxy);
             omni_runtime_destroy(runtime);
-            return 1;
+            return 0;
         }
         if (demo_SensorService_proxy_set_instance(&proxy,
                 lookup.found_host_id, lookup.found_instance_id) != 0) {
@@ -177,6 +203,37 @@ int main(int argc, char* argv[]) {
         printf("Using SensorService instance_id=%s\n", instance_id);
     } else {
         printf("Using SensorService default instance\n");
+    }
+
+    int waiting_connection_printed = 0;
+    for (;;) {
+        if (!g_running) break;
+        int connected = 0;
+        if (instance_id) {
+            if (omni_runtime_connect_service_instance(runtime, "SensorService",
+                    lookup.found_host_id, lookup.found_instance_id) == 0) {
+                connected = omni_runtime_is_service_instance_connected(
+                    runtime, "SensorService", lookup.found_host_id, lookup.found_instance_id);
+            }
+        } else {
+            if (omni_runtime_connect_service(runtime, "SensorService") == 0) {
+                connected = omni_runtime_is_service_connected(runtime, "SensorService");
+            }
+        }
+        if (connected) break;
+        if (!waiting_connection_printed) {
+            printf("Waiting for SensorService data connection...\n");
+            waiting_connection_printed = 1;
+        }
+        app_sleep_ms(500);
+    }
+    if (!g_running) {
+        if (service_watch_id != 0) omni_runtime_unwatch_services(runtime, service_watch_id);
+        omni_runtime_stop(runtime);
+        app_thread_join(runtime_thread);
+        demo_SensorService_proxy_destroy(&proxy);
+        omni_runtime_destroy(runtime);
+        return 0;
     }
 
     printf("--- Primitive RPCs ---\n");
@@ -350,7 +407,7 @@ int main(int argc, char* argv[]) {
     demo_SensorService_proxy_subscribe_sensor_update(&proxy, on_sensor_update, NULL);
     /* 订阅异步结果话题：服务端通过 topic 回推异步任务结果。 */
     demo_SensorService_proxy_subscribe_async_result_ready(&proxy, on_async_result, NULL);
-    /* 注册服务死亡通知：这是客户端侧连接状态通知，不是向服务注册业务回调。 */
+    /* 数据面连接断开回调：感知已连接服务异常退出，不是向服务注册业务回调。 */
     demo_SensorService_proxy_on_service_died(&proxy, on_service_died, NULL);
 
     demo_AsyncRequest async_req;
@@ -369,6 +426,9 @@ int main(int argc, char* argv[]) {
         app_sleep_ms(100);
     }
 
+    if (service_watch_id != 0) {
+        omni_runtime_unwatch_services(runtime, service_watch_id);
+    }
     omni_runtime_stop(runtime);
     app_thread_join(runtime_thread);
     demo_SensorService_proxy_destroy(&proxy);

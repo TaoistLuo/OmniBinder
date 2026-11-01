@@ -2,7 +2,7 @@
  * @file        omnibinder_c.h
  * @brief       OmniBinder C 语言接口封装
  * @details     为纯 C 项目提供 OmniBinder 的常用功能访问能力（客户端、服务端、
- *              Buffer 操作、话题订阅和死亡通知）。C API 是 C++ API 的常用子集，
+ *              Buffer 操作、话题订阅和服务状态 watch）。C API 是 C++ API 的常用子集，
  *              并非一一对等：listServices/queryInterfaces/watchPid 等发现与诊断接口
  *              目前仅在 C++ API 提供，需要时请在 C++ 侧调用或按需扩展 C 封装。
  *
@@ -115,11 +115,6 @@ typedef int (*omni_invoke_callback_t)(uint32_t method_id,
 typedef void (*omni_topic_callback_t)(uint32_t topic_id,
     const omni_buffer_t* data, void* user_data);
 
-/* @brief 服务死亡通知回调
- * @note  service_name 仅在本次回调执行期间有效；需要留用请自行拷贝。
- *        user_data 归调用方所有，生命周期必须覆盖订阅期间。 */
-typedef void (*omni_death_callback_t)(const char* service_name, void* user_data);
-
 /* @brief 服务实例信息（实例发现结果）
  * @note  回调传入的指针仅在本次回调执行期间有效，回调返回后不可保存。 */
 typedef struct omni_service_instance_t {
@@ -206,6 +201,23 @@ uint8_t* omni_buffer_read_bytes(omni_buffer_t* buf, uint32_t* out_len);
  * @param[in] user_data    传递给回调的用户数据指针 */
 omni_service_t* omni_service_create(const char* name, uint32_t interface_id,
     omni_invoke_callback_t callback, void* user_data);
+
+/* @brief 服务端客户端连接状态回调
+ * @param[in] client_info 客户端连接标识（仅在回调期间有效）
+ * @param[in] user_data   注册回调时传入的上下文 */
+typedef void (*omni_service_client_callback_t)(const char* client_info, void* user_data);
+
+/* @brief 设置服务端客户端连接/断开回调
+ * @param[in] svc                服务实例
+ * @param[in] on_connected        客户端连接回调，可为 NULL
+ * @param[in] on_disconnected     客户端断开回调，可为 NULL
+ * @param[in] user_data           传给两个回调的上下文
+ * @note 回调在 owner event-loop 线程执行，必须短小、非阻塞、不得抛异常。
+ *       必须在 omni_runtime_register_service() 之前调用。 */
+void omni_service_set_client_callbacks(omni_service_t* svc,
+    omni_service_client_callback_t on_connected,
+    omni_service_client_callback_t on_disconnected,
+    void* user_data);
 
 /* @brief 销毁服务实例
  * @note  必须先 omni_runtime_unregister_service 注销，再销毁；runtime 内部以裸指针
@@ -459,28 +471,35 @@ int  omni_runtime_subscribe_topic(omni_runtime_t* client, const char* topic_name
          uint32_t expected_idl_hash, omni_topic_callback_t callback, void* user_data);
 int  omni_runtime_unsubscribe_topic(omni_runtime_t* client, const char* topic_name);
 
-/* 死亡通知 */
-int  omni_runtime_subscribe_death(omni_runtime_t* client, const char* service_name,
-         omni_death_callback_t callback, void* user_data);
-int  omni_runtime_unsubscribe_death(omni_runtime_t* client, const char* service_name);
+/* 服务状态 watch */
+/* @brief 服务状态 watch 注册条件；host_id/instance_id 为 NULL 表示通配 */
+typedef struct omni_service_watch_request_t {
+    const char* service_name;   /* 必填 */
+    const char* host_id;        /* NULL = 任意 */
+    const char* instance_id;    /* NULL = 任意 */
+} omni_service_watch_request_t;
 
-/* @brief 订阅指定服务实例的死亡通知
- * @param[in] client       runtime 实例
- * @param[in] service_name 服务名称
- * @param[in] host_id      目标实例的板级主机身份
- * @param[in] instance_id  目标实例标识
- * @param[in] callback     死亡回调（在 owner event-loop 线程执行，携带服务名）
- * @param[in] user_data    用户数据
- * @return 0 成功，<0 失败
- * @note   仅当该 (name, host_id, instance_id) 实例死亡时触发，同名的其它实例死亡不影响 */
-int  omni_runtime_subscribe_death_instance(omni_runtime_t* client, const char* service_name,
-         const char* host_id, const char* instance_id,
-         omni_death_callback_t callback, void* user_data);
+/* @brief 服务实例上线/离线回调（owner event-loop 线程执行）
+ * @param[in] watch_id   watch 组 ID
+ * @param[in] service_name 实例服务名
+ * @param[in] host_id      实例 host_id
+ * @param[in] instance_id  实例 instance_id
+ * @param[in] online       1 上线，0 离线 */
+typedef void (*omni_service_watch_callback_t)(
+    uint64_t watch_id, const char* service_name, const char* host_id,
+    const char* instance_id, int online, void* user_data);
 
-/* @brief 取消指定服务实例的死亡通知订阅
- * @return 0 成功，<0 失败 */
-int  omni_runtime_unsubscribe_death_instance(omni_runtime_t* client, const char* service_name,
-         const char* host_id, const char* instance_id);
+/* @brief 关注一组服务实例状态；list 内条件重叠会整组失败
+ * @return 0 成功（SM 未就绪时先本地登记，连接后自动重放）；<0 参数错误
+ * @note SM 尚未启动/连接时仍返回成功并保留 watch，SM 恢复后自动重新注册。 */
+int  omni_runtime_watch_services(omni_runtime_t* client,
+    const omni_service_watch_request_t* requests, uint32_t count,
+    omni_service_watch_callback_t callback, void* user_data,
+    uint64_t* out_watch_id);
+
+/* @brief 取消一个 watch 组 */
+int  omni_runtime_unwatch_services(omni_runtime_t* client, uint64_t watch_id);
+
 int  omni_runtime_get_stats(omni_runtime_t* client, omni_runtime_stats_t* stats);
 int  omni_runtime_reset_stats(omni_runtime_t* client);
 

@@ -24,6 +24,9 @@ void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& ms
     }
 
     const int new_fd = conn->fd;
+    const ServiceIdentity identity(info.name, info.host_id, info.instance_id);
+    ServiceEntry old_entry;
+    const bool existed = registry_.findServiceByIdentity(identity, old_entry);
     int displaced_fd = -1;
     ServiceHandle handle = registry_.addService(info, new_fd, &displaced_fd);
     if (handle == INVALID_HANDLE) {
@@ -33,6 +36,15 @@ void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& ms
     }
 
     sendRegisterReply(conn, msg.header.sequence, handle);
+
+    // 同名不同实例：这是新实例上线；同身份 takeover 时端点已变化，按
+    // offline + online 通知观察者，便于业务重新初始化数据面资源。
+    if (!existed) {
+        notifyServiceWatch(identity, true);
+    } else if (old_entry.control_fd != new_fd || old_entry.info.port != info.port) {
+        notifyServiceWatch(identity, false);
+        notifyServiceWatch(identity, true);
+    }
 
     // 后来者已接管该名称：回收被顶替的旧控制连接上残留的发布关系，否则旧 fd
     // 会继续占住话题发布者位置，新 owner 的 publishTopic 被拒。旧连接若已无
@@ -71,7 +83,7 @@ void ServiceManagerApp::handleUnregister(ClientConnection* conn, const Message& 
         return;
     }
 
-    // 摘除可能经 notifyServiceDeath 发送失败重入 closeClient(fd)（自订阅场景），
+    // 摘除可能经 watch 通知发送失败重入 closeClient(fd)（自订阅场景），
     // 故使用 conn 前需按 fd 重新校验存活（约束 1）。
     const ServiceIdentity identity(entry.info.name, entry.info.host_id, entry.info.instance_id);
     bool success = removeServiceAndNotify(identity, fd);
@@ -233,79 +245,121 @@ void ServiceManagerApp::sendQueryInterfacesReply(
     sendMessage(conn, reply);
 }
 
-void ServiceManagerApp::handleSubscribeService(ClientConnection* conn, const Message& msg) {
-    std::string target_service;
-    if (!sm_internal::tryReadExactStringArg(msg, target_service, MAX_SERVICE_NAME_LENGTH)) {
-        OMNI_LOG_WARN(TAG, "Reject malformed subscribe service request from fd=%d", conn->fd);
-        sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, msg.header.sequence, false);
+void ServiceManagerApp::handleSubscribeServiceWatch(ClientConnection* conn,
+                                                     const Message& msg) {
+    BufferView buf(msg.payload.data(), msg.payload.size());
+    uint64_t watch_id = 0;
+    uint32_t count = 0;
+    if (!buf.tryReadUint64(watch_id) || !buf.tryReadUint32(count)
+        || watch_id == 0 || count == 0 || count > 64) {
+        sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY,
+                      msg.header.sequence, false);
         return;
     }
 
-    bool success = death_notifier_.subscribe(conn->fd, target_service);
-    sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, msg.header.sequence, success);
-}
+    std::vector<ServiceWatchFilter> filters;
+    filters.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        std::string name;
+        std::string host_id;
+        std::string instance_id;
+        if (!buf.tryReadString(name) || !buf.tryReadString(host_id)
+            || !buf.tryReadString(instance_id)
+            || name.empty()
+            || name.size() > MAX_SERVICE_NAME_LENGTH
+            || host_id.size() > MAX_SERVICE_NAME_LENGTH
+            || instance_id.size() > MAX_SERVICE_NAME_LENGTH) {
+            sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY,
+                          msg.header.sequence, false);
+            return;
+        }
+        for (size_t j = 0; j < filters.size(); ++j) {
+            if (ServiceWatchNotifier::overlaps(filters[j],
+                    ServiceWatchFilter(name, host_id, instance_id))) {
+                OMNI_LOG_WARN(TAG,
+                    "Reject overlapping service watch from fd=%d: %s/%s/%s",
+                    conn->fd, name.c_str(), host_id.c_str(), instance_id.c_str());
+                sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY,
+                              msg.header.sequence, false);
+                return;
+            }
+        }
+        filters.push_back(ServiceWatchFilter(name, host_id, instance_id));
+    }
 
-void ServiceManagerApp::handleUnsubscribeService(ClientConnection* conn, const Message& msg) {
-    std::string target_service;
-    if (!sm_internal::tryReadExactStringArg(msg, target_service, MAX_SERVICE_NAME_LENGTH)) {
-        OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe service request from fd=%d", conn->fd);
+    bool accepted = watch_notifier_.subscribe(conn->fd, watch_id, filters);
+    sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY,
+                  msg.header.sequence, accepted);
+    if (!accepted) {
         return;
     }
 
-    death_notifier_.unsubscribe(conn->fd, target_service);
-    // unsubscribe 无需回复
+    for (size_t i = 0; i < filters.size(); ++i) {
+        if (clients_.find(conn->fd) == clients_.end()) {
+            return;
+        }
+        sendInitialServiceWatch(conn, watch_id, filters[i]);
+    }
 }
 
-void ServiceManagerApp::handleSubscribeServiceInstance(ClientConnection* conn,
+void ServiceManagerApp::handleUnsubscribeServiceWatch(ClientConnection* conn,
                                                        const Message& msg) {
     BufferView buf(msg.payload.data(), msg.payload.size());
-    ServiceIdentity identity;
-    if (!readServiceIdentityPayload(buf, identity.name, identity.host_id, identity.instance_id)) {
-        OMNI_LOG_WARN(TAG, "Reject malformed subscribe service instance request from fd=%d",
-                       conn->fd);
-        sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, msg.header.sequence, false);
+    uint64_t watch_id = 0;
+    if (!buf.tryReadUint64(watch_id) || watch_id == 0) {
         return;
     }
-
-    bool success = death_notifier_.subscribeInstance(conn->fd, identity);
-    sendBoolReply(conn, MessageType::MSG_SUBSCRIBE_SERVICE_REPLY, msg.header.sequence, success);
+    watch_notifier_.unsubscribe(conn->fd, watch_id);
 }
 
-void ServiceManagerApp::handleUnsubscribeServiceInstance(ClientConnection* conn,
-                                                         const Message& msg) {
-    BufferView buf(msg.payload.data(), msg.payload.size());
-    ServiceIdentity identity;
-    if (!readServiceIdentityPayload(buf, identity.name, identity.host_id, identity.instance_id)) {
-        OMNI_LOG_WARN(TAG, "Drop malformed unsubscribe service instance request from fd=%d",
-                       conn->fd);
-        return;
-    }
-
-    death_notifier_.unsubscribeInstance(conn->fd, identity);
-    // unsubscribe 无需回复
-}
-
-void ServiceManagerApp::notifyServiceInstanceDeath(const ServiceIdentity& identity) {
-    // 名字级订阅只在最后一个实例消失时触发：调用前该实例已从注册表移除，
-    // exists() 反映移除后是否仍有同名实例存活
-    const bool name_gone = !registry_.exists(identity.name);
-    std::vector<int> subscribers =
-        death_notifier_.notifyInstanceDeath(identity, name_gone);
-    const MessageType type = name_gone ? MessageType::MSG_DEATH_NOTIFY
-                                       : MessageType::MSG_DEATH_NOTIFY_INSTANCE;
-
-    for (size_t i = 0; i < subscribers.size(); ++i) {
-        // sendDeathNotify → sendMessage 发送失败可能重入 closeClient(fd)，
-        // 每轮重新查找订阅者连接（约束 1）
-        std::map<int, ClientConnection*>::iterator it = clients_.find(subscribers[i]);
+void ServiceManagerApp::notifyServiceWatch(const ServiceIdentity& identity, bool online) {
+    std::vector<ServiceWatchGroup> groups = watch_notifier_.matching(identity);
+    for (size_t i = 0; i < groups.size(); ++i) {
+        std::map<int, ClientConnection*>::iterator it =
+            clients_.find(groups[i].subscriber_fd);
         if (it != clients_.end()) {
-            sendDeathNotify(it->second, identity, type);
+            sendServiceWatchNotify(it->second, groups[i].watch_id, identity, online);
         }
     }
 }
 
+void ServiceManagerApp::sendServiceWatchNotify(ClientConnection* conn, uint64_t watch_id,
+                                               const ServiceIdentity& identity, bool online) {
+    Message notify(MessageType::MSG_SERVICE_WATCH_NOTIFY, nextSMProactiveSequence());
+    notify.payload.writeUint64(watch_id);
+    notify.payload.writeString(identity.name);
+    notify.payload.writeString(identity.host_id);
+    notify.payload.writeString(identity.instance_id);
+    notify.payload.writeBool(online);
+    sendMessage(conn, notify);
+}
+
+void ServiceManagerApp::sendInitialServiceWatch(ClientConnection* conn, uint64_t watch_id,
+                                                const ServiceWatchFilter& filter) {
+    const ServiceIdentity filter_identity(filter.service_name, filter.host_id,
+                                          filter.instance_id);
+    std::vector<ServiceInfo> instances =
+        registry_.listServiceInstances(filter.service_name);
+    bool found = false;
+    for (size_t i = 0; i < instances.size(); ++i) {
+        const ServiceIdentity identity(instances[i].name, instances[i].host_id,
+                                       instances[i].instance_id);
+        if (!ServiceWatchNotifier::matches(filter, identity)) {
+            continue;
+        }
+        found = true;
+        if (clients_.find(conn->fd) == clients_.end()) {
+            return;
+        }
+        sendServiceWatchNotify(conn, watch_id, identity, true);
+    }
+    if (!found && clients_.find(conn->fd) != clients_.end()) {
+        sendServiceWatchNotify(conn, watch_id, filter_identity, false);
+    }
+}
+
 void ServiceManagerApp::notifyServiceRemoved(const ServiceIdentity& identity) {
-    notifyServiceInstanceDeath(identity);
+    notifyServiceWatch(identity, false);
 }
 
 bool ServiceManagerApp::removeServiceAndNotify(const ServiceIdentity& identity, int fd) {
@@ -319,13 +373,5 @@ bool ServiceManagerApp::removeServiceAndNotify(const ServiceIdentity& identity, 
     return true;
 }
 
-void ServiceManagerApp::sendDeathNotify(ClientConnection* conn,
-                                        const ServiceIdentity& identity,
-                                        MessageType type) {
-    Message notify(type, nextSMProactiveSequence());
-    writeServiceIdentityPayload(notify.payload, identity.name, identity.host_id,
-                                identity.instance_id);
-    sendMessage(conn, notify);
-}
 
 } // namespace omnibinder

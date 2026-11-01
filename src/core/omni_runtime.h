@@ -120,14 +120,10 @@ public:
     int unsubscribeTopic(const TopicSubscriptionSelector& selector,
                          const std::string& topic_name);
 
-    // 死亡通知
-    int subscribeServiceDeath(const std::string& name, const DeathCallback& cb);
-    int unsubscribeServiceDeath(const std::string& name);
-    int subscribeServiceInstanceDeath(const std::string& name, const std::string& host_id,
-                                      const std::string& instance_id,
-                                      const DeathSourceCallback& cb);
-    int unsubscribeServiceInstanceDeath(const std::string& name, const std::string& host_id,
-                                        const std::string& instance_id);
+    // 服务状态 watch
+    int watchServices(const std::vector<ServiceWatchRequest>& requests,
+                      const ServiceWatchCallback& callback, uint64_t& watch_id);
+    int unwatchServices(uint64_t watch_id);
 
     // ============================================================
     // 数据面 — 服务间直连通信
@@ -223,14 +219,11 @@ private:
                        uint32_t idl_hash, const Buffer& req, Buffer& resp, uint32_t timeout_ms);
     int invokeOneWayInternal(const std::string& name, uint32_t iface_id, uint32_t method_id,
                              uint32_t idl_hash, const Buffer& req);
-    int subscribeServiceDeathInternal(const std::string& name, const DeathCallback& cb);
-    int unsubscribeServiceDeathInternal(const std::string& name);
-    int subscribeServiceInstanceDeathInternal(const std::string& name, const std::string& host_id,
-                                              const std::string& instance_id,
-                                              const DeathSourceCallback& cb);
-    int unsubscribeServiceInstanceDeathInternal(const std::string& name,
-                                                const std::string& host_id,
-                                                const std::string& instance_id);
+    int watchServicesInternal(const std::vector<ServiceWatchRequest>& requests,
+                              const ServiceWatchCallback& callback, uint64_t& watch_id);
+    int unwatchServicesInternal(uint64_t watch_id);
+    int restoreServiceWatch(uint64_t watch_id);
+    void handleServiceWatchNotify(const Message& msg);
     int publishTopicInternal(const std::string& topic_name, uint32_t idl_hash);
     int publishTopicForService(LocalServiceEntry* entry, const std::string& service_name,
                                const std::string& topic_name, uint32_t idl_hash,
@@ -266,14 +259,11 @@ private:
     int  sendSMRequestAndWaitReply(Message& msg, Message& reply, uint32_t timeout_ms);
     void onSMData(int fd, uint32_t events);
     void onSMMessage(Message& msg);
-    void handleDeathNotify(const Message& msg);
     void handleTopicPublisherNotify(const Message& msg);
     int  reconnectServiceManager();
     void dropServiceManagerConnection();
     int  restoreControlPlaneState();
     int  restoreRegisterService(const std::string& name);
-    int  restoreSubscribeDeath(const std::string& name);
-    int  restoreSubscribeInstanceDeath(const std::string& instance_key);
     int  restorePublishTopic(const std::string& topic, const std::string& owner,
                              uint32_t idl_hash);
     int  restoreSubscribeTopic(const TopicRuntime::SubscriptionRecord& record);
@@ -513,7 +503,8 @@ private:
     std::string         register_host_;
     std::map<std::string, ServiceState>          services_;
     // makeServiceIdentityKey(identity) -> 实例级死亡订阅
-    std::map<std::string, InstanceDeathSubscription> instance_deaths_;
+    std::map<uint64_t, ServiceWatchSubscription> service_watches_;
+    uint64_t next_watch_id_;
     uint32_t                                     reply_send_timeout_ms_;
 
     // 本地服务托管

@@ -1026,11 +1026,16 @@ TEST_F(ControlPlaneTest, SessionTimeoutRemovesAllServicesOnControlFd) {
     ASSERT_TRUE(recvMessage(registrant, subscribe_reply, 2000));
     ASSERT_EQ(subscribe_reply.getType(), MessageType::MSG_SUBSCRIBE_TOPIC_REPLY);
 
-    Message watch(MessageType::MSG_SUBSCRIBE_SERVICE, 1205);
+    Message watch(MessageType::MSG_SUBSCRIBE_SERVICE_WATCH, 1205);
+    watch.payload.writeUint64(9001);
+    watch.payload.writeUint32(1);
     watch.payload.writeString("RawTimeoutA");
+    watch.payload.writeString("");
+    watch.payload.writeString("");
     ASSERT_TRUE(sendMessage(observer, watch));
     Message watch_reply;
     ASSERT_TRUE(recvMessage(observer, watch_reply, 2000));
+    ASSERT_EQ(watch_reply.getType(), MessageType::MSG_SUBSCRIBE_SERVICE_WATCH_REPLY);
 
     TcpConnection future_publisher;
     ASSERT_TRUE(connectTcp(future_publisher, "127.0.0.1", SM_PORT));
@@ -1049,9 +1054,19 @@ TEST_F(ControlPlaneTest, SessionTimeoutRemovesAllServicesOnControlFd) {
     for (int i = 0; i < 20 && !(death_seen && both_gone); ++i) {
         Message death;
         if (recvMessage(observer, death, 1000)) {
-            if (death.getType() == MessageType::MSG_DEATH_NOTIFY) {
+            if (death.getType() == MessageType::MSG_SERVICE_WATCH_NOTIFY) {
                 Buffer payload(death.payload.data(), death.payload.size());
-                if (mustReadString(payload) == "RawTimeoutA") {
+                uint64_t watch_id = 0;
+                ASSERT_TRUE(payload.tryReadUint64(watch_id));
+                std::string name;
+                std::string host_id;
+                std::string instance_id;
+                bool online = true;
+                ASSERT_TRUE(payload.tryReadString(name));
+                ASSERT_TRUE(payload.tryReadString(host_id));
+                ASSERT_TRUE(payload.tryReadString(instance_id));
+                ASSERT_TRUE(payload.tryReadBool(online));
+                if (watch_id == 9001 && name == "RawTimeoutA" && !online) {
                     death_seen = true;
                 }
             }
@@ -1066,7 +1081,7 @@ TEST_F(ControlPlaneTest, SessionTimeoutRemovesAllServicesOnControlFd) {
             both_gone = !found_a && !found_b;
         }
     }
-    EXPECT_TRUE(death_seen) << "death notify for the timed-out session service";
+    EXPECT_TRUE(death_seen) << "watch offline notify for the timed-out session service";
     EXPECT_TRUE(both_gone)
         << "session timeout must remove every service owned by the control fd";
 

@@ -60,6 +60,9 @@ public:
         : Service(name)
         , callback_(callback)
         , user_data_(user_data)
+        , client_connected_(NULL)
+        , client_disconnected_(NULL)
+        , client_user_data_(NULL)
     {
         iface_.interface_id = interface_id;
         iface_.name = name;
@@ -103,6 +106,28 @@ protected:
         }
     }
 
+    void onClientConnected(const std::string& client_info) override {
+        if (client_connected_) {
+            client_connected_(client_info.c_str(), client_user_data_);
+        }
+    }
+
+    void onClientDisconnected(const std::string& client_info) override {
+        if (client_disconnected_) {
+            client_disconnected_(client_info.c_str(), client_user_data_);
+        }
+    }
+
+public:
+    void setClientCallbacks(omni_service_client_callback_t on_connected,
+                            omni_service_client_callback_t on_disconnected,
+                            void* user_data) {
+        client_connected_ = on_connected;
+        client_disconnected_ = on_disconnected;
+        client_user_data_ = user_data;
+    }
+
+protected:
     int onInvoke(uint32_t method_id, const omnibinder::Buffer& request,
                   omnibinder::Buffer& response) override {
         /* 将 C++ Buffer 包装为 omni_buffer_t 供 C 回调使用 */
@@ -133,6 +158,9 @@ protected:
 private:
     omni_invoke_callback_t callback_;
     void* user_data_;
+    omni_service_client_callback_t client_connected_;
+    omni_service_client_callback_t client_disconnected_;
+    void* client_user_data_;
     std::vector<TopicDeclaration> topics_;
 };
 
@@ -651,6 +679,16 @@ void* omni_service_get_user_data(omni_service_t* svc) {
     return svc ? svc->bridge->userData() : NULL;
 }
 
+void omni_service_set_client_callbacks(omni_service_t* svc,
+    omni_service_client_callback_t on_connected,
+    omni_service_client_callback_t on_disconnected,
+    void* user_data)
+{
+    if (svc && svc->bridge) {
+        svc->bridge->setClientCallbacks(on_connected, on_disconnected, user_data);
+    }
+}
+
 void omni_service_add_method(omni_service_t* svc, uint32_t method_id, const char* method_name) {
     omni_service_add_method_ex(svc, method_id, method_name, "", "void", 0);
 }
@@ -962,37 +1000,36 @@ int omni_runtime_unsubscribe_topic(omni_runtime_t* runtime, const char* topic_na
     return runtime->runtime.unsubscribeTopic(topic_name);
 }
 
-int omni_runtime_subscribe_death(omni_runtime_t* runtime, const char* service_name,
-    omni_death_callback_t callback, void* user_data)
+int omni_runtime_watch_services(omni_runtime_t* runtime,
+    const omni_service_watch_request_t* requests, uint32_t count,
+    omni_service_watch_callback_t callback, void* user_data,
+    uint64_t* out_watch_id)
 {
-    if (!runtime || !service_name || !callback) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.subscribeServiceDeath(service_name,
-        [callback, user_data](const std::string& name) {
-            callback(name.c_str(), user_data);
-        });
+    if (!runtime || !requests || count == 0 || !callback || !out_watch_id) {
+        return OMNI_ERR_INVALID_PARAM;
+    }
+    std::vector<omnibinder::ServiceWatchRequest> filters;
+    filters.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!requests[i].service_name) return OMNI_ERR_INVALID_PARAM;
+        filters.push_back(omnibinder::ServiceWatchRequest(
+            requests[i].service_name,
+            requests[i].host_id ? requests[i].host_id : "",
+            requests[i].instance_id ? requests[i].instance_id : ""));
+    }
+    omnibinder::ServiceWatchCallback cb =
+        [callback, user_data](uint64_t watch_id,
+                              const omnibinder::ServiceIdentity& identity,
+                              bool online) {
+            callback(watch_id, identity.name.c_str(), identity.host_id.c_str(),
+                     identity.instance_id.c_str(), online ? 1 : 0, user_data);
+        };
+    return runtime->runtime.watchServices(filters, cb, *out_watch_id);
 }
 
-int omni_runtime_unsubscribe_death(omni_runtime_t* runtime, const char* service_name) {
-    if (!runtime || !service_name) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.unsubscribeServiceDeath(service_name);
-}
-
-int omni_runtime_subscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
-    const char* host_id, const char* instance_id,
-    omni_death_callback_t callback, void* user_data)
-{
-    if (!runtime || !service_name || !host_id || !instance_id || !callback) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.subscribeServiceInstanceDeath(service_name, host_id, instance_id,
-        [callback, user_data](const std::string& name, const std::string&, const std::string&) {
-            callback(name.c_str(), user_data);
-        });
-}
-
-int omni_runtime_unsubscribe_death_instance(omni_runtime_t* runtime, const char* service_name,
-    const char* host_id, const char* instance_id)
-{
-    if (!runtime || !service_name || !host_id || !instance_id) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.unsubscribeServiceInstanceDeath(service_name, host_id, instance_id);
+int omni_runtime_unwatch_services(omni_runtime_t* runtime, uint64_t watch_id) {
+    if (!runtime || watch_id == 0) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.unwatchServices(watch_id);
 }
 
 int omni_runtime_get_stats(omni_runtime_t* runtime, omni_runtime_stats_t* stats) {

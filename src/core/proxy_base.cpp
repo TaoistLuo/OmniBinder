@@ -40,7 +40,7 @@ ServiceProxyBase::ServiceProxyBase(OmniRuntime& runtime, const std::string& serv
       heartbeat_interval_ms_(DEFAULT_HEARTBEAT_INTERVAL),
       heartbeat_timeout_ms_(DEFAULT_HEARTBEAT_TIMEOUT) {
     connected_.store(false, std::memory_order_relaxed);
-    death_subscribed_.store(false, std::memory_order_relaxed);
+    watch_id_.store(0, std::memory_order_relaxed);
     auto_connect_enabled_.store(true, std::memory_order_relaxed);
     ever_connected_.store(false, std::memory_order_relaxed);
     runtime_.registerProxy(this);
@@ -123,22 +123,28 @@ int ServiceProxyBase::connect() {
         // 这里仅保留自动重连。若用户在 connect() 前配置过心跳，connectService
         // 内的 Session Hello 会直接携带该策略，无需再次协商。
         enableAutoReconnect(true);
-        // 未绑定实例时按名订阅；绑定实例后按实例订阅，只有目标实例死亡才触发
-        int sub_ret = 0;
-        if (instance_bound) {
-            sub_ret = runtime_.subscribeServiceInstanceDeath(service_name, host_id,
-                instance_id,
-                [this](const std::string&, const std::string&, const std::string&) {
-                    this->onServiceDeath();
-                });
-        } else {
-            sub_ret = runtime_.subscribeServiceDeath(service_name,
-                [this](const std::string&) { this->onServiceDeath(); });
+        // 绑定精确实例；未绑定实例时由 lookupService 解析 connectService 选中的
+        // 确定性第一实例，避免按服务名收到其它实例的状态事件。
+        std::string watch_host = host_id;
+        std::string watch_instance = instance_id;
+        if (!instance_bound) {
+            ServiceInfo info;
+            if (runtime_.lookupService(service_name, info) == 0) {
+                watch_host = info.host_id;
+                watch_instance = info.instance_id;
+            }
         }
-        // 只置真不清零：重复 connect() 时 SM 以"已订阅"拒绝，若清 false 会导致
-        // 析构漏退订、残留捕获 this 的回调在服务再死时 UAF（约束 1）
-        if (sub_ret == 0) {
-            death_subscribed_.store(true, std::memory_order_release);
+        uint64_t watch_id = 0;
+        if (watch_id_.load(std::memory_order_acquire) == 0) {
+            std::vector<ServiceWatchRequest> filters;
+            filters.push_back(ServiceWatchRequest(service_name, watch_host, watch_instance));
+            int watch_ret = runtime_.watchServices(filters,
+                [this](uint64_t, const ServiceIdentity&, bool online) {
+                    if (!online) this->onServiceDeath();
+                }, watch_id);
+            if (watch_ret == 0) {
+                watch_id_.store(watch_id, std::memory_order_release);
+            }
         }
     }
     return ret;
@@ -161,16 +167,11 @@ void ServiceProxyBase::disconnect() {
         instance_bound = instance_bound_;
     }
 
-    // 退订依据 death_subscribed_ 而非 connected_：服务死亡会把 connected_ 置 false，
-    // 但死亡订阅（lambda 捕获 this）必须在此清除，否则服务重启再死即 UAF。
-    // unsubscribe* 幂等，重复调用安全。
-    if (death_subscribed_.load(std::memory_order_acquire)) {
-        if (instance_bound) {
-            runtime_.unsubscribeServiceInstanceDeath(service_name, host_id, instance_id);
-        } else {
-            runtime_.unsubscribeServiceDeath(service_name);
-        }
-        death_subscribed_.store(false, std::memory_order_release);
+    // 退订依据 watch_id_ 而非 connected_：服务离线会把 connected_ 置 false，
+    // 但 watch lambda 捕获 this，必须在此清除，否则服务重启后状态事件即 UAF。
+    const uint64_t watch_id = watch_id_.exchange(0, std::memory_order_acq_rel);
+    if (watch_id != 0) {
+        runtime_.unwatchServices(watch_id);
     }
     if (connected_.load(std::memory_order_acquire)) {
         runtime_.stopHeartbeat(connection_key);

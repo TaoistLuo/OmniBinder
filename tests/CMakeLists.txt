@@ -53,13 +53,13 @@ target_include_directories(test_service_registry PRIVATE ${CMAKE_SOURCE_DIR}/ser
 target_link_libraries(test_service_registry PRIVATE omnibinder_static gtest gtest_main)
 add_test(NAME test_service_registry COMMAND test_service_registry)
 
-add_executable(test_heartbeat_death
-    test_heartbeat_death.cpp
-    ${CMAKE_SOURCE_DIR}/service_manager/death_notifier.cpp
+add_executable(test_service_watch_notifier
+    test_service_watch_notifier.cpp
+    ${CMAKE_SOURCE_DIR}/service_manager/service_watch_notifier.cpp
 )
-target_include_directories(test_heartbeat_death PRIVATE ${CMAKE_SOURCE_DIR}/service_manager)
-target_link_libraries(test_heartbeat_death PRIVATE omnibinder_static gtest gtest_main)
-add_test(NAME test_heartbeat_death COMMAND test_heartbeat_death)
+target_include_directories(test_service_watch_notifier PRIVATE ${CMAKE_SOURCE_DIR}/service_manager)
+target_link_libraries(test_service_watch_notifier PRIVATE omnibinder_static gtest gtest_main)
+add_test(NAME test_service_watch_notifier COMMAND test_service_watch_notifier)
 
 add_executable(test_topic_manager
     test_topic_manager.cpp

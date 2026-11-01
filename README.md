@@ -46,7 +46,7 @@ OmniBinder 并不是要替代所有已有通信框架，而是面向一类更具
 OmniBinder 更适合的场景是：
 
 - 你希望把**同机进程通信**和**跨设备服务调用**统一到一套接口模型中
-- 你需要的不只是数据传输，还包括**服务注册发现、广播分发、死亡通知、运行时调试**等能力
+- 你需要的不只是数据传输，还包括**服务注册发现、广播分发、服务上下线关注、运行时调试**等能力
 - 你希望通过 **统一 IDL、自动生成 Stub/Proxy 代码和一致的服务接入方式** 来减少重复封装与手写协议适配
 - 你的部署环境偏嵌入式，希望运行时足够轻量，并能同时支持 **C / C++** 接入
 - 你希望业务代码关注“调用哪个服务”，而不是持续处理底层 transport、连接关系和接口编解码细节
@@ -64,11 +64,11 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - **服务注册与发现** — 中心化 ServiceManager 管理所有服务的生命周期
 - **远程方法调用 (RPC)** — 同步调用远端服务接口，支持请求/响应模式和单向调用
 - **发布/订阅广播** — 话题机制，发布者广播数据，订阅者实时接收
-- **死亡通知** — 服务异常退出时自动通知所有关注者
+- **服务状态 watch** — 按服务名/host_id/instance_id 关注实例上线与离线
 - **自动连接管理** — 生成 Proxy 由 runtime `start()` 自动连接/重连；`connect()` 仅保留兼容
 - **自动重连** — 服务恢复后自动重连（可配指数退避策略）
 - **心跳检测** — 定期心跳及时发现服务异常，超时自动触发重连
-- **多实例服务身份** — 同名服务用不同 `instance_id` 并存，实例身份为 `(service_name, host_id, instance_id)`；支持按实例发现、寻址、订阅与死亡通知
+- **多实例服务身份** — 同名服务用不同 `instance_id` 并存，实例身份为 `(service_name, host_id, instance_id)`；支持按实例发现、寻址、订阅与状态关注
 - **传输层自动选择** — 同机通信自动使用共享内存 (SHM)，跨机通信走 TCP
 - **服务级 SHM 配置** — 默认使用小容量 SHM ring（当前 `4KB / 4KB`），特殊服务可按需放大 request / response 容量
 - **IDL 代码生成** — 通过 `.bidl` 接口定义文件自动生成 Stub/Proxy 代码
@@ -94,7 +94,7 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - `init()` 只创建本地资源，`start()` 负责连接 SM、激活服务/topic/proxy 并阻塞驱动 event-loop
 - runtime 不创建线程；业务自行创建线程执行 `start()`
 - 内部运行时由单个 owner event-loop 串行驱动
-- 回调（如 topic / death callback）在 owner event-loop 线程执行
+- 回调（如 topic / service state callback）在 owner event-loop 线程执行
 - 同步 reply wait 期间只处理 fd/timer，不执行新的 pending API functor
 - `start()` / `stop()` 的并发协作规则见 [线程模型文档](docs/threading-model.md)
 
@@ -291,7 +291,7 @@ cmake -S examples/artifact_examples/c -B build/example_artifacts_c \
 cmake --build build/example_artifacts_c -j$(nproc)
 ```
 
-该示例同时提供 C 和 CPP 两套版本，用于演示：服务之间调用控制接口、订阅 sensor 广播、以及在 sensor 退出时接收死亡通知。
+该示例同时提供 C 和 CPP 两套版本，用于演示：服务之间调用控制接口、订阅 sensor 广播、以及通过服务状态 watch 感知 sensor 上线/离线。
 更详细的下游构建说明请参考 `examples/artifact_examples/README.md`。
 
 当前内置示例 `examples/sensor_service.bidl` / `examples/example_cpp/*` / `examples/example_c/*` 已经扩展为一组更完整的 demo，覆盖：
@@ -302,7 +302,7 @@ cmake --build build/example_artifacts_c -j$(nproc)
 - 普通服务接口（`GetLatestData`、`SetThreshold`、`ResetSensor`、`GetSensorCount`）
 - 话题广播（`SensorUpdate`）
 - 异步请求 + 话题回推结果（`RequestLatestDataAsync` + `AsyncResultReady`）
-- 服务死亡通知（client 侧）
+- 服务实例上线/离线关注（client 侧）
 
 如果你想看完整示例，请直接参考 [examples/](examples/) 目录和 [示例文档](docs/examples.md)。
 
@@ -507,7 +507,7 @@ int main() {
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   ServiceManager                     │
-│          (服务注册/发现/心跳/死亡通知/话题管理)         │
+│          (服务注册/发现/心跳/状态关注/话题管理)         │
 └──────────┬──────────────────────────┬────────────────┘
            │ TCP (控制通道)            │ TCP (控制通道)
      ┌─────┴──────┐            ┌──────┴─────┐
