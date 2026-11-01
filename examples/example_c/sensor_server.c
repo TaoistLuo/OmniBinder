@@ -1,4 +1,5 @@
 #include "sensor_service.bidl_c.h"
+#include "app_thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -263,6 +264,10 @@ omni_impl demo_SensorService_impl_request_latest_data_async(
     fill_status(result, 0, "accepted");
 }
 
+static void runtime_entry(void* arg) {
+    omni_runtime_start((omni_runtime_t*)arg);
+}
+
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
     const char* register_host = NULL;
@@ -311,7 +316,18 @@ int main(int argc, char* argv[]) {
         omni_runtime_destroy(runtime);
         return 1;
     }
+    /* runtime 不创建线程；业务线程执行 start()。 */
+    app_thread_t* runtime_thread = app_thread_create(runtime_entry, runtime);
+    if (!runtime_thread) {
+        fprintf(stderr, "Failed to create runtime thread\n");
+        demo_SensorService_stub_destroy(svc);
+        omni_runtime_destroy(runtime);
+        return 1;
+    }
 
+    while (g_running && !omni_runtime_is_ready(runtime)) {
+        app_sleep_ms(100);
+    }
 
     printf("SensorService registered on port %u (host_id=%s, instance_id=%s)\n\n",
            omni_service_port(svc), omni_runtime_host_id(runtime),
@@ -319,7 +335,7 @@ int main(int argc, char* argv[]) {
 
     int counter = 0;
     while (g_running) {
-        omni_runtime_poll_once(runtime, 100);
+        app_sleep_ms(100);
         if (++counter >= 10) {
             counter = 0;
             g_temp += (rand() % 100 - 50) / 100.0;
@@ -334,9 +350,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    omni_runtime_unregister_service(runtime, svc);
-    demo_SensorService_stub_destroy(svc);
     omni_runtime_stop(runtime);
+    app_thread_join(runtime_thread);
+    demo_SensorService_stub_destroy(svc);
     omni_runtime_destroy(runtime);
     return 0;
 }

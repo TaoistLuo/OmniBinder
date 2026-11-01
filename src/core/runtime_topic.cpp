@@ -148,6 +148,82 @@ int OmniRuntime::Impl::publishTopic(const std::string& topic_name, uint32_t idl_
     });
 }
 
+int OmniRuntime::Impl::publishTopicForService(LocalServiceEntry* entry,
+                                               const std::string& service_name,
+                                               const std::string& topic_name,
+                                               uint32_t idl_hash,
+                                               bool allow_pending) {
+    if (!entry || !entry->service) {
+        return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
+    }
+
+    uint32_t topic_id = fnv1a_32(topic_name);
+    if (!sm_channel_.isConnected()) {
+        if (!allow_pending) {
+            return static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE);
+        }
+        topic_runtime_.rememberPublishedTopic(topic_name, topic_id, service_name, idl_hash);
+        return 0;
+    }
+
+    Message msg(MessageType::MSG_PUBLISH_TOPIC, allocSequence());
+    msg.payload.writeString(topic_name);
+
+    ServiceInfo pub_info;
+    pub_info.name = service_name;
+    pub_info.host = resolveRegisterHost(entry->service, listenerAdvertiseHost());
+    pub_info.port = entry->port;
+    pub_info.host_id = host_id_;
+    pub_info.instance_id = entry->service->instanceId();
+    pub_info.shm_config = entry->service->shmConfig();
+    if (!serializeServiceInfo(pub_info, msg.payload)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+    if (!msg.payload.writeUint32(idl_hash)) {
+        return static_cast<int>(ErrorCode::ERR_SERIALIZE);
+    }
+
+    Message reply;
+    int ret = sendSMRequestAndWaitReply(msg, reply);
+    if (ret != 0) {
+        if (allow_pending && isTransientSmError(ret)) {
+            topic_runtime_.rememberPublishedTopic(topic_name, topic_id, service_name, idl_hash);
+            return 0;
+        }
+        return ret;
+    }
+
+    bool accepted = false;
+    if (!decodeBoolReplyPayload(reply, accepted)) {
+        return static_cast<int>(ErrorCode::ERR_DESERIALIZE);
+    }
+    if (!accepted) {
+        return static_cast<int>(ErrorCode::ERR_REGISTER_FAILED);
+    }
+
+    topic_runtime_.rememberPublishedTopic(topic_name, topic_id, service_name, idl_hash);
+    return 0;
+}
+
+int OmniRuntime::Impl::publishDeclaredTopicsForService(const std::string& service_name,
+                                                       LocalServiceEntry* entry,
+                                                       Service* service,
+                                                       bool allow_pending) {
+    if (!service || !entry) {
+        return 0;
+    }
+    const std::vector<PublishedTopicInfo>& topics = service->publishedTopics();
+    for (size_t i = 0; i < topics.size(); ++i) {
+        int ret = publishTopicForService(entry, service_name, topics[i].name,
+                                        topics[i].idl_hash, allow_pending);
+        if (ret != 0) {
+            OMNI_LOG_WARN(LOG_TAG, "publish topic %s for service %s failed err=%d",
+                          topics[i].name.c_str(), service_name.c_str(), ret);
+        }
+    }
+    return 0;
+}
+
 int OmniRuntime::Impl::publishTopicInternal(const std::string& topic_name, uint32_t idl_hash) {
     if (!initialized_) {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);

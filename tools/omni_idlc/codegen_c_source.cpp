@@ -589,7 +589,7 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "        : \"" << svc.name << "\";\n";
     os << "}\n\n";
 
-    os << "int " << prefix << "_proxy_connect(" << prefix << "_proxy* p) {\n";
+    os << "static int " << prefix << "_proxy_connect(" << prefix << "_proxy* p) {\n";
     os << "    int ret;\n";
     os << "    if (!p || !p->runtime) return -1;\n";
     os << "    p->instance_bound = 0;\n";
@@ -606,7 +606,7 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "    return ret;\n";
     os << "}\n\n";
 
-    os << "int " << prefix << "_proxy_connect_instance(" << prefix << "_proxy* p,\n";
+    os << "static int " << prefix << "_proxy_connect_instance(" << prefix << "_proxy* p,\n";
     os << "    const char* host_id, const char* instance_id) {\n";
     os << "    int ret;\n";
     os << "    if (!p || !p->runtime || !host_id || !instance_id) return -1;\n";
@@ -628,6 +628,28 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
     os << "            p->instance_host_id, p->instance_id, " << prefix << "_internal_death_cb, p);\n";
     os << "    }\n";
     os << "    return ret;\n";
+    os << "}\n\n";
+
+    os << "int " << prefix << "_proxy_set_instance(" << prefix << "_proxy* p,\n";
+    os << "    const char* host_id, const char* instance_id) {\n";
+    os << "    if (!p) return -1;\n";
+    os << "    if (!host_id || !instance_id) return -1;\n";
+    os << "    if (" << prefix << "_copy_bounded(p->instance_host_id, sizeof(p->instance_host_id), host_id) != 0\n";
+    os << "        || " << prefix << "_copy_bounded(p->instance_id, sizeof(p->instance_id), instance_id) != 0) {\n";
+    os << "        return -1;\n";
+    os << "    }\n";
+    os << "    p->instance_bound = 1;\n";
+    os << "    p->connected = 0;\n";
+    os << "    return 0;\n";
+    os << "}\n\n";
+
+    os << "static int " << prefix << "_proxy_ensure_connected(" << prefix << "_proxy* p) {\n";
+    os << "    if (!p || !p->runtime) return -1;\n";
+    os << "    if (p->connected) return 0;\n";
+    os << "    if (p->instance_bound) {\n";
+    os << "        return " << prefix << "_proxy_connect_instance(p, p->instance_host_id, p->instance_id);\n";
+    os << "    }\n";
+    os << "    return " << prefix << "_proxy_connect(p);\n";
     os << "}\n\n";
 
     os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p) {\n";
@@ -691,6 +713,13 @@ static void emitProxyMethodSource(std::ostream& os, const ServiceDef& svc, const
     emitProxyMethodParams(os, m, pkg, false);
     os << ") {\n";
 
+    os << "    if (" << prefix << "_proxy_ensure_connected(p) != 0) {\n";
+    if (m.return_type.isVoid()) {
+        os << "        return;\n";
+    } else {
+        os << "        return -1;\n";
+    }
+    os << "    }\n";
     os << "    omni_buffer_t* req = omni_buffer_create();\n";
     if (!m.return_type.isVoid()) {
         os << "    omni_buffer_t* resp = omni_buffer_create();\n";
@@ -799,6 +828,7 @@ static void emitProxySubscribeSource(std::ostream& os, const std::string& topic,
     os << "    void (*callback)(const " << topic_type << "* msg, void* user_data), void* user_data)\n";
     os << "{\n";
     os << "    if (p->_sub_ctx_count >= " << prefix << "_PROXY_MAX_SUBSCRIPTIONS || !p->runtime) return -1;\n";
+    os << "    if (" << prefix << "_proxy_ensure_connected(p) != 0) return -1;\n";
     os << "    " << prefix << "_" << topic_snake << "_sub_ctx* ctx =\n";
     os << "        (" << prefix << "_" << topic_snake << "_sub_ctx*)omni_malloc(\n";
     os << "            sizeof(" << prefix << "_" << topic_snake << "_sub_ctx));\n";

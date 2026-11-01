@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include "platform/platform_test.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
@@ -38,9 +39,8 @@ private:
 struct ErrorLogServerCtx {
     OmniRuntime runtime;
     LogService service;
-    std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    ErrorLogServerCtx() : registered(false), should_stop(false) {}
+    std::atomic<bool> started;
+    ErrorLogServerCtx() : started(false) {}
 };
 
 static void errorLogServerThread(void* arg) {
@@ -49,10 +49,9 @@ static void errorLogServerThread(void* arg) {
     if (ret != 0) return;
     ret = ctx->runtime.registerService(&ctx->service);
     if (ret != 0) return;
-    ctx->registered.store(true);
-    while (!ctx->should_stop.load()) ctx->runtime.pollOnce(50);
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
+    ctx->started.store(true);
+    // 新生命周期：业务线程调用 start() 阻塞驱动 event-loop，stop() 后返回。
+    ctx->runtime.start();
 }
 
 static std::string readFile(const char* path) {
@@ -90,13 +89,16 @@ protected:
 
         server_ctx_ = new ErrorLogServerCtx();
         server_tid_ = std::thread(errorLogServerThread, server_ctx_);
-        for (int i = 0; i < 50 && !server_ctx_->registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        ASSERT_TRUE(server_ctx_->registered.load());
+        // start() 阻塞在业务线程；isReady() 表示 SM 已连接且服务已激活。
+        for (int i = 0; i < 200 && !server_ctx_->runtime.isReady(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ASSERT_TRUE(server_ctx_->runtime.isReady());
     }
 
     static void TearDownTestSuite() {
         if (server_ctx_) {
-            server_ctx_->should_stop.store(true);
+            server_ctx_->runtime.stop();
         }
         if (server_tid_.joinable()) {
             server_tid_.join();
@@ -117,13 +119,17 @@ const char* ErrorLoggingTest::log_path_ = nullptr;
 
 TEST_F(ErrorLoggingTest, SmConnectFailureLog) {
     OmniRuntime bad_runtime;
-    int ret = bad_runtime.init("127.0.0.1", 19999);
-    EXPECT_NE(ret, 0);
+    // 新生命周期：init 只创建本地资源，SM 不可达在首次访问/start 时才暴露。
+    ASSERT_EQ(bad_runtime.init("127.0.0.1", 19999), 0);
+    ServiceInfo info;
+    EXPECT_NE(bad_runtime.lookupService("NoService", info), 0);
+    bad_runtime.stop();
 }
 
 TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread owner(runtime);
 
     Buffer req, resp;
     req.writeRaw("bad", 3);
@@ -131,56 +137,64 @@ TEST_F(ErrorLoggingTest, RpcTimeoutAndReconnectLogs) {
     EXPECT_NE(ret, 0);
 
     stopProcess(sm_pid_);
-    std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    for (int i = 0; i < 30; ++i) {
-        runtime.pollOnce(50);
-    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19933", "--log-level", "0");
     ASSERT_GT(sm_pid_, 0);
     ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
     bool recovered = false;
-    for (int i = 0; i < 80 && !recovered; ++i) {
-        if (runtime.connectService("LogService") != 0) {
-            std::this_thread::sleep_for(std::chrono::microseconds(100000));
-            continue;
+    for (int i = 0; i < 100 && !recovered; ++i) {
+        if (runtime.connectService("LogService") == 0) {
+            Buffer ok_req, ok_resp;
+            const char* payload = "reconnect-ok";
+            ok_req.writeRaw(payload, strlen(payload));
+            ret = runtime.invoke("LogService", IFACE_ID, METHOD_ECHO, 0, ok_req, ok_resp, 3000);
+            if (ret == 0) {
+                std::string result(reinterpret_cast<const char*>(ok_resp.data()), ok_resp.size());
+                if (result == payload) recovered = true;
+            }
         }
-        Buffer ok_req, ok_resp;
-        const char* payload = "reconnect-ok";
-        ok_req.writeRaw(payload, strlen(payload));
-        ret = runtime.invoke("LogService", IFACE_ID, METHOD_ECHO, 0, ok_req, ok_resp, 3000);
-        if (ret == 0) {
-            std::string result(reinterpret_cast<const char*>(ok_resp.data()), ok_resp.size());
-            if (result == payload) recovered = true;
+        if (!recovered) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(recovered);
-    runtime.stop();
+    owner.stop();
 }
 
 TEST_F(ErrorLoggingTest, LogKeywordsPresent) {
     // 本用例自证日志：自行制造连接失败与 SM 掉线/重连，不依赖其它用例的产出
     {
         OmniRuntime bad_runtime;
-        bad_runtime.init("127.0.0.1", 19999);
+        ASSERT_EQ(bad_runtime.init("127.0.0.1", 19999), 0);
+        // 触发一次 SM 访问以产生 sm_connect_failed/timeout 日志。
+        ServiceInfo info;
+        bad_runtime.lookupService("NoService", info);
+        bad_runtime.stop();
     }
 
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread owner(runtime);
 
     stopProcess(sm_pid_);
-    std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    for (int i = 0; i < 30; ++i) {
-        runtime.pollOnce(50);
-    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19933", "--log-level", "0");
     ASSERT_GT(sm_pid_, 0);
     ASSERT_TRUE(waitPortReady(SM_PORT, 30));
-    for (int i = 0; i < 80; ++i) {
-        runtime.pollOnce(100);
+
+    // 等待 runtime 重连并恢复服务发现，确保 reconnect_success 已落日志。
+    bool reconnected = false;
+    for (int i = 0; i < 100 && !reconnected; ++i) {
+        ServiceInfo info;
+        if (runtime.lookupService("LogService", info) == 0) {
+            reconnected = true;
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
-    runtime.stop();
+    EXPECT_TRUE(reconnected);
+    owner.stop();
 
     fflush(stderr);
     std::string logs = readFile(log_path_);

@@ -213,14 +213,13 @@ OmniRuntime 是用户使用 OmniBinder 的主要入口，负责与 ServiceManage
 - 内部核心状态由单个 owner event-loop 串行驱动
 - 非 owner 线程发起的同步调用，会投递到 owner event-loop 执行并等待结果
 - `TopicCallback` 与 `DeathCallback` 默认在 owner event-loop 线程执行
-- `run()` / `pollOnce()` / `stop()` 的并发协作规则见 [线程模型文档](threading-model.md)
+- `start()` / `stop()` 的并发协作规则见 [线程模型文档](threading-model.md)
 
 #### 并发语义摘要
 
 | 方法类别 | 方法 | 行为说明 |
 |---|---|---|
-| 持续驱动 | `run()` | 线程安全，但同一时刻只允许一个线程持续驱动 event-loop |
-| 单次驱动 | `pollOnce()` | 线程安全，但不应与另一个线程中的 `run()` 或 `pollOnce()` 并发驱动同一实例 |
+| 持续驱动 | `start()` | 线程安全；同一时刻只允许一个线程驱动 event-loop |
 | 停止 | `stop()` | 可从任意线程并发调用 |
 | 同步阻塞 | `lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`、`invoke()`、`connectServiceInstance()`、`disconnectServiceInstance()`、`subscribeServiceDeath()`、`subscribeServiceInstanceDeath()`、`publishTopic()`、`subscribeTopic()` | 可从任意线程安全调用，但内部发送/等待/状态写入由 owner event-loop 串行处理 |
 | 异步/配置 | `invokeOneWay()`、`broadcast()`、`setHeartbeatPolicy()`、`setDefaultTimeout()` | 可从任意线程安全调用；`setHeartbeatPolicy` 必须在 `init()` 前调用，不投递 event-loop |
@@ -321,34 +320,30 @@ public:
 
     // ---- 初始化和生命周期 ----
 
-    // 初始化客户端，连接到 ServiceManager
-    // sm_host: ServiceManager 地址
-    // sm_port: ServiceManager 端口（默认 9900）
-    // 返回: 0 成功，负值为错误码
+    // 初始化本地运行时资源（不连接 ServiceManager）
+    // sm_host/sm_port: start() 时要连接的 ServiceManager 地址
+    // 返回: 0 成功，负值为本地资源创建失败
     int init(const std::string& sm_host, uint16_t sm_port = 9900);
 
-    // 启动事件循环（阻塞，直到 stop() 被调用）
-    // 线程安全；同一时刻只允许一个线程持续驱动该 OmniRuntime event-loop
-    void run();
+    // 阻塞启动：当前线程成为 owner event-loop 线程
+    // 依次连接 SM、激活已声明服务、发布 topic、自动连接已声明 proxy。
+    // 业务必须自行创建线程调用 start()；runtime 不创建线程。
+    int start();
 
-    // 停止事件循环
-    // 可从任意线程安全调用
+    // 停止 event-loop；可从任意线程调用
     void stop();
 
-    // 检查是否正在运行
+    // event-loop 是否正在运行
     bool isRunning() const;
 
-    // 处理一次事件（非阻塞，用于集成到用户自己的事件循环）
-    // 线程安全，但不应与另一个线程中的 run()/pollOnce() 共同驱动同一实例
-    // timeout_ms: 最大等待时间，0 表示不等待
-    void pollOnce(int timeout_ms = 0);
+    // 是否已完成 SM 连接与服务/代理激活
+    bool isReady() const;
 
     // ---- 服务注册 ----
 
-    // 注册本地服务
-    // 内部会同时创建 TCP 监听和共享内存，然后将信息注册到 SM
+    // 声明本地服务；start 前只保存声明，start 时创建端点并调用 onStart
     // service: 服务实例（继承自 Service 基类）
-    // 返回: 0 成功，负值为错误码
+    // 返回: 0 成功，负值为参数/重名错误
     int registerService(Service* service);
 
     // 注销本地服务
@@ -1394,10 +1389,10 @@ int            omni_buffer_view_set_position(omni_buffer_view_t* view, size_t po
 omni_runtime_t* omni_runtime_create(void);
 void           omni_runtime_destroy(omni_runtime_t* runtime);
 int            omni_runtime_init(omni_runtime_t* runtime, const char* sm_host, uint16_t sm_port);
-void           omni_runtime_run(omni_runtime_t* runtime);
-void           omni_runtime_poll_once(omni_runtime_t* runtime, int timeout_ms);
+int            omni_runtime_start(omni_runtime_t* runtime); /* 阻塞；业务自行创建线程 */
 void           omni_runtime_stop(omni_runtime_t* runtime);
 int            omni_runtime_is_running(const omni_runtime_t* runtime);
+int            omni_runtime_is_ready(const omni_runtime_t* runtime);
 
 /* Runtime 配置 */
 void        omni_runtime_set_register_host(omni_runtime_t* runtime, const char* host);
@@ -1464,7 +1459,8 @@ int  omni_runtime_invoke_oneway_instance(omni_runtime_t* runtime, const char* se
          const omni_buffer_t* request);
 ```
 
-> C 生成代码为每个 Proxy 额外生成 `<pkg>_<Service>_proxy_connect_instance(p, host_id, instance_id)`；绑定后其业务方法经 `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance` 寻址该实例，自动重连 / 心跳经 `omni_runtime_service_connection_key(...)` 传入实例连接键。
+> C 生成 Proxy 通过 `<pkg>_<Service>_proxy_set_instance(p, host_id, instance_id)` 设置目标实例；
+> 生成的业务方法在首次调用时自动连接，并使用实例连接键寻址。
 
 ```c
 
@@ -1576,6 +1572,8 @@ int on_invoke(uint32_t method_id, const omni_buffer_t* req,
  int main() {
     omni_runtime_t* runtime = omni_runtime_create();
     omni_runtime_init(runtime, "127.0.0.1", 9900);
+    // C 业务需自行创建线程调用 omni_runtime_start(runtime)；
+    // 主线程继续业务循环，停止时 stop + join。
     
     omni_service_t* svc = omni_service_create("SensorService",
         demo_SensorService_INTERFACE_ID, on_invoke, NULL);
@@ -1586,7 +1584,7 @@ int on_invoke(uint32_t method_id, const omni_buffer_t* req,
     omni_runtime_register_service(runtime, svc);
     
     while (running) {
-        omni_runtime_poll_once(runtime, 100);
+        /* 应用自己的 sleep / 业务循环 */
     }
     
     omni_service_destroy(svc);

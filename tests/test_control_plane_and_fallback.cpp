@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include "platform/platform_test.h"
 #include <omnibinder/omnibinder.h>
 #include "transport/shm_ring.h"
@@ -19,6 +20,15 @@ using namespace omnibinder;
 using namespace omnibinder::test;
 
 static const uint16_t SM_PORT = 19912;
+
+static bool waitReady(OmniRuntime& runtime, int attempts = 100) {
+    for (int i = 0; i < attempts; ++i) {
+        if (runtime.isReady()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return runtime.isReady();
+}
+
 static const uint32_t METHOD_ADD = fnv1a_32("Add");
 static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
 static const uint32_t IFACE_ID = fnv1a_32("OwnedService");
@@ -58,15 +68,7 @@ static void stopSM(TestPid pid) {
 }
 
 static bool waitSM(uint16_t port, int retries) {
-    for (int i = 0; i < retries; ++i) {
-        OmniRuntime probe;
-        if (probe.init("127.0.0.1", port) == 0) {
-            probe.stop();
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    }
-    return false;
+    return waitPortReady(port, retries / 10 > 0 ? retries / 10 : 1);
 }
 
 static bool connectTcp(TcpConnection& transport, const std::string& host, uint16_t port) {
@@ -483,8 +485,7 @@ struct OwnedServerCtx {
     OmniRuntime runtime;
     OwnedService service;
     std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    OwnedServerCtx() : registered(false), should_stop(false) {}
+    OwnedServerCtx() : registered(false) {}
 };
 
 static void ownedServerThread(void* arg) {
@@ -493,15 +494,10 @@ static void ownedServerThread(void* arg) {
         return;
     }
     if (ctx->runtime.registerService(&ctx->service) != 0) {
-        ctx->runtime.stop();
         return;
     }
-    ctx->registered.store(true);
-    while (!ctx->should_stop.load()) {
-        ctx->runtime.pollOnce(20);
-    }
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
+    // start() 阻塞驱动 owner event-loop，直到主线程 stop()
+    ctx->runtime.start();
 }
 
 class FallbackService : public Service {
@@ -537,8 +533,7 @@ struct FallbackServerCtx {
     OmniRuntime runtime;
     FallbackService service;
     std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    FallbackServerCtx() : registered(false), should_stop(false) {}
+    FallbackServerCtx() : registered(false) {}
 };
 
 static void fallbackServerThread(void* arg) {
@@ -547,15 +542,10 @@ static void fallbackServerThread(void* arg) {
         return;
     }
     if (ctx->runtime.registerService(&ctx->service) != 0) {
-        ctx->runtime.stop();
         return;
     }
-    ctx->registered.store(true);
-    while (!ctx->should_stop.load()) {
-        ctx->runtime.pollOnce(20);
-    }
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
+    // start() 阻塞驱动 owner event-loop，直到主线程 stop()
+    ctx->runtime.start();
 }
 
 struct DelayedReadServiceCtx {
@@ -673,12 +663,21 @@ protected:
         ASSERT_TRUE(waitSM(SM_PORT, 30));
 
         owned_tid_ = std::thread(ownedServerThread, &owned_ctx_);
-        for (int i = 0; i < 50 && !owned_ctx_.registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        for (int i = 0; i < 100 && !owned_ctx_.registered.load(); ++i) {
+            ServiceInfo info;
+            if (waitReady(owned_ctx_.runtime)
+                && owned_ctx_.runtime.lookupService("OwnedService", info) == 0) {
+                owned_ctx_.registered.store(true);
+            }
+            if (!owned_ctx_.registered.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
         ASSERT_TRUE(owned_ctx_.registered.load());
     }
 
     static void TearDownTestSuite() {
-        owned_ctx_.should_stop.store(true);
+        owned_ctx_.runtime.stop();
         if (owned_tid_.joinable()) {
             owned_tid_.join();
         }
@@ -705,9 +704,11 @@ TEST_F(ControlPlaneTest, IllegalUnregisterRejected) {
 
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(checker);
+    ASSERT_TRUE(waitReady(checker));
     ServiceInfo info;
     ASSERT_EQ(checker.lookupService("OwnedService", info), 0);
-    checker.stop();
+    owner.stop();
     rogue.close();
 }
 
@@ -735,9 +736,11 @@ TEST_F(ControlPlaneTest, MalformedLookupAndSubscribeTopicDoNotCrashSM) {
 
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(checker);
+    ASSERT_TRUE(waitReady(checker));
     ServiceInfo info;
     ASSERT_EQ(checker.lookupService("OwnedService", info), 0);
-    checker.stop();
+    owner.stop();
 
     rogue.close();
 }
@@ -921,6 +924,8 @@ TEST_F(ControlPlaneTest, ListServiceInstancesReturnsAllIdentityFields) {
 
     OmniRuntime probe;
     ASSERT_EQ(probe.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread probe_owner(probe);
+    ASSERT_TRUE(waitReady(probe));
     std::vector<ServiceInfo> instances;
     ASSERT_EQ(probe.listServiceInstances("RawMultiInstance", instances), 0);
     ASSERT_EQ(instances.size(), 2u);
@@ -952,7 +957,7 @@ TEST_F(ControlPlaneTest, ListServiceInstancesReturnsAllIdentityFields) {
     EXPECT_FALSE(found);
     EXPECT_TRUE(raw.empty());
 
-    probe.stop();
+    probe_owner.stop();
     query.close();
     registrant_a.close();
     registrant_b.close();
@@ -991,9 +996,11 @@ TEST_F(ControlPlaneTest, MalformedListInstancesRequestDegradesToNotFound) {
 
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(checker);
+    ASSERT_TRUE(waitReady(checker));
     ServiceInfo info;
     ASSERT_EQ(checker.lookupService("OwnedService", info), 0);
-    checker.stop();
+    owner.stop();
 
     rogue.close();
 }
@@ -1112,6 +1119,8 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
 
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", port), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
     std::vector<std::string> topics;
     const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     EXPECT_EQ(runtime.queryPublishedTopics("AnyService", topics, 250),
@@ -1120,7 +1129,7 @@ TEST(ControlPlaneCompatibilityTest, IgnoredPublishedTopicsQueryUsesExplicitTimeo
         std::chrono::steady_clock::now() - start).count();
     EXPECT_GE(elapsed_ms, 150);
     EXPECT_LE(elapsed_ms, 900);
-    runtime.stop();
+    owner.stop();
     fake_sm.join();
     server.close();
 }
@@ -1159,10 +1168,12 @@ TEST(ControlPlaneCompatibilityTest, ListInstancesMalformedReplyRejectedSafely) {
 
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", port), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
     std::vector<ServiceInfo> instances;
     EXPECT_EQ(runtime.listServiceInstances("AnyService", instances),
               static_cast<int>(ErrorCode::ERR_DESERIALIZE));
-    runtime.stop();
+    owner.stop();
     fake_sm.join();
     server.close();
 }
@@ -1175,13 +1186,24 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     std::thread fallback_tid;
     fallback_tid = std::thread(fallbackServerThread, &fallback_ctx);
     ScopedThreadJoiner fallback_guard(fallback_tid, [&fallback_ctx]() {
-        fallback_ctx.should_stop.store(true);
+        fallback_ctx.runtime.stop();
     });
-    for (int i = 0; i < 50 && !fallback_ctx.registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+    for (int i = 0; i < 100 && !fallback_ctx.registered.load(); ++i) {
+        ServiceInfo info;
+        if (waitReady(fallback_ctx.runtime)
+            && fallback_ctx.runtime.lookupService("FallbackService", info) == 0) {
+            fallback_ctx.registered.store(true);
+        }
+        if (!fallback_ctx.registered.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
     ASSERT_TRUE(fallback_ctx.registered.load());
 
     OmniRuntime probe;
     ASSERT_EQ(probe.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread probe_owner(probe);
+    ASSERT_TRUE(waitReady(probe));
     ServiceInfo info;
     ASSERT_EQ(probe.lookupService("FallbackService", info), 0);
     ASSERT_EQ(info.port, fallback_ctx.service.port());
@@ -1207,8 +1229,8 @@ TEST_F(ControlPlaneTest, ShmFailureFallsBackToTcp) {
     EXPECT_EQ(stats.tcp_connections, 1u);
     EXPECT_EQ(stats.shm_connections, 0u);
 
-    probe.stop();
-    fallback_ctx.should_stop.store(true);
+    probe_owner.stop();
+    fallback_ctx.runtime.stop();
     fallback_tid.join();
 #endif
 }
@@ -1249,11 +1271,13 @@ TEST_F(ControlPlaneTest, MalformedInvokePayloadReturnsDeserializeWithoutCrash) {
 
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(checker);
+    ASSERT_TRUE(waitReady(checker));
     int32_t sum = 0;
     ASSERT_EQ(checker.connectService("OwnedService"), 0);
     ASSERT_TRUE(invokeOwnedService(checker, 20, 22, sum));
     EXPECT_EQ(sum, 42);
-    checker.stop();
+    owner.stop();
 
     rogue.close();
 }
@@ -1274,11 +1298,13 @@ TEST_F(ControlPlaneTest, MalformedSubscribeBroadcastDoesNotCrashService) {
 
     OmniRuntime checker;
     ASSERT_EQ(checker.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(checker);
+    ASSERT_TRUE(waitReady(checker));
     ASSERT_EQ(checker.connectService("OwnedService"), 0);
     int32_t sum = 0;
     ASSERT_TRUE(invokeOwnedService(checker, 1, 2, sum));
     EXPECT_EQ(sum, 3);
-    checker.stop();
+    owner.stop();
 
     rogue.close();
 }
@@ -1289,6 +1315,8 @@ TEST_F(ControlPlaneTest, ListServicesLargeReplyHandlesPartialSend) {
 
     OmniRuntime host_probe;
     ASSERT_EQ(host_probe.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread host_probe_owner(host_probe);
+    ASSERT_TRUE(waitReady(host_probe));
     std::string host_id = host_probe.hostId();
 
     for (int i = 0; i < 48; ++i) {
@@ -1303,7 +1331,7 @@ TEST_F(ControlPlaneTest, ListServicesLargeReplyHandlesPartialSend) {
     EXPECT_GE(services.size(), 49u);
 
     registrant.close();
-    host_probe.stop();
+    host_probe_owner.stop();
 }
 
 TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
@@ -1320,6 +1348,8 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
 
     OmniRuntime probe;
     ASSERT_EQ(probe.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread probe_owner(probe);
+    ASSERT_TRUE(waitReady(probe));
     ASSERT_EQ(probe.connectService("SlowReadService"), 0);
     Buffer req;
     std::vector<uint8_t> payload(16 * 1024, 0x5A);
@@ -1328,7 +1358,7 @@ TEST_F(ControlPlaneTest, RuntimeTcpLargeInvokeWaitsForFullRequestSend) {
     ASSERT_EQ(probe.invoke("SlowReadService", IFACE_ID, METHOD_ADD, 0, req, resp, 30000), 0);
     EXPECT_EQ(resp.size(), 0u);
 
-    probe.stop();
+    probe_owner.stop();
     registrant.close();
     delayed_tid.join();
     delayed_ctx.server.close();
@@ -1651,10 +1681,9 @@ TEST(ControlPlaneCompatibilityTest, PublishAdvertisesConfiguredRegisterHost) {
     ASSERT_EQ(rt.init("127.0.0.1", port), 0);
     HostAdvertiseService svc;
     ASSERT_EQ(rt.registerService(&svc), 0);
-    // 注册应答后 SM 才持有该服务；publishTopic 要求存在已注册本地服务
-    for (int i = 0; i < 100; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    test::RuntimeThread owner(rt);
+    ASSERT_TRUE(waitReady(rt));
+    // start() 激活服务后才可发布 topic
     ASSERT_EQ(rt.publishTopic("host/adv/topic"), 0);
 
     for (int i = 0; i < 200 && !captured; ++i) {
@@ -1667,7 +1696,7 @@ TEST(ControlPlaneCompatibilityTest, PublishAdvertisesConfiguredRegisterHost) {
             << "publish must advertise resolveRegisterHost, not listener fallback 127.0.0.1";
     }
 
-    rt.stop();
+    owner.stop();
     stop_fake.store(true);
     fake_sm.join();
     server.close();

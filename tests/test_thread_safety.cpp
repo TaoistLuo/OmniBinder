@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
 #include <atomic>
@@ -16,6 +17,14 @@ static std::atomic<int> failure_count(0);
 
 static const uint32_t METHOD_ECHO = fnv1a_32("Echo");
 static const uint32_t IFACE_ID = 0x12345678;
+
+static bool waitUntilReady(OmniRuntime& runtime, int attempts) {
+    for (int i = 0; i < attempts; ++i) {
+        if (runtime.isReady()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return runtime.isReady();
+}
 
 class ThreadSafetyTestService : public Service {
 public:
@@ -53,8 +62,12 @@ protected:
         server_rt_ = new OmniRuntime();
         ASSERT_EQ(server_rt_->init("127.0.0.1", SM_PORT), 0);
         ASSERT_EQ(server_rt_->registerService(svc_), 0);
-        server_thread_ = new std::thread([]() { server_rt_->run(); });
-        std::this_thread::sleep_for(std::chrono::microseconds(500000));
+        server_thread_ = new std::thread([]() { server_rt_->start(); });
+        ASSERT_TRUE(waitUntilReady(*server_rt_, 100));
+        for (int i = 0; i < 100 && svc_->port() == 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ASSERT_NE(svc_->port(), 0);
     }
 
     static void TearDownTestSuite() {
@@ -121,8 +134,8 @@ static void concurrentInvoke(OmniRuntime& runtime, int thread_id, int iterations
 TEST_F(ThreadSafetyTest, ConcurrentLookup) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
-    std::thread rt_thread([&runtime]() { runtime.run(); });
-    std::this_thread::sleep_for(std::chrono::microseconds(200000));
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitUntilReady(runtime, 100));
     success_count = 0;
     failure_count = 0;
     std::vector<std::thread> threads;
@@ -131,15 +144,14 @@ TEST_F(ThreadSafetyTest, ConcurrentLookup) {
     }
     for (auto& t : threads) t.join();
     EXPECT_EQ(failure_count.load(), 0);
-    runtime.stop();
-    rt_thread.join();
+    owner.stop();
 }
 
 TEST_F(ThreadSafetyTest, ConcurrentInvoke) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
-    std::thread rt_thread([&runtime]() { runtime.run(); });
-    std::this_thread::sleep_for(std::chrono::microseconds(200000));
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitUntilReady(runtime, 100));
     success_count = 0;
     failure_count = 0;
     std::vector<std::thread> threads;
@@ -148,6 +160,5 @@ TEST_F(ThreadSafetyTest, ConcurrentInvoke) {
     }
     for (auto& t : threads) t.join();
     EXPECT_EQ(failure_count.load(), 0);
-    runtime.stop();
-    rt_thread.join();
+    owner.stop();
 }

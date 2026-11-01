@@ -65,7 +65,7 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - **远程方法调用 (RPC)** — 同步调用远端服务接口，支持请求/响应模式和单向调用
 - **发布/订阅广播** — 话题机制，发布者广播数据，订阅者实时接收
 - **死亡通知** — 服务异常退出时自动通知所有关注者
-- **主动连接管理** — Proxy 提供 `connect()`/`disconnect()` 主动建立/断开服务连接
+- **自动连接管理** — 生成 Proxy 由 runtime `start()` 自动连接/重连；`connect()` 仅保留兼容
 - **自动重连** — 服务恢复后自动重连（可配指数退避策略）
 - **心跳检测** — 定期心跳及时发现服务异常，超时自动触发重连
 - **多实例服务身份** — 同名服务用不同 `instance_id` 并存，实例身份为 `(service_name, host_id, instance_id)`；支持按实例发现、寻址、订阅与死亡通知
@@ -80,7 +80,7 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 同一块板上可以运行多个**同名**服务实例（例如两个 `SensorService` 分别绑定 `ttyUSB0` / `ttyUSB1`）：
 
 - 每个实例必须显式声明**不同的 `instance_id`**（C++ `Service::setInstanceId()`，C `omni_service_set_instance_id()`）。实例身份为 `(service_name, host_id, instance_id)`，**完全相同身份会被视为同一实例而互相顶替（后来者接管）**；默认空 `instance_id` 表示该板上该服务的单实例。
-- 客户端可用 `listServiceInstances()` / `omni_runtime_list_instances()` 枚举某服务名下的全部实例，再用 `connectServiceInstance()` / `omni_runtime_connect_service_instance()` / 生成 Proxy 的 `connect(host_id, instance_id)` / `_proxy_connect_instance()` 绑定到指定实例。
+- 客户端可用 `listServiceInstances()` / `omni_runtime_list_instances()` 枚举某服务名下的全部实例；C++ Proxy 用 `setInstance(host_id, instance_id)`，C Proxy 用 `*_proxy_set_instance()` 设置目标，连接由 runtime start/重连自动完成。
 - 每块板必须具有**唯一 `host_id`**：量产镜像常克隆 `/etc/machine-id`，会让多板共享同一 `host_id`，导致被误判为同一身份互相顶替、且 SHM 误判为同机。请在启动时通过 `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()` 显式设置各设备唯一标识（MAC / 芯片 ID / 序列号）。
 - 同一话题下允许多个同名服务实例并存发布：服务级订阅收到全部实例的数据并可按来源实例身份区分，实例级订阅只接收指定实例。
 
@@ -91,10 +91,12 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 ### 线程模型说明
 
 - `OmniRuntime` 对外提供线程安全公共 API
+- `init()` 只创建本地资源，`start()` 负责连接 SM、激活服务/topic/proxy 并阻塞驱动 event-loop
+- runtime 不创建线程；业务自行创建线程执行 `start()`
 - 内部运行时由单个 owner event-loop 串行驱动
-- 回调（如 topic / death callback）默认在 owner event-loop 线程执行
+- 回调（如 topic / death callback）在 owner event-loop 线程执行
 - 同步 reply wait 期间只处理 fd/timer，不执行新的 pending API functor
-- `run()` / `pollOnce()` / `stop()` 的并发协作规则见 [线程模型文档](docs/threading-model.md)
+- `start()` / `stop()` 的并发协作规则见 [线程模型文档](docs/threading-model.md)
 
 ### 心跳与会话配置
 
@@ -130,7 +132,7 @@ OmniBinder 有两层独立心跳：
 
 - 传输方式：TCP + SHM 自动选择（同机通信使用 SHM）
 - RPC 预热轮数：50；RPC 测试轮数：1000 / 用例
-- 话题模式：服务端每 500us 轮转发布 topic，客户端 `pollOnce(0)` busy-spin 收包
+- 话题模式：服务端每 500us 轮转发布 topic，客户端 owner event-loop 收包
 - 测试服务 SHM ring：64KB / 64KB
 - Topic 预热轮数：100；Topic 测试轮数：1000 / 用例
 
@@ -407,15 +409,19 @@ int main() {
     MySensorService service;
     service.setShmConfig(omnibinder::ShmConfig(64 * 1024, 64 * 1024));
     runtime.registerService(&service);
-    runtime.publishTopic("SensorUpdate");
-    runtime.publishTopic("AsyncResultReady");
+
+    // runtime 不创建线程；业务线程负责驱动 event-loop。
+    std::thread runtime_thread([&runtime]() { runtime.start(); });
 
     while (running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         demo::SensorUpdate msg;
         ...
         service.BroadcastSensorUpdate(msg);
     }
+
+    runtime.stop();
+    runtime_thread.join();
 }
 ```
 
@@ -431,8 +437,13 @@ int main() {
     omnibinder::OmniRuntime runtime;
     runtime.init("127.0.0.1", 9900);
 
-    demo::SensorServiceProxy proxy(runtime);
-    proxy.connect();
+    demo::SensorServiceProxy proxy(runtime); // 只声明；start 后自动连接
+    std::thread runtime_thread([&runtime]() { runtime.start(); });
+
+    // 等待 runtime 完成 SM 连接和 proxy 自动连接（示例轮询 isConnected）
+    while (!proxy.isConnected()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
 
     bool echo_bool = unwrap(proxy.EchoBool(false));
 
@@ -468,8 +479,11 @@ int main() {
     });
 
     while (running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+
+    runtime.stop();
+    runtime_thread.join();
 }
 ```
 

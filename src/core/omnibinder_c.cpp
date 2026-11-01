@@ -98,11 +98,8 @@ public:
 
 protected:
     void onStart() override {
-        if (!runtime()) {
-            return;
-        }
         for (size_t i = 0; i < topics_.size(); ++i) {
-            runtime()->publishTopic(topics_[i].name, topics_[i].idl_hash);
+            declarePublishedTopic(topics_[i].name, topics_[i].idl_hash);
         }
     }
 
@@ -717,6 +714,11 @@ int omni_runtime_init(omni_runtime_t* runtime, const char* sm_host, uint16_t sm_
     return runtime->runtime.init(sm_host, sm_port);
 }
 
+int omni_runtime_start(omni_runtime_t* runtime) {
+    if (!runtime) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.start();
+}
+
 void omni_runtime_set_register_host(omni_runtime_t* runtime, const char* host) {
     if (runtime) {
         runtime->runtime.setRegisterHost(host ? host : "");
@@ -770,20 +772,16 @@ const char* omni_runtime_runtime_id(const omni_runtime_t* runtime) {
     return holder.c_str();
 }
 
-void omni_runtime_poll_once(omni_runtime_t* runtime, int timeout_ms) {
-    if (runtime) runtime->runtime.pollOnce(timeout_ms);
-}
-
-void omni_runtime_run(omni_runtime_t* runtime) {
-    if (runtime) runtime->runtime.run();
-}
-
 void omni_runtime_stop(omni_runtime_t* runtime) {
     if (runtime) runtime->runtime.stop();
 }
 
 int omni_runtime_is_running(const omni_runtime_t* runtime) {
     return runtime ? runtime->runtime.isRunning() : 0;
+}
+
+int omni_runtime_is_ready(const omni_runtime_t* runtime) {
+    return runtime ? runtime->runtime.isReady() : 0;
 }
 
 int omni_runtime_register_service(omni_runtime_t* runtime, omni_service_t* svc) {

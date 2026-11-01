@@ -61,6 +61,8 @@
 
 namespace omnibinder {
 
+class ServiceProxyBase;
+
 /*
  * @brief  OmniRuntime::Impl — 单线程事件循环协调器
  * @details 职责分层：
@@ -78,10 +80,14 @@ public:
     // 生命周期
     // ============================================================
     int  init(const std::string& sm_host, uint16_t sm_port);
-    void run();
+    int  start();
+    void registerProxy(ServiceProxyBase* proxy);
+    void unregisterProxy(ServiceProxyBase* proxy);
+    int connectDeclaredProxiesInternal();
+    void ensureProxyRetryTimerInternal();
     void stop();
     bool isRunning() const;
-    void pollOnce(int timeout_ms);
+    bool isReady() const;
     void pollOnceWithoutFunctors(int timeout_ms);
     void setOwner(OmniRuntime* owner) { owner_ = owner; }
 
@@ -185,8 +191,13 @@ private:
     // ============================================================
     // 内部入口（仅由协调器自身调用，不经过 callSerialized）
     // ============================================================
-    int registerServiceInternal(Service* service);
+    int registerServiceInternal(Service* service, bool allowPending = false);
     int unregisterServiceInternal(Service* service);
+    int beginRuntimeInternal();
+    void shutdownInternal();
+    int activateDeclaredServices();
+    int connectControlPlaneInternal();
+    bool isTransientSmError(int error) const;
     int listServicesInternal(std::vector<ServiceInfo>& services);
     int listServiceInstancesInternal(const std::string& name, std::vector<ServiceInfo>& out);
     int queryInterfacesInternal(const std::string& name, std::vector<InterfaceInfo>& ifaces);
@@ -220,6 +231,12 @@ private:
                                                 const std::string& host_id,
                                                 const std::string& instance_id);
     int publishTopicInternal(const std::string& topic_name, uint32_t idl_hash);
+    int publishTopicForService(LocalServiceEntry* entry, const std::string& service_name,
+                               const std::string& topic_name, uint32_t idl_hash,
+                               bool allow_pending);
+    int publishDeclaredTopicsForService(const std::string& service_name,
+                                        LocalServiceEntry* entry, Service* service,
+                                        bool allow_pending);
     int broadcastInternal(uint32_t topic_id, const Buffer& data);
     int subscribeTopicInternal(const TopicSubscriptionSelector& selector,
                                const std::string& topic_name,
@@ -458,6 +475,10 @@ private:
     std::atomic<bool>   running_;
     std::atomic<bool>   loop_alive_;      // event-loop 是否仍会处理 functor（stop 后置 false）
     bool                initialized_;
+    std::atomic<bool>   started_;
+    std::atomic<bool>   ready_;
+    bool                shutdown_done_;
+    bool                start_owned_;   // true 表示本次生命周期由 start() 驱动
     OmniRuntime*        owner_;
     mutable std::recursive_mutex api_mutex_;  // recursive：回调链内重入 API 需可重入加锁
     std::atomic<bool>   loop_driver_active_;
@@ -495,6 +516,10 @@ private:
     uint32_t                                     reply_send_timeout_ms_;
 
     // 本地服务托管
+    // 启动前 registerService() 的声明（按服务名唯一）；start()/首次 API 时激活。
+    std::map<std::string, Service*>              declared_services_;
+    std::vector<ServiceProxyBase*>               declared_proxies_;
+    uint32_t                                     proxy_retry_timer_id_;
     std::map<std::string, LocalServiceEntry*>    local_services_;
     std::map<int, std::string>                   client_id_to_service_;
     uint64_t                                     client_session_generation_;

@@ -1,4 +1,5 @@
 #include "sensor_service.bidl_c.h"
+#include "app_thread.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,10 @@ static void on_service_died(void* user_data) {
     printf("\n!!! [DeathNotify] SensorService has DIED !!!\n\n");
 }
 
+static void runtime_entry(void* arg) {
+    omni_runtime_start((omni_runtime_t*)arg);
+}
+
 int main(int argc, char* argv[]) {
     const char* sm_host = "127.0.0.1";
     const char* instance_id = NULL;
@@ -133,6 +138,18 @@ int main(int argc, char* argv[]) {
     demo_SensorService_proxy proxy;
     demo_SensorService_proxy_init(&proxy, runtime);
 
+    app_thread_t* runtime_thread = app_thread_create(runtime_entry, runtime);
+    if (!runtime_thread) {
+        fprintf(stderr, "Failed to create runtime thread\n");
+        demo_SensorService_proxy_destroy(&proxy);
+        omni_runtime_destroy(runtime);
+        return 1;
+    }
+
+    while (g_running && !omni_runtime_is_ready(runtime)) {
+        app_sleep_ms(100);
+    }
+
     instance_lookup lookup;
     memset(&lookup, 0, sizeof(lookup));
     lookup.want_instance_id = instance_id;
@@ -142,26 +159,24 @@ int main(int argc, char* argv[]) {
     if (instance_id) {
         if (!lookup.found) {
             fprintf(stderr, "No SensorService instance with instance_id='%s'\n", instance_id);
+            omni_runtime_stop(runtime);
+            app_thread_join(runtime_thread);
             demo_SensorService_proxy_destroy(&proxy);
             omni_runtime_destroy(runtime);
             return 1;
         }
-        if (demo_SensorService_proxy_connect_instance(&proxy,
+        if (demo_SensorService_proxy_set_instance(&proxy,
                 lookup.found_host_id, lookup.found_instance_id) != 0) {
             fprintf(stderr, "SensorService instance not found\n");
+            omni_runtime_stop(runtime);
+            app_thread_join(runtime_thread);
             demo_SensorService_proxy_destroy(&proxy);
             omni_runtime_destroy(runtime);
             return 1;
         }
-        printf("Connected to SensorService instance_id=%s\n", instance_id);
+        printf("Using SensorService instance_id=%s\n", instance_id);
     } else {
-        if (demo_SensorService_proxy_connect(&proxy) != 0) {
-            fprintf(stderr, "SensorService not found\n");
-            demo_SensorService_proxy_destroy(&proxy);
-            omni_runtime_destroy(runtime);
-            return 1;
-        }
-        printf("Connected to SensorService\n");
+        printf("Using SensorService default instance\n");
     }
 
     printf("--- Primitive RPCs ---\n");
@@ -351,10 +366,12 @@ int main(int argc, char* argv[]) {
 
     printf("\nWaiting for broadcasts / async callbacks (Ctrl+C to stop)...\n\n");
     while (g_running) {
-        omni_runtime_poll_once(runtime, 100);
+        app_sleep_ms(100);
     }
 
     omni_runtime_stop(runtime);
+    app_thread_join(runtime_thread);
+    demo_SensorService_proxy_destroy(&proxy);
     omni_runtime_destroy(runtime);
     return 0;
 }

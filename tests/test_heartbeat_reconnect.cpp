@@ -4,47 +4,59 @@
 // 1. HeartbeatTimeoutDetected     — proxy 侧心跳快速检测服务死亡
 // 2. AutoReconnectAfterDeath       — 自动重连在服务重启后恢复连接
 // 3. OnServiceDiedCallbackFires    — SM 死亡通知触发 proxy 回调
-// 4. DirectDisconnectTriggersReconnect — 显式 disconnect/connect 循环在心跳下正常工作
-// 5. DisconnectCleansUpState       — disconnect() 完成清理，后续 connect() 安全
-// 6. DisconnectCancelsPendingReconnect — 显式 disconnect 取消已排队的重连定时器
-// 7. TimeoutDisconnectTriggersReregistration — 阻塞的 runtime 在 SM 关闭超时控制连接后重新注册
+// 4. TimeoutDisconnectTriggersReregistration — 阻塞的 runtime 在 SM 关闭超时控制连接后重新注册
 //    （不会永久漂移）
-// 8. StopHeartbeatKeepsSmLiveness — stopHeartbeat 只影响数据面检测，不会造成 SM 超时 → 重连循环
-// 9. PureClientConnectionNotClosedByPeerTimeout — 从未注册过任何服务的连接不会被心跳超时规则关闭
+// 5. StopHeartbeatKeepsSmLiveness — stopHeartbeat 只影响数据面检测，不会造成 SM 超时 → 重连循环
+// 6. PureClientConnectionNotClosedByPeerTimeout — 从未注册过任何服务的连接不会被心跳超时规则关闭
+// 7. SessionHeartbeatTimeoutRemovesAllServices — 会话超时同时摘除该会话下全部服务
+// 8. 多实例寻址 / 实例级死亡通知
+//
+// 新生命周期：业务线程调用 runtime.start() 阻塞驱动 event-loop；proxy 由 start() 自动连接。
 
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include <omnibinder/omnibinder.h>
 #include <omnibinder/proxy_base.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <atomic>
+#include <chrono>
+#include <functional>
 #include <string>
+#include <thread>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
 
 static const uint16_t SM_PORT        = 19950;
 static const uint32_t METHOD_ECHO    = fnv1a_32("Echo");
+static const uint32_t METHOD_BLOCK   = fnv1a_32("Block");
 static const uint32_t IFACE_ID       = fnv1a_32("HrtbtReconnectSvc");
 static const char*    SERVICE_NAME   = "HrtbtReconnectSvc";
 
 // ============================================================
-// 测试服务 — 简单 Echo 回显
+// 测试服务 — 简单 Echo 回显；Block 用于让 owner 线程阻塞（模拟卡死）
 // ============================================================
 class HrtbtTestService : public Service {
 public:
-    explicit HrtbtTestService(const std::string& name)
-        : Service(name) {
+    explicit HrtbtTestService(const std::string& name, uint32_t block_ms = 0)
+        : Service(name), block_ms_(block_ms) {
         iface_.interface_id = IFACE_ID;
         iface_.name         = SERVICE_NAME;
         iface_.methods.push_back(MethodInfo(METHOD_ECHO, "Echo"));
+        iface_.methods.push_back(MethodInfo(METHOD_BLOCK, "Block"));
     }
     const char* serviceName() const override { return SERVICE_NAME; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
 protected:
     int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) override {
+        if (method_id == METHOD_BLOCK) {
+            // 在 owner event-loop 线程内睡眠：期间不发送心跳，模拟 owner-loop 卡死。
+            if (block_ms_ > 0) platform::sleepMs(block_ms_);
+            return 0;
+        }
         if (method_id == METHOD_ECHO && request.size() > 0) {
             if (!response.writeRaw(request.data(), request.size()))
                 return static_cast<int>(ErrorCode::ERR_SERIALIZE);
@@ -52,6 +64,7 @@ protected:
         return 0;
     }
 private:
+    uint32_t block_ms_;
     InterfaceInfo iface_;
 };
 
@@ -114,16 +127,24 @@ public:
 };
 
 // ============================================================
-// 等待辅助函数 — 基于 pollOnce，不用 sleep()
+// 等待辅助函数 — 基于 sleep_for / 公开查询接口
 // ============================================================
-static bool waitServiceRegistered(OmniRuntime& rt, const std::string& name,
-                                   int max_attempts = 50) {
-    for (int i = 0; i < max_attempts; ++i) {
-        ServiceInfo info;
-        if (rt.lookupService(name, info) == 0) return true;
-        rt.pollOnce(50);
+static bool waitUntil(const std::function<bool()>& predicate, int attempts,
+                      int sleep_ms = 50) {
+    for (int i = 0; i < attempts; ++i) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
     }
-    return false;
+    return predicate();
+}
+
+static bool waitServiceRegistered(OmniRuntime& rt, const std::string& name,
+                                   int max_attempts = 100) {
+    return waitUntil([&rt, &name]() {
+        rt.clearServiceCache();
+        ServiceInfo info;
+        return rt.lookupService(name, info) == 0;
+    }, max_attempts, 50);
 }
 
 static bool tryEchoRpc(OmniRuntime& rt, const std::string& svc_name,
@@ -140,14 +161,11 @@ static bool tryEchoRpc(OmniRuntime& rt, const std::string& svc_name,
 }
 
 static bool waitInstanceCount(OmniRuntime& rt, const std::string& name, size_t want) {
-    for (int i = 0; i < 100; ++i) {
+    return waitUntil([&rt, &name, want]() {
         std::vector<ServiceInfo> instances;
-        if (rt.listServiceInstances(name, instances) == 0 && instances.size() >= want) {
-            return true;
-        }
-        rt.pollOnce(50);
-    }
-    return false;
+        return rt.listServiceInstances(name, instances) == 0
+               && instances.size() >= want;
+    }, 200, 50);
 }
 
 // ============================================================
@@ -371,12 +389,12 @@ private:
 };
 
 // ============================================================
-// Test 7 — TimeoutDisconnectTriggersReregistration
+// Test 4 — TimeoutDisconnectTriggersReregistration
 //
 // @brief   超时断开后触发重新注册
-// @details 子进程注册后阻塞 owner-loop，超过 SM 超时窗口。SM 必须丢弃过期注册并关闭
-//          控制连接（C2），恢复后的 runtime 重连并通过 restoreControlPlaneState 重新注册。
-//          父 runtime 是纯客户端，必须保持自己的连接。
+// @details 子进程注册后通过 Block 调用阻塞 owner-loop，超过 SM 超时窗口。SM 必须丢弃
+//          过期注册并关闭控制连接（C2），恢复后的 runtime 重连并通过
+//          restoreControlPlaneState 重新注册。父 runtime 是纯客户端，必须保持自己的连接。
 // ============================================================
 TEST_F(HeartbeatLifecycleTest, TimeoutDisconnectTriggersReregistration) {
     child_pid_ = startProcess(g_program_path, "--child-blocked-service", "19966", "3500");
@@ -387,16 +405,25 @@ TEST_F(HeartbeatLifecycleTest, TimeoutDisconnectTriggersReregistration) {
     // “对端超时不会误伤自己的会话”。
     rt.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME))
         << "Service should register before the owner loop blocks";
+    ASSERT_EQ(rt.connectService(SERVICE_NAME), 0) << "connect to blocked service failed";
+
+    // 触发子进程 owner-loop 阻塞（在 onInvoke 内 sleep）。
+    std::thread block_thread([&rt]() {
+        Buffer req, resp;
+        rt.invoke(SERVICE_NAME, IFACE_ID, METHOD_BLOCK, 0, req, resp, 8000);
+    });
+    ScopedThreadJoiner block_join(block_thread);
 
     bool observed_timeout = false;
-    for (int i = 0; i < 60 && !observed_timeout; ++i) {
+    for (int i = 0; i < 120 && !observed_timeout; ++i) {
         if (smServiceState(rt, SERVICE_NAME) == 0) {
             observed_timeout = true;
             break;
         }
-        rt.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     ASSERT_TRUE(observed_timeout)
         << "SM should drop the service once heartbeats stop";
@@ -406,21 +433,16 @@ TEST_F(HeartbeatLifecycleTest, TimeoutDisconnectTriggersReregistration) {
     EXPECT_EQ(stats.sm_reconnect_attempts, 0u)
         << "Pure-client connection must not be closed by the timeout rule";
 
-    bool recovered = false;
-    for (int i = 0; i < 120 && !recovered; ++i) {
-        recovered = (smServiceState(rt, SERVICE_NAME) == 1);
-        if (!recovered) {
-            rt.pollOnce(50);
-        }
-    }
-    ASSERT_TRUE(recovered)
+    ASSERT_TRUE(waitUntil([&rt]() {
+        return smServiceState(rt, SERVICE_NAME) == 1;
+    }, 240, 50))
         << "Runtime must re-register after the timeout-induced disconnect";
 
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
-// Test 8 — StopHeartbeatKeepsSmLiveness
+// Test 5 — StopHeartbeatKeepsSmLiveness
 //
 // @brief   stopHeartbeat 后保持 SM 存活
 // @details 子进程停掉自己注册服务的心跳监控。由于 stopHeartbeat 只取消数据面检测，
@@ -433,14 +455,15 @@ TEST_F(HeartbeatLifecycleTest, StopHeartbeatKeepsSmLiveness) {
     OmniRuntime rt;
     rt.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
 
     int missing = 0;
-    for (int i = 0; i < 60; ++i) {
+    for (int i = 0; i < 40; ++i) {
         if (smServiceState(rt, SERVICE_NAME) == 0) {
             ++missing;
         }
-        rt.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     EXPECT_EQ(missing, 0)
         << "stopHeartbeat must not stop SM control-plane liveness "
@@ -450,7 +473,7 @@ TEST_F(HeartbeatLifecycleTest, StopHeartbeatKeepsSmLiveness) {
     ASSERT_EQ(rt.getStats(stats), 0);
     EXPECT_EQ(stats.sm_reconnect_attempts, 0u);
 
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -468,6 +491,7 @@ TEST_F(HeartbeatLifecycleTest, HeartbeatPolicyAfterInitIgnored) {
 
     HrtbtTestService svc(SERVICE_NAME);
     ASSERT_EQ(rt.registerService(&svc), 0);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
 
     // init 之后的策略修改必须被忽略，不能用 0/0 静默关闭控制面心跳
@@ -478,7 +502,7 @@ TEST_F(HeartbeatLifecycleTest, HeartbeatPolicyAfterInitIgnored) {
         if (smServiceState(rt, SERVICE_NAME) != 1) {
             ever_missing = true;
         }
-        rt.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     EXPECT_FALSE(ever_missing)
@@ -490,11 +514,11 @@ TEST_F(HeartbeatLifecycleTest, HeartbeatPolicyAfterInitIgnored) {
     EXPECT_EQ(stats.sm_reconnect_attempts, 0u);
 
     rt.unregisterService(&svc);
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
-// Test 9 — PureClientConnectionNotClosedByPeerTimeout
+// Test 6 — PureClientConnectionNotClosedByPeerTimeout
 //
 // @brief   纯客户端连接不被对端超时关闭
 // @details 从未注册任何服务的 runtime 与一个会超时的对端共享 SM。只允许关闭对端连接；
@@ -507,15 +531,23 @@ TEST_F(HeartbeatLifecycleTest, PureClientConnectionNotClosedByPeerTimeout) {
     OmniRuntime client;
     client.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(client.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
+    RuntimeThread owner(client);
     ASSERT_TRUE(waitServiceRegistered(client, SERVICE_NAME));
+    ASSERT_EQ(client.connectService(SERVICE_NAME), 0);
+
+    std::thread block_thread([&client]() {
+        Buffer req, resp;
+        client.invoke(SERVICE_NAME, IFACE_ID, METHOD_BLOCK, 0, req, resp, 8000);
+    });
+    ScopedThreadJoiner block_join(block_thread);
 
     bool observed_timeout = false;
-    for (int i = 0; i < 60 && !observed_timeout; ++i) {
+    for (int i = 0; i < 120 && !observed_timeout; ++i) {
         if (smServiceState(client, SERVICE_NAME) == 0) {
             observed_timeout = true;
             break;
         }
-        client.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     ASSERT_TRUE(observed_timeout);
 
@@ -529,14 +561,14 @@ TEST_F(HeartbeatLifecycleTest, PureClientConnectionNotClosedByPeerTimeout) {
     ASSERT_EQ(client.getStats(stats), 0);
     EXPECT_EQ(stats.sm_reconnect_attempts, 0u);
 
-    client.stop();
+    owner.stop();
 }
 
 // ============================================================
 // Test 1 — HeartbeatTimeoutDetected
 //
 // @brief   心跳超时被快速检测
-// @details 启动服务 → 连接 proxy → 启动心跳（200 ms 间隔 / 500 ms 超时）
+// @details 启动服务 → 声明 proxy（start 后自动连接）→ 启动心跳（200 ms 间隔 / 500 ms 超时）
 //          → 杀死服务 → 验证 OnServiceDied 回调在 2 s 内触发。
 // ============================================================
 TEST_F(HeartbeatReconnectTest, HeartbeatTimeoutDetected) {
@@ -545,13 +577,12 @@ TEST_F(HeartbeatReconnectTest, HeartbeatTimeoutDetected) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
+    ServiceProxyBase proxy(rt, SERVICE_NAME);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME))
         << "Service not registered with ServiceManager";
-
-    ServiceProxyBase proxy(rt, SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(), 0) << "Proxy connect() failed";
-    ASSERT_TRUE(proxy.isConnected())
-        << "Proxy should report connected after successful connect()";
+    ASSERT_TRUE(waitUntil([&proxy]() { return proxy.isConnected(); }, 160, 50))
+        << "Proxy should auto-connect after start()";
 
     std::atomic<bool> death_fired(false);
     proxy.OnServiceDied([&death_fired]() {
@@ -559,26 +590,25 @@ TEST_F(HeartbeatReconnectTest, HeartbeatTimeoutDetected) {
     });
     proxy.startHeartbeat(200, 500);
 
-    for (int i = 0; i < 5; ++i) rt.pollOnce(50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     stopProcess(svc_pid);
+    svc_pid = 0;
 
-    for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
-        rt.pollOnce(50);
-    }
-
-    ASSERT_TRUE(death_fired.load(std::memory_order_acquire))
+    ASSERT_TRUE(waitUntil([&death_fired]() {
+        return death_fired.load(std::memory_order_acquire);
+    }, 80, 50))
         << "OnServiceDied callback should have fired within ~2 s "
         << "(heartbeat 200 ms interval, 500 ms timeout)";
 
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
 // Test 2 — AutoReconnectAfterDeath
 //
 // @brief   服务死亡后自动重连
-// @details 启动服务 → 连接 proxy（默认开启自动重连）+ 心跳 → 杀死服务 → 验证死亡
+// @details 启动服务 → 声明 proxy（自动连接）+ 心跳 → 杀死服务 → 验证死亡
 //          → 重启服务 → 验证重连且 RPC 可用。
 // ============================================================
 TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
@@ -587,42 +617,41 @@ TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
+    ServiceProxyBase proxy(rt, SERVICE_NAME);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME))
         << "Service not registered with ServiceManager";
-    ASSERT_EQ(rt.connectService(SERVICE_NAME), 0) << "connectService failed";
+    ASSERT_TRUE(waitUntil([&proxy]() { return proxy.isConnected(); }, 160, 50));
 
     ASSERT_TRUE(tryEchoRpc(rt, SERVICE_NAME, "pre-death"))
         << "Initial RPC should succeed while service is alive";
-
-    ServiceProxyBase proxy(rt, SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(), 0) << "Proxy connect() failed";
-    ASSERT_TRUE(proxy.isConnected());
 
     std::atomic<bool> death_fired(false);
     proxy.OnServiceDied([&death_fired]() {
         death_fired.store(true, std::memory_order_release);
     });
     proxy.startHeartbeat(200, 500);
-    for (int i = 0; i < 5; ++i) rt.pollOnce(50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     stopProcess(svc_pid);
 
-    for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
-        rt.pollOnce(50);
-    }
-    ASSERT_TRUE(death_fired.load(std::memory_order_acquire))
+    ASSERT_TRUE(waitUntil([&death_fired]() {
+        return death_fired.load(std::memory_order_acquire);
+    }, 80, 50))
         << "Death should be detected via heartbeat after kill";
 
     svc_pid = startProcess(g_program_path, "--child-service", "19950");
     ASSERT_GT(svc_pid, 0) << "Restarting service process failed";
 
-    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME, 80))
+    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME, 160))
         << "Restarted service should re-register with ServiceManager";
 
     bool reconnected = false;
-    for (int i = 0; i < 60 && !reconnected; ++i) {
-        rt.pollOnce(100);
+    for (int i = 0; i < 160 && !reconnected; ++i) {
         reconnected = tryEchoRpc(rt, SERVICE_NAME, "post-restart");
+        if (!reconnected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 
     EXPECT_TRUE(reconnected)
@@ -631,14 +660,14 @@ TEST_F(HeartbeatReconnectTest, AutoReconnectAfterDeath) {
         << "Runtime should report service as connected after auto-reconnect";
 
     stopProcess(svc_pid);
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
 // Test 3 — OnServiceDiedCallbackFires
 //
 // @brief   OnServiceDied 回调触发
-// @details 连接 proxy（不显式启动心跳）→ 注册 OnServiceDied → 杀死服务
+// @details 声明 proxy（不显式启动心跳）→ 注册 OnServiceDied → 杀死服务
 //          → SM 检测死亡并通知 → 验证回调触发。
 // ============================================================
 TEST_F(HeartbeatReconnectTest, OnServiceDiedCallbackFires) {
@@ -647,12 +676,11 @@ TEST_F(HeartbeatReconnectTest, OnServiceDiedCallbackFires) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
+    ServiceProxyBase proxy(rt, SERVICE_NAME);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME))
         << "Service not registered with ServiceManager";
-
-    ServiceProxyBase proxy(rt, SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(), 0) << "Proxy connect() failed";
-    ASSERT_TRUE(proxy.isConnected());
+    ASSERT_TRUE(waitUntil([&proxy]() { return proxy.isConnected(); }, 160, 50));
 
     std::atomic<bool> death_fired(false);
     proxy.OnServiceDied([&death_fired]() {
@@ -660,111 +688,15 @@ TEST_F(HeartbeatReconnectTest, OnServiceDiedCallbackFires) {
     });
 
     stopProcess(svc_pid);
+    svc_pid = 0;
 
-    for (int i = 0; i < 150 && !death_fired.load(std::memory_order_acquire); ++i) {
-        rt.pollOnce(100);
-    }
-
-    ASSERT_TRUE(death_fired.load(std::memory_order_acquire))
+    ASSERT_TRUE(waitUntil([&death_fired]() {
+        return death_fired.load(std::memory_order_acquire);
+    }, 150, 100))
         << "OnServiceDied callback should fire when SM detects service death "
         << "(via SM-side heartbeat / lost TCP control channel)";
 
-    rt.stop();
-}
-
-// ============================================================
-// Test 4 — DirectDisconnectTriggersReconnect
-//
-// @brief   显式断开后触发重连
-// @details 连接 proxy + 启动心跳 → 显式 disconnect() → 再次 connect()
-//          → 重启心跳 → 验证连接重建且心跳仍能检测死亡。
-// ============================================================
-TEST_F(HeartbeatReconnectTest, DirectDisconnectTriggersReconnect) {
-    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
-    ASSERT_GT(svc_pid, 0) << "Failed to start service child";
-
-    OmniRuntime rt;
-    ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
-    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
-
-    ServiceProxyBase proxy(rt, SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(), 0) << "Initial connect failed";
-    ASSERT_TRUE(proxy.isConnected());
-    proxy.startHeartbeat(200, 500);
-    for (int i = 0; i < 5; ++i) rt.pollOnce(50);
-
-    proxy.disconnect();
-    ASSERT_FALSE(proxy.isConnected())
-        << "isConnected() should be false after explicit disconnect()";
-
-    ASSERT_EQ(proxy.connect(), 0)
-        << "Re-connect after explicit disconnect should succeed";
-    ASSERT_TRUE(proxy.isConnected())
-        << "isConnected() should be true after re-connect";
-    proxy.startHeartbeat(200, 500);
-    for (int i = 0; i < 5; ++i) rt.pollOnce(50);
-
-    std::atomic<bool> death_fired(false);
-    proxy.OnServiceDied([&death_fired]() {
-        death_fired.store(true, std::memory_order_release);
-    });
-
-    stopProcess(svc_pid);
-
-    for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
-        rt.pollOnce(50);
-    }
-    ASSERT_TRUE(death_fired.load(std::memory_order_acquire))
-        << "Heartbeat should still detect death after explicit disconnect/connect cycle";
-
-    rt.stop();
-}
-
-// ============================================================
-// Test 5 — DisconnectCleansUpState
-//
-// @brief   disconnect 清理状态
-// @details 连接 proxy → disconnect() → 验证 isConnected() 为 false → 再次 connect()
-//          → 验证无残留心跳定时器（不崩溃）、isConnected() 为 true。
-// ============================================================
-TEST_F(HeartbeatReconnectTest, DisconnectCleansUpState) {
-    TestPid svc_pid = startProcess(g_program_path, "--child-service", "19950");
-    ASSERT_GT(svc_pid, 0) << "Failed to start service child";
-
-    OmniRuntime rt;
-    ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0) << "Client runtime init failed";
-    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
-
-    ServiceProxyBase proxy(rt, SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(), 0) << "Initial connect failed";
-    ASSERT_TRUE(proxy.isConnected());
-
-    proxy.disconnect();
-    ASSERT_FALSE(proxy.isConnected())
-        << "isConnected() should return false after disconnect()";
-
-    ASSERT_EQ(proxy.connect(), 0)
-        << "Re-connect after disconnect should succeed without crash";
-    ASSERT_TRUE(proxy.isConnected())
-        << "isConnected() should be true after re-connect";
-    proxy.startHeartbeat(200, 500);
-    for (int i = 0; i < 5; ++i) rt.pollOnce(50);
-
-    std::atomic<bool> death_fired(false);
-    proxy.OnServiceDied([&death_fired]() {
-        death_fired.store(true, std::memory_order_release);
-    });
-
-    stopProcess(svc_pid);
-
-    for (int i = 0; i < 40 && !death_fired.load(std::memory_order_acquire); ++i) {
-        rt.pollOnce(50);
-    }
-    ASSERT_TRUE(death_fired.load(std::memory_order_acquire))
-        << "Heartbeat should detect death after disconnect/reconnect, "
-        << "confirming no stale heartbeat state";
-
-    rt.stop();
+    owner.stop();
 }
 
 TEST_F(HeartbeatReconnectTest, DisconnectCancelsPendingReconnect) {
@@ -773,10 +705,10 @@ TEST_F(HeartbeatReconnectTest, DisconnectCancelsPendingReconnect) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SM_PORT), 0);
-    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
-
     ServiceProxyBase proxy(rt, SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(), 0);
+    RuntimeThread owner(rt);
+    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME));
+    ASSERT_TRUE(waitUntil([&proxy]() { return proxy.isConnected(); }, 160, 50));
     proxy.setReconnectInterval(5000);
 
     std::atomic<bool> death_fired(false);
@@ -784,34 +716,38 @@ TEST_F(HeartbeatReconnectTest, DisconnectCancelsPendingReconnect) {
         death_fired.store(true, std::memory_order_release);
     });
     stopProcess(svc_pid);
-    for (int i = 0; i < 150 && !death_fired.load(std::memory_order_acquire); ++i) {
-        rt.pollOnce(100);
-    }
-    ASSERT_TRUE(death_fired.load(std::memory_order_acquire));
+    svc_pid = 0;
+    ASSERT_TRUE(waitUntil([&death_fired]() {
+        return death_fired.load(std::memory_order_acquire);
+    }, 150, 100));
 
     // 现在有一个 5 秒后触发的重连排队。显式 disconnect 必须取消该定时器并移除重连/心跳配置。
     ASSERT_EQ(rt.disconnectService(SERVICE_NAME), 0);
     svc_pid = startProcess(g_program_path, "--child-service", "19950");
     ASSERT_GT(svc_pid, 0);
-    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME, 80));
-    for (int i = 0; i < 60; ++i) rt.pollOnce(100);
+    ASSERT_TRUE(waitServiceRegistered(rt, SERVICE_NAME, 160));
+    // 覆盖 >1 个 5s 重连间隔，确认不会自动连回。
+    for (int i = 0; i < 70; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     EXPECT_FALSE(rt.isServiceConnected(SERVICE_NAME));
 
     stopProcess(svc_pid);
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
-// Test 10 — ConnectionWithSiblingServiceSurvivesTimeout
+// Test 7 — SessionHeartbeatTimeoutRemovesAllServices
 //
 // @brief   有兄弟服务存活的连接可跨过超时
-// @details 一条控制连接注册 A 和 B，但只为 A 发心跳。B 超时时 SM 必须保留连接（A 仍存活）。
+// @details 一条控制连接注册 A 和 B，只为 A 发心跳。B 超时时 SM 必须保留连接（A 仍存活）。
 //          当 A 也停止心跳后，连接已无存活服务，必须关闭。
 // ============================================================
 TEST_F(HeartbeatLifecycleTest, SessionHeartbeatTimeoutRemovesAllServices) {
     OmniRuntime rt;
     rt.setHeartbeatPolicy(100, 500);
     ASSERT_EQ(rt.init("127.0.0.1", HB_LIFECYCLE_SM_PORT), 0);
+    RuntimeThread owner(rt);
 
     RawControlClient raw;
     ASSERT_TRUE(raw.connectTo("127.0.0.1", HB_LIFECYCLE_SM_PORT));
@@ -819,46 +755,31 @@ TEST_F(HeartbeatLifecycleTest, SessionHeartbeatTimeoutRemovesAllServices) {
     ASSERT_TRUE(raw.sendRegister("SiblingB"));
     raw.drain();
 
-    bool both_registered = false;
-    for (int i = 0; i < 50 && !both_registered; ++i) {
-        both_registered = (smServiceState(rt, "SiblingA") == 1)
-                          && (smServiceState(rt, "SiblingB") == 1);
-        if (!both_registered) {
-            rt.pollOnce(50);
-        }
-    }
-    ASSERT_TRUE(both_registered) << "Both sibling services should register";
+    ASSERT_TRUE(waitUntil([&rt]() {
+        return (smServiceState(rt, "SiblingA") == 1)
+               && (smServiceState(rt, "SiblingB") == 1);
+    }, 100, 50)) << "Both sibling services should register";
 
     // 运行时级会话：一条心跳同时覆盖 A/B；持续心跳时两者都保持
     for (int i = 0; i < 8; ++i) {
         ASSERT_TRUE(raw.sendHeartbeat());
-        rt.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         EXPECT_EQ(smServiceState(rt, "SiblingA"), 1);
         EXPECT_EQ(smServiceState(rt, "SiblingB"), 1);
     }
 
     // 停止心跳后，会话超时必须同时摘除 A/B 并关闭控制连接
-    bool both_gone = false;
-    for (int i = 0; i < 40 && !both_gone; ++i) {
-        // 父 runtime 是纯客户端，必须继续 pollOnce 才能发送自己的会话心跳，
-        // 否则会被同一个 500ms 演练超时误摘。
-        rt.pollOnce(100);
-        both_gone = (smServiceState(rt, "SiblingA") == 0)
-                    && (smServiceState(rt, "SiblingB") == 0);
-    }
-    EXPECT_TRUE(both_gone)
+    EXPECT_TRUE(waitUntil([&rt]() {
+        return (smServiceState(rt, "SiblingA") == 0)
+               && (smServiceState(rt, "SiblingB") == 0);
+    }, 80, 100))
         << "runtime session timeout must remove all services owned by the session";
 
     raw.drain();
-    bool connection_closed = false;
-    for (int i = 0; i < 30 && !connection_closed; ++i) {
-        rt.pollOnce(50);
-        connection_closed = (raw.recvProbe() == 0);
-    }
-    EXPECT_TRUE(connection_closed)
+    EXPECT_TRUE(waitUntil([&raw]() { return raw.recvProbe() == 0; }, 80, 50))
         << "Control connection must close when the session times out";
 
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -866,7 +787,7 @@ TEST_F(HeartbeatLifecycleTest, SessionHeartbeatTimeoutRemovesAllServices) {
 //
 // @brief   两个客户端分别绑定同名服务的两个实例，各自 RPC 命中正确实例
 // @details 启动 inst-a / inst-b 两个子进程服务；两个 Proxy 分别
-//          connect(host_id, instance_id)，各自 EchoInstance 必须回显
+//          setInstance(host_id, instance_id)，各自 EchoInstance 必须回显
 //          自己绑定的实例 id（而非默认第一实例）。
 // ============================================================
 TEST_F(InstanceAddressingTest, TwoClientsReachBoundInstance) {
@@ -877,6 +798,9 @@ TEST_F(InstanceAddressingTest, TwoClientsReachBoundInstance) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    InstanceEchoProxy proxy_a(rt, INSTANCE_SERVICE_NAME);
+    InstanceEchoProxy proxy_b(rt, INSTANCE_SERVICE_NAME);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 2))
         << "Both instances should register under the same service name";
 
@@ -891,10 +815,11 @@ TEST_F(InstanceAddressingTest, TwoClientsReachBoundInstance) {
     ASSERT_FALSE(host_a.empty());
     ASSERT_FALSE(host_b.empty());
 
-    InstanceEchoProxy proxy_a(rt, INSTANCE_SERVICE_NAME);
-    InstanceEchoProxy proxy_b(rt, INSTANCE_SERVICE_NAME);
-    ASSERT_EQ(proxy_a.connect(host_a, "inst-a"), 0) << "bind inst-a failed";
-    ASSERT_EQ(proxy_b.connect(host_b, "inst-b"), 0) << "bind inst-b failed";
+    proxy_a.setInstance(host_a, "inst-a");
+    proxy_b.setInstance(host_b, "inst-b");
+    ASSERT_TRUE(waitUntil([&]() {
+        return proxy_a.isConnected() && proxy_b.isConnected();
+    }, 160, 50)) << "proxies should auto-connect to their bound instances";
 
     for (int i = 0; i < 5; ++i) {
         std::string got_a;
@@ -905,9 +830,7 @@ TEST_F(InstanceAddressingTest, TwoClientsReachBoundInstance) {
         EXPECT_EQ(got_b, "inst-b") << "proxy bound to inst-b reached the wrong instance";
     }
 
-    proxy_a.disconnect();
-    proxy_b.disconnect();
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -921,21 +844,28 @@ TEST_F(InstanceAddressingTest, UnknownInstanceReturnsNotFound) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 1));
 
-    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
-    EXPECT_EQ(proxy.connect(rt.hostId(), "missing-instance"),
-              static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND));
-    EXPECT_FALSE(proxy.isConnected());
+    std::vector<ServiceInfo> instances;
+    ASSERT_EQ(rt.listServiceInstances(INSTANCE_SERVICE_NAME, instances), 0);
+    ASSERT_EQ(instances.size(), 1u);
 
-    rt.stop();
+    int ret = rt.connectServiceInstance(INSTANCE_SERVICE_NAME, instances[0].host_id,
+                                        "missing-instance");
+    EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND));
+    EXPECT_FALSE(rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME,
+                                               instances[0].host_id,
+                                               "missing-instance"));
+
+    owner.stop();
 }
 
 // ============================================================
 // P3 Test 3 — EmptyInstanceIdResolvesDeterministically
 //
 // @brief   不指定实例的默认路径行为不变：命中确定性第一实例
-// @details connect()/invoke() 连接键仍为服务名本身，与 P1/P2 语义一致。
+// @details 默认 proxy 连接键仍为服务名本身，与 P1/P2 语义一致。
 // ============================================================
 TEST_F(InstanceAddressingTest, EmptyInstanceIdResolvesDeterministically) {
     child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
@@ -945,6 +875,8 @@ TEST_F(InstanceAddressingTest, EmptyInstanceIdResolvesDeterministically) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 2));
 
     std::vector<ServiceInfo> instances;
@@ -956,15 +888,13 @@ TEST_F(InstanceAddressingTest, EmptyInstanceIdResolvesDeterministically) {
     EXPECT_EQ(first.instance_id, instances[0].instance_id)
         << "lookupService must stay aligned with listServiceInstances first entry";
 
-    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(), 0);
+    ASSERT_TRUE(waitUntil([&proxy]() { return proxy.isConnected(); }, 160, 50));
     std::string got;
     ASSERT_EQ(proxy.EchoInstance(got), 0);
     EXPECT_EQ(got, instances[0].instance_id)
         << "default (no instance) path must reach the deterministic first instance";
 
-    proxy.disconnect();
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -981,6 +911,8 @@ TEST_F(InstanceAddressingTest, BoundProxyReconnectDisableIsInstanceKeyed) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 1));
 
     std::vector<ServiceInfo> instances;
@@ -989,15 +921,16 @@ TEST_F(InstanceAddressingTest, BoundProxyReconnectDisableIsInstanceKeyed) {
     const std::string host_a = instances[0].host_id;
     ASSERT_FALSE(host_a.empty());
 
-    InstanceEchoProxy proxy(rt, INSTANCE_SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(host_a, "inst-a"), 0);
-    ASSERT_TRUE(rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a"));
+    proxy.setInstance(host_a, "inst-a");
+    ASSERT_TRUE(waitUntil([&]() {
+        return rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a");
+    }, 160, 50));
 
     // 短心跳窗口：绑定实例的心跳必须作用在实例连接键上。旧实现作用到服务名键，
     // 每拍都会打 "[E][ConnMgr] No connection to <name>"（可由 stderr 断言佐证）
     proxy.startHeartbeat(100, 1000);
     for (int i = 0; i < 8; ++i) {
-        rt.pollOnce(50);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     EXPECT_TRUE(rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a"))
         << "bound-proxy heartbeat must not tear down the instance connection";
@@ -1007,15 +940,9 @@ TEST_F(InstanceAddressingTest, BoundProxyReconnectDisableIsInstanceKeyed) {
     stopProcess(child_a_);
     child_a_ = 0;
 
-    bool lost = false;
-    for (int i = 0; i < 80 && !lost; ++i) {
-        if (!rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a")) {
-            lost = true;
-        } else {
-            rt.pollOnce(50);
-        }
-    }
-    ASSERT_TRUE(lost) << "data connection to the killed instance should drop";
+    ASSERT_TRUE(waitUntil([&]() {
+        return !rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a");
+    }, 80, 50)) << "data connection to the killed instance should drop";
 
     child_a_ = startProcess(g_program_path, "--child-instance-service", "19972", "inst-a");
     ASSERT_GT(child_a_, 0) << "Failed to restart inst-a child";
@@ -1026,13 +953,13 @@ TEST_F(InstanceAddressingTest, BoundProxyReconnectDisableIsInstanceKeyed) {
         if (rt.isServiceInstanceConnected(INSTANCE_SERVICE_NAME, host_a, "inst-a")) {
             reconnected = true;
         } else {
-            rt.pollOnce(50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
     EXPECT_FALSE(reconnected)
         << "auto reconnect must stay disabled for a bound proxy (instance-keyed)";
 
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -1051,6 +978,7 @@ TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", INSTANCE_SM_PORT), 0);
+    RuntimeThread owner(rt);
     ASSERT_TRUE(waitInstanceCount(rt, INSTANCE_SERVICE_NAME, 2));
 
     std::vector<ServiceInfo> instances;
@@ -1091,11 +1019,9 @@ TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
     stopProcess(child_a_);
     child_a_ = 0;
 
-    for (int i = 0; i < 120 && a_fires.load(std::memory_order_acquire) == 0; ++i) {
-        rt.pollOnce(50);
-    }
-    EXPECT_GE(a_fires.load(std::memory_order_acquire), 1)
-        << "instance-a subscriber should fire when inst-a dies";
+    ASSERT_TRUE(waitUntil([&]() {
+        return a_fires.load(std::memory_order_acquire) > 0;
+    }, 120, 50)) << "instance-a subscriber should fire when inst-a dies";
     EXPECT_EQ(fired_name, INSTANCE_SERVICE_NAME);
     EXPECT_EQ(fired_host, host_a);
     EXPECT_EQ(fired_instance, "inst-a")
@@ -1105,30 +1031,22 @@ TEST_F(InstanceAddressingTest, InstanceDeathNotifiesOnlyTargetInstance) {
     EXPECT_EQ(name_fires.load(std::memory_order_acquire), 0)
         << "name-level subscriber must not fire while inst-b is still alive";
 
-    bool b_alive = false;
-    for (int i = 0; i < 40 && !b_alive; ++i) {
+    EXPECT_TRUE(waitUntil([&]() {
         std::vector<ServiceInfo> now;
-        if (rt.listServiceInstances(INSTANCE_SERVICE_NAME, now) == 0
-            && now.size() == 1u && now[0].instance_id == "inst-b") {
-            b_alive = true;
-        } else {
-            rt.pollOnce(50);
-        }
-    }
-    EXPECT_TRUE(b_alive) << "the surviving instance must remain registered";
+        return rt.listServiceInstances(INSTANCE_SERVICE_NAME, now) == 0
+               && now.size() == 1u && now[0].instance_id == "inst-b";
+    }, 80, 50)) << "the surviving instance must remain registered";
 
     stopProcess(child_b_);
     child_b_ = 0;
 
-    for (int i = 0; i < 120 && name_fires.load(std::memory_order_acquire) == 0; ++i) {
-        rt.pollOnce(50);
-    }
-    EXPECT_GE(name_fires.load(std::memory_order_acquire), 1)
-        << "name-level subscriber should fire when the last instance dies";
+    ASSERT_TRUE(waitUntil([&]() {
+        return name_fires.load(std::memory_order_acquire) > 0;
+    }, 120, 50)) << "name-level subscriber should fire when the last instance dies";
     EXPECT_GE(b_fires.load(std::memory_order_acquire), 1)
         << "instance-b subscriber should fire when inst-b dies";
 
-    rt.stop();
+    owner.stop();
 }
 
 int main(int argc, char** argv) {
@@ -1142,7 +1060,7 @@ int main(int argc, char** argv) {
         InstanceEchoService svc(INSTANCE_SERVICE_NAME, instance_id);
         svc.setInstanceId(instance_id);
         if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
-        while (true) { rt.pollOnce(100); }
+        rt.start();
         return 0;
     }
 
@@ -1152,7 +1070,7 @@ int main(int argc, char** argv) {
         if (rt.init("127.0.0.1", port) != 0) return 1;
         HrtbtTestService svc(SERVICE_NAME);
         if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
-        while (true) { rt.pollOnce(100); }
+        rt.start();
         return 0;
     }
 
@@ -1163,26 +1081,28 @@ int main(int argc, char** argv) {
         if (rt.init("127.0.0.1", port) != 0) return 1;
         HrtbtTestService svc(SERVICE_NAME);
         if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
+        std::thread start_thread([&rt]() { rt.start(); });
+        for (int i = 0; i < 200 && !rt.isReady(); ++i) {
+            platform::sleepMs(20);
+        }
         // C2b 回归：对本进程已注册服务调用 stopHeartbeat 只影响数据面检测，
         // 不得停掉向 SM 的控制面注册心跳（否则会超时→断开→重注册循环）
         rt.startHeartbeat(SERVICE_NAME, 100, 300);
         rt.stopHeartbeat(SERVICE_NAME);
-        while (true) { rt.pollOnce(100); }
+        start_thread.join();
         return 0;
     }
 
     if (argc >= 4 && strcmp(argv[1], "--child-blocked-service") == 0) {
         uint16_t port = (uint16_t)atoi(argv[2]);
-        int block_ms = atoi(argv[3]);
+        uint32_t block_ms = static_cast<uint32_t>(atoi(argv[3]));
         OmniRuntime rt;
         rt.setHeartbeatPolicy(200, 500);
         if (rt.init("127.0.0.1", port) != 0) return 1;
-        HrtbtTestService svc(SERVICE_NAME);
+        HrtbtTestService svc(SERVICE_NAME, block_ms);
         if (rt.registerService(&svc) != 0) { rt.stop(); return 1; }
-        // 阻塞 owner-loop 超过 SM 超时窗口，模拟卡死；恢复后由 C2 的连接断开
-        // 驱动 reconnect + restoreControlPlaneState 重新注册
-        if (block_ms > 0) platform::sleepMs(static_cast<uint32_t>(block_ms));
-        while (true) { rt.pollOnce(100); }
+        // owner-loop 由 start() 阻塞驱动；父进程通过 Block 调用让 onInvoke 睡过 SM 超时窗口。
+        rt.start();
         return 0;
     }
 

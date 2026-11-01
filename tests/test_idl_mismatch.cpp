@@ -1,6 +1,7 @@
 // test_idl_mismatch.cpp - IDL 不匹配检测测试
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include "platform/platform_test.h"
 #include <omnibinder/omnibinder.h>
 #include <omnibinder/omnibinder_c.h>
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <cstring>
 #include <atomic>
+#include <functional>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -134,6 +136,24 @@ protected:
     InterfaceInfo iface_;
 };
 
+static bool waitUntil(const std::function<bool()>& predicate, int attempts,
+                      int sleep_ms = 100) {
+    for (int i = 0; i < attempts; ++i) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+    }
+    return predicate();
+}
+
+static bool waitServiceRegistered(OmniRuntime& runtime, const char* name) {
+    for (int i = 0; i < 200; ++i) {
+        ServiceInfo info;
+        if (runtime.lookupService(name, info) == 0) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
 class IdlMismatchTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -163,13 +183,10 @@ TEST_F(IdlMismatchTest, InvokeWrongIdlHashReturnsMismatch) {
     ASSERT_EQ(server.init("127.0.0.1", SM_PORT), 0);
     EchoService svc;
     ASSERT_EQ(server.registerService(&svc), 0);
+    RuntimeThread server_owner(server);
+    ASSERT_TRUE(waitServiceRegistered(server, "IdlTestService"));
     const uint16_t svc_port = lookupRegisteredPort("IdlTestService");
     ASSERT_TRUE(waitPortReady(svc_port, 10));
-
-    // 服务端轮询线程 — event-loop 必须运行才能接受连接并处理消息
-    std::atomic<bool> srv_stop{false};
-    std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(10); });
-    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc_port));
@@ -190,8 +207,7 @@ TEST_F(IdlMismatchTest, InvokeWrongIdlHashReturnsMismatch) {
     ASSERT_TRUE(BufferView(reply.payload.data(), reply.payload.size()).tryReadInt32(status));
     EXPECT_EQ(status, static_cast<int32_t>(ErrorCode::ERR_IDL_MISMATCH));
     rogue.close();
-    srv_stop = true; srv_poll.join();
-    server.stop();
+    server_owner.stop();
 }
 
 TEST_F(IdlMismatchTest, InvokeCorrectIdlHashSucceeds) {
@@ -199,13 +215,10 @@ TEST_F(IdlMismatchTest, InvokeCorrectIdlHashSucceeds) {
     ASSERT_EQ(server.init("127.0.0.1", SM_PORT), 0);
     EchoService svc;
     ASSERT_EQ(server.registerService(&svc), 0);
+    RuntimeThread server_owner(server);
+    ASSERT_TRUE(waitServiceRegistered(server, "IdlTestService"));
     const uint16_t svc_port = lookupRegisteredPort("IdlTestService");
     ASSERT_TRUE(waitPortReady(svc_port, 10));
-
-    // 服务端轮询线程 — event-loop 必须运行才能接受连接并处理消息
-    std::atomic<bool> srv_stop{false};
-    std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(10); });
-    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     TcpConnection rogue;
     ASSERT_TRUE(connectTcp(rogue, "127.0.0.1", svc_port));
@@ -226,8 +239,7 @@ TEST_F(IdlMismatchTest, InvokeCorrectIdlHashSucceeds) {
     ASSERT_TRUE(BufferView(reply.payload.data(), reply.payload.size()).tryReadInt32(status));
     EXPECT_EQ(status, 0);
     rogue.close();
-    srv_stop = true; srv_poll.join();
-    server.stop();
+    server_owner.stop();
 }
 
 TEST_F(IdlMismatchTest, InvokeWrongHashErrorLog) {
@@ -235,7 +247,6 @@ TEST_F(IdlMismatchTest, InvokeWrongHashErrorLog) {
     ASSERT_EQ(server.init("127.0.0.1", SM_PORT), 0);
     EchoService svc;
     ASSERT_EQ(server.registerService(&svc), 0);
-    ASSERT_TRUE(waitPortReady(lookupRegisteredPort("IdlTestService"), 10));
 
     // stderr 重定向必须在 owner 线程启动之前完成、在其 join 之后恢复：
     // freopen/setbuf 会改写全局 stderr 的 FILE 缓冲，与 owner 线程并发 fprintf
@@ -246,24 +257,26 @@ TEST_F(IdlMismatchTest, InvokeWrongHashErrorLog) {
     ASSERT_NE(cap, nullptr);
     setbuf(stderr, NULL);
 
-    std::atomic<bool> srv_stop{false};
-    std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(5); });
-    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
+    {
+        RuntimeThread server_owner(server);
+        ASSERT_TRUE(waitServiceRegistered(server, "IdlTestService"));
 
-    OmniRuntime client;
-    ASSERT_EQ(client.init("127.0.0.1", SM_PORT), 0);
-    ASSERT_EQ(client.connectService("IdlTestService"), 0);
+        OmniRuntime client;
+        ASSERT_EQ(client.init("127.0.0.1", SM_PORT), 0);
+        RuntimeThread client_owner(client);
+        ASSERT_TRUE(waitUntil([&client]() { return client.isReady(); }, 100));
+        ASSERT_EQ(client.connectService("IdlTestService"), 0);
 
-    // 用错误 hash 的阻塞 invoke：分发路径与 oneway 相同，且能保证服务端已处理该消息
-    Buffer req, resp;
-    req.writeUint32(99);
-    int ret = client.invoke("IdlTestService", IFACE_ID, METHOD_ECHO, WRONG_HASH, req, resp, 5000);
-    EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
+        // 用错误 hash 的阻塞 invoke：分发路径与 oneway 相同，且能保证服务端已处理该消息
+        Buffer req, resp;
+        req.writeUint32(99);
+        int ret = client.invoke("IdlTestService", IFACE_ID, METHOD_ECHO, WRONG_HASH, req, resp, 5000);
+        EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
 
-    // 先停 owner 线程再恢复 stderr：服务端 poll 线程可能仍在 omni_log_vprint 中读写
-    // 全局 stderr，提前 fclose/恢复会与其构成数据竞争（TSan 可捕获）
-    srv_stop = true;
-    srv_poll.join();
+        client_owner.stop();
+        server_owner.stop();
+    }
+
     fflush(stderr);
     fclose(cap);
     stderr = saved;
@@ -272,7 +285,6 @@ TEST_F(IdlMismatchTest, InvokeWrongHashErrorLog) {
     std::string content((std::istreambuf_iterator<char>(log)), {});
     EXPECT_NE(content.find("idl_mismatch"), std::string::npos);
 
-    client.stop();
     server.stop();
     platform::removeFile(log_path);
 }
@@ -370,14 +382,14 @@ TEST_F(IdlMismatchTest, ClientHashAgainstUndeclaredServerHashReturnsMismatch) {
     ASSERT_EQ(server.init("127.0.0.1", SM_PORT), 0);
     NoHashService svc;
     ASSERT_EQ(server.registerService(&svc), 0);
+    RuntimeThread server_owner(server);
+    ASSERT_TRUE(waitServiceRegistered(server, "NoHashService"));
     ASSERT_TRUE(waitPortReady(lookupRegisteredPort("NoHashService"), 10));
-
-    std::atomic<bool> srv_stop{false};
-    std::thread srv_poll([&]() { while (!srv_stop) server.pollOnce(5); });
-    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
 
     OmniRuntime client;
     ASSERT_EQ(client.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread client_owner(client);
+    ASSERT_TRUE(waitUntil([&client]() { return client.isReady(); }, 100));
     ASSERT_EQ(client.connectService("NoHashService"), 0);
     Buffer req, resp;
     req.writeUint32(7);
@@ -385,9 +397,8 @@ TEST_F(IdlMismatchTest, ClientHashAgainstUndeclaredServerHashReturnsMismatch) {
                             SERVER_HASH, req, resp, 3000);
     EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
 
-    srv_stop = true; srv_poll.join();
-    client.stop();
-    server.stop();
+    client_owner.stop();
+    server_owner.stop();
 }
 
 TEST_F(IdlMismatchTest, CServiceDeclaredHashEnforcedEndToEnd) {
@@ -398,48 +409,58 @@ TEST_F(IdlMismatchTest, CServiceDeclaredHashEnforcedEndToEnd) {
     ASSERT_NE(svc, nullptr);
     omni_service_add_method_ex(svc, METHOD_ECHO, "echo", "uint32_t", "uint32_t", SERVER_HASH);
     ASSERT_EQ(omni_runtime_register_service(server, svc), 0);
-    // 经线程安全的实例枚举获取端口：omni_service_port(svc) 与 C++ Service::port() 同源，
-    // 由 owner 线程写入，主线程直读会与 owner 线程构成数据竞争（TSan 可捕获）
-    struct CPortProbe { uint16_t port; };
-    CPortProbe cport = {0};
-    ASSERT_EQ(omni_runtime_list_instances(server, "CIdlService",
-        [](const omni_service_instance_t* info, void* ud) {
-            static_cast<CPortProbe*>(ud)->port = info->port;
-        }, &cport), 0);
-    ASSERT_TRUE(waitPortReady(cport.port, 10));
 
-    std::atomic<bool> srv_stop{false};
-    std::thread srv_poll([&]() { while (!srv_stop) omni_runtime_poll_once(server, 5); });
-    ScopedThreadJoiner srv_join(srv_poll, [&srv_stop]() { srv_stop = true; });
+    {
+        std::thread server_thread([server]() { omni_runtime_start(server); });
+        ScopedThreadJoiner server_join(server_thread, [server]() { omni_runtime_stop(server); });
+        for (int i = 0; i < 200 && !omni_runtime_is_ready(server); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ASSERT_TRUE(omni_runtime_is_ready(server));
 
-    omni_runtime_t* client = omni_runtime_create();
-    ASSERT_NE(client, nullptr);
-    ASSERT_EQ(omni_runtime_init(client, "127.0.0.1", SM_PORT), 0);
-    ASSERT_EQ(omni_runtime_connect_service(client, "CIdlService"), 0);
+        // 经线程安全的实例枚举获取端口：omni_service_port(svc) 与 C++ Service::port() 同源，
+        // 由 owner 线程写入，主线程直读会与 owner 线程构成数据竞争（TSan 可捕获）
+        struct CPortProbe { uint16_t port; };
+        CPortProbe cport = {0};
+        ASSERT_EQ(omni_runtime_list_instances(server, "CIdlService",
+            [](const omni_service_instance_t* info, void* ud) {
+                static_cast<CPortProbe*>(ud)->port = info->port;
+            }, &cport), 0);
+        ASSERT_TRUE(waitPortReady(cport.port, 10));
 
-    omni_buffer_t* req = omni_buffer_create();
-    omni_buffer_t* resp = omni_buffer_create();
-    ASSERT_NE(req, nullptr);
-    ASSERT_NE(resp, nullptr);
-    omni_buffer_write_uint32(req, 42);
+        omni_runtime_t* client = omni_runtime_create();
+        ASSERT_NE(client, nullptr);
+        ASSERT_EQ(omni_runtime_init(client, "127.0.0.1", SM_PORT), 0);
+        {
+            std::thread client_thread([client]() { omni_runtime_start(client); });
+            ScopedThreadJoiner client_join(client_thread, [client]() { omni_runtime_stop(client); });
+            for (int i = 0; i < 200 && !omni_runtime_is_ready(client); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            ASSERT_TRUE(omni_runtime_is_ready(client));
+            ASSERT_EQ(omni_runtime_connect_service(client, "CIdlService"), 0);
 
-    int ret = omni_runtime_invoke(client, "CIdlService", IFACE_ID, METHOD_ECHO,
-                                  SERVER_HASH, req, resp, 3000);
-    EXPECT_EQ(ret, 0);
-    EXPECT_EQ(omni_buffer_read_uint32(resp), 43u);
+            omni_buffer_t* req = omni_buffer_create();
+            omni_buffer_t* resp = omni_buffer_create();
+            ASSERT_NE(req, nullptr);
+            ASSERT_NE(resp, nullptr);
+            omni_buffer_write_uint32(req, 42);
 
-    ret = omni_runtime_invoke(client, "CIdlService", IFACE_ID, METHOD_ECHO,
-                              WRONG_HASH, req, resp, 3000);
-    EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
+            int ret = omni_runtime_invoke(client, "CIdlService", IFACE_ID, METHOD_ECHO,
+                                          SERVER_HASH, req, resp, 3000);
+            EXPECT_EQ(ret, 0);
+            EXPECT_EQ(omni_buffer_read_uint32(resp), 43u);
 
-    omni_buffer_destroy(req);
-    omni_buffer_destroy(resp);
-    omni_runtime_stop(client);
-    omni_runtime_destroy(client);
+            ret = omni_runtime_invoke(client, "CIdlService", IFACE_ID, METHOD_ECHO,
+                                      WRONG_HASH, req, resp, 3000);
+            EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
 
-    srv_stop = true;
-    srv_poll.join();
-    omni_runtime_stop(server);
+            omni_buffer_destroy(req);
+            omni_buffer_destroy(resp);
+        }
+        omni_runtime_destroy(client);
+    }
+
     omni_service_destroy(svc);
     omni_runtime_destroy(server);
 }
@@ -449,25 +470,31 @@ TEST_F(IdlMismatchTest, TopicSubscribeWithWrongExpectedHashReturnsMismatch) {
     ASSERT_EQ(pub.init("127.0.0.1", SM_PORT), 0);
     EchoService svc;
     ASSERT_EQ(pub.registerService(&svc), 0);
+    RuntimeThread pub_owner(pub);
+    ASSERT_TRUE(waitUntil([&pub]() { return pub.isReady(); }, 100));
     ASSERT_EQ(pub.publishTopic("HashTopic", SERVER_HASH), 0);
 
     OmniRuntime sub;
     ASSERT_EQ(sub.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread sub_owner(sub);
+    ASSERT_TRUE(waitUntil([&sub]() { return sub.isReady(); }, 100));
     std::atomic<int> hits{0};
     int ret = sub.subscribeTopic("HashTopic", WRONG_HASH,
         [&hits](uint32_t, const Buffer&) { hits++; },
         nullptr);
     EXPECT_EQ(ret, static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
-    for (int i = 0; i < 10; ++i) sub.pollOnce(10);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
     EXPECT_EQ(hits.load(), 0);
 
-    sub.stop();
-    pub.stop();
+    sub_owner.stop();
+    pub_owner.stop();
 }
 
 TEST_F(IdlMismatchTest, TopicPublisherNotifyWrongHashNotifiesError) {
     OmniRuntime sub;
     ASSERT_EQ(sub.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread sub_owner(sub);
+    ASSERT_TRUE(waitUntil([&sub]() { return sub.isReady(); }, 100));
     std::atomic<int> hits{0};
     std::atomic<int> err_code{0};
     ASSERT_EQ(sub.subscribeTopic("LateHashTopic", SERVER_HASH,
@@ -480,14 +507,16 @@ TEST_F(IdlMismatchTest, TopicPublisherNotifyWrongHashNotifiesError) {
     ASSERT_EQ(pub.init("127.0.0.1", SM_PORT), 0);
     EchoService svc;
     ASSERT_EQ(pub.registerService(&svc), 0);
+    RuntimeThread pub_owner(pub);
+    ASSERT_TRUE(waitUntil([&pub]() { return pub.isReady(); }, 100));
     ASSERT_EQ(pub.publishTopic("LateHashTopic", WRONG_HASH), 0);
 
     for (int i = 0; i < 250 && err_code.load() == 0; ++i) {
-        sub.pollOnce(20);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     EXPECT_EQ(err_code.load(), static_cast<int>(ErrorCode::ERR_IDL_MISMATCH));
     EXPECT_EQ(hits.load(), 0);
 
-    sub.stop();
-    pub.stop();
+    pub_owner.stop();
+    sub_owner.stop();
 }

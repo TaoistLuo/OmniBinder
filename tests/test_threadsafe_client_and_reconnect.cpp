@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
 #include <atomic>
@@ -38,10 +39,33 @@ private:
 struct TsClientServerCtx {
     OmniRuntime runtime;
     ThreadSafeService service;
-    std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    TsClientServerCtx() : registered(false), should_stop(false) {}
+    std::thread thread;
+    TsClientServerCtx() {}
 };
+
+static bool waitUntilReady(OmniRuntime& runtime, int attempts) {
+    for (int i = 0; i < attempts; ++i) {
+        if (runtime.isReady()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return runtime.isReady();
+}
+
+static bool startTsServer(TsClientServerCtx* ctx) {
+    if (ctx->runtime.init("127.0.0.1", SM_PORT) != 0) return false;
+    if (ctx->runtime.registerService(&ctx->service) != 0) return false;
+    ctx->thread = std::thread([ctx]() { ctx->runtime.start(); });
+    if (!waitUntilReady(ctx->runtime, 100)) return false;
+    for (int i = 0; i < 100 && ctx->service.port() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return ctx->service.port() != 0;
+}
+
+static void stopTsServer(TsClientServerCtx* ctx) {
+    ctx->runtime.stop();
+    if (ctx->thread.joinable()) ctx->thread.join();
+}
 
 struct ClientThreadArg {
     OmniRuntime* runtime;
@@ -51,18 +75,6 @@ struct ClientThreadArg {
     int failures;
     ClientThreadArg() : runtime(NULL), thread_index(0), iterations(0), done(false), failures(0) {}
 };
-
-static void tsClientServerThread(void* arg) {
-    TsClientServerCtx* ctx = static_cast<TsClientServerCtx*>(arg);
-    int ret = ctx->runtime.init("127.0.0.1", SM_PORT);
-    if (ret != 0) return;
-    ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) return;
-    ctx->registered = true;
-    while (!ctx->should_stop) ctx->runtime.pollOnce(50);
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
-}
 
 static void concurrentInvokeThread(void* arg) {
     ClientThreadArg* ctx = static_cast<ClientThreadArg*>(arg);
@@ -79,11 +91,21 @@ static void concurrentInvokeThread(void* arg) {
     ctx->done = true;
 }
 
+static bool waitForService(OmniRuntime& runtime, const std::string& name, int attempts) {
+    for (int i = 0; i < attempts; ++i) {
+        ServiceInfo info;
+        if (runtime.lookupService(name, info) == 0) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    return false;
+}
+
 class ThreadsafeClientAndReconnectTest : public ::testing::Test {
 protected:
     static TestPid sm_pid_;
     static TsClientServerCtx* server_ctx_;
-    static std::thread server_tid_;
 
     static void SetUpTestSuite() {
         sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19931", "--log-level", "3");
@@ -91,15 +113,12 @@ protected:
         ASSERT_TRUE(waitPortReady(SM_PORT, 30));
 
         server_ctx_ = new TsClientServerCtx();
-        server_tid_ = std::thread(tsClientServerThread, server_ctx_);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        ASSERT_TRUE(server_ctx_->registered);
+        ASSERT_TRUE(startTsServer(server_ctx_));
     }
 
     static void TearDownTestSuite() {
         if (server_ctx_) {
-            server_ctx_->should_stop = true;
-            server_tid_.join();
+            stopTsServer(server_ctx_);
             delete server_ctx_;
             server_ctx_ = nullptr;
         }
@@ -109,17 +128,16 @@ protected:
 
 TestPid ThreadsafeClientAndReconnectTest::sm_pid_ = 0;
 TsClientServerCtx* ThreadsafeClientAndReconnectTest::server_ctx_ = nullptr;
-std::thread ThreadsafeClientAndReconnectTest::server_tid_;
 
-TEST_F(ThreadsafeClientAndReconnectTest, StopBeforeRunReturns) {
+TEST_F(ThreadsafeClientAndReconnectTest, StartAfterStopReturnsImmediately) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
 
-    // stop 在 run 之前调用（文档允许）：run 必须立即返回，不得重新武装 loop
+    // stop 在 start 之前调用：start 必须立即返回，不得重新武装 loop
     runtime.stop();
     std::atomic<bool> returned(false);
     std::thread t([&runtime, &returned]() {
-        runtime.run();
+        runtime.start();
         returned.store(true);
     });
     for (int i = 0; i < 300 && !returned.load(); ++i) {
@@ -132,19 +150,19 @@ TEST_F(ThreadsafeClientAndReconnectTest, StopBeforeRunReturns) {
     EXPECT_FALSE(runtime.isRunning());
 }
 
-TEST_F(ThreadsafeClientAndReconnectTest, StopDuringRunExits) {
+TEST_F(ThreadsafeClientAndReconnectTest, StopDuringStartExits) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
 
     std::atomic<bool> returned(false);
     std::thread t([&runtime, &returned]() {
-        runtime.run();
+        runtime.start();
         returned.store(true);
     });
     for (int i = 0; i < 300 && !runtime.isRunning(); ++i) {
         std::this_thread::sleep_for(std::chrono::microseconds(10000));
     }
-    // 若 run() 立即返回（loop 未真正运行），本用例会空过，故必须先确认在运行中
+    // 若 start() 立即返回（loop 未真正运行），本用例会空过，故必须先确认在运行中
     ASSERT_TRUE(runtime.isRunning());
     runtime.stop();
     t.join();
@@ -162,7 +180,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentApiDuringStartDoesNotHang) {
         std::atomic<bool> run_returned(false);
         std::atomic<bool> api_done(false);
         std::thread driver([&runtime, &run_returned]() {
-            runtime.run();
+            runtime.start();
             run_returned.store(true);
         });
         std::thread api([&runtime, &api_done]() {
@@ -184,7 +202,7 @@ TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentApiDuringStartDoesNotHang) {
 TEST_F(ThreadsafeClientAndReconnectTest, RegisterHostConcurrentGetSet) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
-    std::thread driver([&runtime]() { runtime.run(); });
+    std::thread driver([&runtime]() { runtime.start(); });
     std::this_thread::sleep_for(std::chrono::microseconds(100000));
 
     std::atomic<bool> stop_flag(false);
@@ -214,6 +232,8 @@ TEST_F(ThreadsafeClientAndReconnectTest, RegisterHostConcurrentGetSet) {
 TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentInvokeSameClient) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitUntilReady(runtime, 100));
     ASSERT_EQ(runtime.connectService("ThreadSafeService"), 0);
 
     std::thread tids[6];
@@ -228,18 +248,21 @@ TEST_F(ThreadsafeClientAndReconnectTest, ConcurrentInvokeSameClient) {
         tids[i].join();
         EXPECT_EQ(args[i].failures, 0);
     }
-    runtime.stop();
+    owner.stop();
 }
 
 TEST_F(ThreadsafeClientAndReconnectTest, SmRestartRecoverySameClient) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitUntilReady(runtime, 100));
 
     stopProcess(sm_pid_);
     std::this_thread::sleep_for(std::chrono::microseconds(300000));
     sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19931", "--log-level", "3");
     ASSERT_GT(sm_pid_, 0);
     ASSERT_TRUE(waitPortReady(SM_PORT, 30));
+    ASSERT_TRUE(waitForService(runtime, "ThreadSafeService", 80));
 
     bool recovered = false;
     for (int i = 0; i < 80 && !recovered; ++i) {
@@ -255,12 +278,16 @@ TEST_F(ThreadsafeClientAndReconnectTest, SmRestartRecoverySameClient) {
         std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(recovered);
-    runtime.stop();
+    owner.stop();
 }
 
 TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitUntilReady(runtime, 100));
+
+    ASSERT_TRUE(waitForService(runtime, "ThreadSafeService", 80));
 
     Buffer warm_req, warm_resp;
     const char* warm_payload = "before-server-restart";
@@ -268,14 +295,11 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
     ASSERT_EQ(runtime.connectService("ThreadSafeService"), 0);
     ASSERT_EQ(runtime.invoke("ThreadSafeService", IFACE_ID, METHOD_ECHO, 0, warm_req, warm_resp, 3000), 0);
 
-    server_ctx_->should_stop = true;
-    server_tid_.join();
+    stopTsServer(server_ctx_);
     delete server_ctx_;
 
     server_ctx_ = new TsClientServerCtx();
-    server_tid_ = std::thread(tsClientServerThread, server_ctx_);
-    for (int i = 0; i < 80 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    ASSERT_TRUE(server_ctx_->registered);
+    ASSERT_TRUE(startTsServer(server_ctx_));
 
     bool server_recovered = false;
     for (int i = 0; i < 80 && !server_recovered; ++i) {
@@ -294,5 +318,5 @@ TEST_F(ThreadsafeClientAndReconnectTest, ServerRestartRecoverySameClient) {
         std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(server_recovered);
-    runtime.stop();
+    owner.stop();
 }

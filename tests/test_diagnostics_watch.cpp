@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "test_common.h"
+#include "runtime_thread.h"
 #include "platform/platform_test.h"
 #include <omnibinder/omnibinder.h>
 
@@ -72,7 +73,6 @@ bool waitForService(OmniRuntime& runtime, const std::string& name, bool expected
             if (listHasService(runtime, name)) {
                 return true;
             }
-            runtime.pollOnce(20);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         return false;
@@ -80,7 +80,6 @@ bool waitForService(OmniRuntime& runtime, const std::string& name, bool expected
     // 期望"不存在"：在短窗口内持续确认从未出现，避免立即返回 true 而漏掉
     // "watch 之后才被注册"的副作用。
     for (int i = 0; i < 10; ++i) {
-        runtime.pollOnce(20);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         if (listHasService(runtime, name)) {
             return false;
@@ -101,7 +100,6 @@ uint32_t findPidForService(OmniRuntime& runtime, const std::string& service_name
                 }
             }
         }
-        runtime.pollOnce(20);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     return 0;
@@ -117,7 +115,6 @@ bool waitForRuntimePid(OmniRuntime& runtime, uint32_t pid) {
                 }
             }
         }
-        runtime.pollOnce(20);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     return false;
@@ -132,9 +129,7 @@ void runServiceChild() {
     if (runtime.registerService(&service) != 0) {
         platform::exitChildProcess(3);
     }
-    while (true) {
-        runtime.pollOnce(50);
-    }
+    runtime.start();
 }
 
 void runIdleClientChild() {
@@ -142,9 +137,7 @@ void runIdleClientChild() {
     if (runtime.init("127.0.0.1", SM_PORT) != 0) {
         platform::exitChildProcess(2);
     }
-    while (true) {
-        runtime.pollOnce(50);
-    }
+    runtime.start();
 }
 
 // 子进程需要运行进程内函数（非外部二进制），走 platform::spawnChildFunction 抽象；
@@ -190,6 +183,7 @@ TEST_F(DiagnosticsWatchTest, ServicePidWatchDoesNotRegisterHiddenService) {
     OmniRuntime watcher;
     watcher.setHeartbeatPolicy(400, 10000);
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread owner(watcher);
     ASSERT_TRUE(waitForService(watcher, SERVICE_NAME, true));
 
     const std::string hidden = diagName(service_pid);
@@ -214,14 +208,13 @@ TEST_F(DiagnosticsWatchTest, ServicePidWatchDoesNotRegisterHiddenService) {
     ASSERT_EQ(watcher.invoke(SERVICE_NAME, IFACE_ID, METHOD_PING, 0, request, response, 5000), 0);
 
     for (int i = 0; i < 50 && events == 0; ++i) {
-        watcher.pollOnce(20);
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     EXPECT_GT(events, 0);
 
     EXPECT_EQ(watcher.unwatchPid(watched_pid), 0);
     EXPECT_TRUE(waitForService(watcher, hidden, false));
-    watcher.stop();
+    owner.stop();
     stopChild(service_pid);
 }
 
@@ -234,6 +227,7 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
 
     OmniRuntime watcher;
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread owner(watcher);
     ASSERT_TRUE(waitForService(watcher, SERVICE_NAME, true));
 
     const std::string diag_topic = diagName(service_pid);
@@ -251,8 +245,10 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
     // 等待目标处理 WATCH_START 并发布 diag topic，避免 Ping 早于 watch 生效
     bool topic_ready = false;
     for (int i = 0; i < 50 && !topic_ready; ++i) {
-        watcher.pollOnce(20);
         topic_ready = listHasPublishedTopic(watcher, SERVICE_NAME, diag_topic);
+        if (!topic_ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
     }
     ASSERT_TRUE(topic_ready);
 
@@ -261,7 +257,6 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
         Buffer req, resp;
         ASSERT_EQ(watcher.invoke(SERVICE_NAME, IFACE_ID, METHOD_PING, 0, req, resp, 5000), 0);
         for (int i = 0; i < 20 && events == 0; ++i) {
-            watcher.pollOnce(20);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
@@ -277,8 +272,10 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
     const int baseline = events;
     bool topic_back = false;
     for (int i = 0; i < 200 && !topic_back; ++i) {
-        watcher.pollOnce(50);
         topic_back = listHasPublishedTopic(watcher, SERVICE_NAME, diag_topic);
+        if (!topic_back) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
     }
     ASSERT_TRUE(topic_back);
 
@@ -288,14 +285,12 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
             Buffer req, resp;
             if (watcher.invoke(SERVICE_NAME, IFACE_ID, METHOD_PING, 0, req, resp, 3000) == 0) {
                 for (int i = 0; i < 20 && events == baseline; ++i) {
-                    watcher.pollOnce(20);
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
                 if (events > baseline) resumed = true;
             }
         }
         if (!resumed) {
-            watcher.pollOnce(50);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
@@ -303,7 +298,6 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
 
     // 至少经过一个心跳周期，确保失败的 WATCH_START 重放已兜底重试
     for (int i = 0; i < 70; ++i) {
-        watcher.pollOnce(50);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
@@ -312,13 +306,14 @@ TEST_F(DiagnosticsWatchTest, WatchIsReplayedAfterSmRestart) {
     EXPECT_EQ(watcher.unwatchPid(watched_pid), 0);
     bool topic_gone = false;
     for (int i = 0; i < 100 && !topic_gone; ++i) {
-        watcher.pollOnce(20);
         topic_gone = !listHasPublishedTopic(watcher, SERVICE_NAME, diag_topic);
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (!topic_gone) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
     }
     EXPECT_TRUE(topic_gone);
 
-    watcher.stop();
+    owner.stop();
 }
 
 TEST_F(DiagnosticsWatchTest, ClientPidWatchRegistersAndCleansHiddenService) {
@@ -328,6 +323,7 @@ TEST_F(DiagnosticsWatchTest, ClientPidWatchRegistersAndCleansHiddenService) {
 
     OmniRuntime watcher;
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread owner(watcher);
 
     const std::string hidden = diagName(client_pid);
     ASSERT_TRUE(waitForRuntimePid(watcher, static_cast<uint32_t>(client_pid)));
@@ -339,7 +335,7 @@ TEST_F(DiagnosticsWatchTest, ClientPidWatchRegistersAndCleansHiddenService) {
     EXPECT_EQ(watcher.unwatchPid(static_cast<uint32_t>(client_pid)), 0);
     EXPECT_TRUE(waitForService(watcher, hidden, false));
 
-    watcher.stop();
+    owner.stop();
     stopChild(client_pid);
 }
 
@@ -374,6 +370,7 @@ TEST_F(DiagnosticsWatchTest, HeartbeatDoesNotReplayDiagWatchersWhileSmUnreachabl
     OmniRuntime watcher;
     watcher.setHeartbeatPolicy(400, 10000);
     ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    RuntimeThread owner(watcher);
 
     for (int i = 0; i < kWatchTargets; ++i) {
         ASSERT_TRUE(waitForRuntimePid(watcher, static_cast<uint32_t>(children[i])))
@@ -391,13 +388,13 @@ TEST_F(DiagnosticsWatchTest, HeartbeatDoesNotReplayDiagWatchersWhileSmUnreachabl
     // 等待 SM 断连被检测、首个失败重连完成（此时 watcher 已全部置为待重放）
     uint64_t attempts = 0;
     for (int i = 0; i < 300; ++i) {
-        watcher.pollOnce(20);
         RuntimeStats stats;
         ASSERT_EQ(watcher.getStats(stats), 0);
         if (stats.sm_reconnect_attempts >= 2) {
             attempts = stats.sm_reconnect_attempts;
             break;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     ASSERT_GE(attempts, 2u)
         << "SM-unreachable reconnect attempts must occur for this measurement";
@@ -407,18 +404,18 @@ TEST_F(DiagnosticsWatchTest, HeartbeatDoesNotReplayDiagWatchersWhileSmUnreachabl
     // 捕获心跳定时器单次触发造成的 attempts 增量
     uint64_t delta = 0;
     for (int i = 0; i < 60; ++i) {
-        watcher.pollOnce(25);
         RuntimeStats stats;
         ASSERT_EQ(watcher.getStats(stats), 0);
         if (stats.sm_reconnect_attempts > 0) {
             delta = stats.sm_reconnect_attempts;
             break;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
     ASSERT_GE(delta, 1u) << "expected exactly one heartbeat tick in the measurement window";
     EXPECT_LT(delta, static_cast<uint64_t>(1 + kWatchTargets))
         << "restoreDiagWatchers must not run while SM is unreachable: one tick performed "
         << delta << " reconnect attempts (watchers=" << kWatchTargets << ")";
 
-    watcher.stop();
+    owner.stop();
 }

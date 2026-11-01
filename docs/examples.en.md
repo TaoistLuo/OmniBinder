@@ -268,7 +268,10 @@ omnibinder::OmniRuntime runtime;
 runtime.init("127.0.0.1", 9900);
 
 demo::SensorServiceProxy proxy(runtime);
-proxy.connect();
+std::thread runtime_thread([&runtime]() { runtime.start(); });
+while (!proxy.isConnected()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
 
 bool bool_out = proxy.EchoBool(false).value();
 
@@ -349,7 +352,7 @@ Core shape:
 ```c
 demo_SensorService_proxy proxy;
 demo_SensorService_proxy_init(&proxy, runtime);
-demo_SensorService_proxy_connect(&proxy);
+/* start 后首次方法调用自动连接。 */
 
 uint8_t b = 0;
 demo_SensorService_proxy_echo_bool(&proxy, 0, &b);
@@ -700,7 +703,7 @@ omni_runtime_register_service(runtime, svc);
 
 /* client: enumerate instances, then bind to one */
 omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
-demo_SensorService_proxy_connect_instance(&proxy, lookup.found_host_id, lookup.found_instance_id);
+demo_SensorService_proxy_set_instance(&proxy, lookup.found_host_id, lookup.found_instance_id);
 ```
 
 > For cross-board deployment, `host_id` is part of instance addressing, so make each board's `host_id` unique: cloned images share `/etc/machine-id`, so set each device's unique id (MAC / chip id / serial) at startup via `setHostId()`.
@@ -904,12 +907,13 @@ int main() {
     runtime.registerService(&service);
 
     printf("Server running (Ctrl+C to stop)...\n");
+    std::thread runtime_thread([&runtime]() { runtime.start(); });
     while (g_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    runtime.unregisterService(&service);
     runtime.stop();
+    runtime_thread.join();
     return 0;
 }
 ```
@@ -934,9 +938,9 @@ int main() {
     }
 
     myapp::MyServiceProxy proxy(runtime);
-    if (proxy.connect() != 0) {
-        fprintf(stderr, "MyService not found\n");
-        return 1;
+    std::thread runtime_thread([&runtime]() { runtime.start(); });
+    while (!proxy.isConnected()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     // RPC call
@@ -957,10 +961,11 @@ int main() {
     });
 
     while (g_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     runtime.stop();
+    runtime_thread.join();
     return 0;
 }
 ```

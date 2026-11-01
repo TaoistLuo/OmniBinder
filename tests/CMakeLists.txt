@@ -93,6 +93,12 @@ add_test(NAME test_omni_cli_info_formatter COMMAND test_omni_cli_info_formatter)
 
 # test_stats 的覆盖（成功/失败计数、reset）已并入 test_runtime_stats，不再单独构建。
 
+add_executable(test_runtime_lifecycle test_runtime_lifecycle.cpp)
+target_link_libraries(test_runtime_lifecycle PRIVATE omnibinder_static gtest gtest_main)
+add_dependencies(test_runtime_lifecycle service_manager)
+add_test(NAME test_runtime_lifecycle COMMAND test_runtime_lifecycle WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(test_runtime_lifecycle PROPERTIES TIMEOUT 120)
+
 add_executable(test_c_api test_c_api.cpp)
 target_link_libraries(test_c_api PRIVATE omnibinder_static gtest gtest_main)
 add_dependencies(test_c_api service_manager)

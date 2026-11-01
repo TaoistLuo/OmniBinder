@@ -1,5 +1,7 @@
 #include "core/omni_runtime.h"
 #include "transport/transport_selector.h"
+#include "omnibinder/proxy_base.h"
+#include <algorithm>
 #include "omnibinder/log.h"
 
 #define LOG_TAG "OmniRuntime"
@@ -34,10 +36,15 @@ OmniRuntime::~OmniRuntime() { delete impl_; }
 int OmniRuntime::init(const std::string& sm_host, uint16_t sm_port) {
     return impl_->init(sm_host, sm_port);
 }
-void OmniRuntime::run() { impl_->run(); }
+int OmniRuntime::start() { return impl_->start(); }
+void OmniRuntime::registerProxy(ServiceProxyBase* proxy) { impl_->registerProxy(proxy); }
+void OmniRuntime::unregisterProxy(ServiceProxyBase* proxy) { impl_->unregisterProxy(proxy); }
+int OmniRuntime::connectProxy(ServiceProxyBase* proxy) {
+    return proxy ? proxy->connect() : static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+}
 void OmniRuntime::stop() { impl_->stop(); }
 bool OmniRuntime::isRunning() const { return impl_->isRunning(); }
-void OmniRuntime::pollOnce(int timeout_ms) { impl_->pollOnce(timeout_ms); }
+bool OmniRuntime::isReady() const { return impl_->isReady(); }
 
 int OmniRuntime::registerService(Service* service) {
     return impl_->registerService(service);
@@ -186,6 +193,10 @@ OmniRuntime::Impl::Impl()
     , running_(false)
     , loop_alive_(false)
     , initialized_(false)
+    , started_(false)
+    , ready_(false)
+    , shutdown_done_(false)
+    , start_owned_(false)
     , owner_(NULL)
     , loop_driver_active_(false)
     , sm_channel_()
@@ -205,6 +216,7 @@ OmniRuntime::Impl::Impl()
     , conn_mgr_(NULL)
     , register_host_()
     , reply_send_timeout_ms_(DEFAULT_REPLY_SEND_TIMEOUT)
+    , proxy_retry_timer_id_(0)
     , client_session_generation_(0)
     , data_max_session_timeout_ms_(0)
     , diag_()
@@ -213,24 +225,32 @@ OmniRuntime::Impl::Impl()
 
 OmniRuntime::Impl::~Impl() {
     stop();
-    
-    // 排空 event-loop 中已就绪的 functor（已到期 timer callback 等），
-    // 避免 teardown 期间 callback 引用已释放的资源
+    shutdownInternal();
+}
+
+void OmniRuntime::Impl::shutdownInternal() {
+    if (shutdown_done_) {
+        return;
+    }
+    shutdown_done_ = true;
+
     if (loop_) {
         loop_->pollOnce(0);
     }
-    
-    // 清理前先取消心跳定时器
+
     if (loop_ && heartbeat_timer_id_ > 0) {
         loop_->cancelTimer(heartbeat_timer_id_);
         heartbeat_timer_id_ = 0;
+    }
+    if (loop_ && proxy_retry_timer_id_ > 0) {
+        loop_->cancelTimer(proxy_retry_timer_id_);
+        proxy_retry_timer_id_ = 0;
     }
     if (loop_ && control_ack_timer_id_ > 0) {
         loop_->cancelTimer(control_ack_timer_id_);
         control_ack_timer_id_ = 0;
     }
 
-    // 取消所有每服务心跳 / 重连定时器
     for (std::map<std::string, ServiceState>::iterator it = services_.begin();
          it != services_.end(); ++it) {
         if (loop_ && it->second.has_heartbeat && it->second.heartbeat.timer_id > 0) {
@@ -244,37 +264,51 @@ OmniRuntime::Impl::~Impl() {
         }
     }
     services_.clear();
-    
+
+    // 先从容器摘除，再执行 onStop：onStop 是用户重入点，可能调用
+    // unregisterService/registerService，不能持有本地服务 map 的迭代器（约束 1/2）。
+    std::vector<std::pair<std::string, LocalServiceEntry*> > shutdown_services;
     for (std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.begin();
          it != local_services_.end(); ++it) {
-        // 先摘除端点/客户端 fd 再销毁 endpoint（约束 3），并清理路由与话题订阅
         removeServiceEndpointsFromLoop(it->second);
         detachClientsFromEntry(it->first, it->second);
-        delete it->second;
+        shutdown_services.push_back(std::make_pair(it->first, it->second));
     }
     local_services_.clear();
+    for (size_t i = 0; i < shutdown_services.size(); ++i) {
+        Service* service = shutdown_services[i].second ? shutdown_services[i].second->service : NULL;
+        // start() 驱动的生命周期中，调用方必须在 start() 返回（stop 完成）前保持
+        // Service 存活；这里触发 onStop。手动 pollOnce 旧路径由 unregisterService 触发。
+        if (service && start_owned_) {
+            service->onStop();
+            service->runtime_ = NULL;
+        }
+        delete shutdown_services[i].second;
+    }
+    declared_services_.clear();
+    declared_proxies_.clear();
     client_id_to_service_.clear();
     if (diag_.data_service) {
         delete diag_.data_service;
         diag_.data_service = NULL;
     }
-    
-    sm_channel_.clearReplies();
 
-    
+    sm_channel_.clearReplies();
     delete conn_mgr_;
     conn_mgr_ = NULL;
-    
     if (loop_) {
         sm_channel_.closeTransport(*loop_);
     }
-    
     delete loop_;
     loop_ = NULL;
-    
+
     if (initialized_) {
         platform::netCleanup();
     }
+    initialized_ = false;
+    started_ = false;
+    ready_ = false;
+    start_owned_ = false;
 }
 
 // ============================================================
@@ -286,12 +320,12 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     if (initialized_) {
         return static_cast<int>(ErrorCode::ERR_ALREADY_INITIALIZED);
     }
-    
+
     platform::netInit();
     host_id_ = host_id_override_.empty() ? platform::getMachineId() : host_id_override_;
     sm_host_ = sm_host;
     sm_port_ = sm_port;
-    
+
     loop_ = new EventLoop();
     if (!loop_->valid()) {
         OMNI_LOG_ERROR(LOG_TAG, "Failed to initialize event-loop backend");
@@ -301,44 +335,26 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
         return static_cast<int>(ErrorCode::ERR_INTERNAL);
     }
     owner_executor_.bindLoop(loop_);
-    
-    int connect_err = 0;
-    IMessageConnection* control_transport = createControlConnection(sm_host, sm_port, connect_err);
-    if (!control_transport) {
-        delete loop_;
-        loop_ = NULL;
-        platform::netCleanup();
-        return connect_err;
-    }
-    sm_channel_.resetTransport(control_transport);
-    
-    loop_->addFd(sm_channel_.transport()->fd(), EventLoop::EVENT_READ,
-        [this](int fd, uint32_t events) { this->onSMData(fd, events); });
-    
+
     conn_mgr_ = new ConnectionManager(*loop_, host_id_);
     conn_mgr_->setMessageCallback(
         [this](const std::string& svc, Message& msg) { this->onDirectMessage(svc, msg); });
     conn_mgr_->setDisconnectCallback(
-        // 参数按值：onDirectDisconnect 内部会 removeConnection 删除 conn，
-        // 若传 conn 成员的引用，删除后引用悬垂（重构 failConnection 后暴露的 UAF）
         [this](std::string svc) {
             this->onDirectDisconnect(svc);
         });
-    
-    heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
-        [this]() { this->sendHeartbeat(); }, true);
-    
+
     initialized_ = true;
-    sm_reconnect_needed_ = false;
+    started_ = false;
+    ready_ = false;
+    // 启动前不连接 SM；由 start()/首次兼容 API 调用进入激活流程。
+    sm_reconnect_needed_ = true;
     diag_.pid = static_cast<uint32_t>(platform::getPid());
     diag_.process_name = runtimeProcessName();
     if (runtime_id_override_.empty()) {
         const uint32_t seq = ++g_runtime_instance_seq;
         const std::string base = diag_.process_name.empty()
             ? "runtime" : diag_.process_name;
-        // 默认包含 pid：保证同机多进程（同二进制多实例）不会互相顶替。
-        // 代价是跨重启不稳定；低功耗/需要快速重启立即顶替旧会话时，
-        // 业务应显式 setRuntimeId()（例如使用启动参数中的稳定实例标识）。
         runtime_id_ = base + "#" + std::to_string(diag_.pid) + "-" + std::to_string(seq);
     } else {
         runtime_id_ = runtime_id_override_;
@@ -348,54 +364,178 @@ int OmniRuntime::Impl::init(const std::string& sm_host, uint16_t sm_port) {
     control_ack_pending_ = false;
     sm_incarnation_id_ = 0;
 
-    // hello 失败不阻塞 init（SM 可能随后恢复），但保留重连标志，
-    // 让后续心跳路径重试 hello + 控制面状态恢复
-    int hello_ret = sendRuntimeHello();
-    if (hello_ret != 0) {
-        OMNI_LOG_WARN(LOG_TAG, "sm_hello_failed host=%s port=%u err=%d, will retry via heartbeat",
-                      sm_host.c_str(), sm_port, hello_ret);
-        sm_reconnect_needed_ = true;
-    }
-
-    OMNI_LOG_INFO(LOG_TAG, "Connected to SM at %s:%u, host_id=%s",
-                    sm_host.c_str(), sm_port, host_id_.c_str());
+    OMNI_LOG_INFO(LOG_TAG, "Runtime initialized locally, SM target %s:%u will be connected on start",
+                  sm_host_.c_str(), sm_port_);
     return 0;
 }
 
-void OmniRuntime::Impl::run() {
-    {
-        // owner 认领与 callSerialized 的无 owner 内联判定共用 api_mutex_：
-        // 消除 "init 后 run 认领前 API 内联执行" 与 "driver 线程驱动 loop" 并发（TOCTOU）
-        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
-        if (!initialized_) return;
+int OmniRuntime::Impl::connectControlPlaneInternal() {
+    if (sm_channel_.isConnected()) {
+        return 0;
+    }
 
-        // 双驱动守卫：先尝试成为 driver（原子 CAS），成功者才捕获 owner 线程；
-        // 已有 driver 且非本线程时拒绝，保持单驱动
+    int connect_err = 0;
+    IMessageConnection* control_transport = createControlConnection(sm_host_, sm_port_, connect_err);
+    if (!control_transport) {
+        sm_reconnect_needed_ = true;
+        ready_ = false;
+        OMNI_LOG_WARN(LOG_TAG, "sm_connect_deferred host=%s port=%u err=%d",
+                      sm_host_.c_str(), sm_port_, connect_err);
+        return connect_err;
+    }
+
+    sm_channel_.resetTransport(control_transport);
+    loop_->addFd(sm_channel_.transport()->fd(), EventLoop::EVENT_READ,
+        [this](int fd, uint32_t events) { this->onSMData(fd, events); });
+    // 新连接已就绪，避免 sendRuntimeHello 内部再次触发 reconnect。
+    sm_reconnect_needed_ = false;
+
+    int hello_ret = sendRuntimeHello();
+    if (hello_ret != 0) {
+        OMNI_LOG_WARN(LOG_TAG, "sm_hello_failed host=%s port=%u err=%d, will retry via heartbeat",
+                      sm_host_.c_str(), sm_port_, hello_ret);
+        sm_reconnect_needed_ = true;
+        ready_ = false;
+        return hello_ret;
+    }
+    sm_reconnect_needed_ = false;
+    ready_ = true;
+    return 0;
+}
+
+int OmniRuntime::Impl::activateDeclaredServices() {
+    std::vector<std::string> names;
+    names.reserve(declared_services_.size());
+    for (std::map<std::string, Service*>::iterator it = declared_services_.begin();
+         it != declared_services_.end(); ++it) {
+        names.push_back(it->first);
+    }
+
+    for (size_t i = 0; i < names.size(); ++i) {
+        std::map<std::string, Service*>::iterator it = declared_services_.find(names[i]);
+        if (it == declared_services_.end()) {
+            continue;
+        }
+        Service* service = it->second;
+        int ret = registerServiceInternal(service, true);
+        if (ret == 0) {
+            declared_services_.erase(names[i]);
+        } else {
+            OMNI_LOG_WARN(LOG_TAG, "activate service %s failed err=%d", names[i].c_str(), ret);
+        }
+    }
+    return 0;
+}
+
+int OmniRuntime::Impl::beginRuntimeInternal() {
+    if (!initialized_) {
+        return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
+    }
+    if (started_) {
+        return 0;
+    }
+
+    started_ = true;
+
+    if (loop_ && heartbeat_timer_id_ == 0) {
+        heartbeat_timer_id_ = loop_->addTimer(heartbeat_interval_ms_,
+            [this]() { this->sendHeartbeat(); }, true);
+    }
+
+    connectControlPlaneInternal();
+    activateDeclaredServices();
+    return 0;
+}
+
+int OmniRuntime::Impl::start() {
+    {
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+        if (!initialized_) {
+            return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
+        }
+        if (loop_ && loop_->stopRequested()) {
+            return static_cast<int>(ErrorCode::ERR_NOT_RUNNING);
+        }
+
         bool expected = false;
         if (loop_driver_active_.compare_exchange_strong(expected, true)) {
             owner_executor_.setOwnerThread(std::this_thread::get_id());
-        } else if (!owner_executor_.isOwnerThread()) {
-            OMNI_LOG_WARN(LOG_TAG, "run rejected: event-loop already driven by another thread");
-            return;
+        } else {
+            return static_cast<int>(ErrorCode::ERR_ALREADY_RUNNING);
         }
 
-        // stop 是终态：不重新武装 running_/loop_alive_（isRunning 保持 false，
-        // 停止后的 API 快速失败）。loop_->run() 仍会调用，用于立即返回并排空
-        // 关闭前已入队的 functor。
-        if (!loop_->stopRequested()) {
-            loop_alive_ = true;
-            running_ = true;
-        }
+        running_ = true;
+        loop_alive_ = true;
+        start_owned_ = true;
+        beginRuntimeInternal();
+        connectDeclaredProxiesInternal();
+        ensureProxyRetryTimerInternal();
     }
 
     loop_->run();
 
-    // stop() 可能在 reply-wait 期间被调用：waitForReply 的 pollOnceWithoutFunctors
-    // 会把 loop_alive_ 重新置 true。run() 退出后必须强制复位，否则后续非 owner
-    // 线程的 API 调用会被投递到已停止的 event-loop，永久阻塞（违反停止后快速失败）。
     loop_alive_ = false;
     running_ = false;
     loop_driver_active_ = false;
+    shutdownInternal();
+    return 0;
+}
+
+void OmniRuntime::Impl::registerProxy(ServiceProxyBase* proxy) {
+    if (!proxy) return;
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    for (size_t i = 0; i < declared_proxies_.size(); ++i) {
+        if (declared_proxies_[i] == proxy) return;
+    }
+    declared_proxies_.push_back(proxy);
+    ensureProxyRetryTimerInternal();
+}
+
+void OmniRuntime::Impl::unregisterProxy(ServiceProxyBase* proxy) {
+    if (!proxy) return;
+    std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+    declared_proxies_.erase(
+        std::remove(declared_proxies_.begin(), declared_proxies_.end(), proxy),
+        declared_proxies_.end());
+}
+
+int OmniRuntime::Impl::connectDeclaredProxiesInternal() {
+    if (!sm_channel_.isConnected()) {
+        return static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE);
+    }
+
+    std::vector<ServiceProxyBase*> proxies;
+    {
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+        proxies = declared_proxies_;
+    }
+
+    int last_error = 0;
+    for (size_t i = 0; i < proxies.size(); ++i) {
+        ServiceProxyBase* proxy = proxies[i];
+        if (!proxy || !proxy->shouldAutoConnect() || proxy->isConnected()) {
+            continue;
+        }
+        // 已成功连接过的 Proxy 由数据面自动重连机制负责；这里仅重试“首次等待服务”
+        // 的 Proxy，避免用户显式 disconnectService 后被自动拉回。
+        if (proxy->hasEverConnected()) {
+            continue;
+        }
+        int ret = owner_->connectProxy(proxy);
+        if (ret != 0) {
+            last_error = ret;
+        }
+    }
+    return last_error;
+}
+
+void OmniRuntime::Impl::ensureProxyRetryTimerInternal() {
+    if (!loop_ || !started_ || proxy_retry_timer_id_ != 0) {
+        return;
+    }
+    proxy_retry_timer_id_ = loop_->addTimer(1000, [this]() {
+        this->connectDeclaredProxiesInternal();
+    }, true);
 }
 
 void OmniRuntime::Impl::stop() {
@@ -406,26 +546,10 @@ void OmniRuntime::Impl::stop() {
 
 bool OmniRuntime::Impl::isRunning() const { return running_; }
 
-void OmniRuntime::Impl::pollOnce(int timeout_ms) {
-    if (!initialized_) return;
-
-    {
-        // 与 run() 一致：owner 认领与 callSerialized 的无 owner 判定共用 api_mutex_，
-        // 防止第二个线程驱动 event-loop，同时闭合 TOCTOU
-        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
-        bool expected = false;
-        if (loop_driver_active_.compare_exchange_strong(expected, true)) {
-            owner_executor_.setOwnerThread(std::this_thread::get_id());
-        } else if (!owner_executor_.isOwnerThread()) {
-            OMNI_LOG_WARN(LOG_TAG, "pollOnce rejected: event-loop already driven by another thread");
-            return;
-        }
-    }
-
-    loop_alive_ = true;
-    if (loop_) loop_->pollOnce(timeout_ms);
-    // SHM 通信现在完全通过 eventfd 事件驱动，不再需要轮询
+bool OmniRuntime::Impl::isReady() const {
+    return started_.load() && ready_.load();
 }
+
 
 void OmniRuntime::Impl::pollOnceWithoutFunctors(int timeout_ms) {
     // 同步 reply wait 期间的内部驱动：只处理 fd/timer，不执行 functor。

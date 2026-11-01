@@ -326,8 +326,9 @@ protected:
 };
 ```
 
-> The Stub registers every `publishes` topic automatically in `onStart()`;
-> applications only call `registerService()` and must not call `Publish<Topic>()`.
+> The Stub records every `publishes` topic as pending in `onStart()`;
+> runtime publishes them after `start()` connects to ServiceManager.
+> Applications only call `registerService()` and must not call `Publish<Topic>()`.
 > `Broadcast<Topic>(msg)` remains available for sending payloads.
 
 Generated C++ Proxy shape:
@@ -415,9 +416,8 @@ typedef struct demo_SensorService_proxy {
 } demo_SensorService_proxy;
 
 void demo_SensorService_proxy_init(demo_SensorService_proxy* p, omni_runtime_t* runtime);
-int  demo_SensorService_proxy_connect(demo_SensorService_proxy* p);
-int  demo_SensorService_proxy_connect_instance(demo_SensorService_proxy* p,
-                                               const char* host_id, const char* instance_id);
+int  demo_SensorService_proxy_set_instance(demo_SensorService_proxy* p,
+                                           const char* host_id, const char* instance_id);
 void demo_SensorService_proxy_disconnect(demo_SensorService_proxy* p);
 
 /* Method names are snake_case; IDL void methods also return void in the C proxy. */
@@ -434,7 +434,7 @@ int  demo_SensorService_proxy_subscribe_sensor_update(
     void* user_data);
 ```
 
-After `..._proxy_connect_instance()`, the C proxy routes its method calls through `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance`, and its auto-reconnect / heartbeat / death subscription through the instance connection key (`omni_runtime_service_connection_key(...)`) and `omni_runtime_subscribe_death_instance(...)`. The C topic subscribe helper is topic-only (no source identity).
+After `..._proxy_set_instance()`, the C proxy routes its method calls through `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance`, and its auto-reconnect / heartbeat / death subscription through the instance connection key (`omni_runtime_service_connection_key(...)`) and `omni_runtime_subscribe_death_instance(...)`. The C topic subscribe helper is topic-only (no source identity).
 
 ---
 

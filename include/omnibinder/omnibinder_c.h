@@ -55,6 +55,7 @@
 #define OMNI_ERR_TIMEOUT           (-4)
 #define OMNI_ERR_NOT_INITIALIZED   (-5)
 #define OMNI_ERR_NOT_RUNNING       (-9)
+#define OMNI_ERR_ALREADY_RUNNING   (-10)
 #define OMNI_ERR_CONNECT_FAILED    (-100)
 #define OMNI_ERR_CONNECTION_CLOSED (-101)
 #define OMNI_ERR_SEND_FAILED       (-102)
@@ -270,10 +271,11 @@ omni_runtime_t* omni_runtime_create(void);
 void           omni_runtime_destroy(omni_runtime_t* client);
 
 int  omni_runtime_init(omni_runtime_t* client, const char* sm_host, uint16_t sm_port);
-void omni_runtime_run(omni_runtime_t* client);
-void omni_runtime_poll_once(omni_runtime_t* client, int timeout_ms);
+/* @brief 阻塞启动运行时；业务需自行创建线程调用（runtime 不创建线程） */
+int  omni_runtime_start(omni_runtime_t* client);
 void omni_runtime_stop(omni_runtime_t* client);
 int  omni_runtime_is_running(const omni_runtime_t* client);
+int  omni_runtime_is_ready(const omni_runtime_t* client);
 
 /* @brief 设置当前 runtime 下服务默认注册到 ServiceManager 的可达地址 */
 void omni_runtime_set_register_host(omni_runtime_t* client, const char* host);
@@ -376,7 +378,7 @@ int  omni_runtime_list_instances(omni_runtime_t* client, const char* service_nam
  * @return 0 成功；OMNI_ERR_SERVICE_NOT_FOUND 无匹配实例；网络/协议错误返回对应错误码
  * @note  host_id / instance_id 必须为非 NULL 且非空的显式身份；默认实例请改用
  *        omni_runtime_connect_service(service_name)（按名连接，键即服务名）。
- *        生成的 C Proxy 可通过 <Service>_proxy_connect_instance 使用本能力 */
+ *        生成的 C Proxy 可通过 <Service>_proxy_set_instance 设置目标并使用本能力 */
 int  omni_runtime_connect_service_instance(omni_runtime_t* client, const char* service_name,
          const char* host_id, const char* instance_id);
 

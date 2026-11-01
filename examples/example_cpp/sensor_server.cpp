@@ -6,6 +6,8 @@
 #include <ctime>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <vector>
 
 static volatile bool g_running = true;
@@ -195,13 +197,21 @@ int main(int argc, char* argv[]) {
     }
 
 
+    std::thread runtime_thread([&runtime]() {
+        runtime.start();
+    });
+
+    for (int i = 0; i < 50 && g_running && !runtime.isReady(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
     std::printf("SensorService registered on port %u (host_id=%s, instance_id=%s)\n",
                 service.port(), runtime.hostId().c_str(), service.instanceId().c_str());
     std::printf("Demo service is ready. Press Ctrl+C to stop.\n\n");
 
     int counter = 0;
     while (g_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (++counter >= 10) {
             counter = 0;
             service.updateData();
@@ -217,7 +227,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::printf("\nShutting down...\n");
-    runtime.unregisterService(&service);
     runtime.stop();
+    runtime_thread.join();
     return 0;
 }

@@ -261,16 +261,17 @@ static void stopSM(omnibinder::platform::TestProcess pid) {
 }
 
 static bool waitSM(uint16_t port) {
-    for (int i = 0; i < 30; ++i) {
-        OmniRuntime probe;
-        if (probe.init("127.0.0.1", port) == 0) {
-            probe.stop();
+    for (int i = 0; i < 100; ++i) {
+        TcpConnection probe;
+        if (connectTcp(probe, "127.0.0.1", port)) {
+            probe.close();
             return true;
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return false;
 }
+
 
 class ItemServiceImpl : public demo::ItemServiceStub {
 public:
@@ -287,29 +288,8 @@ private:
 struct ServerCtx {
     OmniRuntime runtime;
     ItemServiceImpl service;
-    std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    ServerCtx() : registered(false), should_stop(false) {}
+    ServerCtx() {}
 };
-
-static void serverThread(void* arg) {
-    ServerCtx* ctx = static_cast<ServerCtx*>(arg);
-    if (ctx->runtime.init("127.0.0.1", SM_PORT_REQ) != 0) return;
-    if (ctx->runtime.registerService(&ctx->service) != 0) { ctx->runtime.stop(); return; }
-    ctx->registered = true;
-    while (!ctx->should_stop) ctx->runtime.pollOnce(20);
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
-}
-
-static uint16_t lookupServicePort(const char* service_name) {
-    OmniRuntime probe;
-    if (probe.init("127.0.0.1", SM_PORT_REQ) != 0) return 0;
-    ServiceInfo info;
-    uint16_t port = (probe.lookupService(service_name, info) == 0) ? info.port : 0;
-    probe.stop();
-    return port;
-}
 
 enum RawReplyMode {
     RAW_REPLY_EMPTY_SUCCESS = 0,
@@ -381,13 +361,16 @@ int main() {
     assert(waitSM(SM_PORT_REQ));
 
     ServerCtx server;
-    std::thread server_tid;
-    server_tid = std::thread(serverThread, &server);
-    for (int i = 0; i < 50 && !server.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    assert(server.registered);
+    assert(server.runtime.init("127.0.0.1", SM_PORT_REQ) == 0);
+    assert(server.runtime.registerService(&server.service) == 0);
+    std::thread server_tid([&server]() { server.runtime.start(); });
+    for (int i = 0; i < 200 && server.service.port() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(server.service.port() != 0);
 
     TcpConnection rogue;
-    assert(connectTcp(rogue, "127.0.0.1", lookupServicePort("ItemService")));
+    assert(connectTcp(rogue, "127.0.0.1", server.service.port()));
     assert(sendDataHello(rogue, 9000));
     Message bad_invoke(MessageType::MSG_INVOKE, 9001);
     bad_invoke.payload.writeUint32(IFACE_ID);
@@ -406,20 +389,27 @@ int main() {
     OmniRuntime sub_runtime;
     assert(sub_runtime.init("127.0.0.1", SM_PORT_REQ) == 0);
     demo::ItemServiceProxy proxy(sub_runtime);
-    assert(proxy.connect() == 0);
+    std::thread sub_tid([&sub_runtime]() { sub_runtime.start(); });
+    for (int i = 0; i < 200 && !proxy.isConnected(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(proxy.isConnected());
     std::atomic<int> topic_hits(0);
     proxy.SubscribeItemTopic([&topic_hits](const demo::ItemTopic&) { topic_hits++; });
     TcpConnection broadcast_rogue;
-    assert(connectTcp(broadcast_rogue, "127.0.0.1", lookupServicePort("ItemService")));
+    assert(connectTcp(broadcast_rogue, "127.0.0.1", server.service.port()));
     Message bad_broadcast(MessageType::MSG_BROADCAST, 9002);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
     assert(sendMessage(broadcast_rogue, bad_broadcast));
-    for (int i = 0; i < 20; ++i) { sub_runtime.pollOnce(20); std::this_thread::sleep_for(std::chrono::microseconds(10000)); }
+    for (int i = 0; i < 30; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     assert(topic_hits.load() == 0);
     broadcast_rogue.close();
     sub_runtime.stop();
+    sub_tid.join();
 
-    server.should_stop = true;
+    server.runtime.stop();
     server_tid.join();
     stopSM(sm_req);
 
@@ -434,8 +424,6 @@ int main() {
     for (int i = 0; i < 50 && !raw_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_ctx.ready);
 
-    OmniRuntime reg_runtime;
-    assert(reg_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     TcpConnection sm_conn;
     assert(connectTcp(sm_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_conn, 9101, "ItemService", raw_ctx.port, "remote-raw-node"));
@@ -443,14 +431,18 @@ int main() {
     OmniRuntime client_runtime;
     assert(client_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     demo::ItemServiceProxy reply_proxy(client_runtime);
-    assert(reply_proxy.connect() == 0);
+    std::thread client_tid([&client_runtime]() { client_runtime.start(); });
+    for (int i = 0; i < 200 && !reply_proxy.isConnected(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(reply_proxy.isConnected());
     demo::Item input;
     input.id = 77;
     auto result = reply_proxy.echoItem(input);
     assert(!result);
     assert(result.error() == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_runtime.stop();
-    reg_runtime.stop();
+    client_tid.join();
     sm_conn.close();
 
     raw_tid.join();
@@ -467,8 +459,6 @@ int main() {
     for (int i = 0; i < 50 && !raw_status_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_status_ctx.ready);
 
-    OmniRuntime reg_status_runtime;
-    assert(reg_status_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     TcpConnection sm_status_conn;
     assert(connectTcp(sm_status_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_status_conn, 9102, "ItemService", raw_status_ctx.port, "remote-raw-node"));
@@ -476,14 +466,18 @@ int main() {
     OmniRuntime client_status_runtime;
     assert(client_status_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     demo::ItemServiceProxy status_proxy(client_status_runtime);
-    assert(status_proxy.connect() == 0);
+    std::thread status_client_tid([&client_status_runtime]() { client_status_runtime.start(); });
+    for (int i = 0; i < 200 && !status_proxy.isConnected(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(status_proxy.isConnected());
     demo::Item status_input;
     status_input.id = 78;
     auto status_result = status_proxy.echoItem(status_input);
     assert(!status_result);
     assert(status_result.error() == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_status_runtime.stop();
-    reg_status_runtime.stop();
+    status_client_tid.join();
     sm_status_conn.close();
 
     raw_status_tid.join();
@@ -500,8 +494,6 @@ int main() {
     for (int i = 0; i < 50 && !raw_length_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_length_ctx.ready);
 
-    OmniRuntime reg_length_runtime;
-    assert(reg_length_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     TcpConnection sm_length_conn;
     assert(connectTcp(sm_length_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_length_conn, 9103, "ItemService", raw_length_ctx.port, "remote-raw-node"));
@@ -509,14 +501,18 @@ int main() {
     OmniRuntime client_length_runtime;
     assert(client_length_runtime.init("127.0.0.1", SM_PORT_REPLY) == 0);
     demo::ItemServiceProxy length_proxy(client_length_runtime);
-    assert(length_proxy.connect() == 0);
+    std::thread length_client_tid([&client_length_runtime]() { client_length_runtime.start(); });
+    for (int i = 0; i < 200 && !length_proxy.isConnected(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(length_proxy.isConnected());
     demo::Item length_input;
     length_input.id = 79;
     auto length_result = length_proxy.echoItem(length_input);
     assert(!length_result);
     assert(length_result.error() == static_cast<int>(ErrorCode::ERR_DESERIALIZE));
     client_length_runtime.stop();
-    reg_length_runtime.stop();
+    length_client_tid.join();
     sm_length_conn.close();
 
     raw_length_tid.join();
@@ -692,51 +688,29 @@ static void stopSM(omnibinder::platform::TestProcess pid) {
 }
 
 static bool waitSM(uint16_t port) {
-    for (int i = 0; i < 30; ++i) {
-        omni_runtime_t* probe = omni_runtime_create();
-        if (omni_runtime_init(probe, "127.0.0.1", port) == 0) {
-            omni_runtime_stop(probe);
-            omni_runtime_destroy(probe);
+    for (int i = 0; i < 100; ++i) {
+        omnibinder::TcpConnection probe;
+        if (connectTcp(probe, "127.0.0.1", port)) {
+            probe.close();
             return true;
         }
-        omni_runtime_destroy(probe);
-        std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return false;
 }
+
 
 struct ServerCtx {
     omni_runtime_t* runtime;
     omni_service_t* service;
     std::atomic<int> echo_count;
-    std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    ServerCtx() : runtime(NULL), service(NULL), echo_count(0), registered(false), should_stop(false) {}
+    ServerCtx() : runtime(NULL), service(NULL), echo_count(0) {}
 };
 
 static void cEchoItem(const struct demo_Item* item, struct demo_Item* result, void* user_data) {
     ServerCtx* ctx = static_cast<ServerCtx*>(user_data);
     ctx->echo_count++;
     result->id = item->id;
-}
-
-static void serverThread(void* arg) {
-    ServerCtx* ctx = static_cast<ServerCtx*>(arg);
-    ctx->runtime = omni_runtime_create();
-    assert(omni_runtime_init(ctx->runtime, "127.0.0.1", SM_PORT_REQ) == 0);
-    demo_ItemService_callbacks cbs;
-    memset(&cbs, 0, sizeof(cbs));
-    cbs.echoItem = cEchoItem;
-    cbs.user_data = ctx;
-    ctx->service = demo_ItemService_stub_create_from_callbacks(&cbs);
-    assert(ctx->service != NULL);
-    assert(omni_runtime_register_service(ctx->runtime, ctx->service) == 0);
-    ctx->registered = true;
-    while (!ctx->should_stop) omni_runtime_poll_once(ctx->runtime, 20);
-    omni_runtime_unregister_service(ctx->runtime, ctx->service);
-    demo_ItemService_stub_destroy(ctx->service);
-    omni_runtime_stop(ctx->runtime);
-    omni_runtime_destroy(ctx->runtime);
 }
 
 enum RawReplyMode {
@@ -809,20 +783,6 @@ static void topicCallback(const demo_ItemTopic* msg, void* user_data) {
     (*hits)++;
 }
 
-static uint16_t lookupCServicePort(const char* service_name) {
-    omni_runtime_t* probe = omni_runtime_create();
-    if (!probe) return 0;
-    if (omni_runtime_init(probe, "127.0.0.1", SM_PORT_REQ) != 0) { omni_runtime_destroy(probe); return 0; }
-    struct CProbe { uint16_t port; } cp = {0};
-    omni_runtime_list_instances(probe, service_name,
-        [](const omni_service_instance_t* info, void* ud) {
-            static_cast<CProbe*>(ud)->port = info->port;
-        }, &cp);
-    omni_runtime_stop(probe);
-    omni_runtime_destroy(probe);
-    return cp.port;
-}
-
 int main() {
     atexit(cleanupSM);
     omnibinder::platform::TestProcess sm_req = startSM(SM_PORT_REQ);
@@ -830,13 +790,24 @@ int main() {
     assert(waitSM(SM_PORT_REQ));
 
     ServerCtx server;
-    std::thread server_tid;
-    server_tid = std::thread(serverThread, &server);
-    for (int i = 0; i < 50 && !server.registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-    assert(server.registered);
+    server.runtime = omni_runtime_create();
+    assert(server.runtime != NULL);
+    assert(omni_runtime_init(server.runtime, "127.0.0.1", SM_PORT_REQ) == 0);
+    demo_ItemService_callbacks cbs;
+    memset(&cbs, 0, sizeof(cbs));
+    cbs.echoItem = cEchoItem;
+    cbs.user_data = &server;
+    server.service = demo_ItemService_stub_create_from_callbacks(&cbs);
+    assert(server.service != NULL);
+    assert(omni_runtime_register_service(server.runtime, server.service) == 0);
+    std::thread server_tid([&server]() { omni_runtime_start(server.runtime); });
+    for (int i = 0; i < 200 && omni_service_port(server.service) == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(omni_service_port(server.service) != 0);
 
     omnibinder::TcpConnection rogue;
-    assert(connectTcp(rogue, "127.0.0.1", lookupCServicePort("ItemService")));
+    assert(connectTcp(rogue, "127.0.0.1", omni_service_port(server.service)));
     assert(sendDataHello(rogue, 9200));
     omnibinder::Message bad_invoke(omnibinder::MessageType::MSG_INVOKE, 9201);
     bad_invoke.payload.writeUint32(IFACE_ID);
@@ -856,23 +827,32 @@ int main() {
     assert(omni_runtime_init(sub_runtime, "127.0.0.1", SM_PORT_REQ) == 0);
     demo_ItemService_proxy proxy;
     demo_ItemService_proxy_init(&proxy, sub_runtime);
-    assert(demo_ItemService_proxy_connect(&proxy) == 0);
+    std::thread sub_tid([sub_runtime]() { omni_runtime_start(sub_runtime); });
+    for (int i = 0; i < 200 && !omni_runtime_is_ready(sub_runtime); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(omni_runtime_is_ready(sub_runtime));
     std::atomic<int> topic_hits(0);
     demo_ItemService_proxy_subscribe_item_topic(&proxy, topicCallback, &topic_hits);
     omnibinder::TcpConnection broadcast_rogue;
-    assert(connectTcp(broadcast_rogue, "127.0.0.1", lookupCServicePort("ItemService")));
+    assert(connectTcp(broadcast_rogue, "127.0.0.1", omni_service_port(server.service)));
     omnibinder::Message bad_broadcast(omnibinder::MessageType::MSG_BROADCAST, 9202);
     bad_broadcast.payload.writeUint32(TOPIC_ID);
     assert(sendMessage(broadcast_rogue, bad_broadcast));
-    for (int i = 0; i < 20; ++i) { omni_runtime_poll_once(sub_runtime, 20); std::this_thread::sleep_for(std::chrono::microseconds(10000)); }
+    for (int i = 0; i < 30; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     assert(topic_hits.load() == 0);
     broadcast_rogue.close();
     demo_ItemService_proxy_destroy(&proxy);
     omni_runtime_stop(sub_runtime);
+    sub_tid.join();
     omni_runtime_destroy(sub_runtime);
 
-    server.should_stop = true;
+    omni_runtime_stop(server.runtime);
     server_tid.join();
+    demo_ItemService_stub_destroy(server.service);
+    omni_runtime_destroy(server.runtime);
     stopSM(sm_req);
 
     omnibinder::platform::TestProcess sm_reply = startSM(SM_PORT_REPLY);
@@ -886,8 +866,6 @@ int main() {
     for (int i = 0; i < 50 && !raw_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_ctx.ready);
 
-    omni_runtime_t* reg_runtime = omni_runtime_create();
-    assert(omni_runtime_init(reg_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     omnibinder::TcpConnection sm_conn;
     assert(connectTcp(sm_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_conn, 9301, "ItemService", raw_ctx.port, std::string()));
@@ -896,7 +874,11 @@ int main() {
     assert(omni_runtime_init(client_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     demo_ItemService_proxy reply_proxy;
     demo_ItemService_proxy_init(&reply_proxy, client_runtime);
-    assert(demo_ItemService_proxy_connect(&reply_proxy) == 0);
+    std::thread client_tid([client_runtime]() { omni_runtime_start(client_runtime); });
+    for (int i = 0; i < 200 && !omni_runtime_is_ready(client_runtime); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(omni_runtime_is_ready(client_runtime));
     struct demo_Item input;
     demo_Item_init(&input);
     input.id = 88;
@@ -907,9 +889,8 @@ int main() {
     demo_Item_destroy(&input);
     demo_Item_destroy(&result);
     omni_runtime_stop(client_runtime);
+    client_tid.join();
     omni_runtime_destroy(client_runtime);
-    omni_runtime_stop(reg_runtime);
-    omni_runtime_destroy(reg_runtime);
     sm_conn.close();
 
     raw_tid.join();
@@ -926,8 +907,6 @@ int main() {
     for (int i = 0; i < 50 && !raw_status_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_status_ctx.ready);
 
-    omni_runtime_t* reg_status_runtime = omni_runtime_create();
-    assert(omni_runtime_init(reg_status_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     omnibinder::TcpConnection sm_status_conn;
     assert(connectTcp(sm_status_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_status_conn, 9302, "ItemService", raw_status_ctx.port, std::string()));
@@ -936,7 +915,11 @@ int main() {
     assert(omni_runtime_init(client_status_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     demo_ItemService_proxy status_proxy;
     demo_ItemService_proxy_init(&status_proxy, client_status_runtime);
-    assert(demo_ItemService_proxy_connect(&status_proxy) == 0);
+    std::thread status_client_tid([client_status_runtime]() { omni_runtime_start(client_status_runtime); });
+    for (int i = 0; i < 200 && !omni_runtime_is_ready(client_status_runtime); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(omni_runtime_is_ready(client_status_runtime));
     struct demo_Item status_input;
     demo_Item_init(&status_input);
     status_input.id = 89;
@@ -947,9 +930,8 @@ int main() {
     demo_Item_destroy(&status_input);
     demo_Item_destroy(&status_result);
     omni_runtime_stop(client_status_runtime);
+    status_client_tid.join();
     omni_runtime_destroy(client_status_runtime);
-    omni_runtime_stop(reg_status_runtime);
-    omni_runtime_destroy(reg_status_runtime);
     sm_status_conn.close();
 
     raw_status_tid.join();
@@ -966,8 +948,6 @@ int main() {
     for (int i = 0; i < 50 && !raw_length_ctx.ready; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
     assert(raw_length_ctx.ready);
 
-    omni_runtime_t* reg_length_runtime = omni_runtime_create();
-    assert(omni_runtime_init(reg_length_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     omnibinder::TcpConnection sm_length_conn;
     assert(connectTcp(sm_length_conn, "127.0.0.1", SM_PORT_REPLY));
     assert(registerFakeService(sm_length_conn, 9303, "ItemService", raw_length_ctx.port, std::string()));
@@ -976,7 +956,11 @@ int main() {
     assert(omni_runtime_init(client_length_runtime, "127.0.0.1", SM_PORT_REPLY) == 0);
     demo_ItemService_proxy length_proxy;
     demo_ItemService_proxy_init(&length_proxy, client_length_runtime);
-    assert(demo_ItemService_proxy_connect(&length_proxy) == 0);
+    std::thread length_client_tid([client_length_runtime]() { omni_runtime_start(client_length_runtime); });
+    for (int i = 0; i < 200 && !omni_runtime_is_ready(client_length_runtime); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    assert(omni_runtime_is_ready(client_length_runtime));
     struct demo_Item length_input;
     demo_Item_init(&length_input);
     length_input.id = 90;
@@ -987,9 +971,8 @@ int main() {
     demo_Item_destroy(&length_input);
     demo_Item_destroy(&length_result);
     omni_runtime_stop(client_length_runtime);
+    length_client_tid.join();
     omni_runtime_destroy(client_length_runtime);
-    omni_runtime_stop(reg_length_runtime);
-    omni_runtime_destroy(reg_length_runtime);
     sm_length_conn.close();
 
     raw_length_tid.join();

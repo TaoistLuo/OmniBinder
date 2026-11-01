@@ -15,6 +15,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <thread>
 #include <csignal>
 #include <map>
 #include <vector>
@@ -566,7 +567,7 @@ static int cmdSubscribe(omnibinder::OmniRuntime& runtime, const char* topic_name
     signal(SIGINT, subscribe_signal_handler);
     signal(SIGTERM, subscribe_signal_handler);
     while (g_subscribe_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     runtime.unsubscribeTopic(name);
     fprintf(stderr, "Topic subscription stopped.\n");
@@ -947,6 +948,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    std::thread runtime_thread([&runtime]() {
+        runtime.start();
+    });
+    for (int i = 0; i < 100 && !runtime.isReady(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
     int result = 0;
     if (strcmp(command, "list") == 0) {
         result = cmdList(runtime);
@@ -965,6 +973,7 @@ int main(int argc, char* argv[]) {
     }
     
     runtime.stop();
+    runtime_thread.join();
     if (g_parse_ctx) delete g_parse_ctx;
     return result;
 }

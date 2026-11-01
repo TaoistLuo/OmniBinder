@@ -308,9 +308,9 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
         os << "    void Subscribe" << svc.publishes[i] << "Instance(const std::string& host_id, const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << svc.publishes[i] << "&)>& callback);\n";
     }
 
-    os << "\n    // Inherited from ServiceProxyBase: connect(), connect(host_id, instance_id),\n";
-    os << "    //   setInstance(), disconnect(), isConnected(), enableAutoReconnect(),\n";
-    os << "    //   startHeartbeat(), stopHeartbeat(), OnServiceDied()\n";
+    os << "\n    // Proxy 由 runtime start() 自动连接；setInstance() 仅配置目标实例。\n";
+    os << "    // Inherited from ServiceProxyBase: setInstance(), isConnected(),\n";
+    os << "    //   enableAutoReconnect(), startHeartbeat(), stopHeartbeat(), OnServiceDied().\n";
 
     os << "};\n\n";
 }
@@ -419,10 +419,9 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
 
         if (!svc.publishes.empty()) {
             os << "void " << svc.name << "Stub::onStart() {\n";
-            os << "    if (!runtime()) return;\n";
             for (size_t pi = 0; pi < svc.publishes.size(); ++pi) {
                 const std::string& topic = svc.publishes[pi];
-                os << "    runtime()->publishTopic(\"" << topic << "\", s_"
+                os << "    declarePublishedTopic(\"" << topic << "\", s_"
                    << topic << "_topic_idl_hash);\n";
             }
             os << "}\n\n";

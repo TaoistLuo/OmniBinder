@@ -260,7 +260,10 @@ omnibinder::OmniRuntime runtime;
 runtime.init("127.0.0.1", 9900);
 
 demo::SensorServiceProxy proxy(runtime);
-proxy.connect();
+std::thread runtime_thread([&runtime]() { runtime.start(); });
+while (!proxy.isConnected()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
 
 bool bool_out = proxy.EchoBool(false).value();
 
@@ -372,7 +375,7 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 ```c
 demo_SensorService_proxy proxy;
 demo_SensorService_proxy_init(&proxy, runtime);
-demo_SensorService_proxy_connect(&proxy);
+/* start 后首次方法调用自动连接。 */
 
 uint8_t b = 0;
 demo_SensorService_proxy_echo_bool(&proxy, 0, &b);
@@ -845,7 +848,7 @@ omni_runtime_register_service(runtime, svc);
 
 /* 客户端：枚举实例后绑定指定实例 */
 omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
-demo_SensorService_proxy_connect_instance(&proxy, lookup.found_host_id, lookup.found_instance_id);
+demo_SensorService_proxy_set_instance(&proxy, lookup.found_host_id, lookup.found_instance_id);
 ```
 
 > 跨板部署时 `host_id` 会随实例身份一起参与寻址，请确保每块板 `host_id` 唯一：克隆镜像会共享 `/etc/machine-id`，需在启动时通过 `setHostId()` 显式设置各设备唯一标识（MAC / 芯片 ID / 序列号）。
@@ -1077,13 +1080,14 @@ int main() {
     MyServiceImpl service;
     runtime.registerService(&service);
 
+    std::thread runtime_thread([&runtime]() { runtime.start(); });
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    runtime.unregisterService(&service);
     runtime.stop();
+    runtime_thread.join();
     return 0;
 }
 ```
@@ -1108,9 +1112,9 @@ int main() {
     }
 
     myapp::MyServiceProxy proxy(runtime);
-    if (proxy.connect() != 0) {
-        fprintf(stderr, "MyService not found\n");
-        return 1;
+    std::thread runtime_thread([&runtime]() { runtime.start(); });
+    while (!proxy.isConnected()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     // RPC 调用
@@ -1131,10 +1135,11 @@ int main() {
     });
 
     while (g_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     runtime.stop();
+    runtime_thread.join();
     return 0;
 }
 ```
@@ -1202,6 +1207,10 @@ omnic_generate(
 
 #### server.c
 
+> C 示例使用 `examples/common/app_thread.h` 的应用侧线程封装在工作线程执行
+> `omni_runtime_start()`；核心 C API 不提供线程，也不创建线程。
+
+
 ```c
 #include "my_service.bidl_c.h"
 #include <stdio.h>
@@ -1243,14 +1252,17 @@ int main(void) {
     omni_service_t* svc = myapp_MyService_stub_create(runtime);
     omni_runtime_register_service(runtime, svc);
 
+    /* 应用侧线程封装（仅示例 helper；核心 C API 不创建线程）。 */
+    app_thread_t* runtime_thread = app_thread_create(runtime_entry, runtime);
+
     printf("Server running (Ctrl+C to stop)...\n");
     while (g_running) {
-        omni_runtime_poll_once(runtime, 100);
+        app_sleep_ms(100);
     }
 
-    omni_runtime_unregister_service(runtime, svc);
-    myapp_MyService_stub_destroy(svc);
     omni_runtime_stop(runtime);
+    app_thread_join(runtime_thread);
+    myapp_MyService_stub_destroy(svc);
     omni_runtime_destroy(runtime);
     return 0;
 }
@@ -1291,10 +1303,11 @@ int main(void) {
         return 1;
     }
 
-    /* 初始化 Proxy */
+    /* 初始化 Proxy；start 后首次方法调用自动连接。 */
     myapp_MyService_proxy proxy;
     myapp_MyService_proxy_init(&proxy, runtime);
-    myapp_MyService_proxy_connect(&proxy);
+
+    app_thread_t* runtime_thread = app_thread_create(runtime_entry, runtime);
 
     /* RPC 调用 */
     myapp_Request req;
@@ -1317,10 +1330,12 @@ int main(void) {
     myapp_MyService_proxy_on_service_died(&proxy, on_service_died, NULL);
 
     while (g_running) {
-        omni_runtime_poll_once(runtime, 100);
+        app_sleep_ms(100);
     }
 
     omni_runtime_stop(runtime);
+    app_thread_join(runtime_thread);
+    myapp_MyService_proxy_destroy(&proxy);
     omni_runtime_destroy(runtime);
     return 0;
 }

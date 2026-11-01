@@ -45,6 +45,7 @@
 namespace omnibinder {
 
 class Service;
+class ServiceProxyBase;
 
 /* @brief 名字级死亡通知回调
  * @param[in] service_name 已离线的服务名称（该名字下最后一个存活实例消失时触发） */
@@ -124,16 +125,19 @@ public:
     // 生命周期
     // ============================================================
 
-    /* @brief 初始化运行时并连接到 ServiceManager
+    /* @brief 初始化本地运行时资源（不连接 ServiceManager）
      * @param[in]  sm_host ServiceManager 所在主机地址（IP 或域名）
      * @param[in]  sm_port ServiceManager 监听端口（默认 9900）
-     * @return 0 成功，<0 失败（网络错误或连接超时）
-     * @note   必须在其他 API 调用之前完成初始化 */
+     * @return 0 成功，<0 本地资源创建失败
+     * @note   init() 只创建 EventLoop/ConnectionManager 等本地资源；
+     *         SM 连接、服务注册、topic 发布、proxy 连接都在 start() 中执行。 */
     int  init(const std::string& sm_host, uint16_t sm_port = 9900);
 
-    /* @brief 启动 owner event-loop（阻塞直到 stop() 被调用）
-     * @note   可从内部通过 stop() 结束，也可从其它线程调用 stop() */
-    void run();
+    /* @brief 启动运行时并阻塞驱动 owner event-loop
+     * @return 0 正常结束；<0 生命周期错误（未 init / 已运行）
+     * @note   启动后依次连接 SM、激活已声明服务、发布 topic、连接 proxy。
+     *         必须由业务线程调用；本函数不创建线程。 */
+    int  start();
 
     /* @brief 停止 event-loop（线程安全，可从任意线程调用）
      * @note   仅标记停止；实际退出在下一轮事件循环检查时生效 */
@@ -143,10 +147,9 @@ public:
      * @return true 正在运行，false 已停止 */
     bool isRunning() const;
 
-    /* @brief 驱动事件循环执行一轮（非阻塞）
-     * @param[in]  timeout_ms 等待 I/O 事件的超时时间（毫秒，0 表示立即返回）
-     * @note   适合需要手动控制循环节奏的场景（如嵌入式主循环） */
-    void pollOnce(int timeout_ms = 0);
+    /* @brief 查询运行时是否已完成 SM 连接与服务/代理激活
+     * @return true 已 ready，false 仍在等待 SM 或激活中 */
+    bool isReady() const;
 
     // ============================================================
     // 控制面 — 与 ServiceManager 交互
@@ -154,10 +157,10 @@ public:
 
     // 服务注册/发现
 
-    /* @brief 向 ServiceManager 注册本地服务
+    /* @brief 声明本地服务（start 前只保存声明，start 后动态激活）
      * @param[in]  service 服务实例指针（由 IDL 生成的 Stub 子类）
-     * @return 0 成功，<0 失败（服务名重复或 SM 通信错误）
-     * @note   Service 生命周期由调用方管理，注销前不可释放 */
+     * @return 0 成功，<0 失败（服务名重复/参数错误）
+     * @note   Service 生命周期由调用方管理，stop/注销前不可释放。 */
     int registerService(Service* service);
 
     /* @brief 从 ServiceManager 注销本地服务
@@ -541,8 +544,15 @@ public:
     std::string runtimeId() const;
 
 private:
+    friend class ServiceProxyBase;
+
     OmniRuntime(const OmniRuntime&);
     OmniRuntime& operator=(const OmniRuntime&);
+
+    // Proxy 生命周期登记/连接（由 ServiceProxyBase 构造/析构与 runtime 内部调用）
+    void registerProxy(ServiceProxyBase* proxy);
+    void unregisterProxy(ServiceProxyBase* proxy);
+    int connectProxy(ServiceProxyBase* proxy);
 
     class Impl;
     Impl* impl_;

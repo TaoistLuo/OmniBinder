@@ -2,6 +2,7 @@
 #include <omnibinder/omnibinder.h>
 #include "platform/platform.h"
 #include "platform/platform_test.h"
+#include "runtime_thread.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +17,8 @@
 #include <ctime>
 #include <sstream>
 #include <iomanip>
+#include <thread>
+#include <atomic>
 
 using namespace omnibinder;
 
@@ -147,8 +150,9 @@ struct LatencyStats {
 static bool waitForService(const char* name, uint16_t sm_port, int timeout_sec) {
     omnibinder::OmniRuntime rt;
     if (rt.init("127.0.0.1", sm_port) != 0) return false;
-    omnibinder::ServiceInfo info;
+    omnibinder::test::RuntimeThread owner(rt);
     for (int i = 0; i < timeout_sec * 10; ++i) {
+        omnibinder::ServiceInfo info;
         if (rt.lookupService(name, info) == 0) return true;
         omnibinder::platform::sleepMs(100);
     }
@@ -225,7 +229,11 @@ int main(int argc, char* argv[]) {
         omnibinder::OmniRuntime rt;
         rt.init("127.0.0.1", SM_PORT);
         perf::PerfServiceProxy proxy(rt);
-        proxy.connect();
+        omnibinder::test::RuntimeThread owner(rt);
+        for (int i = 0; i < 100 && !proxy.isConnected(); ++i) {
+            omnibinder::platform::sleepMs(20);
+        }
+        if (!proxy.isConnected()) fatalExit(3);
 
         // 不同 payload 大小的 EchoBytes — 随机化顺序消除系统性偏差
         const int sizes[] = {0, 64, 256, 1024, 4096, 8192};
@@ -347,21 +355,25 @@ int main(int argc, char* argv[]) {
         omnibinder::OmniRuntime rt;
         rt.init("127.0.0.1", SM_PORT);
         perf::PerfServiceProxy proxy(rt);
-        proxy.connect();
+        omnibinder::test::RuntimeThread owner(rt);
+        for (int i = 0; i < 100 && !proxy.isConnected(); ++i) {
+            omnibinder::platform::sleepMs(20);
+        }
+        if (!proxy.isConnected()) fatalExit(3);
 
         const int sizes[] = {0, 64, 256, 1024, 4096, 8192};
         const int n_sizes = sizeof(sizes) / sizeof(sizes[0]);
 
         LatencyStats stats[n_sizes];
-        int warmup[n_sizes];
-        int needed[n_sizes];
+        std::atomic<int> warmup[n_sizes];
+        std::atomic<int> needed[n_sizes];
 
         for (int i = 0; i < n_sizes; ++i) {
             char buf[64];
             snprintf(buf, sizeof(buf), "Topic pub/sub (%d bytes)", sizes[i]);
             stats[i].name = buf;
-            warmup[i] = TOPIC_WARMUP;
-            needed[i] = TOPIC_ROUNDS;
+            warmup[i].store(TOPIC_WARMUP, std::memory_order_relaxed);
+            needed[i].store(TOPIC_ROUNDS, std::memory_order_relaxed);
         }
 
         proxy.SubscribePerfTopic(
@@ -372,13 +384,17 @@ int main(int argc, char* argv[]) {
                     if (sizes[i] == sz) { idx = i; break; }
                 if (idx < 0) return;
 
-                if (warmup[idx] > 0) { --warmup[idx]; return; }
-                if (needed[idx] > 0) {
+                if (warmup[idx].load(std::memory_order_relaxed) > 0) {
+                    warmup[idx].fetch_sub(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (needed[idx].load(std::memory_order_relaxed) > 0) {
                     stats[idx].add(nowUs() - msg.send_time_us);
-                    --needed[idx];
+                    needed[idx].fetch_sub(1, std::memory_order_release);
                 }
                 // 校验在计时之后，避免 O(N) 扫描污染测量
-                if (needed[idx] == 0 && warmup[idx] == 0) {
+                if (needed[idx].load(std::memory_order_relaxed) == 0
+                    && warmup[idx].load(std::memory_order_relaxed) == 0) {
                     for (size_t j = 0; j < msg.payload.size(); ++j) {
                         if (msg.payload[j] != static_cast<uint8_t>(0xCD)) {
                             fprintf(stderr, "FATAL: Topic payload mismatch: sz=%d pos=%zu\n", sz, j);
@@ -391,15 +407,18 @@ int main(int argc, char* argv[]) {
         int pending = n_sizes * TOPIC_ROUNDS;
         int64_t deadline = nowUs() + 60 * 1000 * 1000LL;
         while (pending > 0 && nowUs() < deadline) {
-            rt.pollOnce(0);
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
             pending = 0;
-            for (int i = 0; i < n_sizes; ++i) pending += needed[i];
+            for (int i = 0; i < n_sizes; ++i) {
+                pending += needed[i].load(std::memory_order_acquire);
+            }
         }
 
         for (int i = 0; i < n_sizes; ++i) {
-            if (needed[i] > 0) {
+            const int remaining = needed[i].load(std::memory_order_acquire);
+            if (remaining > 0) {
                 fprintf(stderr, "FATAL: topic %s only %d/%d samples\n",
-                        stats[i].name.c_str(), TOPIC_ROUNDS - needed[i], TOPIC_ROUNDS);
+                        stats[i].name.c_str(), TOPIC_ROUNDS - remaining, TOPIC_ROUNDS);
                 fatalExit(2);
             }
             stats[i].print();
@@ -432,7 +451,7 @@ int main(int argc, char* argv[]) {
                 << "- 传输方式: TCP + SHM（自动选择，同机通信使用 SHM）\n"
                 << "- RPC 预热轮数: " << RPC_WARMUP << "\n"
                 << "- RPC 测试轮数: " << RPC_ROUNDS << "（每个用例）\n"
-                << "- 话题模式: 服务端每 500us 轮转发布 topic，客户端 pollOnce(0) busy-spin 收包，统计服务端 publish 时间戳到客户端 callback 的延迟\n"
+                << "- 话题模式: 服务端每 500us 轮转发布 topic，客户端 owner event-loop 收包，统计服务端 publish 时间戳到客户端 callback 的延迟\n"
                 << "- 测试服务 SHM ring: 64KB / 64KB\n"
                 << "- 话题预热轮数: " << TOPIC_WARMUP << "\n"
                 << "- 话题测试轮数: " << TOPIC_ROUNDS << "（每个用例）\n\n"
@@ -463,7 +482,7 @@ int main(int argc, char* argv[]) {
 
             ofs << "### 话题发布/订阅延迟\n\n"
                 << "测量服务端执行 `BroadcastPerfTopic` 时写入的 `send_time_us` 到客户端订阅回调执行的时间。\n"
-                << "服务端以 500us 间隔轮转发布各 payload size，客户端使用 pollOnce(0) busy-spin 收包，与 RPC benchmark 的热事件循环条件对齐。\n\n";
+                << "服务端以 500us 间隔轮转发布各 payload size，客户端使用 owner event-loop 收包，与 RPC benchmark 的热事件循环条件对齐。\n\n";
             for (size_t i = 0; i < all.size(); ++i) {
                 if (all[i].name.find("Topic") == std::string::npos) continue;
                 ofs << "**" << all[i].name << "**\n\n"

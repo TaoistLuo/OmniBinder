@@ -6,6 +6,7 @@
 #include <csignal>
 #include <atomic>
 #include <chrono>
+#include <thread>
 
 static std::atomic<bool> g_running(true);
 static void signalHandler(int) { g_running.store(false); }
@@ -74,6 +75,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    std::thread owner([&runtime]() { runtime.start(); });
+    for (int i = 0; i < 200 && service.port() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (service.port() == 0) {
+        fprintf(stderr, "SERVER: start/registration failed\n");
+        runtime.stop();
+        owner.join();
+        return 1;
+    }
+
     printf("SERVER_READY port=%u\n", service.port());
     fflush(stdout);
 
@@ -101,10 +113,10 @@ int main(int argc, char* argv[]) {
                 next_us = now + topic_interval_us;
             }
         }
-        runtime.pollOnce(0);
+        std::this_thread::sleep_for(std::chrono::microseconds(topic_interval_us));
     }
 
-    runtime.unregisterService(&service);
     runtime.stop();
+    owner.join();
     return 0;
 }

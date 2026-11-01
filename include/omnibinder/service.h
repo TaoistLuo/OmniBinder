@@ -37,8 +37,19 @@
 #include "omnibinder/types.h"
 #include "omnibinder/buffer.h"
 #include <string>
+#include <vector>
+#include <cstdint>
+#include <atomic>
 
 namespace omnibinder {
+
+/* @brief 服务声明的发布 topic（由生成 Stub 在 onStart 中登记） */
+struct PublishedTopicInfo {
+    std::string name;
+    uint32_t    idl_hash;
+    PublishedTopicInfo() : idl_hash(0) {}
+    PublishedTopicInfo(const std::string& n, uint32_t h) : name(n), idl_hash(h) {}
+};
 
 class OmniRuntime;
 
@@ -81,7 +92,13 @@ public:
      * @return 接口信息（接口 ID、名称、方法列表） */
     virtual const InterfaceInfo& interfaceInfo() const = 0;
 
+    /* @brief 登记本服务要发布的 topic
+     * @note  只记录声明，不立即向 ServiceManager 发送请求；由 runtime start/reconnect
+     *        阶段统一发布。生成 Stub 的 onStart() 会调用本函数。 */
+    const std::vector<PublishedTopicInfo>& publishedTopics() const { return published_topics_; }
+
 protected:
+    void declarePublishedTopic(const std::string& topic_name, uint32_t idl_hash);
     virtual int onInvoke(uint32_t method_id, const Buffer& request, Buffer& response) = 0;
     virtual void onStart();
     virtual void onStop();
@@ -100,10 +117,11 @@ private:
     void setPort(uint16_t p);
 
     std::string name_;
-    uint16_t port_;
+    std::atomic<uint16_t> port_;
     std::string register_host_;
     std::string instance_id_;
     ShmConfig shm_config_;
+    std::vector<PublishedTopicInfo> published_topics_;
     OmniRuntime* runtime_;
 };
 

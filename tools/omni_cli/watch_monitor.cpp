@@ -12,6 +12,8 @@
 #include <omnibinder/message.h>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <thread>
 #include <cstdarg>
 #include <csignal>
 #include <map>
@@ -508,7 +510,7 @@ int runWatchMonitor(omnibinder::OmniRuntime& runtime, uint32_t pid, const char* 
     signal(SIGINT, watch_sigint_handler);
     signal(SIGTERM, watch_sigint_handler);
     while (g_watch_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     runtime.unwatchPid(pid);
     printf("\nDiagnostic watch stopped.\n");

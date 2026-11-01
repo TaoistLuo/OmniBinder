@@ -24,11 +24,11 @@ const char* Service::serviceName() const {
 }
 
 uint16_t Service::port() const {
-    return port_;
+    return port_.load(std::memory_order_acquire);
 }
 
 void Service::setPort(uint16_t p) {
-    port_ = p;
+    port_.store(p, std::memory_order_release);
 }
 
 void Service::setRegisterHost(const std::string& host) {
@@ -57,6 +57,16 @@ const std::string& Service::instanceId() const {
 
 OmniRuntime* Service::runtime() const {
     return runtime_;
+}
+
+void Service::declarePublishedTopic(const std::string& topic_name, uint32_t idl_hash) {
+    for (size_t i = 0; i < published_topics_.size(); ++i) {
+        if (published_topics_[i].name == topic_name) {
+            published_topics_[i].idl_hash = idl_hash;
+            return;
+        }
+    }
+    published_topics_.push_back(PublishedTopicInfo(topic_name, idl_hash));
 }
 
 void Service::onStart() {}

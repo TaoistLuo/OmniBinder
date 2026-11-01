@@ -39,7 +39,11 @@ omnibinder::OmniRuntime runtime;
 runtime.init("127.0.0.1", 9900);
 
 demo::SensorServiceProxy proxy(runtime);
-if (proxy.connect() != 0) {
+std::thread runtime_thread([&runtime]() { runtime.start(); });
+while (!proxy.isConnected()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+}
+if (!proxy.isConnected()) {
     return -1;
 }
 
@@ -287,7 +291,7 @@ omni_runtime_register_service(rt, svc);
 
 demo_SensorService_proxy proxy;
 demo_SensorService_proxy_init(&proxy, rt);
-demo_SensorService_proxy_connect(&proxy);
+demo_SensorService_proxy_set_instance(&proxy, host_id, instance_id);
 
 demo_SensorData result;
 demo_SensorData_init(&result);
@@ -310,7 +314,7 @@ omni_runtime_destroy(rt);
 ```c
 demo_SensorService_proxy proxy;
 demo_SensorService_proxy_init(&proxy, rt);
-demo_SensorService_proxy_connect(&proxy);
+demo_SensorService_proxy_set_instance(&proxy, host_id, instance_id);
 
 demo_ControlCommand cmd;
 demo_ControlCommand_init(&cmd);

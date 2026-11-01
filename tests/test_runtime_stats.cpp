@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
 #include <thread>
@@ -38,20 +39,23 @@ struct RuntimeStatsServerCtx {
     OmniRuntime runtime;
     StatsService service;
     std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    RuntimeStatsServerCtx() : registered(false), should_stop(false) {}
+    RuntimeStatsServerCtx() : registered(false) {}
 };
+
+static bool waitReady(OmniRuntime& runtime, int attempts = 100) {
+    for (int i = 0; i < attempts; ++i) {
+        if (runtime.isReady()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return runtime.isReady();
+}
 
 static void rtStatsServerThread(void* arg) {
     RuntimeStatsServerCtx* ctx = static_cast<RuntimeStatsServerCtx*>(arg);
-    int ret = ctx->runtime.init("127.0.0.1", SM_PORT);
-    if (ret != 0) return;
-    ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) return;
-    ctx->registered.store(true);
-    while (!ctx->should_stop.load()) ctx->runtime.pollOnce(50);
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
+    if (ctx->runtime.init("127.0.0.1", SM_PORT) != 0) return;
+    if (ctx->runtime.registerService(&ctx->service) != 0) return;
+    // start() 阻塞驱动 owner event-loop，直到主线程 stop()
+    ctx->runtime.start();
 }
 
 class RuntimeStatsTest : public ::testing::Test {
@@ -67,14 +71,23 @@ protected:
 
         server_ctx_ = new RuntimeStatsServerCtx();
         server_tid_ = std::thread(rtStatsServerThread, server_ctx_);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        for (int i = 0; i < 100 && !server_ctx_->registered; ++i) {
+            ServiceInfo info;
+            if (waitReady(server_ctx_->runtime)
+                && server_ctx_->runtime.lookupService("StatsService", info) == 0) {
+                server_ctx_->registered.store(true);
+            }
+            if (!server_ctx_->registered) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
         ASSERT_TRUE(server_ctx_->registered);
     }
 
     static void TearDownTestSuite() {
         if (server_ctx_) {
-            server_ctx_->should_stop = true;
-            server_tid_.join();
+            server_ctx_->runtime.stop();
+            if (server_tid_.joinable()) server_tid_.join();
             delete server_ctx_;
             server_ctx_ = nullptr;
         }
@@ -89,17 +102,21 @@ std::thread RuntimeStatsTest::server_tid_;
 TEST_F(RuntimeStatsTest, InitialStatsZero) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
     RuntimeStats stats;
     ASSERT_EQ(runtime.getStats(stats), 0);
     EXPECT_EQ(stats.total_rpc_calls, 0u);
     EXPECT_EQ(stats.total_rpc_success, 0u);
     EXPECT_EQ(stats.total_rpc_failures, 0u);
-    runtime.stop();
+    owner.stop();
 }
 
 TEST_F(RuntimeStatsTest, SuccessfulCallsUpdateStats) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
     for (int i = 0; i < 5; ++i) {
         Buffer req, resp;
         const char* payload = "stats-ok";
@@ -114,12 +131,14 @@ TEST_F(RuntimeStatsTest, SuccessfulCallsUpdateStats) {
     EXPECT_EQ(stats.total_rpc_failures, 0u);
     EXPECT_GE(stats.active_connections, 1u);
     EXPECT_GE(stats.tcp_connections + stats.shm_connections, 1u);
-    runtime.stop();
+    owner.stop();
 }
 
 TEST_F(RuntimeStatsTest, FailedCallUpdatesStats) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
     Buffer req, resp;
     req.writeRaw("bad", 3);
     int ret = runtime.invoke("MissingService", IFACE_ID, METHOD_ECHO, 0, req, resp, 1000);
@@ -130,12 +149,14 @@ TEST_F(RuntimeStatsTest, FailedCallUpdatesStats) {
     EXPECT_EQ(stats.total_rpc_calls, 1u);
     EXPECT_EQ(stats.total_rpc_success, 0u);
     EXPECT_GE(stats.total_rpc_failures, 1u);
-    runtime.stop();
+    owner.stop();
 }
 
 TEST_F(RuntimeStatsTest, ResetStatsClearsCounters) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
 
     // 先制造非零计数，证明 reset 真的清零，而非"本来就为 0"掩盖 reset 空实现
     {
@@ -160,5 +181,5 @@ TEST_F(RuntimeStatsTest, ResetStatsClearsCounters) {
     EXPECT_EQ(stats.total_rpc_calls, 0u);
     EXPECT_EQ(stats.total_rpc_success, 0u);
     EXPECT_EQ(stats.total_rpc_failures, 0u);
-    runtime.stop();
+    owner.stop();
 }

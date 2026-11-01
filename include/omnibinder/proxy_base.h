@@ -36,11 +36,13 @@
 #include <atomic>
 #include <functional>
 #include <string>
+#include <mutex>
 
 namespace omnibinder {
 
 /* @brief 所有生成 Proxy 的公共基类：封装 runtime 引用、连接状态与 RPC 超时等横切关注点 */
 class ServiceProxyBase {
+    friend class OmniRuntime;
 public:
     /* @brief 创建 Proxy 基类实例
      * @param[in]  runtime      OmniRuntime 引用
@@ -49,22 +51,7 @@ public:
 
     virtual ~ServiceProxyBase();
     
-    /* @brief 建立到目标服务的数据面连接
-     * @return 0 成功，<0 失败
-     * @note   成功后会启用自动重连和心跳 */
-    int connect();
-
-    /* @brief 绑定到目标服务的指定实例并建立数据面连接
-     * @param[in]  host_id     目标板级主机身份（ServiceInfo.host_id）
-     * @param[in]  instance_id 目标实例标识（ServiceInfo.instance_id）
-     * @return 0 成功；ERR_SERVICE_NOT_FOUND 无匹配实例；网络/协议错误时返回对应错误码
-     * @note   等价于先 setInstance(host_id, instance_id) 再 connect()。
-     *         绑定后本代理的 invoke / 心跳 / 重连 / 断开均寻址该实例。
-     *         话题的服务级订阅仍按 topic 全局身份；实例级订阅由生成 Proxy 的
-     *         Subscribe<Topic>Instance 提供 */
-    int connect(const std::string& host_id, const std::string& instance_id);
-
-    /* @brief 设置实例选择器（下一次 connect() 生效）
+    /* @brief 设置实例选择器（下一次自动连接/connect() 生效）
      * @param[in]  host_id     目标板级主机身份
      * @param[in]  instance_id 目标实例标识
      * @note   仅改变后续 connect() 的目标；对已建立的连接不生效，需先 disconnect() */
@@ -76,6 +63,11 @@ public:
     /* @brief 查询连接状态
      * @return true 已连接，false 未连接 */
     bool isConnected() const;
+
+    /* @brief 是否允许 runtime 自动连接/重连本 Proxy */
+    bool shouldAutoConnect() const { return auto_connect_enabled_.load(); }
+    /* @brief 是否曾经成功连接过（用于区分“首次等待服务”和“已连接后死亡”） */
+    bool hasEverConnected() const { return ever_connected_.load(); }
 
     /* @brief 启用/禁用自动重连
      * @param[in]  enable true 启用（默认） */
@@ -104,11 +96,15 @@ public:
     void OnServiceDied(const std::function<void()>& callback);
     
 protected:
+    /* @brief 建立/重连目标服务的数据面连接（仅由 runtime 调用） */
+    int connect();
+    int connect(const std::string& host_id, const std::string& instance_id);
+
     /* @brief 当前实例绑定的数据面连接键
      * @return 默认实例返回服务名；绑定实例后返回 makeServiceConnectionKey(...)
      * @note   生成的 Proxy 方法据此寻址数据面连接（默认路径与服务名一致，
      *         行为与历史版本完全相同） */
-    const std::string& connectionKey() const;
+    std::string connectionKey() const;
 
     /* @brief 服务死亡回调（子类可重写）
      * @note   默认行为：标记已断开 + 调用 OnServiceDied 注册的回调。
@@ -123,6 +119,8 @@ protected:
     std::string instance_id_;
     std::string connection_key_;
     std::atomic<bool> connected_;
+    std::atomic<bool> auto_connect_enabled_;
+    std::atomic<bool> ever_connected_;
     // 是否已向 runtime 订阅死亡通知。与 connected_ 分开：服务死亡会把 connected_
     // 置 false，但订阅仍然存在且 lambda 捕获 this，析构时必须据此退订，否则
     // 服务重启再死会回调已析构的 proxy（UAF）
@@ -133,6 +131,7 @@ protected:
     bool heartbeat_configured_;
     uint32_t heartbeat_interval_ms_;
     uint32_t heartbeat_timeout_ms_;
+    mutable std::mutex state_mutex_;
     std::function<void()> death_callback_;
 };
 

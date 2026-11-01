@@ -33,6 +33,7 @@
 
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
 #include <omnibinder/proxy_base.h>
@@ -47,6 +48,23 @@ using namespace omnibinder;
 using namespace omnibinder::test;
 
 static const uint16_t SCENARIO_SM_PORT = 19920;
+
+static bool waitReady(OmniRuntime& runtime, int attempts = 100) {
+    for (int i = 0; i < attempts; ++i) {
+        if (runtime.isReady()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return runtime.isReady();
+}
+
+static bool waitUntil(const std::function<bool()>& predicate, int attempts,
+                      int sleep_ms = 50) {
+    for (int i = 0; i < attempts; ++i) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+    }
+    return predicate();
+}
 
 // ─── 场景 1: 纯客户端（无注册服务）SM 重启后自动重连 ───
 //
@@ -67,17 +85,10 @@ TEST(SmRestartPureClient, ClientReconnectsAfterSmRestart) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SCENARIO_SM_PORT), 0);
 
-    // 启动 event-loop（在后台线程驱动，模拟真实运行）
-    std::atomic<bool> client_running{true};
-    std::thread client_thread([&]() {
-        while (client_running.load()) {
-            runtime.pollOnce(100);
-        }
-    });
-    ScopedThreadJoiner client_join(client_thread, [&]() {
-        client_running = false;
-        runtime.stop();
-    });
+    // 启动 event-loop（业务线程执行 start()，阻塞驱动）
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(runtime.isRunning());
+    ASSERT_TRUE(waitReady(runtime));
 
     // 验证客户端可以查询自己的运行时信息（证明 SM 连接正常）
     std::vector<RuntimeInfo> runtimes;
@@ -108,9 +119,7 @@ TEST(SmRestartPureClient, ClientReconnectsAfterSmRestart) {
     EXPECT_TRUE(reconnected) << "Pure client should reconnect to SM after restart";
 
     // 清理
-    client_running = false;
-    runtime.stop();
-    client_thread.join();
+    owner.stop();
     stopProcess(sm_pid);
 }
 
@@ -135,6 +144,8 @@ public:
         iface_.interface_id = TOPIC_INST_IFACE_ID;
         iface_.name = name;
         iface_.methods.push_back(MethodInfo(TOPIC_INST_METHOD_ECHO, "Echo"));
+        // start() 激活阶段统一发布，避免测试线程提前驱动 runtime
+        declarePublishedTopic(TOPIC_INST_NAME, 0x1234u);
     }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
 
@@ -155,12 +166,11 @@ struct TopicPublisherContext {
     TopicInstService service;
     std::string instance_id;
     std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
     uint16_t sm_port;
 
     TopicPublisherContext(const std::string& service_name, const std::string& inst)
         : service(service_name), instance_id(inst), registered(false),
-          should_stop(false), sm_port(0) {}
+          sm_port(0) {}
 };
 
 static void topicPublisherThread(void* arg) {
@@ -170,27 +180,31 @@ static void topicPublisherThread(void* arg) {
     }
     ctx->service.setInstanceId(ctx->instance_id);
     if (ctx->runtime.registerService(&ctx->service) != 0) {
-        ctx->runtime.stop();
         return;
     }
-    if (ctx->runtime.publishTopic(TOPIC_INST_NAME, 0x1234u) != 0) {
-        ctx->runtime.unregisterService(&ctx->service);
-        ctx->runtime.stop();
-        return;
-    }
-    ctx->registered = true;
-    while (!ctx->should_stop) {
-        ctx->runtime.pollOnce(5);
-    }
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
+    // start() 阻塞驱动 owner event-loop，直到主线程 stop()
+    ctx->runtime.start();
 }
 
 static void startTopicPublisher(TopicPublisherContext& ctx, std::thread& tid) {
     ctx.sm_port = TOPIC_INSTANCE_SM_PORT;
     tid = std::thread(topicPublisherThread, &ctx);
+    const std::string service_name = ctx.service.serviceName();
     for (int i = 0; i < 100 && !ctx.registered; ++i) {
-        platform::sleepMs(50);
+        if (waitReady(ctx.runtime)) {
+            std::vector<ServiceInfo> instances;
+            if (ctx.runtime.listServiceInstances(service_name, instances) == 0) {
+                for (size_t n = 0; n < instances.size(); ++n) {
+                    if (instances[n].instance_id == ctx.instance_id) {
+                        ctx.registered = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!ctx.registered) {
+            platform::sleepMs(50);
+        }
     }
     if (!ctx.registered) {
         fprintf(stderr, "startTopicPublisher: registration timed out for %s/%s\n",
@@ -199,7 +213,7 @@ static void startTopicPublisher(TopicPublisherContext& ctx, std::thread& tid) {
 }
 
 static void stopTopicPublisher(TopicPublisherContext& ctx, std::thread& tid) {
-    ctx.should_stop = true;
+    ctx.runtime.stop();
     if (tid.joinable()) {
         tid.join();
     }
@@ -211,10 +225,10 @@ static int broadcastTopicUntil(OmniRuntime& pub, OmniRuntime& sub,
     Buffer data;
     data.writeInt32(value);
     const int before = counter.load();
+    (void)sub;
     for (int i = 0; i < iterations && (counter.load() - before) < want_more; ++i) {
         pub.broadcast(TOPIC_INST_ID, data);
-        sub.pollOnce(20);
-        platform::sleepMs(5);
+        platform::sleepMs(10);
     }
     return counter.load() - before;
 }
@@ -251,8 +265,8 @@ TEST_F(TopicInstanceScenario, ServiceLevelReceivesAllInstancesAndSource) {
     std::thread t2;
     startTopicPublisher(p1, t1);
     startTopicPublisher(p2, t2);
-    ScopedThreadJoiner j1(t1, [&p1]() { p1.should_stop = true; });
-    ScopedThreadJoiner j2(t2, [&p2]() { p2.should_stop = true; });
+    ScopedThreadJoiner j1(t1, [&p1]() { p1.runtime.stop(); });
+    ScopedThreadJoiner j2(t2, [&p2]() { p2.runtime.stop(); });
     ASSERT_TRUE(p1.registered);
     ASSERT_TRUE(p2.registered);
 
@@ -261,6 +275,8 @@ TEST_F(TopicInstanceScenario, ServiceLevelReceivesAllInstancesAndSource) {
 
     OmniRuntime sub;
     ASSERT_EQ(sub.init("127.0.0.1", TOPIC_INSTANCE_SM_PORT), 0);
+    test::RuntimeThread owner(sub);
+    ASSERT_TRUE(waitReady(sub));
 
     std::atomic<int> count_a(0);
     std::atomic<int> count_b(0);
@@ -291,7 +307,7 @@ TEST_F(TopicInstanceScenario, ServiceLevelReceivesAllInstancesAndSource) {
 
     stopTopicPublisher(p1, t1);
     stopTopicPublisher(p2, t2);
-    sub.stop();
+    owner.stop();
 }
 
 TEST_F(TopicInstanceScenario, InstanceLevelReceivesOnlySelectedInstance) {
@@ -301,13 +317,15 @@ TEST_F(TopicInstanceScenario, InstanceLevelReceivesOnlySelectedInstance) {
     std::thread t2;
     startTopicPublisher(p1, t1);
     startTopicPublisher(p2, t2);
-    ScopedThreadJoiner j1(t1, [&p1]() { p1.should_stop = true; });
-    ScopedThreadJoiner j2(t2, [&p2]() { p2.should_stop = true; });
+    ScopedThreadJoiner j1(t1, [&p1]() { p1.runtime.stop(); });
+    ScopedThreadJoiner j2(t2, [&p2]() { p2.runtime.stop(); });
     ASSERT_TRUE(p1.registered);
     ASSERT_TRUE(p2.registered);
 
     OmniRuntime sub;
     ASSERT_EQ(sub.init("127.0.0.1", TOPIC_INSTANCE_SM_PORT), 0);
+    test::RuntimeThread owner(sub);
+    ASSERT_TRUE(waitReady(sub));
 
     std::atomic<int> count_a(0);
     std::atomic<int> count_b(0);
@@ -332,7 +350,7 @@ TEST_F(TopicInstanceScenario, InstanceLevelReceivesOnlySelectedInstance) {
 
     stopTopicPublisher(p1, t1);
     stopTopicPublisher(p2, t2);
-    sub.stop();
+    owner.stop();
 }
 
 TEST_F(TopicInstanceScenario, DifferentServicesWithSameTopicDoNotCollide) {
@@ -342,13 +360,15 @@ TEST_F(TopicInstanceScenario, DifferentServicesWithSameTopicDoNotCollide) {
     std::thread ty;
     startTopicPublisher(px, tx);
     startTopicPublisher(py, ty);
-    ScopedThreadJoiner jx(tx, [&px]() { px.should_stop = true; });
-    ScopedThreadJoiner jy(ty, [&py]() { py.should_stop = true; });
+    ScopedThreadJoiner jx(tx, [&px]() { px.runtime.stop(); });
+    ScopedThreadJoiner jy(ty, [&py]() { py.runtime.stop(); });
     ASSERT_TRUE(px.registered);
     ASSERT_TRUE(py.registered);
 
     OmniRuntime sub;
     ASSERT_EQ(sub.init("127.0.0.1", TOPIC_INSTANCE_SM_PORT), 0);
+    test::RuntimeThread owner(sub);
+    ASSERT_TRUE(waitReady(sub));
 
     std::atomic<int> count_x(0);
     std::atomic<int> count_y(0);
@@ -372,18 +392,20 @@ TEST_F(TopicInstanceScenario, DifferentServicesWithSameTopicDoNotCollide) {
 
     stopTopicPublisher(px, tx);
     stopTopicPublisher(py, ty);
-    sub.stop();
+    owner.stop();
 }
 
 TEST_F(TopicInstanceScenario, SubscriptionWithoutPublisherSelectorMatchesAnyPublisher) {
     TopicPublisherContext p("TopicInstService", "");
     std::thread t;
     startTopicPublisher(p, t);
-    ScopedThreadJoiner j(t, [&p]() { p.should_stop = true; });
+    ScopedThreadJoiner j(t, [&p]() { p.runtime.stop(); });
     ASSERT_TRUE(p.registered);
 
     OmniRuntime sub;
     ASSERT_EQ(sub.init("127.0.0.1", TOPIC_INSTANCE_SM_PORT), 0);
+    test::RuntimeThread owner(sub);
+    ASSERT_TRUE(waitReady(sub));
 
     std::atomic<int> received(0);
     int ret = sub.subscribeTopic(TOPIC_INST_NAME,
@@ -395,7 +417,7 @@ TEST_F(TopicInstanceScenario, SubscriptionWithoutPublisherSelectorMatchesAnyPubl
     EXPECT_GE(received.load(), 1);
 
     stopTopicPublisher(p, t);
-    sub.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -425,6 +447,7 @@ public:
         iface_.interface_id = SCEN_IFACE_ID;
         iface_.name = SCEN_SERVICE_NAME;
         iface_.methods.push_back(MethodInfo(SCEN_METHOD_ECHO, "EchoInstance"));
+        declarePublishedTopic(SCEN_TOPIC_NAME, 0);
     }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
 
@@ -473,7 +496,7 @@ static bool waitScenarioInstanceCount(OmniRuntime& rt, size_t want, int max_atte
         if (listScenarioInstances(rt, instances) && instances.size() >= want) {
             return true;
         }
-        rt.pollOnce(50);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return false;
 }
@@ -493,12 +516,13 @@ static bool findScenarioInstance(OmniRuntime& rt, const std::string& instance_id
 
 static bool waitScenarioEcho(SysScenarioProxy& proxy, OmniRuntime& rt,
                              const std::string& want, int max_attempts = 200) {
+    (void)rt;
     for (int i = 0; i < max_attempts; ++i) {
         std::string got;
         if (proxy.EchoInstance(got) == 0 && got == want) {
             return true;
         }
-        rt.pollOnce(50);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return false;
 }
@@ -571,6 +595,8 @@ TEST_F(SystemScenarioTest, SingleBoardTwoInstancesDistinctShmAndTopicSources) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SCEN1_SM_PORT), 0);
+    test::RuntimeThread owner(rt);
+    ASSERT_TRUE(waitReady(rt));
     ASSERT_TRUE(waitScenarioInstanceCount(rt, 2))
         << "两个不同 instance_id 的同名实例必须并存";
 
@@ -590,8 +616,12 @@ TEST_F(SystemScenarioTest, SingleBoardTwoInstancesDistinctShmAndTopicSources) {
 
     SysScenarioProxy proxy_a(rt, SCEN_SERVICE_NAME);
     SysScenarioProxy proxy_b(rt, SCEN_SERVICE_NAME);
-    ASSERT_EQ(proxy_a.connect(a.host_id, "ttyUSB0"), 0);
-    ASSERT_EQ(proxy_b.connect(b.host_id, "ttyUSB1"), 0);
+    proxy_a.setInstance(a.host_id, "ttyUSB0");
+    proxy_b.setInstance(b.host_id, "ttyUSB1");
+    ASSERT_TRUE(waitUntil([&proxy_a]() { return proxy_a.isConnected(); }, 100))
+        << "proxy_a auto-connect timed out";
+    ASSERT_TRUE(waitUntil([&proxy_b]() { return proxy_b.isConnected(); }, 100))
+        << "proxy_b auto-connect timed out";
     for (int i = 0; i < 5; ++i) {
         std::string got_a;
         std::string got_b;
@@ -626,7 +656,7 @@ TEST_F(SystemScenarioTest, SingleBoardTwoInstancesDistinctShmAndTopicSources) {
     for (int i = 0; i < 300
          && (seen_a.load(std::memory_order_acquire) == 0
              || seen_b.load(std::memory_order_acquire) == 0); ++i) {
-        rt.pollOnce(20);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     EXPECT_GE(seen_a.load(std::memory_order_acquire), 1)
         << "服务级订阅必须收到 ttyUSB0 的广播";
@@ -643,7 +673,7 @@ TEST_F(SystemScenarioTest, SingleBoardTwoInstancesDistinctShmAndTopicSources) {
 
     proxy_a.disconnect();
     proxy_b.disconnect();
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -665,6 +695,8 @@ TEST_F(SystemScenarioTest, CrossBoardSameNameBindByHostAndInstance) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SCEN2_SM_PORT), 0);
+    test::RuntimeThread owner(rt);
+    ASSERT_TRUE(waitReady(rt));
     ASSERT_TRUE(waitScenarioInstanceCount(rt, 2))
         << "不同 host_id 的同名实例必须并存（不得跨板顶替）";
 
@@ -681,8 +713,12 @@ TEST_F(SystemScenarioTest, CrossBoardSameNameBindByHostAndInstance) {
 
     SysScenarioProxy proxy_a(rt, SCEN_SERVICE_NAME);
     SysScenarioProxy proxy_b(rt, SCEN_SERVICE_NAME);
-    ASSERT_EQ(proxy_a.connect("board-a", "hmi-a"), 0);
-    ASSERT_EQ(proxy_b.connect("board-b", "hmi-b"), 0);
+    proxy_a.setInstance("board-a", "hmi-a");
+    proxy_b.setInstance("board-b", "hmi-b");
+    ASSERT_TRUE(waitUntil([&proxy_a]() { return proxy_a.isConnected(); }, 100))
+        << "proxy_a auto-connect timed out";
+    ASSERT_TRUE(waitUntil([&proxy_b]() { return proxy_b.isConnected(); }, 100))
+        << "proxy_b auto-connect timed out";
     for (int i = 0; i < 3; ++i) {
         std::string got_a;
         std::string got_b;
@@ -701,13 +737,19 @@ TEST_F(SystemScenarioTest, CrossBoardSameNameBindByHostAndInstance) {
     OmniRuntime board_a_rt;
     board_a_rt.setHostId("board-a");
     ASSERT_EQ(board_a_rt.init("127.0.0.1", SCEN2_SM_PORT), 0);
+    test::RuntimeThread board_owner(board_a_rt);
+    ASSERT_TRUE(waitReady(board_a_rt));
     EXPECT_EQ(board_a_rt.hostId(), "board-a")
         << "setHostId 必须在 init 后生效";
 
     SysScenarioProxy local_a(board_a_rt, SCEN_SERVICE_NAME);
     SysScenarioProxy remote_b(board_a_rt, SCEN_SERVICE_NAME);
-    ASSERT_EQ(local_a.connect("board-a", "hmi-a"), 0);
-    ASSERT_EQ(remote_b.connect("board-b", "hmi-b"), 0);
+    local_a.setInstance("board-a", "hmi-a");
+    remote_b.setInstance("board-b", "hmi-b");
+    ASSERT_TRUE(waitUntil([&local_a]() { return local_a.isConnected(); }, 100))
+        << "local_a auto-connect timed out";
+    ASSERT_TRUE(waitUntil([&remote_b]() { return remote_b.isConnected(); }, 100))
+        << "remote_b auto-connect timed out";
     std::string got_local;
     std::string got_remote;
     ASSERT_EQ(local_a.EchoInstance(got_local), 0);
@@ -726,8 +768,8 @@ TEST_F(SystemScenarioTest, CrossBoardSameNameBindByHostAndInstance) {
     proxy_b.disconnect();
     local_a.disconnect();
     remote_b.disconnect();
-    board_a_rt.stop();
-    rt.stop();
+    board_owner.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -745,6 +787,8 @@ TEST_F(SystemScenarioTest, CrashRestartSameIdentityTakesOverAndClientRecovers) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SCEN3_SM_PORT), 0);
+    test::RuntimeThread owner(rt);
+    ASSERT_TRUE(waitReady(rt));
     ASSERT_TRUE(waitScenarioInstanceCount(rt, 1));
 
     ServiceInfo before;
@@ -752,7 +796,9 @@ TEST_F(SystemScenarioTest, CrashRestartSameIdentityTakesOverAndClientRecovers) {
     const std::string host_id = before.host_id;
 
     SysScenarioProxy proxy(rt, SCEN_SERVICE_NAME);
-    ASSERT_EQ(proxy.connect(host_id, "restart-0"), 0);
+    proxy.setInstance(host_id, "restart-0");
+    ASSERT_TRUE(waitUntil([&proxy]() { return proxy.isConnected(); }, 100))
+        << "proxy auto-connect timed out";
     ASSERT_TRUE(waitScenarioEcho(proxy, rt, "restart-0", 60))
         << "崩溃前实例必须可调用";
 
@@ -764,7 +810,7 @@ TEST_F(SystemScenarioTest, CrashRestartSameIdentityTakesOverAndClientRecovers) {
         ServiceInfo unused;
         gone = !findScenarioInstance(rt, "restart-0", unused);
         if (!gone) {
-            rt.pollOnce(50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
     ASSERT_TRUE(gone) << "SM 必须摘除被杀死实例";
@@ -779,7 +825,7 @@ TEST_F(SystemScenarioTest, CrashRestartSameIdentityTakesOverAndClientRecovers) {
             && current[0].instance_id == "restart-0") {
             re_registered = true;
         } else {
-            rt.pollOnce(50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
     ASSERT_TRUE(re_registered)
@@ -796,14 +842,14 @@ TEST_F(SystemScenarioTest, CrashRestartSameIdentityTakesOverAndClientRecovers) {
         if (proxy.EchoInstance(got) == 0 && got == "restart-0") {
             recovered = true;
         } else {
-            rt.pollOnce(50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
     EXPECT_TRUE(recovered)
         << "此前正在调用的客户端必须在重启后恢复 RPC";
 
     proxy.disconnect();
-    rt.stop();
+    owner.stop();
 }
 
 // ============================================================
@@ -821,6 +867,8 @@ TEST_F(SystemScenarioTest, RestartWithDifferentInstanceIdCoexists) {
 
     OmniRuntime rt;
     ASSERT_EQ(rt.init("127.0.0.1", SCEN3_SM_PORT), 0);
+    test::RuntimeThread owner(rt);
+    ASSERT_TRUE(waitReady(rt));
     ASSERT_TRUE(waitScenarioInstanceCount(rt, 1));
 
     ServiceInfo before;
@@ -835,7 +883,7 @@ TEST_F(SystemScenarioTest, RestartWithDifferentInstanceIdCoexists) {
         ServiceInfo unused;
         gone = !findScenarioInstance(rt, "dev-0", unused);
         if (!gone) {
-            rt.pollOnce(50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
     ASSERT_TRUE(gone);
@@ -866,8 +914,12 @@ TEST_F(SystemScenarioTest, RestartWithDifferentInstanceIdCoexists) {
 
     SysScenarioProxy proxy0(rt, SCEN_SERVICE_NAME);
     SysScenarioProxy proxy1(rt, SCEN_SERVICE_NAME);
-    ASSERT_EQ(proxy0.connect(host_id, "dev-0"), 0);
-    ASSERT_EQ(proxy1.connect(host_id, "dev-1"), 0);
+    proxy0.setInstance(host_id, "dev-0");
+    proxy1.setInstance(host_id, "dev-1");
+    ASSERT_TRUE(waitUntil([&proxy0]() { return proxy0.isConnected(); }, 100))
+        << "proxy0 auto-connect timed out";
+    ASSERT_TRUE(waitUntil([&proxy1]() { return proxy1.isConnected(); }, 100))
+        << "proxy1 auto-connect timed out";
     std::string got0;
     std::string got1;
     ASSERT_EQ(proxy0.EchoInstance(got0), 0);
@@ -877,7 +929,7 @@ TEST_F(SystemScenarioTest, RestartWithDifferentInstanceIdCoexists) {
 
     proxy0.disconnect();
     proxy1.disconnect();
-    rt.stop();
+    owner.stop();
 }
 
 // 子进程模式：注册带 instance_id 的服务，回显自身实例身份，并周期广播该身份
@@ -894,21 +946,22 @@ static int runScenarioChildInstance(uint16_t port, const std::string& host_id,
     SysScenarioService service(SCEN_SERVICE_NAME);
     service.setInstanceId(instance_id);
     if (rt.registerService(&service) != 0) {
-        rt.stop();
-        return 1;
-    }
-    if (rt.publishTopic(SCEN_TOPIC_NAME) != 0) {
-        rt.stop();
         return 1;
     }
 
+    // topic 由 service 声明并在 start() 激活阶段发布；广播线程在 owner loop 运行后周期发送
     Buffer payload;
     payload.writeString(instance_id);
-    while (true) {
-        rt.pollOnce(10);
-        rt.broadcast(SCEN_TOPIC_ID, payload);
-        platform::sleepMs(20);
-    }
+    std::atomic<bool> broadcaster_stop(false);
+    std::thread broadcaster([&rt, &payload, &broadcaster_stop]() {
+        while (!broadcaster_stop.load()) {
+            rt.broadcast(SCEN_TOPIC_ID, payload);
+            platform::sleepMs(20);
+        }
+    });
+    rt.start();
+    broadcaster_stop.store(true);
+    broadcaster.join();
     return 0;
 }
 

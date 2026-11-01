@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "test_common.h"
+#include "runtime_thread.h"
 #include <omnibinder/runtime.h>
 #include <omnibinder/service.h>
 #include <thread>
@@ -20,6 +21,8 @@ public:
         iface_.name = "ReconnectService";
         iface_.methods.push_back(MethodInfo(METHOD_ECHO, "Echo"));
         iface_.methods.push_back(MethodInfo(METHOD_SLOW_ECHO, "SlowEcho"));
+        // start() 激活服务阶段统一向 SM 发布，避免测试线程提前驱动 runtime
+        declarePublishedTopic("reconnect/topic", 0);
     }
     const char* serviceName() const override { return "ReconnectService"; }
     const InterfaceInfo& interfaceInfo() const override { return iface_; }
@@ -42,22 +45,23 @@ struct SmReconnectServerCtx {
     OmniRuntime runtime;
     ReconnectService service;
     std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    SmReconnectServerCtx() : registered(false), should_stop(false) {}
+    SmReconnectServerCtx() : registered(false) {}
 };
+
+static bool waitReady(OmniRuntime& runtime, int attempts = 100) {
+    for (int i = 0; i < attempts; ++i) {
+        if (runtime.isReady()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return runtime.isReady();
+}
 
 static void smReconnectServerThread(void* arg) {
     SmReconnectServerCtx* ctx = static_cast<SmReconnectServerCtx*>(arg);
-    int ret = ctx->runtime.init("127.0.0.1", SM_PORT);
-    if (ret != 0) return;
-    ret = ctx->runtime.registerService(&ctx->service);
-    if (ret != 0) return;
-    ret = ctx->runtime.publishTopic("reconnect/topic");
-    if (ret != 0) return;
-    ctx->registered.store(true);
-    while (!ctx->should_stop.load()) ctx->runtime.pollOnce(50);
-    ctx->runtime.unregisterService(&ctx->service);
-    ctx->runtime.stop();
+    if (ctx->runtime.init("127.0.0.1", SM_PORT) != 0) return;
+    if (ctx->runtime.registerService(&ctx->service) != 0) return;
+    // start() 阻塞驱动 owner event-loop，直到主线程 stop()
+    ctx->runtime.start();
 }
 
 class SmReconnectTest : public ::testing::Test {
@@ -73,13 +77,26 @@ protected:
 
         server_ctx_ = new SmReconnectServerCtx();
         server_tid_ = std::thread(smReconnectServerThread, server_ctx_);
-        for (int i = 0; i < 50 && !server_ctx_->registered.load(); ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
+        for (int i = 0; i < 100 && !server_ctx_->registered.load(); ++i) {
+            ServiceInfo info;
+            if (waitReady(server_ctx_->runtime)
+                && server_ctx_->runtime.lookupService("ReconnectService", info) == 0) {
+                std::vector<std::string> topics;
+                if (server_ctx_->runtime.queryPublishedTopics("ReconnectService", topics) == 0
+                    && topics.size() == 1 && topics[0] == "reconnect/topic") {
+                    server_ctx_->registered.store(true);
+                }
+            }
+            if (!server_ctx_->registered.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
         ASSERT_TRUE(server_ctx_->registered.load());
     }
 
     static void TearDownTestSuite() {
         if (server_ctx_) {
-            server_ctx_->should_stop.store(true);
+            server_ctx_->runtime.stop();
         }
         if (server_tid_.joinable()) {
             server_tid_.join();
@@ -98,6 +115,8 @@ std::thread SmReconnectTest::server_tid_;
 TEST_F(SmReconnectTest, InitialLookupAndInvoke) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
 
     Buffer req, resp;
     const char* msg = "before-restart";
@@ -112,12 +131,14 @@ TEST_F(SmReconnectTest, InitialLookupAndInvoke) {
     ASSERT_EQ(topics.size(), 1u);
     EXPECT_EQ(topics[0], "reconnect/topic");
 
-    runtime.stop();
+    owner.stop();
 }
 
 TEST_F(SmReconnectTest, SmRestartRecovery) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
 
     stopProcess(sm_pid_);
     std::this_thread::sleep_for(std::chrono::microseconds(300000));
@@ -127,7 +148,6 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
 
     bool recovered = false;
     for (int i = 0; i < 80 && !recovered; ++i) {
-        runtime.pollOnce(100);
         ServiceInfo info;
         if (runtime.lookupService("ReconnectService", info) == 0) {
             std::vector<std::string> topics;
@@ -150,7 +170,7 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
         std::this_thread::sleep_for(std::chrono::microseconds(100000));
     }
     EXPECT_TRUE(recovered);
-    runtime.stop();
+    owner.stop();
 }
 
 /* @brief 数据面在途 RPC 不得被 SM 重连误伤
@@ -159,6 +179,8 @@ TEST_F(SmReconnectTest, SmRestartRecovery) {
 TEST_F(SmReconnectTest, DataPlaneRpcSurvivesFailedSmReconnect) {
     OmniRuntime runtime;
     ASSERT_EQ(runtime.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread owner(runtime);
+    ASSERT_TRUE(waitReady(runtime));
     ASSERT_EQ(runtime.connectService("ReconnectService"), 0);
 
     Buffer req, resp;
@@ -184,5 +206,5 @@ TEST_F(SmReconnectTest, DataPlaneRpcSurvivesFailedSmReconnect) {
     sm_pid_ = startProcess("./target/bin/service_manager", "--port", "19916", "--log-level", "3");
     ASSERT_GT(sm_pid_, 0);
     ASSERT_TRUE(waitPortReady(SM_PORT, 30));
-    runtime.stop();
+    owner.stop();
 }

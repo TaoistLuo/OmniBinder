@@ -51,21 +51,43 @@ int decodeCountedVector(BufferView& rbuf, ReadFn read_one, std::vector<T>& out,
 // ============================================================
 
 int OmniRuntime::Impl::registerService(Service* service) {
+    if (!service) {
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+        if (!started_) {
+            const std::string& name = service->name();
+            if (declared_services_.find(name) != declared_services_.end()
+                || local_services_.find(name) != local_services_.end()) {
+                return static_cast<int>(ErrorCode::ERR_SERVICE_EXISTS);
+            }
+            declared_services_[name] = service;
+            return 0;
+        }
+    }
     return callSerialized([this, service]() -> int {
-        return registerServiceInternal(service);
+        return registerServiceInternal(service, true);
     });
 }
 
-int OmniRuntime::Impl::registerServiceInternal(Service* service) {
+bool OmniRuntime::Impl::isTransientSmError(int error) const {
+    return error == static_cast<int>(ErrorCode::ERR_SM_UNREACHABLE)
+        || error == static_cast<int>(ErrorCode::ERR_SEND_FAILED)
+        || error == static_cast<int>(ErrorCode::ERR_TIMEOUT)
+        || error == static_cast<int>(ErrorCode::ERR_CONNECTION_CLOSED);
+}
+
+int OmniRuntime::Impl::registerServiceInternal(Service* service, bool allow_pending) {
     if (!initialized_ || !service) {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
-    
+
     const std::string& name = service->name();
     if (local_services_.find(name) != local_services_.end()) {
         return static_cast<int>(ErrorCode::ERR_SERVICE_EXISTS);
     }
-    
+
     LocalServiceEntry* entry = new LocalServiceEntry();
     entry->service = service;
 
@@ -81,27 +103,40 @@ int OmniRuntime::Impl::registerServiceInternal(Service* service) {
         shm_config.req_ring_capacity,
         shm_config.resp_ring_capacity);
 
+    // 先进入本地服务表：即使 SM 暂不可达，本地端点/onStart 也已经启动。
+    local_services_[name] = entry;
+    const uint16_t registered_port = entry->port;
+    service->onStart();
+
+    // onStart 是用户回调重入点，可能 unregisterService 释放 entry（约束 1）。
+    if (!isEntryAlive(name, entry)) {
+        return 0;
+    }
+
     ret = registerServiceWithManager(name, service, entry, advertise_host);
     if (ret != 0) {
-        // 应答丢失/超时时 SM 侧可能已完成登记，而本地端点随后关闭；best-effort
-        // 撤销该登记，避免客户端被引导连到已关闭端口（SM 按 fd+name 校验，只影响
-        // 本控制连接，未登记时安全空操作）
-        Message unregister(MessageType::MSG_UNREGISTER, allocSequence());
-        if (unregister.payload.writeString(name)) {
-            sendToSM(unregister);
+        if (allow_pending && isTransientSmError(ret)) {
+            ready_ = false;
+            publishDeclaredTopicsForService(name, entry, service, true);
+            OMNI_LOG_WARN(LOG_TAG,
+                          "service %s activated locally; SM registration pending err=%d",
+                          name.c_str(), ret);
+            return 0;
         }
-        cleanupPendingServiceRegistration(name, entry);
+
+        // 非临时错误：撤销本地服务，保持注册失败语义。
+        local_services_.erase(name);
+        removeServiceEndpointsFromLoop(entry);
+        detachClientsFromEntry(name, entry);
+        service->onStop();
+        service->runtime_ = NULL;
         delete entry;
         return ret;
     }
 
-    local_services_[name] = entry;
-    // 先缓存日志所需的 port：onStart() 是用户回调重入点，可能 unregisterService
-    // 释放 entry（约束 1/2），回调返回后不得再解引用 entry
-    const uint16_t registered_port = entry->port;
-    service->onStart();
-    OMNI_LOG_INFO(LOG_TAG, "Registered service %s on port %u",
-                    name.c_str(), registered_port);
+    publishDeclaredTopicsForService(name, entry, service, allow_pending);
+    ready_ = sm_channel_.isConnected();
+    OMNI_LOG_INFO(LOG_TAG, "Registered service %s on port %u", name.c_str(), registered_port);
     return 0;
 }
 
@@ -119,9 +154,10 @@ int OmniRuntime::Impl::initializeServiceListener(LocalServiceEntry* entry, Servi
     }
 
     entry->endpoints.push_back(tcp);
+    // 先绑定 runtime，再发布 port：外部线程观察到 port 非零时，runtime_ 已可见。
+    service->runtime_ = owner_;
     entry->port = static_cast<uint16_t>(port);
     service->setPort(entry->port);
-    service->runtime_ = owner_;
     advertise_host = resolveRegisterHost(service, listenerAdvertiseHost());
     wireServiceEndpoint(service->name(), entry, tcp);
     return 0;
@@ -312,6 +348,20 @@ void OmniRuntime::Impl::removeServiceEndpointsFromLoop(LocalServiceEntry* entry)
 }
 
 int OmniRuntime::Impl::unregisterService(Service* service) {
+    if (!service) {
+        return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lock(api_mutex_);
+        if (!started_) {
+            std::map<std::string, Service*>::iterator it = declared_services_.find(service->name());
+            if (it == declared_services_.end()) {
+                return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
+            }
+            declared_services_.erase(it);
+            return 0;
+        }
+    }
     return callSerialized([this, service]() -> int {
         return unregisterServiceInternal(service);
     });
@@ -321,6 +371,12 @@ int OmniRuntime::Impl::unregisterServiceInternal(Service* service) {
     if (!service) return static_cast<int>(ErrorCode::ERR_INVALID_PARAM);
     
     const std::string& name = service->name();
+    std::map<std::string, Service*>::iterator declared = declared_services_.find(name);
+    if (declared != declared_services_.end()) {
+        declared_services_.erase(declared);
+        return 0;
+    }
+
     std::map<std::string, LocalServiceEntry*>::iterator it = local_services_.find(name);
     if (it == local_services_.end()) {
         return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);

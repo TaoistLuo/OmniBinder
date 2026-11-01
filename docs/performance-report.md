@@ -6,7 +6,7 @@
 - 传输方式: TCP + SHM（自动选择，同机通信使用 SHM）
 - RPC 预热轮数: 50
 - RPC 测试轮数: 1000（每个用例）
-- 话题模式: 服务端每 500us 轮转发布 topic，客户端 pollOnce(0) busy-spin 收包，统计服务端 publish 时间戳到客户端 callback 的延迟
+- 话题模式: 服务端每 500us 轮转发布 topic，客户端 owner event-loop 收包，统计服务端 publish 时间戳到客户端 callback 的延迟
 - 测试服务 SHM ring: 64KB / 64KB
 - 话题预热轮数: 100
 - 话题测试轮数: 1000（每个用例）
@@ -140,7 +140,7 @@
 ### 话题发布/订阅延迟
 
 测量服务端执行 `BroadcastPerfTopic` 时写入的 `send_time_us` 到客户端订阅回调执行的时间。
-服务端以 500us 间隔轮转发布各 payload size，客户端使用 pollOnce(0) busy-spin 收包，与 RPC benchmark 的热事件循环条件对齐。
+服务端以 500us 间隔轮转发布各 payload size，客户端使用 owner event-loop 收包，与 RPC benchmark 的热事件循环条件对齐。
 
 **Topic pub/sub (0 bytes)**
 

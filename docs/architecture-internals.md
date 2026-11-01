@@ -925,10 +925,10 @@ public:
 demo::SensorServiceProxy proxy(runtime);
 
 // 连接服务（建立连接 + 注册死亡通知）
-proxy.connect();
+// proxy 构造后由 runtime start()/重连自动连接；实例绑定使用 setInstance()
 
 // 或：绑定到指定实例（同名多实例场景）
-// proxy.connect(host_id, instance_id);
+// proxy.setInstance(host_id, instance_id);
 
 // 启用自动重连
 proxy.enableAutoReconnect(true);

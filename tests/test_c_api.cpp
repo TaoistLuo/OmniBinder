@@ -41,21 +41,15 @@ static int cEchoCallback(uint32_t method_id, const omni_buffer_t* request,
 struct CApiServerCtx {
     omni_runtime_t* runtime;
     omni_service_t* service;
-    std::atomic<bool> registered;
-    std::atomic<bool> should_stop;
-    CApiServerCtx() : runtime(NULL), service(NULL), registered(false), should_stop(false) {}
+    CApiServerCtx() : runtime(NULL), service(NULL) {}
 };
 
-static void cApiServerThread(void* arg) {
-    CApiServerCtx* ctx = static_cast<CApiServerCtx*>(arg);
-    int ret = omni_runtime_init(ctx->runtime, "127.0.0.1", SM_PORT);
-    if (ret != 0) return;
-    ret = omni_runtime_register_service(ctx->runtime, ctx->service);
-    if (ret != 0) return;
-    ctx->registered = true;
-    while (!ctx->should_stop) omni_runtime_poll_once(ctx->runtime, 20);
-    omni_runtime_unregister_service(ctx->runtime, ctx->service);
-    omni_runtime_stop(ctx->runtime);
+static bool waitRuntimeReady(omni_runtime_t* runtime, int attempts) {
+    for (int i = 0; i < attempts; ++i) {
+        if (omni_runtime_is_ready(runtime)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return omni_runtime_is_ready(runtime) != 0;
 }
 
 class CApiTest : public ::testing::Test {
@@ -78,15 +72,20 @@ protected:
         omni_service_add_method_ex(server_ctx_->service, METHOD_GET_NAME, "GetName", "", "std::string", HASH_GET_NAME);
         omni_service_add_method_ex(server_ctx_->service, METHOD_ECHO_BYTES, "EchoBytes", "std::vector<uint8_t>", "std::vector<uint8_t>", HASH_ECHO_BYTES);
 
-        server_tid_ = std::thread(cApiServerThread, server_ctx_);
-        for (int i = 0; i < 50 && !server_ctx_->registered; ++i) std::this_thread::sleep_for(std::chrono::microseconds(100000));
-        ASSERT_TRUE(server_ctx_->registered);
+        ASSERT_EQ(omni_runtime_init(server_ctx_->runtime, "127.0.0.1", SM_PORT), 0);
+        ASSERT_EQ(omni_runtime_register_service(server_ctx_->runtime, server_ctx_->service), 0);
+        server_tid_ = std::thread([]() { omni_runtime_start(server_ctx_->runtime); });
+        ASSERT_TRUE(waitRuntimeReady(server_ctx_->runtime, 100));
+        for (int i = 0; i < 100 && omni_service_port(server_ctx_->service) == 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ASSERT_NE(omni_service_port(server_ctx_->service), 0);
     }
 
     static void TearDownTestSuite() {
         if (server_ctx_) {
-            server_ctx_->should_stop = true;
-            server_tid_.join();
+            omni_runtime_stop(server_ctx_->runtime);
+            if (server_tid_.joinable()) server_tid_.join();
             omni_service_destroy(server_ctx_->service);
             omni_runtime_destroy(server_ctx_->runtime);
             delete server_ctx_;
@@ -199,6 +198,8 @@ TEST_F(CApiTest, RegisterInvokeAndStats) {
     omni_runtime_t* runtime = omni_runtime_create();
     ASSERT_NE(runtime, nullptr);
     ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
+    std::thread owner([runtime]() { omni_runtime_start(runtime); });
+    ASSERT_TRUE(waitRuntimeReady(runtime, 100));
 
     omni_buffer_t* req = omni_buffer_create();
     omni_buffer_t* resp = omni_buffer_create();
@@ -229,6 +230,7 @@ TEST_F(CApiTest, RegisterInvokeAndStats) {
     omni_buffer_destroy(req);
     omni_buffer_destroy(resp);
     omni_runtime_stop(runtime);
+    owner.join();
     omni_runtime_destroy(runtime);
 }
 
@@ -236,6 +238,8 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     omni_runtime_t* runtime = omni_runtime_create();
     ASSERT_NE(runtime, nullptr);
     ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
+    std::thread owner([runtime]() { omni_runtime_start(runtime); });
+    ASSERT_TRUE(waitRuntimeReady(runtime, 100));
     ASSERT_EQ(omni_runtime_connect_service(runtime, "CService"), 0);
 
     omni_buffer_t* req = omni_buffer_create();
@@ -266,5 +270,6 @@ TEST_F(CApiTest, StringAndBytesMethods) {
     omni_buffer_destroy(req);
     omni_buffer_destroy(resp);
     omni_runtime_stop(runtime);
+    owner.join();
     omni_runtime_destroy(runtime);
 }

@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <vector>
 
 /* @brief 测试/示例用：失败时打印错误并返回默认值 */
@@ -77,6 +79,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    demo::SensorServiceProxy proxy(runtime);
+    std::string bound_host_id;
+    std::string bound_instance_id;
+    std::thread runtime_thread([&runtime]() {
+        runtime.start();
+    });
+
+    for (int i = 0; i < 50 && g_running && !runtime.isReady(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
     std::vector<omnibinder::ServiceInfo> instances;
     if (runtime.listServiceInstances("SensorService", instances) == 0) {
         std::printf("Discovered %zu SensorService instance(s):\n", instances.size());
@@ -89,15 +102,11 @@ int main(int argc, char* argv[]) {
         std::printf("No SensorService instance discovered yet\n");
     }
 
-    demo::SensorServiceProxy proxy(runtime);
-    int connect_ret = 0;
-    std::string bound_host_id;
-    std::string bound_instance_id;
     if (instance_id) {
         bool found = false;
         for (size_t i = 0; i < instances.size(); ++i) {
             if (instances[i].instance_id == instance_id) {
-                connect_ret = proxy.connect(instances[i].host_id, instances[i].instance_id);
+                proxy.setInstance(instances[i].host_id, instances[i].instance_id);
                 bound_host_id = instances[i].host_id;
                 bound_instance_id = instances[i].instance_id;
                 found = true;
@@ -106,13 +115,19 @@ int main(int argc, char* argv[]) {
         }
         if (!found) {
             std::fprintf(stderr, "No SensorService instance with instance_id='%s'\n", instance_id);
+            runtime.stop();
+            runtime_thread.join();
             return 1;
         }
-    } else {
-        connect_ret = proxy.connect();
     }
-    if (connect_ret != 0) {
+
+    for (int i = 0; i < 50 && g_running && !proxy.isConnected(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (!proxy.isConnected()) {
         std::fprintf(stderr, "SensorService not found\n");
+        runtime.stop();
+        runtime_thread.join();
         return 1;
     }
 
@@ -265,9 +280,10 @@ int main(int argc, char* argv[]) {
 
     std::printf("\nWaiting for broadcasts / async callbacks (Ctrl+C to stop)...\n\n");
     while (g_running) {
-        runtime.pollOnce(100);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     runtime.stop();
+    runtime_thread.join();
     return 0;
 }

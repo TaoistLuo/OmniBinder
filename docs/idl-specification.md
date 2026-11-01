@@ -385,9 +385,9 @@ protected:
 } // namespace demo
 ```
 
-> Stub 会在 `onStart()` 中自动把 `publishes` 声明的所有 topic 注册为发布关系；
-> 业务只需 `registerService()`，不需要也不应再调用 `Publish<主题>()`。
-> `Broadcast<主题>(msg)` 仍保留用于发送具体消息。
+> Stub 会在 `onStart()` 中把 `publishes` 声明登记为 pending topic；
+> runtime 在 `start()` 连接 SM 成功后统一发布。业务只需 `registerService()`，
+> 不需要也不应再调用 `Publish<主题>()`。`Broadcast<主题>(msg)` 仍用于发送具体消息。
 
 ### 7.5 生成的 C++ 代码 — Proxy（客户端代理）
 
@@ -489,8 +489,7 @@ typedef struct demo_SensorService_proxy {
 void demo_SensorService_proxy_init(
     demo_SensorService_proxy* p, omni_runtime_t* runtime);
 
-int  demo_SensorService_proxy_connect(demo_SensorService_proxy* p);
-int  demo_SensorService_proxy_connect_instance(
+int  demo_SensorService_proxy_set_instance(
     demo_SensorService_proxy* p, const char* host_id, const char* instance_id);
 void demo_SensorService_proxy_disconnect(demo_SensorService_proxy* p);
 
@@ -513,8 +512,8 @@ int demo_SensorService_proxy_subscribe_sensor_update(
 补充：C Proxy 最多同时订阅 8 个话题（`_sub_ctxs[8]`），超出返回 -1；`string` 返回值通过 `char** result`（NUL 结尾）回传；`bytes` 返回值通过 `uint8_t** result, uint32_t* result_len` 回传。
 
 > C stub 的 `stub_create()` 会自动调用 `omni_service_add_topic()` 登记 `publishes`；
-> 服务注册成功时自动发布，业务不需要调用 `omni_runtime_publish_topic()`。
-> `xxx_broadcast_*()` 仍保留用于发送具体消息。
+> 实际发布由 runtime 在 `start()` 连接 SM 后执行，业务不需要调用
+> `omni_runtime_publish_topic()`。`xxx_broadcast_*()` 仍用于发送具体消息。
 
 ## 8. 严格语义校验
 

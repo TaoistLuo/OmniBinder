@@ -126,6 +126,7 @@ int OmniRuntime::Impl::sendRuntimeHello() {
 void OmniRuntime::Impl::dropServiceManagerConnection() {
     diag_.watch_active = false;
     sm_reconnect_needed_ = true;
+    ready_ = false;
     control_ack_pending_ = false;
     if (loop_ && control_ack_timer_id_ > 0) {
         loop_->cancelTimer(control_ack_timer_id_);
@@ -371,6 +372,7 @@ int OmniRuntime::Impl::reconnectServiceManager() {
         return static_cast<int>(ErrorCode::ERR_NOT_INITIALIZED);
     }
     diag_.stats.sm_reconnect_attempts++;
+    ready_ = false;
     OMNI_LOG_WARN(LOG_TAG, "sm_reconnect_begin host=%s port=%u attempt=%lu",
                   sm_host_.c_str(), sm_port_,
                   static_cast<unsigned long>(diag_.stats.sm_reconnect_attempts));
@@ -683,6 +685,9 @@ int OmniRuntime::Impl::reconnectServiceManagerIfNeeded() {
         sm_reconnect_needed_ = true;
         return ret;
     }
+
+    connectDeclaredProxiesInternal();
+    ready_ = true;
 
     // 数据面恢复：reconnectServiceManager 内 conn_mgr_->closeAll() 已清空所有
     // 数据面连接。对 services_ 中 has_reconnect 且 enabled 的条目立即

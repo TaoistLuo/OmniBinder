@@ -17,7 +17,7 @@
 
 以下 API 支持并发安全调用：
 
-- 生命周期/驱动：`init()`、`run()`、`stop()`、`isRunning()`、`pollOnce()`
+- 生命周期/驱动：`init()`、`start()`、`stop()`、`isRunning()`、`isReady()`
 - 服务注册：`registerService()`、`unregisterService()`
 - 服务发现：`lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()`
 - 连接管理：`connectService()`、`connectServiceInstance()`、`disconnectService()`、`disconnectServiceInstance()`、`isServiceConnected()`、`isServiceInstanceConnected()`
@@ -36,10 +36,9 @@
 
 | API 类别 | 方法 | 当前并发语义 |
 |---|---|---|
-| 生命周期 | `init()` | 允许从任意线程调用，但同一实例只应成功完成一次初始化；与运行中的 `run()` / `pollOnce()` 不能无序交叠 |
-| 持续驱动 | `run()` | 线程安全，但同一时刻只允许一个线程承担 owner event-loop 的持续驱动职责 |
-| 单次驱动 | `pollOnce()` | 线程安全，但不能与另一个线程中的 `run()` 形成“双重驱动”；若 `run()` 已接管 event-loop，应禁止并发 `pollOnce()` |
-| 停止 | `stop()` | 可从任意线程安全调用；必须可靠唤醒 owner event-loop 并使 `run()` 退出 |
+| 生命周期 | `init()` / `start()` | `init()` 只创建本地资源；`start()` 阻塞当前线程并在 owner event-loop 中激活服务/topic/proxy |
+| 持续驱动 | `start()` | 线程安全；同一时刻只允许一个线程调用 `start()` 承担 owner event-loop 驱动职责 |
+| 停止 | `stop()` | 可从任意线程安全调用；必须可靠唤醒 owner event-loop 并使 `start()` 返回 |
 | 状态查询 | `isRunning()`、`hostId()` | 可从任意线程并发读取，但返回值只保证内部状态的可见性，不代表更强的事务语义 |
 | 配置 | `setHeartbeatPolicy()`、`setDefaultTimeout()`、`setHostId()`、`setRuntimeId()` | 可从任意线程安全调用；`setHostId()` / `setHeartbeatPolicy()` / `setRuntimeId()` 必须在 `init()` 之前调用，init 后调用被忽略 |
 | 服务发现 | `lookupService()`、`listServices()`、`listServiceInstances()`、`queryInterfaces()` | 可从任意线程安全调用；同步等待与缓存更新由 owner event-loop 串行处理 |
@@ -97,102 +96,81 @@
 
 ---
 
-## 3. `run()` / `pollOnce()` / `stop()` 语义
+## 3. `init()` / `start()` / `stop()` 语义
 
-线程安全设计里，最容易出问题的不是 `invoke()`，而是事件循环驱动方法。
+### 3.1 `init()`
 
-### 3.1 `run()`
+`init()` 只创建本地资源：`EventLoop`、`ConnectionManager`、`RpcRuntime` 等。
+它不连接 ServiceManager，不注册服务，不发布 topic，也不连接 proxy。
 
-- `run()` 表示当前线程接管 owner event-loop，持续驱动事件处理
-- 一次只能有一个线程处于“持续驱动事件循环”的角色
-- 不应允许多个线程同时调用 `run()` 试图共同驱动同一个 `OmniRuntime`
+### 3.2 `start()`
 
-### 3.2 `pollOnce()`
+`start()` 是唯一启动入口，阻塞当前调用线程：
 
-- `pollOnce()` 用于外部手动泵一轮事件循环
-- 如果已经有线程在执行长期 `run()`，则不应由其他线程并发调用 `pollOnce()` 再次驱动同一个 event-loop
+```text
+当前线程认领 owner event-loop
+  -> 连接 SM / runtime hello
+  -> 激活已声明服务（创建端点、调用 onStart）
+  -> 发布服务声明的 topic（SM 不可用时保持 pending）
+  -> 自动连接已声明的 proxy
+  -> 进入 event-loop，直到 stop()
+```
 
-### 3.3 `stop()`
-
-- `stop()` 应可从任意线程安全调用
-- 调用后应可靠唤醒 owner event-loop 并结束 `run()`
-- `stop()` 之后（event-loop 已停止）调用需要串行化执行的 API，会**快速失败**返回
-  `ERR_NOT_RUNNING`（int 返回型）或默认值（bool/void 型），不会永久阻塞调用线程；
-  不应在 `stop()` 之后继续调用业务 API，正确流程是先停止所有应用线程再析构
-
-### 3.4 明确规则
-
-按以下规则使用：
-
-1. 同一 `OmniRuntime` 实例只允许一个 owner event-loop 驱动者
-2. `run()` 与其他线程中的 `run()` 并发调用：**禁止**
-3. `run()` 与其他线程中的 `pollOnce()` 并发调用：**禁止**
-4. `pollOnce()` 与其他线程中的 `pollOnce()` 并发调用：**禁止**
-5. `stop()` 与上述任意方法并发调用：**允许**
-
-这个规则集较保守，但最不容易误导调用方。
-
----
-
-## 4. 当前支持的使用方式
-
-`OmniRuntime` 支持以下使用方式：
-
-1. 多个线程并发调用公共 API
-2. 一个线程持续执行 `run()`，其他线程发起调用
-3. 外部主循环定期调用 `pollOnce()` 驱动事件处理
-
-使用限制：
-
-- 同一实例一次只能有一个线程持续驱动 event-loop
-- 不建议在 owner event-loop 回调中再对同一个 `OmniRuntime` 发起同步阻塞 API
-- 线程安全并不意味着内部状态会被多个线程并行修改
-
----
-
-## 5. 调用方使用建议
-
-## 5.1 推荐方式
-
-### 方式一：专用事件线程 + 其他线程并发调用 API
+`start()` 不会创建线程。业务需要自己创建线程：
 
 ```cpp
-omnibinder::OmniRuntime runtime;
-runtime.init("127.0.0.1", 9900);
-
-std::thread loop_thread([&runtime]() {
-        runtime.run();
-    });
-
-    // 其他线程安全发起调用
-    std::thread worker([&runtime]() {
-    omnibinder::Buffer req, resp;
-    runtime.invoke("SensorService", 0x1234, 0x1, 0, req, resp, 3000);
+std::thread runtime_thread([&runtime]() {
+    runtime.start();
 });
 ```
 
-### 方式二：外部主循环定期调用 `pollOnce()`
+如果 SM 不可达，`start()` 仍进入 event-loop 并持续重连；`isReady()` 在 SM 连接和服务/
+proxy 激活完成前保持 false。
 
-```cpp
-while (running) {
-    runtime.pollOnce(50);
-    // 其他业务逻辑
-}
-```
+### 3.3 `stop()`
 
-## 5.2 调用方不应假设的事情
+- `stop()` 可从任意线程调用
+- 停止后 `start()` 返回
+- 停止后业务 API 快速失败，不应继续调用
+- Service 对象生命周期由调用方管理；需要 `onStop` 时应在服务仍存活时 `unregisterService()`
 
-- 不应假设多个线程会并行执行内部状态修改
-- 不应假设回调会在“发起调用的那个线程”执行
-- 不应把“可并发调用”理解成“所有行为都无顺序约束”
+### 3.5 同步等待期间
+
+同步 RPC / SM 请求等待期间只处理 fd/timer，不执行新的 pending API functor；
+该行为保持不变。
 
 ---
 
-## 6. 一句话建议
+## 4. 推荐使用方式
 
-- 想最省心：一个线程 `run()`，其他线程安全调用 API
-- 想自己驱动：在外部循环里调用 `pollOnce()`
-- 想避免风险：不要在同一个 runtime 的回调里再发同步阻塞 API
+### 方式一：业务线程驱动 runtime（推荐）
+
+```cpp
+OmniRuntime runtime;
+runtime.init("127.0.0.1", 9900);
+
+MyService service;
+runtime.registerService(&service);
+
+std::thread runtime_thread([&runtime]() {
+    runtime.start();
+});
+
+// 业务线程继续工作
+while (running) {
+    // ... 业务逻辑 / Broadcast
+}
+
+runtime.stop();
+runtime_thread.join();
+```
+
+## 5. 回调线程语义（不变）
+
+所有 topic / death / onInvoke / onStart 回调在 owner event-loop 线程执行。
+`onStart()` 在 `start()` 的激活流程中执行，不在 `registerService()` 中提前执行。
+
+---
 
 ## 7. 连接管理线程模型
 
@@ -228,7 +206,8 @@ while (running) {
 
 ### 7.4 Proxy 基类
 
-- `ServiceProxyBase::connect()` / `connect(host_id, instance_id)` 通过 runtime 公共 API 间接走 `callSerialized`，线程安全
-- `setInstance()` 仅更新下次 `connect()` 的目标实例与连接键；`connectionKey()` 供生成的方法寻址数据面连接
+- Proxy 构造时登记到 runtime；`start()` 后由 runtime 自动连接
+- `setInstance()` 只设置目标实例与连接键；`connectionKey()` 供生成的方法寻址数据面连接
+- `connect()` / `connect(host_id, instance_id)` 是兼容旧接口，新代码不应调用
 - `enableAutoReconnect()` / `setReconnectInterval()` / `startHeartbeat()` / `stopHeartbeat()` 通过 `callSerialized` 串行执行，并以 `connectionKey()`（默认实例即服务名，绑定实例即实例连接键）为键
 - 死亡通知回调（`onServiceDeath`）在 event-loop 线程执行；绑定实例的代理注册的是实例级死亡订阅
