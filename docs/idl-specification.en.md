@@ -358,7 +358,7 @@ public:
                                  const SensorUpdate&)>& callback);
     void SubscribeSystemAlert(const std::function<void(const SystemAlert&)>& callback);
 
-    // connect(), connect(host_id, instance_id), setInstance(), disconnect(),
+    // connect(instance_id), setInstance(instance_id), disconnect(),
     // isConnected(), enableAutoReconnect(), startHeartbeat(), stopHeartbeat(),
     // OnServiceDied(), ... are inherited from ServiceProxyBase.
 };
@@ -367,10 +367,10 @@ public:
 Notes on topic source identity:
 
 - `SubscribeX(cb)` is a service-level subscription (all instances published by that service); the callback has no source
-- `SubscribeXWithSource(cb)` / `SubscribeXInstance(host_id, instance_id, cb)` reuse the same runtime callback type `TopicSourceCallback`, passing `host_id` + `instance_id` as separate arguments, and **do not change the broadcast message payload**
+- `SubscribeXWithSource(cb)` / `SubscribeXInstance(instance_id, cb)` reuse the same runtime callback type `TopicSourceCallback`, passing `host_id` + `instance_id` as separate arguments, and **do not change the broadcast message payload**; `host_id` is source metadata only, not a logical selector
 - a service-level subscription opens one data-plane connection per publisher instance; an instance-level subscription accepts only the selected instance
 - same-name topics published by different services do not cross-deliver (topic identity is publisher service name + topic name)
-- when a proxy is bound to an instance via `connect(host_id, instance_id)` / `setInstance()`, its method calls address the data-plane connection keyed by `makeServiceConnectionKey(name, host_id, instance_id)`; generated methods use `connectionKey()`
+- when a proxy is bound to a logical instance via `connect(instance_id)` / `setInstance(instance_id)`, its method calls address the data-plane connection keyed by `makeServiceConnectionKey(name, instance_id)`; generated methods use `connectionKey()`. `host_id` is endpoint metadata and does not participate in the key
 
 Generated C API shape:
 
@@ -434,7 +434,7 @@ int  demo_SensorService_proxy_subscribe_sensor_update(
     void* user_data);
 ```
 
-After `..._proxy_set_instance()`, the C proxy routes its method calls through `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance`, and its auto-reconnect / heartbeat / service-state watch through the instance connection key (`omni_runtime_service_connection_key(...)`) and `omni_runtime_watch_services(...)`. The C topic subscribe helper is topic-only (no source identity).
+After `..._proxy_set_instance_id()` (or the compatibility `..._proxy_set_instance()`), the C proxy routes its method calls through `omni_runtime_invoke_instance` / `omni_runtime_invoke_oneway_instance`, and its auto-reconnect / heartbeat / service-state watch through the logical instance connection key (`omni_runtime_service_connection_key(...)`) and `omni_runtime_watch_services(...)`. `host_id` is endpoint metadata and is not required. The C topic subscribe helper is topic-only (no source identity).
 
 ---
 

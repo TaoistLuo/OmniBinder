@@ -264,6 +264,22 @@ TEST_F(CApiTest, WatchServiceState) {
     omni_runtime_destroy(runtime);
 }
 
+TEST_F(CApiTest, ConnectInstanceWithoutHostId) {
+    omni_runtime_t* runtime = omni_runtime_create();
+    ASSERT_NE(runtime, nullptr);
+    ASSERT_EQ(omni_runtime_init(runtime, "127.0.0.1", SM_PORT), 0);
+    std::thread owner([runtime]() { omni_runtime_start(runtime); });
+    ASSERT_TRUE(waitRuntimeReady(runtime, 100));
+
+    ASSERT_EQ(omni_runtime_connect_service_instance(runtime, "CService", NULL, ""), 0);
+    EXPECT_EQ(omni_runtime_is_service_instance_connected(runtime, "CService", NULL, ""), 1);
+    EXPECT_EQ(omni_runtime_disconnect_service_instance(runtime, "CService", NULL, ""), 0);
+
+    omni_runtime_stop(runtime);
+    owner.join();
+    omni_runtime_destroy(runtime);
+}
+
 TEST_F(CApiTest, RegisterInvokeAndStats) {
     omni_runtime_t* runtime = omni_runtime_create();
     ASSERT_NE(runtime, nullptr);

@@ -102,6 +102,8 @@ public:
 
     // 服务发现
     int lookupService(const std::string& name, ServiceInfo& info);
+    int lookupServiceInstance(const std::string& name, const std::string& instance_id,
+                              ServiceInfo& info);
     int listServices(std::vector<ServiceInfo>& services);
     int listServiceInstances(const std::string& name, std::vector<ServiceInfo>& out);
     int queryInterfaces(const std::string& name, std::vector<InterfaceInfo>& ifaces);
@@ -131,9 +133,11 @@ public:
 
     // 连接管理
     int  connectService(const std::string& name);
+    int  connectServiceInstance(const std::string& name, const std::string& instance_id);
     int  connectServiceInstance(const std::string& name, const std::string& host_id,
                                 const std::string& instance_id);
     int  disconnectService(const std::string& name);
+    int  disconnectServiceInstance(const std::string& name, const std::string& instance_id);
     int  disconnectServiceInstance(const std::string& name, const std::string& host_id,
                                    const std::string& instance_id);
     bool isServiceConnected(const std::string& name);
@@ -197,6 +201,8 @@ private:
     bool isTransientSmError(int error) const;
     int listServicesInternal(std::vector<ServiceInfo>& services);
     int listServiceInstancesInternal(const std::string& name, std::vector<ServiceInfo>& out);
+    int lookupServiceInstanceInternal(const std::string& name, const std::string& instance_id,
+                                      ServiceInfo& info);
     int queryInterfacesInternal(const std::string& name, std::vector<InterfaceInfo>& ifaces);
     int queryPublishedTopicsInternal(const std::string& name, std::vector<std::string>& topics,
                                      uint32_t timeout_ms);

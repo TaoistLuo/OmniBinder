@@ -395,7 +395,7 @@ This C client now demonstrates the same feature matrix as the C++ client:
 
 ### 7.1 List services
 
-`list` enumerates service **instances** (`(service_name, host_id, instance_id)` per row):
+`list` enumerates logical service **instances** (`(service_name, instance_id)` per row; `host_id` is endpoint metadata):
 
 ```bash
 ./build/target/bin/omni-cli list
@@ -643,7 +643,7 @@ Typical ServiceManager-side output:
 
 ### 8.5 Run two same-name service instances on one board
 
-To run several **same-name** services on one board, each must declare a **distinct `instance_id`**: an instance is identified by `(service_name, host_id, instance_id)`, and an exactly identical identity is treated as the same instance and taken over (newer wins). The C++ example below runs two `SensorService` instances.
+To run several **same-name** services in one cluster, each must declare a cluster-wide **unique `instance_id`**: a logical instance is identified by `(service_name, instance_id)`, while `host_id` is placement metadata. The same logical identity from a different host is treated as a move/takeover. The C++ example below runs two `SensorService` instances.
 
 **Terminal 1: start ServiceManager**
 ```bash
@@ -677,16 +677,16 @@ Registered service: SensorService (handle=..., fd=..., host=127.0.0.1, port=<B>,
 > `Service instance taken over by newer registration: SensorService (... instance_id=)`,
 > meaning the newer one takes over the older and only one instance remains in the registry.
 >
-> **Known boundary (takeover churn)**: takeover applies to an **exactly identical identity** `(service_name, host_id, instance_id)`. If two **live** processes declare the same identity, ServiceManager lets the newer one take over and closes the older control connection; the displaced live instance reconnects and re-registers automatically, so the two can repeatedly take each other over (takeover churn). This is an accepted boundary, not a defect: operators must give same-name services on one board **distinct** `instance_id` values and must never run two live instances with the exact same identity.
+> **Known boundary (takeover churn)**: takeover applies to the same logical identity `(service_name, instance_id)`. If two **live** processes declare the same logical identity, even on different hosts, ServiceManager lets the newer one take over and closes the older control connection; the displaced live instance reconnects and re-registers automatically, so they may repeatedly take each other over (takeover churn). This is an accepted boundary, not a defect: operators must keep `instance_id` unique per service name across the cluster.
 
 **Terminal 4: client lists instances, then binds to one**
 ```bash
 $ ./target/example/example_cpp_sensor_client --instance ttyUSB1
 === SensorClient (C++ Client) Starting ===
 ServiceManager: 127.0.0.1:9900
-Discovered 2 SensorService instance(s):
-  [0] host_id=<host> instance_id=ttyUSB0 host=127.0.0.1 port=<A>
-  [1] host_id=<host> instance_id=ttyUSB1 host=127.0.0.1 port=<B>
+[Service] SensorService host_id= instance_id=ttyUSB1 OFFLINE
+Target SensorService instance_id='ttyUSB1', waiting for online...
+[Service] SensorService host_id=<host> instance_id=ttyUSB1 ONLINE
 Connected to SensorService instance_id=ttyUSB1
 ...
 ```
@@ -701,12 +701,11 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 omni_service_set_instance_id(svc, "ttyUSB0");
 omni_runtime_register_service(runtime, svc);
 
-/* client: enumerate instances, then bind to one */
-omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
-demo_SensorService_proxy_set_instance(&proxy, lookup.found_host_id, lookup.found_instance_id);
+/* client: bind by logical instance id; no host_id required */
+demo_SensorService_proxy_set_instance_id(&proxy, "ttyUSB1");
 ```
 
-> For cross-board deployment, `host_id` is part of instance addressing, so make each board's `host_id` unique: cloned images share `/etc/machine-id`, so set each device's unique id (MAC / chip id / serial) at startup via `setHostId()`.
+> For cross-board deployment, logical addressing depends only on `instance_id`; `host_id` is used for SHM/same-host and endpoint derivation. Keep each board's `host_id` unique (cloned images share `/etc/machine-id`) and set it via `setHostId()`. Business must keep `instance_id` unique per service name across the cluster.
 
 ---
 

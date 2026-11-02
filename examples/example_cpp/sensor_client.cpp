@@ -88,8 +88,6 @@ int main(int argc, char* argv[]) {
     }
 
     demo::SensorServiceProxy proxy(runtime);
-    std::string bound_host_id;
-    std::string bound_instance_id;
     std::thread runtime_thread([&runtime]() {
         runtime.start();
     });
@@ -100,51 +98,17 @@ int main(int argc, char* argv[]) {
 
     uint64_t service_watch_id = 0;
     std::vector<omnibinder::ServiceWatchRequest> watch_requests;
-    watch_requests.push_back(omnibinder::ServiceWatchRequest("SensorService", "", ""));
+    watch_requests.push_back(omnibinder::ServiceWatchRequest(
+        "SensorService", "", instance_id ? instance_id : ""));
     if (runtime.watchServices(watch_requests, printServiceState, service_watch_id) != 0) {
         std::fprintf(stderr, "Failed to watch SensorService state\n");
     }
 
-    std::vector<omnibinder::ServiceInfo> instances;
-    if (runtime.listServiceInstances("SensorService", instances) == 0) {
-        std::printf("Discovered %zu SensorService instance(s):\n", instances.size());
-        for (size_t i = 0; i < instances.size(); ++i) {
-            std::printf("  [%zu] host_id=%s instance_id=%s host=%s port=%u\n",
-                        i, instances[i].host_id.c_str(), instances[i].instance_id.c_str(),
-                        instances[i].host.c_str(), instances[i].port);
-        }
+    if (instance_id) {
+        proxy.setInstance(instance_id);
+        std::printf("Target SensorService instance_id='%s', waiting for online...\n", instance_id);
     } else {
-        std::printf("No SensorService instance discovered yet, waiting...\n");
-    }
-
-    bool instance_found = (instance_id == NULL);
-    bool waiting_instance_printed = false;
-    while (g_running && !instance_found) {
-        std::vector<omnibinder::ServiceInfo> current;
-        if (runtime.listServiceInstances("SensorService", current) == 0) {
-            for (size_t i = 0; i < current.size(); ++i) {
-                if (current[i].instance_id == instance_id) {
-                    proxy.setInstance(current[i].host_id, current[i].instance_id);
-                    bound_host_id = current[i].host_id;
-                    bound_instance_id = current[i].instance_id;
-                    instance_found = true;
-                    break;
-                }
-            }
-        }
-        if (!instance_found) {
-            if (!waiting_instance_printed) {
-                std::printf("Waiting for SensorService instance_id='%s'...\n", instance_id);
-                waiting_instance_printed = true;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        }
-    }
-    if (!g_running) {
-        if (service_watch_id != 0) runtime.unwatchServices(service_watch_id);
-        runtime.stop();
-        runtime_thread.join();
-        return 0;
+        std::printf("Target SensorService default instance, waiting for online...\n");
     }
 
     bool waiting_connection_printed = false;
@@ -270,9 +234,9 @@ int main(int argc, char* argv[]) {
     std::printf("GetSensorCount => %d\n\n", sensor_count);
 
     std::printf("--- Topic subscriptions ---\n");
-    if (!bound_instance_id.empty()) {
-        // 实例级订阅：只接收该实例发布的广播，回调携带来源 host_id / instance_id
-        proxy.SubscribeSensorUpdateInstance(bound_host_id, bound_instance_id,
+    if (instance_id) {
+        // 实例级订阅：只接收该逻辑实例发布的广播，回调携带来源 host_id / instance_id
+        proxy.SubscribeSensorUpdateInstance(instance_id,
             [](const std::string& host_id, const std::string& instance_id,
                const demo::SensorUpdate& msg) {
                 std::printf("[SensorUpdate] host=%s instance=%s id=%d temp=%.2f humidity=%.2f\n",

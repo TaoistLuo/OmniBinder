@@ -58,7 +58,7 @@ void ServiceProxyBase::setInstance(const std::string& host_id, const std::string
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         const std::string next_key = next_bound
-            ? makeServiceConnectionKey(service_name_, host_id, instance_id)
+            ? makeServiceConnectionKey(service_name_, instance_id)
             : service_name_;
         changed = next_bound != instance_bound_ || next_key != connection_key_;
     }
@@ -74,9 +74,18 @@ void ServiceProxyBase::setInstance(const std::string& host_id, const std::string
     instance_id_ = instance_id;
     instance_bound_ = next_bound;
     connection_key_ = next_bound
-        ? makeServiceConnectionKey(service_name_, host_id, instance_id)
+        ? makeServiceConnectionKey(service_name_, instance_id)
         : service_name_;
     auto_connect_enabled_.store(keep_auto_connect, std::memory_order_relaxed);
+}
+
+void ServiceProxyBase::setInstance(const std::string& instance_id) {
+    setInstance("", instance_id);
+}
+
+int ServiceProxyBase::connect(const std::string& instance_id) {
+    setInstance(instance_id);
+    return connect();
 }
 
 int ServiceProxyBase::connect(const std::string& host_id, const std::string& instance_id) {
@@ -113,7 +122,7 @@ int ServiceProxyBase::connect() {
         runtime_.startHeartbeat(connection_key, heartbeat_interval_ms, heartbeat_timeout_ms);
     }
     int ret = instance_bound
-        ? runtime_.connectServiceInstance(service_name, host_id, instance_id)
+        ? runtime_.connectServiceInstance(service_name, instance_id)
         : runtime_.connectService(service_name);
     if (ret == 0) {
         connected_.store(true, std::memory_order_release);
@@ -176,7 +185,7 @@ void ServiceProxyBase::disconnect() {
     if (connected_.load(std::memory_order_acquire)) {
         runtime_.stopHeartbeat(connection_key);
         if (instance_bound) {
-            runtime_.disconnectServiceInstance(service_name, host_id, instance_id);
+            runtime_.disconnectServiceInstance(service_name, instance_id);
         } else {
             runtime_.disconnectService(service_name);
         }

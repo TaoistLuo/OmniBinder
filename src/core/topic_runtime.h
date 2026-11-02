@@ -51,11 +51,12 @@ public:
     /*
      * @brief 订阅来源选择器
      * @details publisher_service 为空表示不限定发布者服务（匹配任意服务发布的该主题）；
-     *          instance_level 为 true 时再按 (host_id, instance_id) 精确匹配。
+     *          instance_level 为 true 时按 (publisher_service, instance_id) 精确匹配；
+     *          host_id 仅为兼容字段，不参与逻辑匹配。
      */
     struct SubscriptionSelector {
         std::string publisher_service;
-        std::string host_id;
+        std::string host_id;      // 兼容字段，不参与逻辑匹配
         std::string instance_id;
         bool        instance_level;
 

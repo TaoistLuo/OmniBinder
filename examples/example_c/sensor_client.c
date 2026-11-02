@@ -16,26 +16,6 @@ static void runtime_entry(void* arg) {
     omni_runtime_start((omni_runtime_t*)arg);
 }
 
-/* 实例发现回调的上下文：打印全部实例，并记录 --instance 指定实例的 host_id */
-typedef struct instance_lookup {
-    const char* want_instance_id;
-    char found_host_id[128];
-    char found_instance_id[128];
-    int found;
-} instance_lookup;
-
-static void on_instance(const omni_service_instance_t* info, void* user_data) {
-    instance_lookup* lookup = (instance_lookup*)user_data;
-    printf("  host_id=%s instance_id=%s host=%s port=%u\n",
-           info->host_id, info->instance_id, info->host, info->port);
-    if (lookup && lookup->want_instance_id && !lookup->found
-        && strcmp(info->instance_id, lookup->want_instance_id) == 0) {
-        snprintf(lookup->found_host_id, sizeof(lookup->found_host_id), "%s", info->host_id);
-        snprintf(lookup->found_instance_id, sizeof(lookup->found_instance_id), "%s", info->instance_id);
-        lookup->found = 1;
-    }
-}
-
 /* 请求输入是借用语义：框架只读取、不接管内存，因此可直接指向字符串字面量。
  * 注意：这类借用输入结构不要调用 *_destroy()，否则会尝试释放字面量。 */
 static void fill_status(common_StatusResponse* resp, int32_t code, const char* msg) {
@@ -160,49 +140,24 @@ int main(int argc, char* argv[]) {
     }
 
     uint64_t service_watch_id = 0;
-    omni_service_watch_request_t watch_request = { "SensorService", NULL, NULL };
+    omni_service_watch_request_t watch_request = { "SensorService", NULL, instance_id };
     if (omni_runtime_watch_services(runtime, &watch_request, 1,
             on_service_state, NULL, &service_watch_id) != 0) {
         fprintf(stderr, "Failed to watch SensorService state\n");
     }
 
-    instance_lookup lookup;
-    memset(&lookup, 0, sizeof(lookup));
-    lookup.want_instance_id = instance_id;
-    printf("Discovered SensorService instance(s):\n");
-    omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
-
     if (instance_id) {
-        int waiting_instance_printed = 0;
-        while (g_running && !lookup.found) {
-            if (!waiting_instance_printed) {
-                printf("Waiting for SensorService instance_id='%s'...\n", instance_id);
-                waiting_instance_printed = 1;
-            }
-            app_sleep_ms(500);
-            memset(&lookup, 0, sizeof(lookup));
-            lookup.want_instance_id = instance_id;
-            omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
-        }
-        if (!g_running) {
-            omni_runtime_stop(runtime);
-            app_thread_join(runtime_thread);
-            demo_SensorService_proxy_destroy(&proxy);
-            omni_runtime_destroy(runtime);
-            return 0;
-        }
-        if (demo_SensorService_proxy_set_instance(&proxy,
-                lookup.found_host_id, lookup.found_instance_id) != 0) {
-            fprintf(stderr, "SensorService instance not found\n");
+        if (demo_SensorService_proxy_set_instance_id(&proxy, instance_id) != 0) {
+            fprintf(stderr, "Invalid SensorService instance_id='%s'\n", instance_id);
             omni_runtime_stop(runtime);
             app_thread_join(runtime_thread);
             demo_SensorService_proxy_destroy(&proxy);
             omni_runtime_destroy(runtime);
             return 1;
         }
-        printf("Using SensorService instance_id=%s\n", instance_id);
+        printf("Target SensorService instance_id='%s', waiting for online...\n", instance_id);
     } else {
-        printf("Using SensorService default instance\n");
+        printf("Target SensorService default instance, waiting for online...\n");
     }
 
     int waiting_connection_printed = 0;
@@ -211,9 +166,9 @@ int main(int argc, char* argv[]) {
         int connected = 0;
         if (instance_id) {
             if (omni_runtime_connect_service_instance(runtime, "SensorService",
-                    lookup.found_host_id, lookup.found_instance_id) == 0) {
+                    NULL, instance_id) == 0) {
                 connected = omni_runtime_is_service_instance_connected(
-                    runtime, "SensorService", lookup.found_host_id, lookup.found_instance_id);
+                    runtime, "SensorService", NULL, instance_id);
             }
         } else {
             if (omni_runtime_connect_service(runtime, "SensorService") == 0) {

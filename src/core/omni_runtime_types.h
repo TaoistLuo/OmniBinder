@@ -154,8 +154,9 @@ struct ReconnectConfig {
     bool       has_topic_endpoint;
     ServiceInfo topic_endpoint;
     std::vector<std::string> topic_subscriptions;
-    // 显式实例绑定：连接键非服务名时登记原始身份，SM 重连恢复 / 断线重连
-    // 时据此经 listServiceInstances 重新解析目标实例（而非按名 lookup）
+    // 显式逻辑实例绑定：连接键非服务名时登记 (service_name, instance_id)，
+    // SM 重连恢复 / 断线重连时据此经 listServiceInstances 重新解析 endpoint。
+    // bound_host_id 仅为兼容旧状态保留，逻辑重连不再使用。
     bool        has_instance;
     std::string bound_service;
     std::string bound_host_id;

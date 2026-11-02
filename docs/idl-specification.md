@@ -414,25 +414,27 @@ public:
         const std::function<void(const std::string& host_id,
                                  const std::string& instance_id,
                                  const SensorUpdate&)>& callback);
-    // 实例级：仅订阅指定实例，回调携带来源实例身份
+    // 实例级：仅订阅指定逻辑实例，回调携带来源实例身份
     void SubscribeSensorUpdateInstance(
-        const std::string& host_id, const std::string& instance_id,
+        const std::string& instance_id,
         const std::function<void(const std::string&, const std::string&,
                                  const SensorUpdate&)>& callback);
     void SubscribeSystemAlert(
         const std::function<void(const SystemAlert&)>& callback);
 
-    // connect()/connect(host_id, instance_id)/setInstance()/disconnect()/
+    // setInstance(instance_id)/connect(instance_id)/disconnect()/
     // isConnected()/OnServiceDied() 等由 ServiceProxyBase 提供
+    // host_id 不参与业务身份；兼容重载仍可传 host_id
 };
 ```
 
 补充说明（话题来源实例身份，决策 D5）：
 
 - `SubscribeX(cb)` 为服务级订阅（该服务发布的全部实例），回调不带来源
-- `SubscribeXWithSource(cb)` / `SubscribeXInstance(host_id, instance_id, cb)`
+- `SubscribeXWithSource(cb)` / `SubscribeXInstance(instance_id, cb)`
   复用同一运行时回调类型 `TopicSourceCallback`，以独立参数回传 `host_id` + `instance_id`，
-  **不改变广播消息 payload**；订阅方据此区分数据来自哪个实例
+  **不改变广播消息 payload**；订阅方据此区分数据来自哪个实例。host_id 只是来源元数据，
+  不参与逻辑选择
 - 服务级订阅在数据面为每个发布者实例建立独立直连；实例级只接受所选实例
 - 不同服务发布的同名话题互不下发（话题身份 = 发布者服务名 + 主题名）
 
@@ -490,7 +492,9 @@ void demo_SensorService_proxy_init(
     demo_SensorService_proxy* p, omni_runtime_t* runtime);
 
 int  demo_SensorService_proxy_set_instance(
-    demo_SensorService_proxy* p, const char* host_id, const char* instance_id);
+    demo_SensorService_proxy* p, const char* host_id, const char* instance_id); /* 兼容 */
+int  demo_SensorService_proxy_set_instance_id(
+    demo_SensorService_proxy* p, const char* instance_id);
 void demo_SensorService_proxy_disconnect(demo_SensorService_proxy* p);
 
 /* 远程调用：方法名 snake_case；IDL void 方法在 C Proxy 中也返回 void */

@@ -2,8 +2,8 @@
  * @file        info_formatter.h
  * @brief       服务信息格式化输出与实例选择
  * @details     omni-cli list / info / call 命令的辅助。将 ServiceInfo 结构体渲染为
- *              可读的终端文本输出（支持字段名转义），并按 (host_id, instance_id)
- *              从同名多实例中解析唯一目标实例。
+ *              可读的终端文本输出（支持字段名转义），并按 instance_id
+ *              从同名多实例中解析唯一逻辑目标实例（host_id 为端点元数据）。
  *
  * @author      taoist.luo
  * @version     1.0.0
@@ -48,15 +48,15 @@ std::string formatPublishedTopicsSection(const std::vector<std::string>& topics,
 // ============================================================
 // 多实例服务身份：list / info / call 的展示与选择
 // ============================================================
-// 服务身份 = (service_name, host_id, instance_id)。同名服务可存在多个实例；
-// instance_id 为空串表示该 host_id 上该服务的默认（单）实例，仅是多实例模型
+// 逻辑服务身份 = (service_name, instance_id)；host_id 是端点元数据。
+// 同名服务可存在多个逻辑实例；instance_id 为空串表示该服务的默认（单）实例，
 // 的一个取值，不是独立格式。以下辅助函数与 omnibinder::ServiceInfo 解耦，
 // 便于脱离 ServiceManager 做确定性单元测试。
 
 /* @brief 单个服务实例的可展示字段 */
 struct ServiceInstanceView {
     std::string name;         // 服务名
-    std::string host_id;      // 板级主机身份
+    std::string host_id;      // 板级主机身份（端点元数据）
     std::string instance_id;  // 实例标识（空串 = 默认实例）
     std::string host;         // 数据面直连地址
     uint16_t    port;         // 数据面直连端口
@@ -98,7 +98,7 @@ std::string formatInstanceTable(const std::vector<ServiceInstanceView>& instance
  * @param[out] selected  解析出的目标实例
  * @param[out] error     失败时的中文错误说明
  * @return 0 成功；1 无匹配；2 匹配到多个（需补充选择条件）
- * @note   指定 instance_id 而未指定 host_id 且跨 host_id 命中多个实例时视为歧义；
+ * @note   逻辑身份只按 instance_id 解析；host_id 仅兼容/诊断筛选；
  *         未指定任何字段时返回 instances[0]，由调用方在输出中显式说明。 */
 int selectInstance(const std::vector<ServiceInstanceView>& instances,
                    const InstanceSelector& selector,

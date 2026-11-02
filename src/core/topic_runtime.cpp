@@ -12,7 +12,7 @@ std::string TopicRuntime::SubscriptionSelector::key() const
     std::ostringstream os;
     if (instance_level) {
         os << 'I' << publisher_service.size() << '|' << publisher_service
-           << host_id.size() << '|' << host_id << instance_id;
+           << instance_id.size() << '|' << instance_id;
     } else if (!publisher_service.empty()) {
         os << 'S' << publisher_service.size() << '|' << publisher_service;
     } else {
@@ -32,7 +32,8 @@ bool TopicRuntime::SubscriptionSelector::matches(const std::string& service,
         return false;
     }
     if (instance_level) {
-        return this->host_id == host_id && this->instance_id == instance_id;
+        // 逻辑发布者身份 = (service_name, instance_id)；host_id 只是端点。
+        return this->instance_id == instance_id;
     }
     return true;
 }

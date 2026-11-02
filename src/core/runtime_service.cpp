@@ -472,6 +472,31 @@ int OmniRuntime::Impl::listServiceInstances(const std::string& name,
     });
 }
 
+int OmniRuntime::Impl::lookupServiceInstance(const std::string& name,
+                                             const std::string& instance_id,
+                                             ServiceInfo& info) {
+    return callSerialized([this, &name, &instance_id, &info]() -> int {
+        return lookupServiceInstanceInternal(name, instance_id, info);
+    });
+}
+
+int OmniRuntime::Impl::lookupServiceInstanceInternal(const std::string& name,
+                                                     const std::string& instance_id,
+                                                     ServiceInfo& info) {
+    std::vector<ServiceInfo> instances;
+    int ret = listServiceInstancesInternal(name, instances);
+    if (ret != 0) {
+        return ret;
+    }
+    for (size_t i = 0; i < instances.size(); ++i) {
+        if (instances[i].instance_id == instance_id) {
+            info = instances[i];
+            return 0;
+        }
+    }
+    return static_cast<int>(ErrorCode::ERR_SERVICE_NOT_FOUND);
+}
+
 int OmniRuntime::Impl::listServicesInternal(std::vector<ServiceInfo>& services) {
     Message msg(MessageType::MSG_LIST_SERVICES, allocSequence());
 

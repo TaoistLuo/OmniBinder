@@ -293,6 +293,8 @@ void CCodeGen::genServiceProxyHeader(const ServiceDef& svc, const AstFile& /*ast
     os << "void " << prefix << "_proxy_init(" << prefix << "_proxy* p, omni_runtime_t* runtime);\n";
     os << "int  " << prefix << "_proxy_set_instance(" << prefix << "_proxy* p,\n";
     os << "    const char* host_id, const char* instance_id);\n";
+    os << "int  " << prefix << "_proxy_set_instance_id(" << prefix << "_proxy* p,\n";
+    os << "    const char* instance_id);\n";
     os << "void " << prefix << "_proxy_disconnect(" << prefix << "_proxy* p);\n";
     os << "void " << prefix << "_proxy_destroy(" << prefix << "_proxy* p);\n";
     os << "int  " << prefix << "_proxy_is_connected(const " << prefix << "_proxy* p);\n";

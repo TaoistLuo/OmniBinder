@@ -30,13 +30,14 @@ static void printUsage(const char* prog) {
     printf("  -h, --host <addr>   ServiceManager address (default: 127.0.0.1)\n");
     printf("  -p, --port <port>   ServiceManager port (default: 9900)\n");
     printf("  --idl <file.bidl>   IDL file for JSON I/O/watch/subscribe support\n");
-    printf("  --instance-id <id>  Target service instance (info/call)\n");
-    printf("                      instance_id is part of the service identity; '' selects\n");
-    printf("                      the default instance of a name\n");
-    printf("  --host-id <id>      Target host_id, combined with --instance-id (info/call)\n");
+    printf("  --instance-id <id>  Target logical service instance (info/call)\n");
+    printf("                      instance_id is the logical identity; '' selects the\n");
+    printf("                      default instance of a name\n");
+    printf("  --host-id <id>      Compatibility/diagnostic host filter (info/call)\n");
     printf("  --help              Show this help\n\n");
-    printf("Service identity: a service name may have many instances; an instance is\n");
-    printf("  (service_name, host_id, instance_id). `list` enumerates instances.\n\n");
+    printf("Service identity: a service name may have many logical instances; an instance\n");
+    printf("  is (service_name, instance_id); host_id is endpoint metadata.\n");
+    printf("  `list` enumerates instances.\n\n");
     printf("Commands:\n");
     printf("  list                List all online service instances\n");
     printf("  ps                  List online runtimes for --pid commands\n");
@@ -75,7 +76,7 @@ static std::vector<omni_cli::ServiceInstanceView> toInstanceViews(
     return views;
 }
 
-/* @brief 按 (host_id, instance_id) 从实例信息列表中定位对应条目
+/* @brief 按逻辑 instance_id 从实例信息列表中定位对应条目（host_id 为兼容/诊断）
  * @param[in] infos    服务实例信息列表
  * @param[in] selected 已解析的目标实例
  * @return 匹配项指针；未找到返回 NULL
@@ -95,7 +96,7 @@ static const omnibinder::ServiceInfo* findSelectedInfo(
 /* @brief 列出全部在线服务实例
  * @param[in,out] runtime OmniRuntime 实例
  * @return 成功返回 0，失败返回 1
- * @note listServices 返回注册表中每个 (name, host_id, instance_id) 一条，
+ * @note listServices 返回注册表中每个逻辑实例 (name, instance_id) 一条，
  *       同名多实例即多行；单一实例只是同一展示的一行特例。
  */
 static int cmdList(omnibinder::OmniRuntime& runtime) {
@@ -623,7 +624,7 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
 
     printf("%s\n", omni_cli::formatCallTargetNotice(selected, explicit_selection).c_str());
 
-    ret = runtime.connectServiceInstance(service_name, selected.host_id, selected.instance_id);
+    ret = runtime.connectServiceInstance(service_name, selected.instance_id);
     if(ret != 0){
         fprintf(stderr, "Error: Cannot connect service '%s' (instance_id=\"%s\" host_id=\"%s\"): %s\n",
                 service_name, selected.instance_id.c_str(), selected.host_id.c_str(),
@@ -719,7 +720,7 @@ static int cmdCall(omnibinder::OmniRuntime& runtime, const char* service_name,
     // 调用方法：连接键与 connectServiceInstance 一致，确保命中该实例
     omnibinder::Buffer response;
     const std::string connection_key = omnibinder::makeServiceConnectionKey(
-        service_name, selected.host_id, selected.instance_id);
+        service_name, selected.instance_id);
     ret = runtime.invoke(connection_key, iface_id, method_id, 0, request, response);
     
     // 记录结束时间

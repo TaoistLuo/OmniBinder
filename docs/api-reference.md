@@ -247,8 +247,8 @@ struct ServiceInfo {
     std::string name;           // 服务名
     std::string host;           // 主机地址
     uint16_t    port;           // TCP 端口
-    std::string host_id;        // 主机/设备标识（同机判断与实例身份）
-    std::string instance_id;    // 实例标识：同 host_id 上同名服务的多实例区分（默认空串）
+    std::string host_id;        // 主机/设备标识（同机判断与 SHM 端点元数据）
+    std::string instance_id;    // 逻辑实例标识：同一服务名下集群内唯一（默认空串）
     ShmConfig   shm_config;     // SHM 容量配置
     std::vector<InterfaceInfo> interfaces;  // 接口列表
 };
@@ -364,10 +364,17 @@ public:
     // service_name: 要查询的服务名
     // info: 输出参数，服务信息
     // 可从任意线程安全调用；同步等待与缓存更新由 owner event-loop 串行处理
-    // 同名多实例时返回 SM 注册表实例键 (host_id, instance_id) 字典序的第一实例；
+    // 同名多实例时返回 SM 注册表逻辑实例键 (instance_id) 字典序的第一实例；
     // 需要枚举全部实例请使用 listServiceInstances()
     // 返回: 0 成功，负值为错误码
     int lookupService(const std::string& service_name, ServiceInfo& info);
+
+    // 按逻辑身份查询服务实例（service_name + instance_id）
+    // instance_id 为空串表示默认实例；host_id 只作为返回的端点元数据
+    // 返回: 0 成功；ERR_SERVICE_NOT_FOUND 不存在；负值为其它错误码
+    int lookupServiceInstance(const std::string& service_name,
+                              const std::string& instance_id,
+                              ServiceInfo& info);
 
     // 列出所有在线服务实例
     // services: 输出参数，服务实例列表；每个实例一项（同名多实例会有多项）
@@ -375,12 +382,12 @@ public:
     // 返回: 0 成功，负值为错误码
     int listServices(std::vector<ServiceInfo>& services);
 
-    // 列出指定服务名下的全部实例（跨 host_id / instance_id）
+    // 列出指定服务名下的全部逻辑实例（instance_id 维度）
     // service_name: 服务名
-    // instances: 输出参数，实例列表；每项含 name / host_id / instance_id / host / port
+    // instances: 输出参数，实例列表；每项含 name / instance_id / host_id / host / port
     // 返回: 0 成功；ERR_SERVICE_NOT_FOUND 该名称下无任何实例；负值为其它错误码
-    // 顺序为 SM 注册表实例键 (host_id, instance_id) 字典序，与 lookupService 选取的
-    // 确定性第一实例一致
+    // 顺序为 SM 注册表逻辑实例键 (instance_id) 字典序，与 lookupService 选取的
+    // 确定性第一实例一致；host_id 是部署元数据
     int listServiceInstances(const std::string& service_name,
                              std::vector<ServiceInfo>& instances);
 
@@ -414,14 +421,18 @@ public:
     // 返回: 0 成功，负值为错误码
     int connectService(const std::string& service_name);
 
-    // 连接到指定服务实例 (host_id, instance_id)
-    // service_name: 目标服务名；host_id / instance_id: 目标实例身份
+    // 连接到指定逻辑服务实例 (service_name, instance_id)
+    // service_name: 目标服务名；instance_id: 目标逻辑实例标识
     // 返回: 0 成功；ERR_SERVICE_NOT_FOUND 无匹配实例；负值为其它错误码
-    // 通过 listServiceInstances 解析目标实例后建立直连；连接以
-    // makeServiceConnectionKey(name, host_id, instance_id) 为键。
+    // 通过 listServiceInstances 解析目标实例 endpoint 后建立直连；连接以
+    // makeServiceConnectionKey(name, instance_id) 为键（host_id 不参与）。
     // 生成 Proxy 绑定实例后，其 invoke / 单向调用 / 心跳 / 自动重连 / 断开
     // 均以该连接键寻址该实例；连接建立时 runtime 也在该实例键上登记自动重连
     // 与话题恢复意图。
+    int connectServiceInstance(const std::string& service_name,
+                               const std::string& instance_id);
+
+    // 兼容旧调用：host_id 仅为兼容占位，忽略，不参与逻辑身份
     int connectServiceInstance(const std::string& service_name,
                                const std::string& host_id,
                                const std::string& instance_id);
@@ -431,9 +442,13 @@ public:
     // 返回: 0 成功，负值为错误码
     int disconnectService(const std::string& service_name);
 
-    // 断开与指定服务实例 (host_id, instance_id) 的连接
+    // 断开与指定逻辑服务实例 (service_name, instance_id) 的连接
     // 与 connectServiceInstance 使用同一连接键；对同名的其它实例无影响
     // 返回: 0 成功，负值为错误码
+    int disconnectServiceInstance(const std::string& service_name,
+                                  const std::string& instance_id);
+
+    // 兼容旧调用：host_id 仅为兼容占位，忽略，不参与逻辑身份
     int disconnectServiceInstance(const std::string& service_name,
                                   const std::string& host_id,
                                   const std::string& instance_id);
@@ -443,11 +458,15 @@ public:
     // 返回: true 已连接，false 未连接
     bool isServiceConnected(const std::string& service_name) const;
 
-    // 检查是否已连接到指定服务实例
-    // name / host_id / instance_id: 目标实例身份
-    // 连接以 makeServiceConnectionKey(name, host_id, instance_id) 为键；按实例建立的
+    // 检查是否已连接到指定逻辑服务实例
+    // name / instance_id: 目标逻辑实例身份
+    // 连接以 makeServiceConnectionKey(name, instance_id) 为键；按实例建立的
     // 连接不能用 isServiceConnected(name) 检测（后者只命中以服务名为键的连接）
     // 返回: true 已连接，false 未连接
+    bool isServiceInstanceConnected(const std::string& name,
+                                    const std::string& instance_id) const;
+
+    // 兼容旧调用：host_id 仅为兼容占位，忽略，不参与逻辑身份
     bool isServiceInstanceConnected(const std::string& name, const std::string& host_id,
                                     const std::string& instance_id) const;
 
@@ -479,7 +498,7 @@ public:
 
     // 连接管理说明（数据面连接以连接键索引）：
     // - 默认实例（未显式绑定）连接键即服务名。
-    // - 显式实例连接键为 makeServiceConnectionKey(name, host_id, instance_id)；
+    // - 显式实例连接键为 makeServiceConnectionKey(name, instance_id)；
     //   connectServiceInstance / disconnectServiceInstance / isServiceInstanceConnected
     //   与生成 Proxy 的 invoke / invokeOneWay / disconnect 使用该键。
     // - enableAutoReconnect / setReconnectInterval / startHeartbeat / stopHeartbeat 接收
@@ -622,7 +641,7 @@ public:
     // 该预算独立于 setDefaultTimeout，默认值 DEFAULT_REPLY_SEND_TIMEOUT（1000ms）
     void setReplySendTimeout(uint32_t ms);
 
-    // 覆盖本机 host_id（同机判断与实例身份）
+    // 覆盖本机 host_id（同机判断与 SHM 端点派生）
     // host_id: 指定的主机/设备标识；空串表示使用平台默认机器标识
     // 必须在 init() 之前调用；默认取自 platform::getMachineId()（Linux /etc/machine-id）。
     // 克隆镜像共享 machine-id 的多板设备应显式设置各设备唯一标识，否则会被误判为
@@ -740,7 +759,7 @@ public:
 
     // 实例标识：同名服务多实例时用于区分
     // 空串表示该 host_id 上该服务的默认实例；须在 registerService() 之前调用
-    // 实例身份 (name, host_id, instance_id) 参与注册与 SHM 命名派生
+    // 逻辑身份 (name, instance_id) 参与注册；host_id 参与 SHM 端点派生
     void setInstanceId(const std::string& instance_id);
     const std::string& instanceId() const;
 
@@ -1403,7 +1422,7 @@ void        omni_runtime_set_heartbeat_policy(omni_runtime_t* runtime,
                                                uint32_t interval_ms,
                                                uint32_t timeout_ms);
 void        omni_runtime_set_default_timeout(omni_runtime_t* runtime, uint32_t timeout_ms);
-/* 覆盖本机 host_id（同机判断 + 实例身份）；必须在 init 之前调用，空串用平台默认 */
+/* 覆盖本机 host_id（同机判断 + SHM 端点派生）；必须在 init 之前调用，空串用平台默认 */
 void        omni_runtime_set_host_id(omni_runtime_t* runtime, const char* host_id);
 const char* omni_runtime_host_id(const omni_runtime_t* runtime);
 
@@ -1434,11 +1453,11 @@ void omni_runtime_set_reconnect_interval(omni_runtime_t* runtime, const char* se
 void omni_runtime_start_heartbeat(omni_runtime_t* runtime, const char* service_name, uint32_t interval_ms, uint32_t timeout_ms);
 void omni_runtime_stop_heartbeat(omni_runtime_t* runtime, const char* service_name);
 
-/* 多实例：实例发现与实例级寻址（实例身份 = service_name + host_id + instance_id） */
+/* 多实例：实例发现与实例级寻址（逻辑身份 = service_name + instance_id；host_id 仅端点元数据） */
 /* 按服务名枚举全部实例，每个实例回调一次；info 指针仅回调期间有效 */
 int  omni_runtime_list_instances(omni_runtime_t* runtime, const char* service_name,
          omni_instance_callback_t callback, void* user_data);
-/* 绑定并直连指定 (host_id, instance_id) 实例；无匹配返回 OMNI_ERR_SERVICE_NOT_FOUND */
+/* 绑定并直连指定逻辑实例；host_id 可为 NULL（推荐），无匹配返回 OMNI_ERR_SERVICE_NOT_FOUND */
 int  omni_runtime_connect_service_instance(omni_runtime_t* runtime, const char* service_name,
          const char* host_id, const char* instance_id);
 int  omni_runtime_disconnect_service_instance(omni_runtime_t* runtime, const char* service_name,
@@ -1461,8 +1480,9 @@ int  omni_runtime_invoke_oneway_instance(omni_runtime_t* runtime, const char* se
          const omni_buffer_t* request);
 ```
 
-> C 生成 Proxy 通过 `<pkg>_<Service>_proxy_set_instance(p, host_id, instance_id)` 设置目标实例；
-> 生成的业务方法在首次调用时自动连接，并使用实例连接键寻址。
+> C 生成 Proxy 通过 `<pkg>_<Service>_proxy_set_instance_id(p, instance_id)` 设置逻辑实例目标
+> （旧 `*_proxy_set_instance(p, host_id, instance_id)` 保留兼容）；生成的业务方法在首次调用时
+> 自动连接，并使用逻辑实例连接键寻址。
 
 ```c
 
@@ -1716,7 +1736,7 @@ omni-cli 是 OmniBinder 的调试工具，支持查询服务信息、查询 runt
 
 ### 7.1 list 命令输出格式
 
-`list` 按**实例**枚举：注册表中每个 `(service_name, host_id, instance_id)` 占一行，列宽由 `formatInstanceTable` 固定。
+`list` 按**逻辑实例**枚举：注册表中每个 `(service_name, instance_id)` 占一行，host_id 作为 endpoint 元数据展示；列宽由 `formatInstanceTable` 固定。
 
 ```
 $ omni-cli list
@@ -1821,7 +1841,7 @@ Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpo
 
 ### 7.4 call 命令输出格式
 
-`call` 先按 `(host_id, instance_id)` 定位目标实例并显式打印命中目标：给出选择器时打印 `Target instance:`；不给选择器时使用确定性第一实例并打印 `No instance selector given; using deterministic first instance:`。
+`call` 先按 `instance_id` 定位逻辑目标并显式打印命中目标（host_id 为端点元数据）：给出选择器时打印 `Target instance:`；不给选择器时使用确定性第一实例并打印 `No instance selector given; using deterministic first instance:`。
 
 **Hex 模式（不带 --idl，显式指定实例）：**
 ```
@@ -1865,7 +1885,7 @@ Response (status=OK, 42 bytes, 0.85 ms):
 
 **说明：**
 - 所有调用都显示耗时统计（毫秒精度）
-- 实例选择器语义统一：只给 `--instance-id`（跨主机命中多个则报错需补 `--host-id`）；只给 `--host-id`（该主机同名实例多于一个则报错需补 `--instance-id`）；都给则精确匹配 `(host_id, instance_id)`
+- 实例选择器语义：推荐只给 `--instance-id`；`--host-id` 仅为兼容/诊断筛选，不参与逻辑身份
 - 未指定选择器时使用确定性第一实例（与 `list` / `info` 表格首行一致，SM 按实例键字典序返回），输出首行显式标明实际命中的实例
 - JSON 模式自动格式化输出；hex 模式直接传入二进制数据的十六进制表示
 

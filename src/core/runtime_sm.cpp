@@ -329,14 +329,13 @@ void OmniRuntime::Impl::handleServiceWatchNotify(const Message& msg) {
         // 数据面连接与 SM 状态事件解耦：状态事件先清理目标实例连接，
         // 让 isServiceInstanceConnected()/自动重连立即反映真实状态。
         const std::string instance_key = makeServiceConnectionKey(
-            identity.name, identity.host_id, identity.instance_id);
+            identity.name, identity.instance_id);
         handleServiceLost(instance_key);
 
         // 未绑定实例的 Proxy 使用服务名作为连接键；仅当它当前连接的就是
         // 这个实例时，才清理按名连接，避免同名其它实例离线误伤。
         ServiceState* name_state = findServiceState(identity.name);
         if (name_state && name_state->has_info
-            && name_state->info.host_id == identity.host_id
             && name_state->info.instance_id == identity.instance_id) {
             handleServiceLost(identity.name);
         }

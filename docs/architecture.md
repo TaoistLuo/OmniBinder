@@ -140,9 +140,9 @@ topic 数据面仍然走 publisher 与 subscriber 之间的直连通道。
 
 ### 4.1 主机标识
 
-每个节点启动时都会获得本机 `host_id`，用于判断服务是否与调用方同机，同时也是服务实例身份 `(service_name, host_id, instance_id)` 的组成部分。
+每个节点启动时都会获得本机 `host_id`，用于判断服务是否与调用方同机，以及派生 SHM 握手路径；它只是部署位置元数据，不参与逻辑实例身份 `(service_name, instance_id)`。
 
-`host_id` 默认取自平台机器标识（Linux 为 `/etc/machine-id`），可在 `init()` 之前通过 `OmniRuntime::setHostId()` 显式覆盖。量产镜像可能被克隆导致多板 `machine-id` 相同，此时各设备应设置本设备唯一标识（MAC / 芯片 ID / 序列号）——否则多板会被误判为同一身份而互相顶替，且 SHM 会误判为同机（设计决策 D8）。
+`host_id` 默认取自平台机器标识（Linux 为 `/etc/machine-id`），可在 `init()` 之前通过 `OmniRuntime::setHostId()` 显式覆盖。量产镜像可能被克隆导致多板 `machine-id` 相同，此时各设备应设置本设备唯一标识（MAC / 芯片 ID / 序列号）——否则 SHM 会误判为同机；逻辑实例唯一性由业务保证的 `instance_id` 决定（设计决策 D8）。
 
 ### 4.2 自动选择规则
 

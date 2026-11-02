@@ -784,7 +784,7 @@ ctest --output-on-failure
 
 ### 8.5 单板运行两个同名服务实例
 
-要在同一块板上运行多个**同名**服务，必须为每个实例声明**不同的 `instance_id`**：实例身份为 `(service_name, host_id, instance_id)`，相同身份会被视为同一实例而互相顶替（后来者接管）。下面以 C++ 示例演示两个 `SensorService` 实例。
+要在同一集群内运行多个**同名**服务，必须为每个实例声明**集群内唯一的 `instance_id`**：逻辑实例身份为 `(service_name, instance_id)`，host_id 只描述部署位置；相同逻辑身份从不同 host 注册会被视为迁移/接管。下面以 C++ 示例演示两个 `SensorService` 实例。
 
 **终端1：启动 ServiceManager**
 ```bash
@@ -818,20 +818,20 @@ Registered service: SensorService (handle=..., fd=..., host=127.0.0.1, port=<B>,
 > `Service instance taken over by newer registration: SensorService (... instance_id=)`，
 > 即后者顶替前者，registry 中只剩一个实例。
 >
-> **已知边界（顶替 churn）**：顶替是针对**相同身份** `(service_name, host_id, instance_id)` 的。
-> 如果两个**都还在运行**的进程声明了完全相同的身份，SM 会让后来者接管并关闭先来者的控制连接；
-> 被顶替的活实例会自动重连并重新注册，于是两者可能反复互相顶替（takeover churn）。
-> 这是已接受的边界行为，不是缺陷——运维必须保证同板同名服务各自声明**不同**的 `instance_id`，
-> 绝不能让两个活实例使用完全相同的身份。
+> **已知边界（顶替 churn）**：顶替针对**相同逻辑身份** `(service_name, instance_id)`。
+> 如果两个**都还在运行**的进程声明了完全相同的逻辑身份（即使 host_id 不同），SM 会让后来者
+> 接管并关闭先来者的控制连接；被顶替的活实例会自动重连并重新注册，于是两者可能反复互相顶替
+> （takeover churn）。这是已接受的边界行为，不是缺陷——运维必须保证同一服务名下各实例的
+> `instance_id` 集群内唯一。
 
 **终端4：客户端先列出实例，再绑定指定实例**
 ```bash
 $ ./target/example/example_cpp_sensor_client --instance ttyUSB1
 === SensorClient (C++ Client) Starting ===
 ServiceManager: 127.0.0.1:9900
-Discovered 2 SensorService instance(s):
-  [0] host_id=<host> instance_id=ttyUSB0 host=127.0.0.1 port=<A>
-  [1] host_id=<host> instance_id=ttyUSB1 host=127.0.0.1 port=<B>
+[Service] SensorService host_id= instance_id=ttyUSB1 OFFLINE
+Target SensorService instance_id='ttyUSB1', waiting for online...
+[Service] SensorService host_id=<host> instance_id=ttyUSB1 ONLINE
 Connected to SensorService instance_id=ttyUSB1
 ...
 ```
@@ -846,12 +846,11 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 omni_service_set_instance_id(svc, "ttyUSB0");
 omni_runtime_register_service(runtime, svc);
 
-/* 客户端：枚举实例后绑定指定实例 */
-omni_runtime_list_instances(runtime, "SensorService", on_instance, &lookup);
-demo_SensorService_proxy_set_instance(&proxy, lookup.found_host_id, lookup.found_instance_id);
+/* 客户端：只按逻辑实例 id 绑定，无需 host_id */
+demo_SensorService_proxy_set_instance_id(&proxy, "ttyUSB1");
 ```
 
-> 跨板部署时 `host_id` 会随实例身份一起参与寻址，请确保每块板 `host_id` 唯一：克隆镜像会共享 `/etc/machine-id`，需在启动时通过 `setHostId()` 显式设置各设备唯一标识（MAC / 芯片 ID / 序列号）。
+> 跨板部署时逻辑寻址只依赖 `instance_id`；`host_id` 仅用于 SHM 同机判断/端点派生，请确保每块板 `host_id` 唯一（克隆镜像会共享 `/etc/machine-id`），启动时通过 `setHostId()` 设置设备唯一标识。`instance_id` 需由业务保证在集群内唯一。
 
 ## 9. 跨板通信示例
 

@@ -228,9 +228,8 @@ static TopicSubscriptionFilter serviceSelector(const std::string& service) {
 }
 
 static TopicSubscriptionFilter instanceSelector(const std::string& service,
-                                                  const std::string& host_id,
                                                   const std::string& instance_id) {
-    return TopicSubscriptionFilter::instance(service, host_id, instance_id);
+    return TopicSubscriptionFilter::instance(service, instance_id);
 }
 
 TEST(TopicManagerTest, CoexistingPublishersAcrossServicesAndInstances) {
@@ -249,7 +248,7 @@ TEST(TopicManagerTest, CoexistingPublishersAcrossServicesAndInstances) {
         mgr.getMatchingPublishers("shared/topic", serviceSelector("svc.a"));
     ASSERT_EQ(pubs.size(), 2u);
 
-    pubs = mgr.getMatchingPublishers("shared/topic", instanceSelector("svc.a", "h1", "i2"));
+    pubs = mgr.getMatchingPublishers("shared/topic", instanceSelector("svc.a", "i2"));
     ASSERT_EQ(pubs.size(), 1u);
     EXPECT_EQ(pubs[0].info.port, 9002);
 
@@ -262,6 +261,24 @@ TEST(TopicManagerTest, CoexistingPublishersAcrossServicesAndInstances) {
     EXPECT_TRUE(mgr.isPublisherOwner("shared/topic", 21));
 }
 
+TEST(TopicManagerTest, LogicalPublisherMovesAcrossHosts) {
+    TopicManager mgr;
+    ServiceInfo a = makeInstanceInfo("svc.move", "10.0.0.1", 9001, "host-A", "camera-0");
+    ServiceInfo b = makeInstanceInfo("svc.move", "10.0.0.2", 9002, "host-B", "camera-0");
+
+    ASSERT_TRUE(mgr.registerPublisher("move/topic", a, 11));
+    ASSERT_TRUE(mgr.registerPublisher("move/topic", b, 12));
+
+    std::vector<TopicPublisherView> pubs =
+        mgr.getMatchingPublishers("move/topic", TopicSubscriptionFilter());
+    ASSERT_EQ(pubs.size(), 1u);
+    EXPECT_EQ(pubs[0].info.instance_id, "camera-0");
+    EXPECT_EQ(pubs[0].info.host_id, "host-B");
+    EXPECT_EQ(pubs[0].info.port, 9002);
+    EXPECT_FALSE(mgr.isPublisherOwner("move/topic", 11));
+    EXPECT_TRUE(mgr.isPublisherOwner("move/topic", 12));
+}
+
 TEST(TopicManagerTest, MatchingSubscribersRespectSelector) {
     TopicManager mgr;
     ServiceInfo a1 = makeInstanceInfo("svc.a", "10.0.0.1", 9001, "h1", "i1");
@@ -272,7 +289,7 @@ TEST(TopicManagerTest, MatchingSubscribersRespectSelector) {
     ASSERT_TRUE(mgr.registerPublisher("t", b1, 21));
 
     EXPECT_TRUE(mgr.addSubscriber("t", serviceSelector("svc.a"), 100));
-    EXPECT_TRUE(mgr.addSubscriber("t", instanceSelector("svc.a", "h1", "i2"), 101));
+    EXPECT_TRUE(mgr.addSubscriber("t", instanceSelector("svc.a", "i2"), 101));
     EXPECT_TRUE(mgr.addSubscriber("t", TopicSubscriptionFilter(), 102));
     EXPECT_TRUE(mgr.addSubscriber("t", 103));
 

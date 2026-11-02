@@ -330,7 +330,7 @@ TEST_F(TopicInstanceScenario, InstanceLevelReceivesOnlySelectedInstance) {
     std::atomic<int> count_a(0);
     std::atomic<int> count_b(0);
     int ret = sub.subscribeTopic(
-        TopicSubscriptionSelector::instance("TopicInstService", p1.runtime.hostId(), "dev-a"),
+        TopicSubscriptionSelector::instance("TopicInstService", "dev-a"),
         TOPIC_INST_NAME, 0,
         [&count_a, &count_b](const std::string&, const std::string& instance_id,
                              uint32_t, const Buffer&) {

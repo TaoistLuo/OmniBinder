@@ -21,6 +21,7 @@
 #include <string>
 #include <atomic>
 #include <algorithm>
+#include <mutex>
 
 using namespace omnibinder;
 using namespace omnibinder::test;
@@ -575,7 +576,7 @@ TEST_F(FullIntegrationTest, SameTopicMultiSelectorUnsubscribeKeepsServiceLevel) 
     const TopicSubscriptionSelector service_selector =
         TopicSubscriptionSelector::service("CalcService");
     const TopicSubscriptionSelector instance_selector =
-        TopicSubscriptionSelector::instance("CalcService", pub_info.host_id, pub_info.instance_id);
+        TopicSubscriptionSelector::instance("CalcService", pub_info.instance_id);
 
     std::atomic<int> service_hits(0);
     std::atomic<int> instance_hits(0);
@@ -746,7 +747,7 @@ TEST_F(FullIntegrationTest, WatchInitialOfflineForMissingService) {
     }
     EXPECT_EQ(offline.load(), 1);
     EXPECT_EQ(seen_name, "NeverRegisteredService");
-    EXPECT_EQ(seen_host, "host-A");
+    EXPECT_EQ(seen_host, "");
     EXPECT_EQ(seen_instance, "id-1");
     watcher.unwatchServices(watch_id);
     owner.stop();
@@ -796,6 +797,112 @@ TEST_F(FullIntegrationTest, WatchTakeoverEmitsOfflineThenOnline) {
     stopProcess(first);
     watcher.unwatchServices(watch_id);
     owner.stop();
+}
+
+TEST_F(FullIntegrationTest, WatchFollowsLogicalInstanceAcrossHosts) {
+    OmniRuntime watcher;
+    ASSERT_EQ(watcher.init("127.0.0.1", SM_PORT), 0);
+    test::RuntimeThread watcher_owner(watcher);
+    ASSERT_TRUE(waitReady(watcher));
+
+    std::atomic<int> online(0);
+    std::atomic<int> offline(0);
+    std::mutex hosts_mutex;
+    std::vector<std::string> seen_hosts;
+    uint64_t watch_id = 0;
+    std::vector<ServiceWatchRequest> filters;
+    filters.push_back(ServiceWatchRequest("CalcService", "", "moving"));
+    ASSERT_EQ(watcher.watchServices(filters,
+        [&](uint64_t, const ServiceIdentity& identity, bool is_online) {
+            if (is_online) {
+                online.fetch_add(1, std::memory_order_release);
+                std::lock_guard<std::mutex> lock(hosts_mutex);
+                seen_hosts.push_back(identity.host_id);
+            } else {
+                offline.fetch_add(1, std::memory_order_release);
+            }
+        }, watch_id), 0);
+
+    OmniRuntime a;
+    a.setHostId("host-A");
+    ASSERT_EQ(a.init("127.0.0.1", SM_PORT), 0);
+    CalcService service_a;
+    service_a.setInstanceId("moving");
+    ASSERT_EQ(a.registerService(&service_a), 0);
+    test::RuntimeThread a_owner(a);
+    ASSERT_TRUE(waitReady(a));
+    for (int i = 0; i < 100 && online.load(std::memory_order_acquire) < 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_GE(online.load(std::memory_order_acquire), 1) << "first host should come online";
+    ASSERT_EQ(watcher.connectServiceInstance("CalcService", "moving"), 0);
+    EXPECT_TRUE(watcher.isServiceInstanceConnected("CalcService", "moving"));
+
+    a_owner.stop();
+    for (int i = 0; i < 100 && offline.load(std::memory_order_acquire) < 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_GE(offline.load(std::memory_order_acquire), 1) << "old host should go offline";
+
+    OmniRuntime b;
+    b.setHostId("host-B");
+    ASSERT_EQ(b.init("127.0.0.1", SM_PORT), 0);
+    CalcService service_b;
+    service_b.setInstanceId("moving");
+    ASSERT_EQ(b.registerService(&service_b), 0);
+    test::RuntimeThread b_owner(b);
+    ASSERT_TRUE(waitReady(b));
+    for (int i = 0; i < 100 && online.load(std::memory_order_acquire) < 2; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_GE(online.load(std::memory_order_acquire), 2)
+        << "logical instance should come online on new host";
+    for (int i = 0; i < 100
+         && !watcher.isServiceInstanceConnected("CalcService", "moving"); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_TRUE(watcher.isServiceInstanceConnected("CalcService", "moving"))
+        << "existing logical connection should reconnect to the new host";
+
+    Buffer add_req;
+    ASSERT_TRUE(add_req.writeInt32(20));
+    ASSERT_TRUE(add_req.writeInt32(22));
+    Buffer add_resp;
+    ASSERT_EQ(watcher.invoke(makeServiceConnectionKey("CalcService", "moving"),
+                             IFACE_ID, METHOD_ADD, 0, add_req, add_resp, 3000), 0);
+    BufferView add_view(add_resp.data(), add_resp.size());
+    int32_t sum = 0;
+    ASSERT_TRUE(add_view.tryReadInt32(sum));
+    EXPECT_EQ(sum, 42);
+
+    std::vector<ServiceInfo> instances;
+    ASSERT_EQ(watcher.listServiceInstances("CalcService", instances), 0);
+    int moving_count = 0;
+    std::string moving_host;
+    for (size_t i = 0; i < instances.size(); ++i) {
+        if (instances[i].instance_id == "moving") {
+            ++moving_count;
+            moving_host = instances[i].host_id;
+        }
+    }
+    EXPECT_EQ(moving_count, 1);
+    EXPECT_EQ(moving_host, "host-B");
+
+    ServiceInfo moving_info;
+    ASSERT_EQ(watcher.lookupServiceInstance("CalcService", "moving", moving_info), 0);
+    EXPECT_EQ(moving_info.host_id, "host-B");
+    EXPECT_EQ(watcher.connectServiceInstance("CalcService", "moving"), 0);
+    EXPECT_TRUE(watcher.isServiceInstanceConnected("CalcService", "moving"));
+    EXPECT_EQ(watcher.disconnectServiceInstance("CalcService", "moving"), 0);
+
+    {
+        std::lock_guard<std::mutex> lock(hosts_mutex);
+        ASSERT_GE(seen_hosts.size(), 2u);
+        EXPECT_EQ(seen_hosts[0], "host-A");
+        EXPECT_EQ(seen_hosts[1], "host-B");
+    }
+
+    watcher.unwatchServices(watch_id);
 }
 
 TEST_F(FullIntegrationTest, WatchRejectsOverlappingFilters) {

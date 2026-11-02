@@ -305,7 +305,7 @@ void CppCodeGen::genProxy(const ServiceDef& svc, std::ostream& os) {
     for (size_t i = 0; i < svc.publishes.size(); ++i) {
         os << "    void Subscribe" << svc.publishes[i] << "(const std::function<void(const " << svc.publishes[i] << "&)>& callback);\n";
         os << "    void Subscribe" << svc.publishes[i] << "WithSource(const std::function<void(const std::string& host_id, const std::string& instance_id, const " << svc.publishes[i] << "&)>& callback);\n";
-        os << "    void Subscribe" << svc.publishes[i] << "Instance(const std::string& host_id, const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << svc.publishes[i] << "&)>& callback);\n";
+        os << "    void Subscribe" << svc.publishes[i] << "Instance(const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << svc.publishes[i] << "&)>& callback);\n";
     }
 
     os << "\n    // Proxy 由 runtime start() 自动连接；setInstance() 仅配置目标实例。\n";
@@ -501,8 +501,8 @@ void CppCodeGen::generateSource(const AstFile& ast, std::ostream& os, const std:
             os << "        callback(source_host_id, source_instance_id, msg);\n";
             os << "    }, nullptr);\n}\n\n";
 
-            os << "void " << svc.name << "Proxy::Subscribe" << topic << "Instance(const std::string& host_id, const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << topic << "&)>& callback) {\n";
-            os << "    runtime_.subscribeTopic(omnibinder::TopicSubscriptionSelector::instance(service_name_, host_id, instance_id), \"" << topic << "\", s_" << topic << "_topic_idl_hash, [callback](const std::string& source_host_id, const std::string& source_instance_id, uint32_t, const omnibinder::Buffer& data) {\n";
+            os << "void " << svc.name << "Proxy::Subscribe" << topic << "Instance(const std::string& instance_id, const std::function<void(const std::string&, const std::string&, const " << topic << "&)>& callback) {\n";
+            os << "    runtime_.subscribeTopic(omnibinder::TopicSubscriptionSelector::instance(service_name_, instance_id), \"" << topic << "\", s_" << topic << "_topic_idl_hash, [callback](const std::string& source_host_id, const std::string& source_instance_id, uint32_t, const omnibinder::Buffer& data) {\n";
             os << "        " << topic << " msg;\n";
             os << "        omnibinder::Buffer buf(data.data(), data.size());\n";
             os << "        if (!msg.deserialize(buf)) return;\n";

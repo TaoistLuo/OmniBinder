@@ -13,12 +13,12 @@
 - list all online service instances (service name / `instance_id` / `host_id` / `host:port`)
 - list online runtimes / PIDs
 - enumerate every instance of a service name and inspect its interfaces and method signatures
-- invoke a method on a specific instance by `(host_id, instance_id)`
+- invoke a method on a specific logical instance by `instance_id` (`--host-id` is compatibility/diagnostic only)
 - display call latency statistics
 - set runtime log levels by PID
 - watch IDL business interface input/output by PID
 
-**Service identity model**: one service name may have several live instances at once, identified by `(service_name, host_id, instance_id)`. An empty `instance_id` is the **default instance** of that name on that `host_id`. `list` / `info` / `call` all work at instance granularity: a single instance is simply the "one row for this name" special case.
+**Service identity model**: one service name may have several live logical instances at once, identified by `(service_name, instance_id)`; `host_id` is placement metadata only. An empty `instance_id` is the **default instance** of that service. `list` / `info` / `call` all work at instance granularity: a single instance is simply the "one row for this name" special case.
 
 It supports both:
 
@@ -49,7 +49,7 @@ omni-cli [options] <command> [args]
 > `--instance-id` / `--host-id` are **instance selectors** with uniform semantics:
 > - only `--instance-id`: match the unique `instance_id` under that service name; if several `host_id` values match, it errors and asks for `--host-id`.
 > - only `--host-id`: match the unique instance on that `host_id`; if that host has more than one same-name instance, it errors and asks for `--instance-id`.
-> - both: exact match on `(host_id, instance_id)`.
+> - recommended: `--instance-id` only; `--host-id` is compatibility/diagnostic and does not participate in logical identity.
 > - neither: `call` uses the **deterministic first instance** and says so in the output; `info` only enumerates when there are multiple instances and never picks one silently.
 
 ### Available commands
@@ -70,7 +70,7 @@ omni-cli [options] <command> [args]
 
 ### 1. `list`
 
-Lists all online service **instances**. Every `(service_name, host_id, instance_id)` in the registry is one row; when a name has only one instance it is simply one row among the same-name rows.
+Lists all online logical service **instances**. Every `(service_name, instance_id)` in the registry is one row (with `host_id` shown as endpoint metadata); when a name has only one instance it is simply one row among the same-name rows.
 
 ```bash
 omni-cli list
@@ -236,7 +236,7 @@ Notes:
 
 ### 4. `call`
 
-Invokes a method on a service instance. The instance selector is a first-class argument: `omni-cli` enumerates the name's instances, resolves the target by `(host_id, instance_id)`, then establishes a data-plane direct connection with `connectServiceInstance`.
+Invokes a method on a logical service instance. The instance selector is a first-class argument: `omni-cli` enumerates the name's instances, resolves the target by `instance_id` (`--host-id` is compatibility/diagnostic), then establishes a data-plane direct connection with `connectServiceInstance`.
 
 ```bash
 omni-cli call <service> <method> [params] [--instance-id <id>] [--host-id <id>]

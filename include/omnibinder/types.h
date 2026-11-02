@@ -175,9 +175,9 @@ struct ServiceInfo {
     std::string host;
     uint16_t    port;
     std::string host_id;
-    /* @brief 实例标识：同一 host_id 上同名服务的多实例区分
-     * @note  由服务显式声明（Service::setInstanceId）；默认空串表示该板上该服务的
-     *        默认实例 */
+    /* @brief 逻辑实例标识：同一服务名下跨主机唯一（业务保证）
+     * @note  由服务显式声明（Service::setInstanceId）；默认空串表示默认实例。
+     *         host_id 只描述部署位置，不参与逻辑实例唯一性 */
     std::string instance_id;
     ShmConfig    shm_config;
     std::vector<InterfaceInfo> interfaces;
@@ -186,10 +186,11 @@ struct ServiceInfo {
 };
 
 // ============================================================
-// 服务实例身份 (service_name, host_id, instance_id)
+// 服务实例逻辑身份 (service_name, instance_id)
 // ============================================================
-/* @brief 服务实例身份：唯一确定一个真实服务实例
- * @details 服务名 + 板级 host_id + 实例标识。host_id 复用机器身份，
+/* @brief 服务实例逻辑身份：唯一确定一个真实服务实例
+ * @details 集群内由 (service_name, instance_id) 唯一确定逻辑实例；
+ *          host_id 只描述该实例当前所在的部署位置，不参与身份比较。
  *          instance_id 由服务显式声明（默认空串表示单实例）。 */
 struct ServiceIdentity {
     std::string name;
@@ -203,29 +204,26 @@ struct ServiceIdentity {
         : name(n), host_id(h), instance_id(i) {}
 
     bool operator==(const ServiceIdentity& other) const {
-        return name == other.name
-            && host_id == other.host_id
-            && instance_id == other.instance_id;
+        // 逻辑身份只比较 service_name + instance_id；host_id 只是端点是元数据。
+        return name == other.name && instance_id == other.instance_id;
     }
     bool operator!=(const ServiceIdentity& other) const {
         return !(*this == other);
     }
 };
 
-/* @brief 生成无歧义的 (host_id, instance_id) 实例键
- * @param[in]  host_id     板级主机身份
+/* @brief 生成逻辑实例键 instance_id
  * @param[in]  instance_id 实例标识
- * @return 可用于 map key 的字符串
- * @note   采用 "host_id长度|host_id|instance_id" 编码：先写 host_id 字节数再写原串，
- *         因此即使字段中本身含有分割符也不会与其它组合碰撞；instance_id 位于末尾无需长度。
+ * @return 可用于 map key 的字符串（空串表示默认实例）
+ * @note   集群内逻辑身份由 (service_name, instance_id) 唯一确定；
+ *         host_id 只描述部署位置，不进入逻辑实例键。
  *         实现在 src/core/runtime_connection.cpp。 */
-std::string makeServiceInstanceKey(const std::string& host_id,
-                                   const std::string& instance_id);
+std::string makeServiceInstanceKey(const std::string& instance_id);
 
-/* @brief 生成无歧义的完整实例身份键（含服务名）
+/* @brief 生成无歧义的完整逻辑实例身份键（含服务名）
  * @param[in]  identity 服务实例身份
  * @return 可用于 map key 的字符串
- * @note   编码顺序为 name / host_id / instance_id，各自前置长度前缀，保证无碰撞。
+ * @note   编码 name / instance_id，各自前置长度前缀；host_id 不参与。
  *         实现在 src/core/runtime_connection.cpp。 */
 std::string makeServiceIdentityKey(const ServiceIdentity& identity);
 

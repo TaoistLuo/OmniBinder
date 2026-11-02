@@ -9,31 +9,26 @@
 
 namespace omnibinder {
 
-std::string makeServiceInstanceKey(const std::string& host_id,
-                                   const std::string& instance_id) {
-    std::ostringstream os;
-    os << host_id.size() << '|' << host_id << '|' << instance_id;
-    return os.str();
+std::string makeServiceInstanceKey(const std::string& instance_id) {
+    // 逻辑实例键只由 instance_id 决定；host_id 属于 endpoint 元数据。
+    return instance_id;
 }
 
 std::string makeServiceIdentityKey(const ServiceIdentity& identity) {
     std::ostringstream os;
     os << identity.name.size() << '|' << identity.name << '|'
-       << identity.host_id.size() << '|' << identity.host_id << '|'
-       << identity.instance_id;
+       << identity.instance_id.size() << '|' << identity.instance_id;
     return os.str();
 }
 
 std::string makeServiceConnectionKey(const std::string& name,
-                                     const std::string& host_id,
                                      const std::string& instance_id) {
-    // 默认实例（未显式指定 host_id / instance_id）的连接键即服务名本身，
-    // 与 connectService/disconnectService 及 connectServiceInstance 的默认路径一致；
-    // 否则在服务名后追加无歧义的实例键，同名不同实例互不覆盖。
-    if (host_id.empty() && instance_id.empty()) {
+    // 默认实例的连接键即服务名本身；显式实例在服务名后追加逻辑实例键。
+    // host_id 不参与连接键，实例迁移到其它板子后仍复用同一逻辑连接身份。
+    if (instance_id.empty()) {
         return name;
     }
-    return name + '\x1f' + makeServiceInstanceKey(host_id, instance_id);
+    return name + '\x1f' + makeServiceInstanceKey(instance_id);
 }
 
 ServiceState* OmniRuntime::Impl::findServiceState(const std::string& name) {
@@ -85,7 +80,7 @@ int OmniRuntime::Impl::disconnectServiceInstance(const std::string& service_name
                                                  const std::string& instance_id) {
     return callSerialized([this, &service_name, &host_id, &instance_id]() -> int {
         return disconnectServiceInternal(
-            makeServiceConnectionKey(service_name, host_id, instance_id));
+            makeServiceConnectionKey(service_name, instance_id));
     });
 }
 
@@ -102,7 +97,7 @@ bool OmniRuntime::Impl::isServiceInstanceConnected(const std::string& service_na
     return callSerialized([this, &service_name, &host_id, &instance_id]() -> int {
         if (!conn_mgr_) return 0;
         return conn_mgr_->getConnection(
-            makeServiceConnectionKey(service_name, host_id, instance_id)) != NULL ? 1 : 0;
+            makeServiceConnectionKey(service_name, instance_id)) != NULL ? 1 : 0;
     }) != 0;
 }
 
@@ -149,7 +144,9 @@ int OmniRuntime::Impl::connectResolvedConnection(const std::string& connection_k
     if (identity) {
         config.has_instance = true;
         config.bound_service = identity->name;
-        config.bound_host_id = identity->host_id;
+        // 逻辑实例重连只按 (service_name, instance_id) 重新解析；host 是位置元数据，
+        // 实例迁移到其它板子后不能继续钉住旧 host_id。
+        config.bound_host_id.clear();
         config.bound_instance_id = identity->instance_id;
     } else {
         config.has_instance = false;
@@ -167,11 +164,16 @@ int OmniRuntime::Impl::connectServiceInstanceInternal(const std::string& name,
         return ret;  // ERR_SERVICE_NOT_FOUND 等
     }
     for (size_t i = 0; i < instances.size(); ++i) {
-        if (instances[i].host_id != host_id || instances[i].instance_id != instance_id) {
+        // 逻辑身份只由 (name, instance_id) 决定；host_id 仅在调用方显式给出时
+        // 作为兼容性校验，不参与实例选择。
+        if (instances[i].instance_id != instance_id) {
             continue;
         }
-        ServiceIdentity identity(name, host_id, instance_id);
-        return connectResolvedConnection(makeServiceConnectionKey(name, host_id, instance_id),
+        if (!host_id.empty() && instances[i].host_id != host_id) {
+            continue;
+        }
+        ServiceIdentity identity(name, instances[i].host_id, instance_id);
+        return connectResolvedConnection(makeServiceConnectionKey(name, instance_id),
                                          instances[i], true, &identity);
     }
     OMNI_LOG_WARN(LOG_TAG, "connectServiceInstance no match name=%s host_id=%s instance_id=%s",
@@ -762,7 +764,7 @@ bool OmniRuntime::Impl::ensureTopicPublisherConnection(const std::string& topic_
     // 每个发布者实例使用独立连接键：服务级订阅下同名的多个发布者实例各占一条直连，
     // 订阅方按连接区分来源实例。已显式 connectServiceInstance 的实例复用同一连接。
     const std::string conn_key =
-        makeServiceConnectionKey(pub_name, pub_info.host_id, pub_info.instance_id);
+        makeServiceConnectionKey(pub_name, pub_info.instance_id);
 
     ServiceConnection* conn = conn_mgr_->getOrCreateConnectionByKey(
         conn_key, pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config,

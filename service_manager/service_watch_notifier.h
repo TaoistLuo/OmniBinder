@@ -2,8 +2,9 @@
  * @file        service_watch_notifier.h
  * @brief       服务状态关注关系管理器
  * @details     管理客户端对服务实例上线/离线事件的持久订阅。订阅按 watch_id 分组，
- *              每组可包含多个 (service_name, host_id, instance_id) 过滤条件；空
- *              host_id / instance_id 表示通配。仅 ServiceManager owner 线程访问。
+ *              每组可包含多个 (service_name, instance_id) 逻辑过滤条件；空
+ *              instance_id 表示通配。host_id 仅为兼容字段，不参与匹配。
+ *              仅 ServiceManager owner 线程访问。
  *************************************************************************************************/
 #ifndef OMNIBINDER_SERVICE_WATCH_NOTIFIER_H
 #define OMNIBINDER_SERVICE_WATCH_NOTIFIER_H
@@ -20,8 +21,8 @@ namespace omnibinder {
 
 struct ServiceWatchFilter {
     std::string service_name;
-    std::string host_id;
-    std::string instance_id;
+    std::string host_id;      // 兼容字段，不参与逻辑匹配
+    std::string instance_id;  // 空串表示该服务下全部实例
 
     ServiceWatchFilter() {}
     ServiceWatchFilter(const std::string& name, const std::string& host,

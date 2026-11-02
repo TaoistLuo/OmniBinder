@@ -57,7 +57,7 @@ TEST(ServiceRegistryTest, AddDuplicateSameFdHasNoDisplacedFd) {
     EXPECT_EQ(reg.count(), 1u);
 }
 
-TEST(ServiceRegistryTest, AddDuplicateDifferentHostCoexists) {
+TEST(ServiceRegistryTest, AddSameLogicalInstanceOnDifferentHostTakesOver) {
     ServiceRegistry reg;
     ServiceInfo a = makeInfo("svc.cross", "127.0.0.1", 8080, "host-a");
     ASSERT_NE(reg.addService(a, 10), INVALID_HANDLE);
@@ -65,15 +65,15 @@ TEST(ServiceRegistryTest, AddDuplicateDifferentHostCoexists) {
     ServiceInfo b = makeInfo("svc.cross", "127.0.0.1", 8081, "host-b");
     int displaced_fd = -1;
     EXPECT_NE(reg.addService(b, 11, &displaced_fd), INVALID_HANDLE);
-    EXPECT_EQ(displaced_fd, -1);   // 异身份新增，不顶替
-    EXPECT_EQ(reg.count(), 2u);    // 两板同名实例并存
+    EXPECT_EQ(displaced_fd, 10);   // 同一逻辑实例迁移到新 host，旧连接被顶替
+    EXPECT_EQ(reg.count(), 1u);
 
-    ServiceEntry ea;
-    ServiceEntry eb;
-    EXPECT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.cross", "host-a", ""), ea));
-    EXPECT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.cross", "host-b", ""), eb));
-    EXPECT_EQ(ea.control_fd, 10);
-    EXPECT_EQ(eb.control_fd, 11);
+    ServiceEntry entry;
+    EXPECT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.cross", "host-a", ""), entry));
+    EXPECT_EQ(entry.control_fd, 11);
+    EXPECT_EQ(entry.info.host_id, "host-b");
+    EXPECT_TRUE(reg.findServiceByIdentity(ServiceIdentity("svc.cross", "host-b", ""), entry));
+    EXPECT_EQ(entry.control_fd, 11);
 }
 
 TEST(ServiceRegistryTest, AddSameNameDifferentInstanceCoexistsOnSameHost) {
@@ -388,7 +388,7 @@ TEST(ServiceRegistryTest, ListServiceInstancesByName) {
     EXPECT_TRUE(reg.listServiceInstances("svc.none").empty());
 }
 
-TEST(ServiceRegistryTest, ListServiceInstancesOrdersAcrossHosts) {
+TEST(ServiceRegistryTest, ListServiceInstancesOrdersByLogicalInstanceId) {
     ServiceRegistry reg;
     reg.addService(makeInfo("svc.cross", "127.0.0.1", 9080, "host-b", ""), 10);
     reg.addService(makeInfo("svc.cross", "127.0.0.1", 9081, "host-a", "inst-b"), 11);
@@ -396,11 +396,9 @@ TEST(ServiceRegistryTest, ListServiceInstancesOrdersAcrossHosts) {
 
     std::vector<ServiceInfo> list = reg.listServiceInstances("svc.cross");
     ASSERT_EQ(list.size(), 3u);
-    EXPECT_EQ(list[0].host_id, "host-a");
-    EXPECT_EQ(list[0].instance_id, "inst-a");
-    EXPECT_EQ(list[1].host_id, "host-a");
-    EXPECT_EQ(list[1].instance_id, "inst-b");
-    EXPECT_EQ(list[2].host_id, "host-b");
+    EXPECT_EQ(list[0].instance_id, "");
+    EXPECT_EQ(list[1].instance_id, "inst-a");
+    EXPECT_EQ(list[2].instance_id, "inst-b");
 }
 
 // ============================================================

@@ -59,7 +59,8 @@ const size_t MAX_TOPIC_SUBSCRIPTIONS_GLOBAL = 16384u;
 // @brief  描述订阅的粒度：仅主题名 / 服务级 / 实例级
 // @details TOPIC_ONLY 兼容历史"按主题名订阅"语义（匹配任意服务发布的该主题）；
 //          SERVICE 匹配 (publisher_service, topic) 的全部发布者实例；
-//          INSTANCE 再叠加 (host_id, instance_id) 精确匹配单个发布者实例。
+//          INSTANCE 按 (publisher_service, instance_id) 匹配单个逻辑发布者实例；
+//          host_id 仅为兼容字段，不参与逻辑匹配。
 // ============================================================
 enum class TopicSubscribeMode : uint8_t {
     TOPIC_ONLY = 0,
@@ -70,7 +71,7 @@ enum class TopicSubscribeMode : uint8_t {
 struct TopicSubscriptionFilter {
     TopicSubscribeMode mode;
     std::string        publisher_service;  // SERVICE / INSTANCE 有效
-    std::string        host_id;            // INSTANCE 有效
+    std::string        host_id;            // 兼容字段，已不参与匹配
     std::string        instance_id;        // INSTANCE 有效
 
     TopicSubscriptionFilter() : mode(TopicSubscribeMode::TOPIC_ONLY) {}
@@ -85,13 +86,20 @@ struct TopicSubscriptionFilter {
 
     /* @brief 构造实例级选择器（仅该服务的目标实例） */
     static TopicSubscriptionFilter instance(const std::string& publisher_service,
-                                              const std::string& host_id,
                                               const std::string& instance_id) {
         TopicSubscriptionFilter selector;
         selector.mode = TopicSubscribeMode::INSTANCE;
         selector.publisher_service = publisher_service;
-        selector.host_id = host_id;
         selector.instance_id = instance_id;
+        return selector;
+    }
+
+    /* @brief 兼容旧调用：host_id 仅保留字段值，不参与逻辑匹配 */
+    static TopicSubscriptionFilter instance(const std::string& publisher_service,
+                                              const std::string& host_id,
+                                              const std::string& instance_id) {
+        TopicSubscriptionFilter selector = instance(publisher_service, instance_id);
+        selector.host_id = host_id;
         return selector;
     }
 
@@ -117,7 +125,7 @@ struct PublisherSlot {
 struct TopicEntry {
     std::string service_name;  // 发布者服务名；TOPIC_ONLY 订阅条目为空串
     std::string topic_name;
-    // 发布者实例：instance_key (host_id|instance_id) -> slot
+    // 发布者实例：逻辑 instance_key (instance_id) -> slot
     std::map<std::string, PublisherSlot> publishers;
     // 订阅者：fd -> (选择器 key -> 选择器)
     std::map<int, std::map<std::string, TopicSubscriptionFilter> > subscribers;

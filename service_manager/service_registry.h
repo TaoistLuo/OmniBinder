@@ -59,7 +59,7 @@ struct ServiceEntry {
 // ============================================================
 // ServiceIdentityRef - 指向某个 (name, host_id, instance_id) 条目的轻量索引
 //
-// @brief  注册表内部索引使用的实例键引用；instance_key 由 makeServiceInstanceKey 生成
+// @brief  注册表内部索引使用的逻辑实例键引用；instance_key 由 makeServiceInstanceKey 生成
 // ============================================================
 struct ServiceIdentityRef {
     std::string name;
@@ -86,15 +86,16 @@ public:
     ServiceRegistry& operator=(const ServiceRegistry&) = delete;
 
     /*
-     * @brief  向注册表添加服务，身份键为 (服务名, host_id, instance_id)
+     * @brief  向注册表添加服务，逻辑身份键为 (服务名, instance_id)
      * @param[in]   info         服务信息
      * @param[in]   control_fd   服务的控制连接 TCP fd
      * @param[out]  displaced_fd 非空时输出被顶替的旧控制连接 fd；未被顶替或与
      *                           control_fd 相同时置 -1
      * @return 服务 handle；名称为空或超长时返回 INVALID_HANDLE
-     * @note   同身份（name + host_id + instance_id 全同）重复注册视为后来者顶替
-     *         （崩溃重启场景），刷新 ServiceInfo 与控制 fd 并保留原 handle；
-     *         异身份（同机不同 instance_id / 不同 host_id）新增条目并存，不顶替。
+     * @note   同一逻辑身份 (name + instance_id) 重复注册视为后来者顶替/实例迁移
+     *         （崩溃重启或换 host），刷新 ServiceInfo/endpoint 与控制 fd 并保留原 handle；
+     *         不同 instance_id 才是不同逻辑实例，新增条目并存。
+     *         host_id 不参与身份键，仅作为端点元数据。
      *         旧连接上残留的话题归属与连接回收由调用方依据 displaced_fd 完成。
      */
     ServiceHandle addService(const ServiceInfo& info, int control_fd,
@@ -127,7 +128,7 @@ public:
      * @param[in]   name  服务名称
      * @param[out]  entry 找到时填充的服务条目
      * @return true 表示找到
-     * @note   确定性顺序为实例键（host_id, instance_id 的无歧义编码）字典序；
+     * @note   确定性顺序为逻辑实例键（instance_id）字典序；
      *         同名多实例的完整枚举由 listServiceInstances 提供
      */
     bool findService(const std::string& name, ServiceEntry& entry) const;
@@ -157,11 +158,12 @@ public:
     std::vector<ServiceInfo> listServices() const;
 
     /*
-     * @brief  列出指定服务名下的全部实例（跨 host_id / instance_id）
+     * @brief  列出指定服务名下的全部逻辑实例（instance_id 维度）
      * @param[in]  name 服务名称
      * @return 该名称下的服务信息列表；名称不存在时返回空列表
-     * @note   顺序为实例键 (host_id, instance_id 的无歧义编码) 字典序，
-     *         与 findService 选取的"确定性第一实例"一致
+     * @note   顺序为逻辑实例键 (instance_id) 字典序，
+     *         与 findService 选取的"确定性第一实例"一致；host_id 仅作为返回值中的
+     *         部署位置元数据。
      */
     std::vector<ServiceInfo> listServiceInstances(const std::string& name) const;
 
@@ -222,7 +224,7 @@ private:
     const ServiceEntry* findEntry(const std::string& name,
                                   const std::string& instance_key) const;
 
-    // 外层 key: 服务名；内层 key: makeServiceInstanceKey(host_id, instance_id)
+    // 外层 key: 服务名；内层 key: makeServiceInstanceKey(instance_id)（逻辑实例键）
     std::map<std::string, std::map<std::string, ServiceEntry> > services_by_name_;
     // 控制 fd -> 其拥有的实例引用列表
     std::map<int, std::vector<ServiceIdentityRef> > fd_to_services_;

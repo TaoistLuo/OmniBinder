@@ -343,7 +343,7 @@ struct LocalServiceEntry {
 4. 成功返回 `IMessageConnection*`（`CONNECTED` 状态），以连接键存入 `ServiceConnection` 由连接生命周期管理
 5. 失败返回 `NULL`，上层返回 `ERR_CONNECT_FAILED`
 
-`ConnectionManager` 以连接键索引连接：`getOrCreateConnection(service_name, ...)` 是默认实例封装（键即服务名），`getOrCreateConnectionByKey(connection_key, service_name, ...)` 供显式实例寻址使用（键由 `makeServiceConnectionKey(name, host_id, instance_id)` 生成）。`service_name` 与 `connection_key` 分离，SHM 握手路径仍以真实服务名 + `instance_id` 派生。
+`ConnectionManager` 以连接键索引连接：`getOrCreateConnection(service_name, ...)` 是默认实例封装（键即服务名），`getOrCreateConnectionByKey(connection_key, service_name, ...)` 供显式逻辑实例寻址使用（键由 `makeServiceConnectionKey(name, instance_id)` 生成）。`service_name` 与 `connection_key` 分离，SHM 握手路径仍以真实服务名 + `instance_id` 派生；endpoint 变化时连接管理器按逻辑键重建连接。
 
 `createClientConnection()` 位于 `src/transport/transport_selector.{h,cpp}`，是新增传输的落点，但属**源码级、侵入式**扩展：
 新增传输还需同步改动 core 侧（`TransportType` 分支、服务端端点半创建、topic 订阅模型等），并非在此单点即可接入；当前不提供动态插件 / provider 注入 ABI。
@@ -446,11 +446,11 @@ ShmServerConnection:
 负责：
 
 - 注册服务表
-- `name -> (instance_key -> ServiceEntry)` 两级映射，`instance_key` 由 `makeServiceInstanceKey(host_id, instance_id)` 生成
+- `name -> (instance_key -> ServiceEntry)` 两级映射，`instance_key` 由 `makeServiceInstanceKey(instance_id)` 生成
 - handle -> 实例条目、控制 fd -> 实例条目等索引（同一 fd 同名至多一个实例）
 - fd ownership 关联
 
-同身份 `(name, host_id, instance_id)` 重复注册为后来者顶替（保留原 handle、刷新 ServiceInfo 与控制 fd，并输出被顶替的旧 fd）；异身份新增条目并存。按名查找（`findService`）返回实例键字典序第一实例，完整枚举由 `listServiceInstances` 提供。
+同逻辑身份 `(name, instance_id)` 重复注册为后来者顶替/迁移（保留原 handle、刷新 ServiceInfo、endpoint 与控制 fd，并输出被顶替的旧 fd）；不同 instance_id 才是不同实例，新增条目并存。host_id 不参与注册表键。按名查找（`findService`）返回逻辑实例键字典序第一实例，完整枚举由 `listServiceInstances` 提供。
 
 ### 11.2 Session deadline
 
@@ -464,7 +464,7 @@ ShmServerConnection:
 
 负责：
 
-- 管理按 service_name / host_id / instance_id 过滤的持久 watch 组
+- 管理按 service_name + instance_id 过滤的持久 watch 组；host_id 仅为兼容字段
 - 实例注册、注销、心跳超时与 takeover 时向匹配客户端下发 online/offline 通知
 
 ### 11.4 TopicManager
@@ -655,7 +655,7 @@ Subscriber
   -> OmniRuntime::onSMMessage()
   -> topic_runtime_.matchSubscriptions() 过滤
   -> ensureTopicPublisherConnection()
-  -> ConnectionManager::getOrCreateConnectionByKey(makeServiceConnectionKey(pub_name, host_id, instance_id), ...)
+  -> ConnectionManager::getOrCreateConnectionByKey(makeServiceConnectionKey(pub_name, instance_id), ...)
   -> 发送 MSG_SUBSCRIBE_BROADCAST 给 publisher
 ```
 
@@ -733,15 +733,12 @@ class OmniRuntime {
     // 连接管理
     int connectService(const std::string& service_name);
     int connectServiceInstance(const std::string& service_name,
-                               const std::string& host_id,
                                const std::string& instance_id);
     int disconnectService(const std::string& service_name);
     int disconnectServiceInstance(const std::string& service_name,
-                                  const std::string& host_id,
                                   const std::string& instance_id);
     bool isServiceConnected(const std::string& service_name) const;
     bool isServiceInstanceConnected(const std::string& service_name,
-                                    const std::string& host_id,
                                     const std::string& instance_id) const;
 
     // 实例发现
@@ -765,7 +762,7 @@ class OmniRuntime {
 };
 ```
 
-> `enableAutoReconnect` / `setReconnectInterval` / `startHeartbeat` / `stopHeartbeat` 接收的参数就是**连接键**：传服务名即作用于默认实例，传 `makeServiceConnectionKey(name, host_id, instance_id)` 即作用于该实例。生成的 Proxy（C++ / C）在绑定实例后会自动传入实例连接键，因此绑定实例的 invoke / 心跳 / 重连 / 断开都寻址该实例。
+> `enableAutoReconnect` / `setReconnectInterval` / `startHeartbeat` / `stopHeartbeat` 接收的参数就是**连接键**：传服务名即作用于默认实例，传 `makeServiceConnectionKey(name, instance_id)` 即作用于该逻辑实例。生成的 Proxy（C++ / C）在绑定实例后会自动传入实例连接键，因此绑定实例的 invoke / 心跳 / 重连 / 断开都寻址该实例；host_id 不参与连接键。
 
 ### 17.3 ServiceProxyBase 基类
 
@@ -775,8 +772,10 @@ class OmniRuntime {
 class ServiceProxyBase {
 public:
     int connect();           // 查询服务 + 建立连接 + 注册服务状态通知
-    int connect(const std::string& host_id, const std::string& instance_id);  // 绑定实例后连接
-    void setInstance(const std::string& host_id, const std::string& instance_id);  // 设置下次 connect 目标
+    int connect(const std::string& instance_id);  // 绑定逻辑实例后连接
+    int connect(const std::string& host_id, const std::string& instance_id);  // 兼容旧调用
+    void setInstance(const std::string& instance_id);  // 设置下次 connect 目标
+    void setInstance(const std::string& host_id, const std::string& instance_id);  // 兼容旧调用
     void disconnect();       // 断开连接 + 停止心跳
     bool isConnected() const;
     void enableAutoReconnect(bool enable = true);
@@ -912,7 +911,7 @@ public:
                                  const std::string& instance_id,
                                  const SensorUpdate&)>& cb);
     void SubscribeSensorUpdateInstance(
-        const std::string& host_id, const std::string& instance_id,
+        const std::string& instance_id,
         const std::function<void(const std::string&, const std::string&,
                                  const SensorUpdate&)>& cb);
 };
@@ -928,7 +927,7 @@ demo::SensorServiceProxy proxy(runtime);
 // proxy 构造后由 runtime start()/重连自动连接；实例绑定使用 setInstance()
 
 // 或：绑定到指定实例（同名多实例场景）
-// proxy.setInstance(host_id, instance_id);
+// proxy.setInstance(instance_id);
 
 // 启用自动重连
 proxy.enableAutoReconnect(true);

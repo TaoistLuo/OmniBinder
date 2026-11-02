@@ -217,7 +217,7 @@ bool serializeServiceInfo(const ServiceInfo& info, Buffer& buf);
 
 // ============================================================
 // 服务实例身份线格式（MSG_SERVICE_WATCH_NOTIFY /
-// 服务状态 watch 共用）：service_name + host_id + instance_id
+// 服务状态 watch 共用）：service_name + instance_id；host_id 仅作端点元数据
 // ============================================================
 /* @brief 序列化服务实例身份 payload
  * @param[out] buf          输出缓冲

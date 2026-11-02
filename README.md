@@ -64,11 +64,11 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 - **服务注册与发现** — 中心化 ServiceManager 管理所有服务的生命周期
 - **远程方法调用 (RPC)** — 同步调用远端服务接口，支持请求/响应模式和单向调用
 - **发布/订阅广播** — 话题机制，发布者广播数据，订阅者实时接收
-- **服务状态 watch** — 按服务名/host_id/instance_id 关注实例上线与离线
+- **服务状态 watch** — 按服务名/instance_id 关注逻辑实例上线与离线（host_id 仅作部署元数据）
 - **自动连接管理** — 生成 Proxy 由 runtime `start()` 自动连接/重连；`connect()` 仅保留兼容
 - **自动重连** — 服务恢复后自动重连（可配指数退避策略）
 - **心跳检测** — 定期心跳及时发现服务异常，超时自动触发重连
-- **多实例服务身份** — 同名服务用不同 `instance_id` 并存，实例身份为 `(service_name, host_id, instance_id)`；支持按实例发现、寻址、订阅与状态关注
+- **多实例逻辑身份** — 同名服务用不同 `instance_id` 并存，集群内由 `(service_name, instance_id)` 唯一确定逻辑实例；host_id 只描述部署位置，支持按实例发现、寻址、订阅与状态关注
 - **传输层自动选择** — 同机通信自动使用共享内存 (SHM)，跨机通信走 TCP
 - **服务级 SHM 配置** — 默认使用小容量 SHM ring（当前 `4KB / 4KB`），特殊服务可按需放大 request / response 容量
 - **IDL 代码生成** — 通过 `.bidl` 接口定义文件自动生成 Stub/Proxy 代码
@@ -77,14 +77,14 @@ OmniBinder 同时覆盖了**服务管理**和**服务间数据通路**两部分�
 
 ### 多实例服务说明
 
-同一块板上可以运行多个**同名**服务实例（例如两个 `SensorService` 分别绑定 `ttyUSB0` / `ttyUSB1`）：
+同一集群内可以运行多个**同名**服务实例（例如两个 `SensorService` 分别绑定 `ttyUSB0` / `ttyUSB1`，可以在同一块板或不同板）：
 
-- 每个实例必须显式声明**不同的 `instance_id`**（C++ `Service::setInstanceId()`，C `omni_service_set_instance_id()`）。实例身份为 `(service_name, host_id, instance_id)`，**完全相同身份会被视为同一实例而互相顶替（后来者接管）**；默认空 `instance_id` 表示该板上该服务的单实例。
-- 客户端可用 `listServiceInstances()` / `omni_runtime_list_instances()` 枚举某服务名下的全部实例；C++ Proxy 用 `setInstance(host_id, instance_id)`，C Proxy 用 `*_proxy_set_instance()` 设置目标，连接由 runtime start/重连自动完成。
-- 每块板必须具有**唯一 `host_id`**：量产镜像常克隆 `/etc/machine-id`，会让多板共享同一 `host_id`，导致被误判为同一身份互相顶替、且 SHM 误判为同机。请在启动时通过 `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()` 显式设置各设备唯一标识（MAC / 芯片 ID / 序列号）。
+- 每个实例必须显式声明**集群内唯一的 `instance_id`**（C++ `Service::setInstanceId()`，C `omni_service_set_instance_id()`）。逻辑实例身份为 `(service_name, instance_id)`；host_id 只描述部署位置。**相同逻辑身份从不同 host 注册会被视为实例迁移/接管（先 offline 后 online）**；默认空 `instance_id` 表示该服务的默认实例。
+- 客户端可用 `listServiceInstances()` / `omni_runtime_list_instances()` 枚举某服务名下的全部实例；C++ Proxy 用 `setInstance(instance_id)`，C Proxy 用 `*_proxy_set_instance_id()` 设置目标，连接由 runtime start/重连自动完成。业务侧不需要传 host_id。
+- 每块板仍应具有**唯一 `host_id`**：量产镜像常克隆 `/etc/machine-id`，会让 SHM 误判为同机。请在启动时通过 `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()` 设置各设备唯一标识（MAC / 芯片 ID / 序列号）；host_id 不参与业务逻辑身份。
 - 同一话题下允许多个同名服务实例并存发布：服务级订阅收到全部实例的数据并可按来源实例身份区分，实例级订阅只接收指定实例。
 
-> **已知边界（同身份活实例顶替 churn）**：顶替只发生在**完全相同身份** `(service_name, host_id, instance_id)` 上。如果两个**都还在运行**的进程声明了完全相同的身份，SM 会让后来者接管并关闭先来的控制连接；被顶替的活实例会自动重连并重新注册，于是两者可能反复互相顶替（takeover churn）。这是**已接受的边界行为，不是缺陷**：运维必须保证同板同名服务各自声明**不同**的 `instance_id`，绝不能让两个活实例使用完全相同的身份。
+> **已知边界（同逻辑身份活实例顶替 churn）**：顶替发生在相同逻辑身份 `(service_name, instance_id)` 上。如果两个**都还在运行**的进程声明了完全相同的逻辑身份，即使 host_id 不同，SM 也会让后来者接管并关闭先来的控制连接；被顶替的活实例会自动重连并重新注册，于是两者可能反复互相顶替（takeover churn）。这是**已接受的边界行为，不是缺陷**：运维必须保证同一服务名下各实例的 `instance_id` 集群内唯一。
 
 运行示例见[示例文档](docs/examples.md)的“单板运行两个同名服务实例”一节。
 

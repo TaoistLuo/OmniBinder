@@ -51,10 +51,13 @@ public:
 
     virtual ~ServiceProxyBase();
     
-    /* @brief 设置实例选择器（下一次自动连接/connect() 生效）
-     * @param[in]  host_id     目标板级主机身份
-     * @param[in]  instance_id 目标实例标识
-     * @note   仅改变后续 connect() 的目标；对已建立的连接不生效，需先 disconnect() */
+    /* @brief 设置逻辑实例选择器（下一次自动连接/connect() 生效）
+     * @param[in]  instance_id 目标逻辑实例标识
+     * @note   集群内 (service_name, instance_id) 唯一确定实例；host_id 由运行时解析。
+     *         仅改变后续 connect() 的目标；对已建立的连接不生效，需先 disconnect() */
+    void setInstance(const std::string& instance_id);
+
+    /* @brief 兼容旧调用：host_id 仅为兼容占位，忽略，不参与逻辑身份 */
     void setInstance(const std::string& host_id, const std::string& instance_id);
 
     /* @brief 断开到目标服务的连接 */
@@ -98,6 +101,7 @@ public:
 protected:
     /* @brief 建立/重连目标服务的数据面连接（仅由 runtime 调用） */
     int connect();
+    int connect(const std::string& instance_id);
     int connect(const std::string& host_id, const std::string& instance_id);
 
     /* @brief 当前实例绑定的数据面连接键

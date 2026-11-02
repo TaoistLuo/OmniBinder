@@ -669,15 +669,19 @@ static void emitProxyLifecycleSource(std::ostream& os, const ServiceDef& svc,
 
     os << "int " << prefix << "_proxy_set_instance(" << prefix << "_proxy* p,\n";
     os << "    const char* host_id, const char* instance_id) {\n";
-    os << "    if (!p) return -1;\n";
-    os << "    if (!host_id || !instance_id) return -1;\n";
-    os << "    if (" << prefix << "_copy_bounded(p->instance_host_id, sizeof(p->instance_host_id), host_id) != 0\n";
+    os << "    if (!p || !instance_id) return -1;\n";
+    os << "    if (" << prefix << "_copy_bounded(p->instance_host_id, sizeof(p->instance_host_id), host_id ? host_id : \"\") != 0\n";
     os << "        || " << prefix << "_copy_bounded(p->instance_id, sizeof(p->instance_id), instance_id) != 0) {\n";
     os << "        return -1;\n";
     os << "    }\n";
     os << "    p->instance_bound = 1;\n";
     os << "    p->connected = 0;\n";
     os << "    return 0;\n";
+    os << "}\n\n";
+
+    os << "int " << prefix << "_proxy_set_instance_id(" << prefix << "_proxy* p,\n";
+    os << "    const char* instance_id) {\n";
+    os << "    return " << prefix << "_proxy_set_instance(p, \"\", instance_id);\n";
     os << "}\n\n";
 
     os << "static int " << prefix << "_proxy_ensure_connected(" << prefix << "_proxy* p) {\n";

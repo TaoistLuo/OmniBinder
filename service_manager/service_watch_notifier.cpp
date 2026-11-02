@@ -99,9 +99,7 @@ bool ServiceWatchNotifier::matches(const ServiceWatchFilter& filter,
     if (filter.service_name != identity.name) {
         return false;
     }
-    if (!filter.host_id.empty() && filter.host_id != identity.host_id) {
-        return false;
-    }
+    // 逻辑身份 = (service_name, instance_id)；host_id 只是部署位置元数据。
     if (!filter.instance_id.empty() && filter.instance_id != identity.instance_id) {
         return false;
     }
@@ -114,9 +112,7 @@ bool ServiceWatchNotifier::overlaps(const ServiceWatchFilter& a,
     if (a.service_name != b.service_name) {
         return false;
     }
-    if (!a.host_id.empty() && !b.host_id.empty() && a.host_id != b.host_id) {
-        return false;
-    }
+    // host_id 不参与逻辑匹配；仅 instance_id 约束可能互斥。
     if (!a.instance_id.empty() && !b.instance_id.empty()
         && a.instance_id != b.instance_id) {
         return false;

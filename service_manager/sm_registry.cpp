@@ -41,8 +41,12 @@ void ServiceManagerApp::handleRegister(ClientConnection* conn, const Message& ms
     // offline + online 通知观察者，便于业务重新初始化数据面资源。
     if (!existed) {
         notifyServiceWatch(identity, true);
-    } else if (old_entry.control_fd != new_fd || old_entry.info.port != info.port) {
-        notifyServiceWatch(identity, false);
+    } else if (old_entry.control_fd != new_fd || old_entry.info.port != info.port
+               || old_entry.info.host_id != info.host_id) {
+        // 同一逻辑实例迁移/重启：先按旧 endpoint 发 offline，再按新 endpoint 发 online。
+        const ServiceIdentity old_identity(old_entry.info.name, old_entry.info.host_id,
+                                           old_entry.info.instance_id);
+        notifyServiceWatch(old_identity, false);
         notifyServiceWatch(identity, true);
     }
 
@@ -336,7 +340,8 @@ void ServiceManagerApp::sendServiceWatchNotify(ClientConnection* conn, uint64_t 
 
 void ServiceManagerApp::sendInitialServiceWatch(ClientConnection* conn, uint64_t watch_id,
                                                 const ServiceWatchFilter& filter) {
-    const ServiceIdentity filter_identity(filter.service_name, filter.host_id,
+    // 逻辑离线事件只携带 (name, instance_id)；host_id 未知且不属于身份。
+    const ServiceIdentity filter_identity(filter.service_name, "",
                                           filter.instance_id);
     std::vector<ServiceInfo> instances =
         registry_.listServiceInstances(filter.service_name);

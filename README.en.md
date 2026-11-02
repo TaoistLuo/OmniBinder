@@ -65,7 +65,7 @@ OmniBinder covers both **service management** and **service-to-service data path
 - **Automatic proxy connection** — proxies connect on first use; `disconnect()` remains available for explicit teardown
 - **Auto-reconnect** — automatic reconnection on service recovery with configurable exponential backoff
 - **Heartbeat detection** — periodic heartbeat for service liveness detection, auto-triggers reconnect on timeout
-- **Multi-instance service identity**: same-name services coexist with distinct `instance_id`; an instance is identified by `(service_name, host_id, instance_id)`, with per-instance discovery, addressing, subscription, and service online/offline watch
+- **Multi-instance logical identity**: same-name services coexist with distinct `instance_id`; a cluster-wide logical instance is identified by `(service_name, instance_id)` and `host_id` is placement metadata only, with per-instance discovery, addressing, subscription, and watch
 - **Automatic transport selection** — SHM for same-host communication, TCP for cross-host communication
 - **Per-service SHM configuration** — default small SHM rings (`4KB / 4KB`) with optional per-service enlargement
 - **IDL code generation** — generate Stub/Proxy code from `.bidl` files
@@ -76,12 +76,12 @@ OmniBinder covers both **service management** and **service-to-service data path
 
 A single board can run multiple services with the **same name** (for example two `SensorService` instances bound to `ttyUSB0` and `ttyUSB1`):
 
-- Each instance must declare a **distinct `instance_id`** (C++ `Service::setInstanceId()`, C `omni_service_set_instance_id()`). An instance is identified by `(service_name, host_id, instance_id)`. **Two registrations with exactly the same identity are treated as the same instance and take over each other (newer wins)**; an empty `instance_id` means the single default instance of that name on that board.
-- Clients enumerate all instances of a name with `listServiceInstances()` / `omni_runtime_list_instances()`, then bind to one with `connectServiceInstance()` / `omni_runtime_connect_service_instance()` / the generated proxy's `setInstance(host_id, instance_id)`.
-- Every board needs a **unique `host_id`**. Mass-produced images often clone `/etc/machine-id`, so multiple boards share one `host_id` and get mistaken for the same identity (taking each other over) while SHM wrongly treats them as same-host. Set each device's unique id (MAC / chip id / serial) at startup via `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()`.
+- Each instance must declare a cluster-wide **unique `instance_id`** (C++ `Service::setInstanceId()`, C `omni_service_set_instance_id()`). A logical instance is identified by `(service_name, instance_id)`; `host_id` is placement metadata. **The same logical identity registered from a different host is treated as an instance move/takeover (offline then online)**; an empty `instance_id` means the default instance.
+- Clients enumerate all instances of a name with `listServiceInstances()` / `omni_runtime_list_instances()`, then bind to one with `connectServiceInstance(name, instance_id)` / `omni_runtime_connect_service_instance(name, NULL, instance_id)` / the generated proxy's `setInstance(instance_id)`. Business code does not need `host_id`.
+- Every board should still have a **unique `host_id`**. Mass-produced images often clone `/etc/machine-id`, causing SHM to treat multiple boards as same-host. Set each device's unique id (MAC / chip id / serial) at startup via `OmniRuntime::setHostId()` / `omni_runtime_set_host_id()`; `host_id` is not part of business identity.
 - Multiple same-name instances may publish under one topic: a service-level subscription receives data from all instances and can tell them apart by source identity, while an instance-level subscription receives only the selected instance.
 
-> **Known boundary (same-identity takeover churn)**: takeover only applies to an **exactly identical identity** `(service_name, host_id, instance_id)`. If two **live** processes declare the same identity, ServiceManager lets the newer one take over and closes the older control connection; the displaced live instance reconnects and re-registers automatically, so the two can repeatedly take each other over (takeover churn). This is an **accepted boundary, not a defect**: operators must give same-name services on one board distinct `instance_id` values and must never run two live instances with the exact same identity.
+> **Known boundary (same-logical-identity takeover churn)**: takeover applies to the same logical identity `(service_name, instance_id)`. If two **live** processes declare the same logical identity, even on different hosts, ServiceManager lets the newer one take over and closes the older control connection; the displaced live instance reconnects and re-registers automatically, so they may repeatedly take each other over (takeover churn). This is an **accepted boundary, not a defect**: operators must keep `instance_id` unique per service name across the cluster.
 
 See the "Run two same-name service instances on one board" section of the [examples guide](docs/examples.en.md).
 

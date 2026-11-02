@@ -32,12 +32,13 @@ ServiceManager 只负责服务注册发现、Topic 发布/订阅关系、服务�
      - 发送 MSG_REGISTER 到 ServiceManager
      - 等待 MSG_REGISTER_REPLY
   -> ServiceManagerApp::handleRegister()
-     - ServiceRegistry::addService()：以 (name, host_id, instance_id) 身份键存储；
-       同身份重复注册为后来者顶替（保留 handle），异身份新增并存
+     - ServiceRegistry::addService()：以逻辑身份 (name, instance_id) 存储；
+       同逻辑身份重复注册为后来者顶替/迁移（保留 handle），不同 instance_id 新增并存；
+       host_id 仅作为 endpoint 元数据保存
      - 控制面会话由 MSG_CONTROL_HEARTBEAT 续期；服务不再单独跟踪心跳
 ```
 
-`instance_id` 由服务在注册前经 `Service::setInstanceId()` 声明，默认空串表示该 `host_id` 上该服务的默认实例。
+`instance_id` 由服务在注册前经 `Service::setInstanceId()` 声明，默认空串表示该服务的默认实例；业务需保证同一服务名下 `instance_id` 集群内唯一。
 
 当前 `ServiceInfo` 不包含固定 `shm_name`。SHM 是 per-client 模型：客户端后续直连服务端时创建自己的 SHM，再通过服务端 UDS listener 完成握手；服务端握手路径由 `(service_name, host_id, instance_id)` 共同派生（`generateShmName`），因此同机同名不同实例（或不同 `host_id`）互不抢占。
 
@@ -55,11 +56,12 @@ ServiceProxyBase::connect()
           - lookupServiceInfo(): 查 services_ 中该服务的 ServiceState.info；未命中则向 SM 发 MSG_LOOKUP
             （同名多实例时 SM 返回实例键字典序第一实例）
           - ConnectionManager::getOrCreateConnectionByKey(service_name, service_name, host, port, host_id, shm_config)
-  -> 已绑定实例（connect(host_id, instance_id) 或 setInstance(...) 之后）：
-       OmniRuntime::Impl::connectServiceInstance(name, host_id, instance_id)
-       -> listServiceInstancesInternal(name): 向 SM 发 MSG_LIST_INSTANCES，解析目标实例
-       -> connectResolvedConnection(makeServiceConnectionKey(name, host_id, instance_id), instance_info, true, &identity)
+  -> 已绑定逻辑实例（setInstance(instance_id) 或 connect(instance_id) 之后）：
+       OmniRuntime::Impl::connectServiceInstance(name, instance_id)
+       -> listServiceInstancesInternal(name): 向 SM 发 MSG_LIST_INSTANCES，按 instance_id 解析目标实例
+       -> connectResolvedConnection(makeServiceConnectionKey(name, instance_id), instance_info, true, &identity)
           - ConnectionManager::getOrCreateConnectionByKey(connection_key, name, host, port, host_id, shm_config, instance_id)
+          - host_id 只参与 endpoint 选择；逻辑连接键不包含 host_id
   -> enableAutoReconnect(true)
   -> connectService 内 ensureDataSession()：MSG_SESSION_HELLO/ACK；数据面心跳自动启动
      （可选：startHeartbeat(interval, timeout) 自定义策略/重新协商）
@@ -67,7 +69,7 @@ ServiceProxyBase::connect()
      - 向 SM 发 MSG_SUBSCRIBE_SERVICE_WATCH
 ```
 
-连接以 `makeServiceConnectionKey(name, host_id, instance_id)` 为索引键：生成的 Proxy 方法据此调用 `runtime_.invoke(connectionKey(), ...)` / `invokeOneWay(connectionKey(), ...)`；`ServiceProxyBase` 的 `disconnect()`、`enableAutoReconnect()`、`setReconnectInterval()`、`startHeartbeat()`、`stopHeartbeat()` 也都以 `connectionKey()` 为键。默认实例（未显式指定）的连接键即服务名本身。
+连接以 `makeServiceConnectionKey(name, instance_id)` 为索引键：生成的 Proxy 方法据此调用 `runtime_.invoke(connectionKey(), ...)` / `invokeOneWay(connectionKey(), ...)`；`ServiceProxyBase` 的 `disconnect()`、`enableAutoReconnect()`、`setReconnectInterval()`、`startHeartbeat()`、`stopHeartbeat()` 也都以 `connectionKey()` 为键。默认实例（未显式指定）的连接键即服务名本身；host_id 不参与连接键。
 
 `invokeInternal()` 本身要求连接已经存在：它只调用 `conn_mgr_->getConnection(service_name)`，连接不存在时返回 `ERR_CONNECT_FAILED`，不会在 invoke 内隐式 lookup/connect。
 
@@ -224,7 +226,7 @@ runtime.subscribeTopic(topic_name, callback)
 runtime.subscribeTopic(selector, topic_name, expected_idl_hash, on_msg, on_err)
   -> subscribeSourceTopicInternal(selector, ...)
      - 向 SM 发送 MSG_SUBSCRIBE_TOPIC(topic_name, selector)
-       选择器线格式 mode：1=服务级（publisher_service）/ 2=实例级（+ host_id + instance_id）
+       选择器线格式 mode：1=服务级（publisher_service）/ 2=实例级（+ instance_id；host_id 字段兼容保留但不参与匹配）
      - SM 按 (发布者服务名, 主题名) 与选择器匹配，为每个匹配的在线发布者实例各下发
        一条 MSG_TOPIC_PUBLISHER_NOTIFY
      - runtime 收到 reply 后 TopicRuntime::rememberSourceSubscription() + setSourceErrorCallback()
@@ -240,7 +242,7 @@ SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo{name, hos
   -> topic_runtime_.matchSubscriptions(topic, name, host_id, instance_id)  // 按选择器过滤
   -> ensureTopicPublisherConnection(topic_name, pub_info)
      - pub_name = pub_info.name 非空时复用真实服务名，否则用 "topic_pub_" + topic_name
-     - conn_key = makeServiceConnectionKey(pub_name, pub_info.host_id, pub_info.instance_id)
+     - conn_key = makeServiceConnectionKey(pub_name, pub_info.instance_id)
      - conn_mgr_->getOrCreateConnectionByKey(conn_key, pub_name, pub_info.host, pub_info.port, pub_info.host_id, pub_info.shm_config, pub_info.instance_id)
      - 构造 MSG_SUBSCRIBE_BROADCAST(topic_id, topic_name)
      - conn_mgr_->sendMessage(conn_key, sub_msg)，并把话题订阅与发布者实例信息绑定到该连接的 ReconnectConfig
@@ -272,12 +274,12 @@ SM 推送 MSG_TOPIC_PUBLISHER_NOTIFY(topic_name, publisher ServiceInfo{name, hos
 
 ### 8.1 ServiceManager 侧服务状态通知
 
-客户端通过 `watchServices()` 注册持久状态 watch，filter 支持 service_name + 可选 host_id / instance_id：
+客户端通过 `watchServices()` 注册持久状态 watch，逻辑 filter 为 service_name + 可选 instance_id；host_id 字段兼容保留但不参与匹配：
 
 - 服务实例注册 → `MSG_SERVICE_WATCH_NOTIFY`，online=true
 - 实例注销、连接断开、心跳超时 → `MSG_SERVICE_WATCH_NOTIFY`，online=false
-- 同身份 takeover 且 fd/端点变化 → 先 offline，再 online
-- name-only watch 会收到每个匹配实例的每次上下线事件
+- 同逻辑身份迁移/takeover 且 fd/端点变化 → 先 offline（旧 endpoint），再 online（新 endpoint）
+- name-only watch 会收到每个匹配逻辑实例的每次上下线事件
 
 runtime 在 `onSMMessage()` 的 `handleServiceWatchNotify()` 中解析 watch_id 与实例身份，
 先清理离线实例的数据面连接/重连状态，再调用 `ServiceWatchCallback`。

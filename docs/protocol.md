@@ -215,8 +215,9 @@ enum class MessageType : uint16_t {
 | (变长)            |
 +------------------+------------------+------------------+
 
-instance_id: 实例标识，由服务显式声明（Service::setInstanceId）。空串表示该板上该服务的
-          默认实例。服务实例身份 = (service_name, host_id, instance_id)。
+instance_id: 逻辑实例标识，由服务显式声明（Service::setInstanceId）。空串表示该服务的
+          默认实例。集群内逻辑实例身份 = (service_name, instance_id)；host_id 只是当前
+          部署位置元数据，不参与逻辑身份。instance_id 由业务保证集群内唯一。
           同机同名不同 instance_id 的服务是合法多实例，各自注册并派生不同的 SHM 名称与
           UDS 握手路径（host_id 与 instance_id 共同参与 SHM 名哈希派生，见 6.5 节）。
           host_id / instance_id 长度不得超过 MAX_SERVICE_NAME_LENGTH，否则注册被拒。
@@ -224,11 +225,11 @@ instance_id: 实例标识，由服务显式声明（Service::setInstanceId）。
 req_ring_cap / resp_ring_cap: 服务建议的每客户端 SHM request/response ring 容量。
           客户端同机连接时会创建自己的 SHM，并通过服务端 UDS listener 交换名称和 eventfd。
 
-> **同身份重复注册（顶替）边界**：相同 `(service_name, host_id, instance_id)` 再次注册视为
-> 后来者顶替，SM 保留原 handle、刷新 ServiceInfo 与控制 fd，并关闭被顶替的旧控制连接。
-> 若被顶替的是**仍存活的**进程，其 runtime 会自动重连并重新注册，于是两个活实例可能互相顶替、
-> 反复 ping-pong（takeover churn）。这是**已接受的边界行为**，不是缺陷：正确用法是
-> 同板同名服务各自声明不同的 `instance_id`，**运维不得让两个活实例使用完全相同的身份**。
+> **同逻辑身份重复注册（顶替/迁移）边界**：相同 `(service_name, instance_id)` 再次注册视为
+> 后来者顶替；即使 host_id 不同也按实例迁移处理，SM 保留原 handle、刷新 ServiceInfo 与
+> 控制 fd，并关闭被顶替的旧控制连接。若被顶替的是**仍存活的**进程，其 runtime 会自动重连
+> 并重新注册，于是两个活实例可能互相顶替、反复 ping-pong（takeover churn）。这是**已接受
+> 的边界行为**，不是缺陷：正确用法是同一服务名下各实例的 `instance_id` 集群内唯一。
 
 interfaces 数组中每个元素:
 +------------------+------------------+------------------+
@@ -391,7 +392,8 @@ found:
   1 = 找到该名称下的至少一个实例，随后为 instance_count 个完整的
       serialized ServiceInfo（格式与 MSG_REGISTER payload 相同：
       service_name, host, port, host_id, instance_id, shm_config, interfaces[]）
-      同名多实例会逐项返回，顺序为 SM 注册表实例键 (host_id, instance_id) 字典序
+      同名多实例会逐项返回，顺序为 SM 注册表逻辑实例键 (instance_id) 字典序；
+      host_id 仅作为 endpoint 元数据返回
   0 = 该名称下无任何实例，instance_count 为 0
 
 客户端解析规则：
@@ -413,8 +415,9 @@ found:
 ... 重复 filter_count 次
 ```
 
-`service_name` 必填；`host_id` / `instance_id` 为空表示通配，且两者可只指定其一。
-filter 之间不允许重叠，否则 SM 整组拒绝并记录日志。
+`service_name` 必填；`instance_id` 为空表示该服务下全部逻辑实例。`host_id` 字段为兼容
+保留，不参与逻辑匹配。filter 之间按 (service_name, instance_id) 判断重叠，不允许重叠，
+否则 SM 整组拒绝并记录日志。
 
 订阅应答复用 `MSG_SUBSCRIBE_SERVICE_WATCH_REPLY`（bool）。订阅成功后，SM 立即补发当前状态：
 
@@ -435,9 +438,9 @@ filter 之间不允许重叠，否则 SM 整组拒绝并记录日志。
 |------|--------|
 | 新实例注册 | 1 |
 | 实例注销 / 崩溃 / 心跳超时 | 0 |
-| 同身份 takeover 且 fd/端点变化 | 先 0 后 1 |
+| 同逻辑身份迁移/takeover 且 fd/端点变化 | 先 0 后 1（旧 host 的 offline + 新 host 的 online） |
 
-name-only watch 会收到该名称下每个实例的每次上下线事件；不做名字级聚合。
+name-only watch 会收到该名称下每个逻辑实例的每次上下线事件；不做名字级聚合。
 客户端解析失败时丢弃并记录告警，不进入回调分发。
 
 ### 4.11 声明发布话题（MSG_PUBLISH_TOPIC）
@@ -450,8 +453,8 @@ name-only watch 会收到该名称下每个实例的每次上下线事件；不�
 ```
 
 话题身份为 **(发布者服务名, 主题名)**：不同服务可使用同名主题而互不影响；同一服务的
-同名主题允许存在多个发布者实例，由 `ServiceInfo.host_id` + `ServiceInfo.instance_id`
-区分（相同发布者实例重复声明为幂等更新）。
+同名主题允许存在多个发布者逻辑实例，由 `ServiceInfo.instance_id` 区分；`host_id` 只是
+当前 endpoint 元数据。相同逻辑发布者实例重复声明为幂等更新，换 host 时覆盖旧 endpoint。
 
 idl_hash 为发布者声明的 topic IDL 哈希（0 表示未声明）；订阅者声明了期望哈希时，
 SM 会将该哈希经 MSG_SUBSCRIBE_TOPIC_REPLY / MSG_TOPIC_PUBLISHER_NOTIFY 转发给订阅者用于校验。
@@ -472,7 +475,7 @@ SM 会将该哈希经 MSG_SUBSCRIBE_TOPIC_REPLY / MSG_TOPIC_PUBLISHER_NOTIFY 转
 |------|------|----------|
 | 0 | 仅按主题名（不限定发布者服务，匹配任意服务发布的该主题） | 无 |
 | 1 | 服务级：匹配 `(publisher_service, topic_name)` 的全部发布者实例 | `publisher_service` |
-| 2 | 实例级：在服务级基础上再匹配 `host_id` + `instance_id` 的单个发布者实例 | `publisher_service` + `host_id` + `instance_id` |
+| 2 | 实例级：在服务级基础上再匹配 `instance_id` 的单个逻辑发布者实例 | `publisher_service` + `instance_id`；`host_id` 字段兼容保留但不参与匹配 |
 
 send 端始终写 `mode`；SM 读取时若 payload 仅含 `topic_name`（无尾随字节），按 mode 0 处理。
 取消订阅使用相同 payload 格式，按选择器精确摘除；由 fd 断开
@@ -504,8 +507,9 @@ MSG_TOPIC_PUBLISHER_NOTIFY；此后新发布者实例上线时，仅向选择器
 +------------------+------------------+------------------------------+------------------+
 ```
 
-ServiceInfo 中的 `name` / `host_id` / `instance_id` 标识发布者实例：订阅者据此按选择器
-过滤并为每个发布者实例建立独立数据面连接；收到广播时以该身份回填消息来源。
+ServiceInfo 中的 `name` / `instance_id` 标识逻辑发布者实例，`host_id` / host / port 描述
+当前 endpoint：订阅者按逻辑选择器过滤并按逻辑连接键建立/复用数据面连接；收到广播时以
+来源身份回填消息来源。发布者迁移 host 时同一逻辑连接会按新 endpoint 重建。
 
 idl_hash 为发布者声明的 topic IDL 哈希（0 表示未声明）。订阅者持有非 0 期望哈希时，
 两者不一致则不上报数据、不建立连接，并经 on_err 上报 `ERR_IDL_MISMATCH`。

@@ -119,8 +119,8 @@ typedef void (*omni_topic_callback_t)(uint32_t topic_id,
  * @note  回调传入的指针仅在本次回调执行期间有效，回调返回后不可保存。 */
 typedef struct omni_service_instance_t {
     const char* service_name;   /* 服务名称 */
-    const char* host_id;        /* 板级主机身份（同机判断与实例身份的一部分） */
-    const char* instance_id;    /* 实例标识；空串表示该 host_id 上该服务的单实例 */
+    const char* host_id;        /* 板级主机身份（同机/SHM 端点元数据，不参与逻辑身份） */
+    const char* instance_id;    /* 逻辑实例标识；空串表示该服务的默认实例 */
     const char* host;           /* 数据面直连可达地址 */
     uint16_t    port;           /* 数据面直连端口 */
 } omni_service_instance_t;
@@ -324,7 +324,7 @@ void omni_runtime_set_heartbeat_policy(omni_runtime_t* client,
 /* @brief 设置 RPC 调用的默认超时时间（毫秒） */
 void omni_runtime_set_default_timeout(omni_runtime_t* client, uint32_t timeout_ms);
 
-/* @brief 覆盖本机标识符 host_id（同机判断与实例身份）
+/* @brief 覆盖本机标识符 host_id（同机判断与 SHM 端点派生）
  * @note  必须在 omni_runtime_init 之前调用；空串表示使用平台默认机器标识。
  *        克隆镜像共享 machine-id 的多板设备应显式设置各设备唯一标识（D8）。 */
 void omni_runtime_set_host_id(omni_runtime_t* client, const char* host_id);
@@ -375,24 +375,25 @@ int  omni_runtime_is_service_connected(const omni_runtime_t* client, const char*
  * @param[in] host_id      目标实例的板级主机身份
  * @param[in] instance_id  目标实例标识
  * @return 1 已连接，0 未连接
- * @note   连接键为 makeServiceConnectionKey(name, host_id, instance_id)，与
+ * @note   连接键为 makeServiceConnectionKey(name, instance_id)，与
  *         omni_runtime_connect_service_instance 配套。按实例建立的连接不能用
  *         omni_runtime_is_service_connected(name) 检测（后者只命中按服务名的连接） */
 int  omni_runtime_is_service_instance_connected(const omni_runtime_t* client,
          const char* service_name, const char* host_id, const char* instance_id);
 
-/* @brief 生成数据面实例连接键，供键无关 API（自动重连 / 重连间隔 / 心跳）按实例寻址
+/* @brief 生成数据面逻辑实例连接键，供键无关 API（自动重连 / 重连间隔 / 心跳）按实例寻址
  * @param[in] service_name 服务名称
- * @param[in] host_id      目标实例的板级主机身份
- * @param[in] instance_id  目标实例标识
+ * @param[in] host_id      兼容字段，可为 NULL；不参与逻辑身份
+ * @param[in] instance_id  目标逻辑实例标识
  * @return 指向线程局部缓冲的连接键字符串；在下次调用本函数前有效
  * @note   主要供生成的 C Proxy 在 instance_bound 时把同一套连接 API 作用于实例 */
 const char* omni_runtime_service_connection_key(const char* service_name,
          const char* host_id, const char* instance_id);
 
 /* ---- 多实例：实例发现与实例级寻址 ----
- * 同名服务可存在多个实例，实例身份 = (service_name, host_id, instance_id)。
- * 默认（instance_id 为空）时按服务名寻址，行为与历史版本一致。 */
+ * 同名服务可存在多个实例，逻辑身份 = (service_name, instance_id)；
+ * host_id 只描述部署位置，不参与逻辑身份。instance_id 由业务保证集群内唯一。
+ * 默认（instance_id 为空）表示默认实例。 */
 
 /* @brief 列出指定服务名下的全部实例（跨 host_id / instance_id）
  * @param[in]  client       runtime 实例
@@ -404,11 +405,11 @@ const char* omni_runtime_service_connection_key(const char* service_name,
 int  omni_runtime_list_instances(omni_runtime_t* client, const char* service_name,
          omni_instance_callback_t callback, void* user_data);
 
-/* @brief 建立到指定服务实例 (host_id, instance_id) 的数据面直连
+/* @brief 建立到指定逻辑服务实例 (service_name, instance_id) 的数据面直连
  * @return 0 成功；OMNI_ERR_SERVICE_NOT_FOUND 无匹配实例；网络/协议错误返回对应错误码
- * @note  host_id / instance_id 必须为非 NULL 且非空的显式身份；默认实例请改用
- *        omni_runtime_connect_service(service_name)（按名连接，键即服务名）。
- *        生成的 C Proxy 可通过 <Service>_proxy_set_instance 设置目标并使用本能力 */
+ * @note  instance_id 必须非 NULL；host_id 可为 NULL（推荐），仅为兼容占位，忽略。
+ *        默认实例请改用 omni_runtime_connect_service(service_name)。
+ *        生成的 C Proxy 可通过 <Service>_proxy_set_instance_id 设置目标。 */
 int  omni_runtime_connect_service_instance(omni_runtime_t* client, const char* service_name,
          const char* host_id, const char* instance_id);
 
@@ -419,8 +420,8 @@ int  omni_runtime_disconnect_service_instance(omni_runtime_t* client, const char
 /* @brief 向指定服务实例发起同步 RPC（需先 connect_service_instance 建立数据面）
  * @param[in]  client       runtime 实例
  * @param[in]  service_name 服务名称
- * @param[in]  host_id      目标实例的板级主机身份
- * @param[in]  instance_id  目标实例标识
+ * @param[in]  host_id      兼容字段，可为 NULL；不参与逻辑身份
+ * @param[in]  instance_id  目标逻辑实例标识
  * @param[in]  interface_id 接口 ID（由 IDL 生成）
  * @param[in]  method_id    方法 ID（由 IDL 生成）
  * @param[in]  idl_hash     IDL 哈希（用于接口版本校验）
@@ -472,11 +473,12 @@ int  omni_runtime_subscribe_topic(omni_runtime_t* client, const char* topic_name
 int  omni_runtime_unsubscribe_topic(omni_runtime_t* client, const char* topic_name);
 
 /* 服务状态 watch */
-/* @brief 服务状态 watch 注册条件；host_id/instance_id 为 NULL 表示通配 */
+/* @brief 服务状态 watch 注册条件；instance_id 为 NULL/空表示该服务下全部实例
+ * @note  host_id 仅为兼容字段，不参与逻辑匹配 */
 typedef struct omni_service_watch_request_t {
     const char* service_name;   /* 必填 */
-    const char* host_id;        /* NULL = 任意 */
-    const char* instance_id;    /* NULL = 任意 */
+    const char* host_id;        /* 兼容字段，不参与逻辑匹配 */
+    const char* instance_id;    /* NULL = 该服务下全部逻辑实例 */
 } omni_service_watch_request_t;
 
 /* @brief 服务实例上线/离线回调（owner event-loop 线程执行）

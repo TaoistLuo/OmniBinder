@@ -9,15 +9,15 @@
 
 `omni-cli` 是 OmniBinder 的命令行调试工具，用于查询在线服务实例和运行时、查看接口定义、调用服务方法、调整运行时日志级别、订阅主题并输出 JSON，以及按 PID 观察业务接口输入/输出。
 
-**服务身份模型**：一个服务名可以同时存在多个实例，实例身份为 `(service_name, host_id, instance_id)`。
-`instance_id` 为空串表示该 `host_id` 上该服务的**默认实例**。
+**服务身份模型**：一个服务名可以同时存在多个逻辑实例，集群内逻辑身份为 `(service_name, instance_id)`；`host_id` 只是当前部署位置元数据，不参与实例选择。
+`instance_id` 为空串表示该服务的**默认实例**；业务需保证同一服务名下 `instance_id` 集群内唯一。
 `omni-cli` 的 `list` / `info` / `call` 全部以实例为单位工作：单一实例只是"同名实例只有一行"的特例。
 
 **主要功能**：
 - 列出所有在线服务实例（服务名 / `instance_id` / `host_id` / `host:port`）
 - 列出所有在线 runtime / PID
 - 枚举某个服务名下的全部实例，并查看接口和方法签名
-- 按 `(host_id, instance_id)` 调用指定实例的方法（支持 hex 和 JSON 格式）
+- 按 `instance_id` 调用指定逻辑实例的方法（`--host-id` 兼容保留，不再参与逻辑选择）
 - 显示调用耗时统计
 - 按 PID 设置运行时日志级别
 - 订阅 IDL 主题并将收到的消息打印为 JSON
@@ -41,13 +41,12 @@ omni-cli [options] <command> [args]
 | `-p, --port <port>` | ServiceManager 端口 | 9900 |
 | `--idl <file.bidl>` | IDL 文件路径（启用 JSON 支持） | 无 |
 | `--instance-id <id>` | 目标实例标识（`info` / `call`）；`--instance-id ''` 选择默认实例 | 无（见各命令） |
-| `--host-id <id>` | 目标实例的板级主机身份，配合 `--instance-id` 精确定位 | 无（见各命令） |
+| `--host-id <id>` | 兼容/诊断用 host 过滤；不参与逻辑身份 | 无（见各命令） |
 | `--help` | 显示帮助信息 | - |
 
 > `--instance-id` / `--host-id` 是**实例选择器**，语义统一：
-> - 只给 `--instance-id`：在该服务名下匹配唯一 `instance_id`；若跨多个 `host_id` 命中多个实例则报错，需补 `--host-id`。
-> - 只给 `--host-id`：匹配该 `host_id` 上唯一实例；若该主机上同名实例多于一个则报错，需补 `--instance-id`。
-> - 两者都给：精确匹配 `(host_id, instance_id)`。
+> - 推荐只给 `--instance-id`：在该服务名下匹配唯一逻辑实例。
+> - `--host-id` 仅作为兼容/诊断筛选；逻辑身份不依赖 host。
 > - 都不给：`call` 使用**确定性第一实例**并在输出中显式说明；`info` 在多实例时只枚举、不擅自选一个。
 
 ### 可用命令
@@ -69,7 +68,7 @@ omni-cli [options] <command> [args]
 ### 1. list - 列出服务实例
 
 列出所有在线服务**实例**及其基本信息。注册表中的每个
-`(service_name, host_id, instance_id)` 占一行；一个服务名只有一个实例时，
+`(service_name, instance_id, endpoint)` 占一行；host_id 仅作为 endpoint 元数据展示；一个服务名只有一个实例时，
 就是同名多行展示中的一行。
 
 **语法**：
@@ -83,7 +82,7 @@ omni-cli list
 |------|------|
 | `NAME` | 服务名 |
 | `INSTANCE_ID` | 实例标识；空 `instance_id` 显示为 `(default)` |
-| `HOST_ID` | 板级主机身份（同机判断与实例身份的一部分） |
+| `HOST_ID` | 板级主机身份（仅 endpoint 元数据，不参与逻辑身份） |
 | `ENDPOINT` | 数据面直连地址 `host:port` |
 | `STATUS` | 当前为 `ONLINE` |
 
@@ -210,7 +209,7 @@ Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpo
 ```
 
 **说明**：
-- 实例身份行始终标明显式选中的 `(instance_id, host_id, endpoint)`，不存在"静默命中某个实例"。
+- 实例身份行始终标明显式选中的 `(instance_id, endpoint)`（host_id 为部署元数据），不存在"静默命中某个实例"。
 - IDL 文件中的 `import` 依赖会自动递归加载
 - 跨包类型（如 `common.StatusResponse`）也能正确展开
 - `Published Topics` 来自独立的运行时查询（按服务名）：没有发布话题时显示 `(none)`；服务查询成功但话题查询失败时显示 `(unavailable: <原因>)`，随后仍继续显示接口。服务名不存在时则直接报错。
@@ -221,7 +220,7 @@ Instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpo
 ### 4. call - 调用指定实例的方法
 
 调用某个服务实例的方法。实例选择器是一等参数：先枚举该服务名下的实例，
-按 `(host_id, instance_id)` 定位目标后用 `connectServiceInstance` 建立数据面直连。
+按 `instance_id` 定位逻辑目标后用 `connectServiceInstance` 建立数据面直连；host_id 不参与选择。
 支持两种输入格式。
 
 **语法**：
@@ -427,7 +426,7 @@ omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatest
 
 场景：同一块板上运行**两个同名实例** `SensorService`，分别绑定 `ttyUSB0` / `ttyUSB1`
 （服务端在注册前调用 `Service::setInstanceId("ttyUSB0")` / `setInstanceId("ttyUSB1")`）。
-两者同 `host_id`、不同 `instance_id`，在 ServiceManager 中并存。
+两者不同 `instance_id`，在 ServiceManager 中作为不同逻辑实例并存。
 
 **1. 启动 ServiceManager 与两个实例**
 

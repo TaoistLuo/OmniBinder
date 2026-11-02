@@ -892,15 +892,15 @@ int omni_runtime_list_instances(omni_runtime_t* runtime, const char* service_nam
 int omni_runtime_connect_service_instance(omni_runtime_t* runtime, const char* service_name,
     const char* host_id, const char* instance_id)
 {
-    if (!runtime || !service_name || !host_id || !instance_id) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.connectServiceInstance(service_name, host_id, instance_id);
+    if (!runtime || !service_name || !instance_id) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.connectServiceInstance(service_name, host_id ? host_id : "", instance_id);
 }
 
 int omni_runtime_disconnect_service_instance(omni_runtime_t* runtime, const char* service_name,
     const char* host_id, const char* instance_id)
 {
-    if (!runtime || !service_name || !host_id || !instance_id) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.disconnectServiceInstance(service_name, host_id, instance_id);
+    if (!runtime || !service_name || !instance_id) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.disconnectServiceInstance(service_name, host_id ? host_id : "", instance_id);
 }
 
 int omni_runtime_invoke_instance(omni_runtime_t* runtime, const char* service_name,
@@ -909,8 +909,8 @@ int omni_runtime_invoke_instance(omni_runtime_t* runtime, const char* service_na
     const omni_buffer_t* request, omni_buffer_t* response,
     uint32_t timeout_ms)
 {
-    if (!runtime || !service_name || !host_id || !instance_id || !request || !response) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.invoke(omnibinder::makeServiceConnectionKey(service_name, host_id, instance_id),
+    if (!runtime || !service_name || !instance_id || !request || !response) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.invoke(omnibinder::makeServiceConnectionKey(service_name, instance_id),
                                    interface_id, method_id, idl_hash,
                                    request->buf, response->buf, timeout_ms);
 }
@@ -920,8 +920,8 @@ int omni_runtime_invoke_oneway_instance(omni_runtime_t* runtime, const char* ser
     uint32_t interface_id, uint32_t method_id, uint32_t idl_hash,
     const omni_buffer_t* request)
 {
-    if (!runtime || !service_name || !host_id || !instance_id || !request) return OMNI_ERR_INVALID_PARAM;
-    return runtime->runtime.invokeOneWay(omnibinder::makeServiceConnectionKey(service_name, host_id, instance_id),
+    if (!runtime || !service_name || !instance_id || !request) return OMNI_ERR_INVALID_PARAM;
+    return runtime->runtime.invokeOneWay(omnibinder::makeServiceConnectionKey(service_name, instance_id),
                                          interface_id, method_id, idl_hash, request->buf);
 }
 
@@ -933,19 +933,20 @@ int omni_runtime_is_service_connected(const omni_runtime_t* runtime, const char*
 int omni_runtime_is_service_instance_connected(const omni_runtime_t* runtime,
     const char* service_name, const char* host_id, const char* instance_id)
 {
-    if (!runtime || !service_name || !host_id || !instance_id) return 0;
-    return runtime->runtime.isServiceInstanceConnected(service_name, host_id, instance_id) ? 1 : 0;
+    if (!runtime || !service_name || !instance_id) return 0;
+    return runtime->runtime.isServiceInstanceConnected(
+        service_name, host_id ? host_id : "", instance_id) ? 1 : 0;
 }
 
 const char* omni_runtime_service_connection_key(const char* service_name,
     const char* host_id, const char* instance_id)
 {
     static thread_local std::string holder;
-    if (!service_name || !host_id || !instance_id) {
+    if (!service_name || !instance_id) {
         holder.clear();
         return holder.c_str();
     }
-    holder = omnibinder::makeServiceConnectionKey(service_name, host_id, instance_id);
+    holder = omnibinder::makeServiceConnectionKey(service_name, instance_id);
     return holder.c_str();
 }
 

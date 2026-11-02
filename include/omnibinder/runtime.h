@@ -47,11 +47,12 @@ namespace omnibinder {
 class Service;
 class ServiceProxyBase;
 
-/* @brief 服务实例状态关注条件；host_id/instance_id 为空表示通配 */
+/* @brief 服务实例状态关注条件；instance_id 为空表示该服务下全部逻辑实例
+ * @note   host_id 仅为兼容字段，不参与逻辑匹配；逻辑身份 = service_name + instance_id。 */
 struct ServiceWatchRequest {
     std::string service_name;
-    std::string host_id;
-    std::string instance_id;
+    std::string host_id;      // 兼容字段，不参与逻辑匹配
+    std::string instance_id;  // 空串表示该服务下全部实例
 
     ServiceWatchRequest() {}
     ServiceWatchRequest(const std::string& name, const std::string& host,
@@ -88,8 +89,8 @@ typedef std::function<void(const std::string& host_id, const std::string& instan
  *        服务级/实例级订阅与 TopicSourceCallback 搭配；旧接口与 TopicCallback 搭配。 */
 struct TopicSubscriptionSelector {
     std::string publisher_service;  // 发布者服务名
-    std::string host_id;            // 实例级：目标 host_id
-    std::string instance_id;        // 实例级：目标实例标识
+    std::string host_id;            // 兼容字段；逻辑身份不再依赖 host_id
+    std::string instance_id;        // 实例级：目标逻辑实例标识
     bool        instance_level;     // true 实例级；false 服务级
 
     TopicSubscriptionSelector() : instance_level(false) {}
@@ -101,32 +102,36 @@ struct TopicSubscriptionSelector {
         return selector;
     }
 
-    /* @brief 构造实例级选择器（仅该服务的目标实例） */
+    /* @brief 构造实例级选择器（仅该服务的目标逻辑实例） */
     static TopicSubscriptionSelector instance(const std::string& publisher_service,
-                                              const std::string& host_id,
                                               const std::string& instance_id) {
         TopicSubscriptionSelector selector;
         selector.publisher_service = publisher_service;
-        selector.host_id = host_id;
         selector.instance_id = instance_id;
         selector.instance_level = true;
         return selector;
     }
+
+    /* @brief 兼容旧调用：host_id 仅保留字段值，不参与逻辑匹配 */
+    static TopicSubscriptionSelector instance(const std::string& publisher_service,
+                                              const std::string& host_id,
+                                              const std::string& instance_id) {
+        TopicSubscriptionSelector selector = instance(publisher_service, instance_id);
+        selector.host_id = host_id;
+        return selector;
+    }
 };
 
-/* @brief 生成数据面实例连接键
+/* @brief 生成数据面逻辑实例连接键
  * @param[in]  name        服务名称
- * @param[in]  host_id     目标板级主机身份
  * @param[in]  instance_id 目标实例标识
  * @return 用于 invoke/heartbeat/重连/断开的连接键
- * @note   默认实例（host_id 与 instance_id 均为空）的键即服务名本身，与服务级
- *         connectService 使用同一键；显式实例键在服务名后追加
- *         makeServiceInstanceKey(host_id, instance_id) 无歧义编码，
- *         因此同一服务名下不同实例互不覆盖。
+ * @note   默认实例（instance_id 为空）的键即服务名本身；显式实例键在服务名后
+ *         追加逻辑实例键。host_id 属于 endpoint 元数据，不参与连接键，
+ *         因此同一逻辑实例迁移到其它板子后仍复用同一连接身份。
  *         与 connectServiceInstance() 配套：绑定实例后，invoke/心跳/重连/断开
  *         均以本键寻址该实例的数据面连接。 */
 std::string makeServiceConnectionKey(const std::string& name,
-                                     const std::string& host_id,
                                      const std::string& instance_id);
 
 /* @brief 进程级运行时入口：控制面（注册/发现/心跳/服务状态关注）+ 数据面（直连 RPC/广播）+ 诊断 */
@@ -217,6 +222,15 @@ public:
      *         线程安全，内部经 callSerialized 投递到 owner event-loop */
     int listServiceInstances(const std::string& name, std::vector<ServiceInfo>& out);
 
+    /* @brief 按逻辑身份查询服务实例（name + instance_id）
+     * @param[in]  name        服务名称
+     * @param[in]  instance_id 逻辑实例标识（空串表示默认实例）
+     * @param[out] info        找到时返回实例信息（host_id 仅作为部署元数据）
+     * @return 0 成功；ERR_SERVICE_NOT_FOUND 不存在；其它 SM 通信错误
+     * @note   host_id 不参与逻辑身份匹配；实例 id 由业务保证在集群内唯一。 */
+    int lookupServiceInstance(const std::string& name, const std::string& instance_id,
+                              ServiceInfo& info);
+
     /* @brief 查询指定服务的接口定义列表
      * @param[in]  name   服务名称
      * @param[out] ifaces 接口信息列表
@@ -270,7 +284,7 @@ public:
      * @param[in]  selector          订阅选择器（服务级或实例级）
      * @param[in]  topic_name        topic 名称
      * @param[in]  expected_idl_hash 订阅者期望的 topic IDL 哈希（0 表示不校验）
-     * @param[in]  on_msg            消息回调（携带发布者 host_id + instance_id）
+     * @param[in]  on_msg            消息回调（携带发布者 host_id + instance_id；host_id 为端点元数据）
      * @param[in]  on_err            错误回调（可选）
      * @return 0 成功，<0 失败；发布者哈希与期望不一致时返回 ERR_IDL_MISMATCH
      * @note   服务级订阅该发布者服务的全部实例：每个实例使用独立数据面连接，
@@ -291,12 +305,13 @@ public:
     // 服务状态关注
 
     /* @brief 关注服务实例状态（按 name/host/instance 过滤，持久订阅）
-     * @param[in]  requests  关注条件列表；service_name 必填，host/instance 可空
+     * @param[in]  requests  关注条件列表；service_name 必填，instance 为空表示全部
      * @param[in]  callback  状态变化回调（owner event-loop 线程执行）
      * @param[out] watch_id  本次注册的 watch 组 ID
      * @return 0 成功（SM 未就绪时先本地登记，连接后自动重放）；
      *         ERR_INVALID_PARAM 参数/重叠条件；其它 SM 通信错误
      * @note   订阅成功后立即补发当前匹配实例状态；list 内条件重叠会整组拒绝。
+     *         host_id 仅为兼容字段，不参与逻辑匹配。
      *         SM 尚未启动/连接时仍返回成功并保留 watch，SM 恢复后自动重新注册。 */
     int watchServices(const std::vector<ServiceWatchRequest>& requests,
                       const ServiceWatchCallback& callback,
@@ -319,15 +334,18 @@ public:
      * @note   同机自动使用 SHM，跨机走 TCP */
     int  connectService(const std::string& name);
 
-    /* @brief 建立到指定服务实例 (host_id, instance_id) 的数据面直连
+    /* @brief 建立到指定逻辑服务实例 (name, instance_id) 的数据面直连
      * @param[in]  name        服务名称
-     * @param[in]  host_id     目标板级主机身份（ServiceInfo.host_id）
-     * @param[in]  instance_id 目标实例标识（ServiceInfo.instance_id）
+     * @param[in]  instance_id 逻辑实例标识；host_id 由 SM 解析为 endpoint
      * @return 0 成功；ERR_SERVICE_NOT_FOUND 该名称下无匹配实例；网络/协议错误时返回对应错误码
      * @note   通过 listServiceInstances 解析目标实例后建立直连，不新增线协议。
-     *         连接以 makeServiceConnectionKey(name, host_id, instance_id) 为键，
+     *         连接以 makeServiceConnectionKey(name, instance_id) 为键，
      *         之后对该实例的 invoke / 心跳 / 自动重连 / 断开均使用同一连接键。
-     *         不指定实例的 connectService(name) 行为保持不变 */
+     *         host_id 是部署位置元数据，不参与逻辑身份；实例迁移后仍复用同一逻辑键。 */
+    int  connectServiceInstance(const std::string& name,
+                                const std::string& instance_id);
+
+    /* @brief 兼容旧调用：host_id 仅为兼容占位，忽略，不参与逻辑身份 */
     int  connectServiceInstance(const std::string& name,
                                 const std::string& host_id,
                                 const std::string& instance_id);
@@ -337,13 +355,16 @@ public:
      * @return 0 成功，<0 失败 */
     int  disconnectService(const std::string& name);
 
-    /* @brief 断开到指定服务实例的数据面直连
+    /* @brief 断开到指定逻辑服务实例的数据面直连
      * @param[in]  name        服务名称
-     * @param[in]  host_id     目标板级主机身份
-     * @param[in]  instance_id 目标实例标识
+     * @param[in]  instance_id 逻辑实例标识
      * @return 0 成功，<0 失败
      * @note   与 connectServiceInstance 使用同一连接键，断开该实例的连接与
      *         重连/心跳状态；对同名的其它实例无影响 */
+    int  disconnectServiceInstance(const std::string& name,
+                                   const std::string& instance_id);
+
+    /* @brief 兼容旧调用：host_id 仅为兼容占位，忽略，不参与逻辑身份 */
     int  disconnectServiceInstance(const std::string& name,
                                    const std::string& host_id,
                                    const std::string& instance_id);
@@ -353,19 +374,22 @@ public:
      * @return true 已连接，false 未连接 */
     bool isServiceConnected(const std::string& name) const;
 
-    /* @brief 查询与指定服务实例的数据面连接状态
+    /* @brief 查询与指定逻辑服务实例的数据面连接状态
      * @param[in]  name        服务名称
-     * @param[in]  host_id     目标板级主机身份
-     * @param[in]  instance_id 目标实例标识
+     * @param[in]  instance_id 逻辑实例标识
      * @return true 已连接，false 未连接
-     * @note   连接以 makeServiceConnectionKey(name, host_id, instance_id) 为键，
+     * @note   连接以 makeServiceConnectionKey(name, instance_id) 为键，
      *         与 connectServiceInstance 配套。按实例建立的连接不能用按服务名的
      *         isServiceConnected(name) 检测（后者只命中以服务名为键的连接）。 */
+    bool isServiceInstanceConnected(const std::string& name,
+                                    const std::string& instance_id) const;
+
+    /* @brief 兼容旧调用：host_id 仅为兼容占位，忽略，不参与逻辑身份 */
     bool isServiceInstanceConnected(const std::string& name, const std::string& host_id,
                                     const std::string& instance_id) const;
 
     // 自动重连 / 重连间隔 / 心跳的 name 参数是"数据面连接键"：服务级连接即服务名；
-    // 实例级连接为 makeServiceConnectionKey(name, host_id, instance_id)。生成的 Proxy
+    // 实例级连接为 makeServiceConnectionKey(name, instance_id)。生成的 Proxy
     // 绑定实例后即以实例连接键调用本组 API，无需额外的实例版接口。
 
     /* @brief 启用/禁用自动重连
@@ -525,7 +549,7 @@ public:
      *         默认值为 DEFAULT_REPLY_SEND_TIMEOUT（1000ms）。 */
     void setReplySendTimeout(uint32_t ms);
 
-    /* @brief 覆盖本机标识符 host_id（用于判断同机通信与实例身份）
+    /* @brief 覆盖本机标识符 host_id（用于判断同机通信与 SHM 端点派生）
      * @param[in]  host_id 指定的主机/设备标识；空串表示使用平台默认机器标识
      * @note   必须在 init() 之前调用；init() 之后调用不再生效（返回后忽略）。
      *         默认取自 platform::getMachineId()（Linux 为 /etc/machine-id）。

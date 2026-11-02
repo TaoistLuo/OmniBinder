@@ -13,7 +13,7 @@ std::string TopicSubscriptionFilter::key() const
     std::ostringstream os;
     if (mode == TopicSubscribeMode::INSTANCE) {
         os << 'I' << '|' << publisher_service.size() << '|' << publisher_service
-           << host_id.size() << '|' << host_id << instance_id;
+           << instance_id.size() << '|' << instance_id;
     } else if (mode == TopicSubscribeMode::SERVICE) {
         os << 'S' << '|' << publisher_service.size() << '|' << publisher_service;
     } else {
@@ -31,7 +31,8 @@ bool TopicSubscriptionFilter::matches(const ServiceInfo& publisher) const
         return false;
     }
     if (mode == TopicSubscribeMode::INSTANCE) {
-        return publisher.host_id == host_id && publisher.instance_id == instance_id;
+        // 发布者逻辑身份由 (service_name, instance_id) 决定；host_id 只是端点。
+        return publisher.instance_id == instance_id;
     }
     return true;
 }
@@ -132,7 +133,7 @@ bool TopicManager::registerPublisher(const std::string& topic,
     }
 
     const std::string instance_key =
-        makeServiceInstanceKey(publisher_info.host_id, publisher_info.instance_id);
+        makeServiceInstanceKey(publisher_info.instance_id);
     const std::string ekey = entryKey(publisher_info.name, topic);
 
     std::map<std::string, TopicEntry>::iterator it = topics_.find(ekey);

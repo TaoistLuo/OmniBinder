@@ -82,7 +82,7 @@
 以下回调统一在 owner event-loop 线程执行：
 
 - `TopicCallback` / `TopicSourceCallback`（后者携带发布者 host_id + instance_id）
-- `ServiceWatchCallback`（携带实例 name + host_id + instance_id 与 online 状态）
+- `ServiceWatchCallback`（携带逻辑实例 name + instance_id 与 online 状态；host_id 仅作部署元数据）
 - 服务端请求处理相关回调
 - 连接断开、topic 发布者通知等内部派发回调
 
@@ -193,13 +193,13 @@ runtime_thread.join();
 - `connectService()` / `connectServiceInstance()` / `disconnectService()` / `disconnectServiceInstance()` 通过 `callSerialized` 在 owner event-loop 串行执行
 - 连接建立过程中同步等待 SM 回复（`sendSMRequestAndWaitReply`）；`connectServiceInstance` 先经 `listServiceInstances` 解析目标实例
 - `isServiceConnected()` / `isServiceInstanceConnected()` 可从任意线程调用（内部经 `callSerialized` 串行到 owner event-loop；`ConnectionManager::getConnection` 本身无锁，只在 owner 线程访问）
-- 连接以连接键索引：默认实例键即服务名，显式实例键由 `makeServiceConnectionKey(name, host_id, instance_id)` 生成
+- 连接以逻辑连接键索引：默认实例键即服务名，显式实例键由 `makeServiceConnectionKey(name, instance_id)` 生成；host_id 不参与
 
 ### 7.2 自动重连
 
 - 服务离线时通过 `scheduleReconnect` 在 event-loop 上注册定时器
 - 重连定时器回调在 event-loop 线程执行
-- 重连过程中会查询 SM：显式实例绑定按 `(name, host_id, instance_id)` 经 `listServiceInstances` 重新解析，未绑定实例按名 `lookupServiceInfo`，均同步等待回复
+- 重连过程中会查询 SM：显式实例绑定按 `(name, instance_id)` 经 `listServiceInstances` 重新解析 endpoint；host_id 不参与重连身份，实例迁移后自动连到新位置
 
 ### 7.3 心跳与会话
 

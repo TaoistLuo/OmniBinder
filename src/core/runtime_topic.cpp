@@ -27,7 +27,7 @@ uint8_t selectorWireMode(const TopicSubscriptionSelector& selector) {
 
 bool watchesOverlap(const ServiceWatchRequest& a, const ServiceWatchRequest& b) {
     if (a.service_name != b.service_name) return false;
-    if (!a.host_id.empty() && !b.host_id.empty() && a.host_id != b.host_id) return false;
+    // host_id 不参与逻辑匹配；仅 instance_id 约束可能互斥。
     if (!a.instance_id.empty() && !b.instance_id.empty()
         && a.instance_id != b.instance_id) return false;
     return true;

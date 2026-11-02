@@ -105,7 +105,7 @@ ServiceHandle ServiceRegistry::addService(const ServiceInfo& info, int control_f
         return INVALID_HANDLE;
     }
 
-    const std::string instance_key = makeServiceInstanceKey(info.host_id, info.instance_id);
+    const std::string instance_key = makeServiceInstanceKey(info.instance_id);
 
     // 仅完全相同的身份 (name, host_id, instance_id) 才顶替：崩溃重启的服务接替原身份。
     // 同机不同 instance_id、或不同 host_id 的同名服务是合法多实例，新增并存。
@@ -176,7 +176,7 @@ bool ServiceRegistry::removeService(const std::string& name)
 bool ServiceRegistry::removeServiceByIdentity(const ServiceIdentity& identity)
 {
     const std::string instance_key =
-        makeServiceInstanceKey(identity.host_id, identity.instance_id);
+        makeServiceInstanceKey(identity.instance_id);
     const ServiceEntry* entry = findEntry(identity.name, instance_key);
     ServiceHandle handle = entry ? entry->handle : INVALID_HANDLE;
 
@@ -246,7 +246,7 @@ bool ServiceRegistry::findServiceByIdentity(const ServiceIdentity& identity,
                                             ServiceEntry& entry) const
 {
     const ServiceEntry* found = findEntry(
-        identity.name, makeServiceInstanceKey(identity.host_id, identity.instance_id));
+        identity.name, makeServiceInstanceKey(identity.instance_id));
     if (!found) {
         return false;
     }

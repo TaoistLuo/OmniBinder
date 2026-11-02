@@ -65,6 +65,10 @@ int OmniRuntime::listServices(std::vector<ServiceInfo>& services) {
 int OmniRuntime::listServiceInstances(const std::string& name, std::vector<ServiceInfo>& out) {
     return impl_->listServiceInstances(name, out);
 }
+int OmniRuntime::lookupServiceInstance(const std::string& name, const std::string& instance_id,
+                                       ServiceInfo& info) {
+    return impl_->lookupServiceInstance(name, instance_id, info);
+}
 int OmniRuntime::queryInterfaces(const std::string& name, std::vector<InterfaceInfo>& ifaces) {
     return impl_->queryInterfaces(name, ifaces);
 }
@@ -77,12 +81,19 @@ int OmniRuntime::queryPublishedTopics(const std::string& name,
 int OmniRuntime::connectService(const std::string& name) {
     return impl_->connectService(name);
 }
+int OmniRuntime::connectServiceInstance(const std::string& name, const std::string& instance_id) {
+    return impl_->connectServiceInstance(name, "", instance_id);
+}
 int OmniRuntime::connectServiceInstance(const std::string& name, const std::string& host_id,
                                         const std::string& instance_id) {
-    return impl_->connectServiceInstance(name, host_id, instance_id);
+    (void)host_id;  // 兼容旧调用：host_id 不再参与逻辑实例解析
+    return impl_->connectServiceInstance(name, "", instance_id);
 }
 int OmniRuntime::disconnectService(const std::string& name) {
     return impl_->disconnectService(name);
+}
+int OmniRuntime::disconnectServiceInstance(const std::string& name, const std::string& instance_id) {
+    return impl_->disconnectServiceInstance(name, "", instance_id);
 }
 int OmniRuntime::disconnectServiceInstance(const std::string& name, const std::string& host_id,
                                            const std::string& instance_id) {
@@ -90,6 +101,10 @@ int OmniRuntime::disconnectServiceInstance(const std::string& name, const std::s
 }
 bool OmniRuntime::isServiceConnected(const std::string& name) const {
     return impl_->isServiceConnected(name);
+}
+bool OmniRuntime::isServiceInstanceConnected(const std::string& name,
+                                             const std::string& instance_id) const {
+    return impl_->isServiceInstanceConnected(name, "", instance_id);
 }
 bool OmniRuntime::isServiceInstanceConnected(const std::string& name, const std::string& host_id,
                                              const std::string& instance_id) const {
