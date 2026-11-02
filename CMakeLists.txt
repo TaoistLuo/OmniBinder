@@ -2,7 +2,7 @@
 # 顶层 CMakeLists.txt
 
 cmake_minimum_required(VERSION 3.12)
-project(OmniBinder VERSION 1.1.0 LANGUAGES C CXX)
+project(OmniBinder VERSION 1.2.0 LANGUAGES C CXX)
 
 # ============================================================
 # 编译选项

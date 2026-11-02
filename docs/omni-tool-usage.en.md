@@ -2,7 +2,7 @@
 
 [中文](omni-tool-usage.md) | English
 
-> **Version**: 1.1.0  
+> **Version**: 1.2.0
 > **Updated**: 2026-10-31
 
 ## Overview
@@ -661,5 +661,5 @@ When `omni-cli` and the target service run on the same machine, OmniBinder autom
 
 ---
 
-**Document version**: 1.1.0  
+**Document version**: 1.2.0
 **Last updated**: 2026-09-21

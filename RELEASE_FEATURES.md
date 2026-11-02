@@ -39,9 +39,9 @@ OmniBinder 提供统一的服务化通信模型，用于连接同一设备内的
 
 发布者与订阅者通过统一机制建立关系，数据面走高效通信路径。
 
-### 3. 服务死亡通知
+### 3. 服务状态 Watch
 
-支持服务死亡通知，用于感知目标服务在线状态变化。
+支持持久服务状态 watch，用于感知目标服务实例上线与离线。
 
 该能力适用于：
 
@@ -50,27 +50,28 @@ OmniBinder 提供统一的服务化通信模型，用于连接同一设备内的
 - 网关
 - 多服务协作系统
 
-当目标服务退出或失效时，订阅方可收到统一通知，用于更新业务状态、进入离线模式或触发恢复流程。
+当目标实例注册、注销、崩溃、心跳超时或迁移时，订阅方可收到统一状态事件，用于更新业务状态、进入离线模式或触发恢复流程。
 
-### 4. 多实例服务身份
+### 4. 逻辑服务实例身份
 
-支持同一服务名下多个实例在同一板卡或跨板并存，实例身份为 `(service_name, host_id, instance_id)`。
+集群内由 `(service_name, instance_id)` 唯一确定一个逻辑服务实例；`host_id` 只描述当前部署位置，不参与业务寻址。
 
 该能力适用于：
 
 - 单板多实例（例如同一 `SensorService` 分别绑定不同串口 / 传感器）
-- 多板同名服务（HMI 需要分别发现与控制每块板上的同名服务）
-- 崩溃重启后以相同身份接替原实例
+- 多板同名服务（HMI 按逻辑实例发现与控制，不依赖板卡位置）
+- 实例迁移/崩溃重启后以相同逻辑身份接替
 
 提供的能力包括：
 
 - 实例注册与共存：不同 `instance_id` 的同名服务同时在线，各自拥有独立数据面连接
-- 实例发现：按服务名枚举全部实例（含 `host_id` / `instance_id` / `host` / `port`）
-- 实例寻址：客户端可绑定指定 `(host_id, instance_id)` 实例进行 RPC
-- 实例级订阅与死亡通知：区分数据来源实例，按实例感知上下线
-- C / C++ 双接口：C++ 提供 `setInstanceId` / `listServiceInstances` / `connectServiceInstance`，C 提供 `omni_service_set_instance_id` / `omni_runtime_list_instances` / `omni_runtime_connect_service_instance` / `omni_runtime_invoke_instance` 及生成 Proxy 的 `_proxy_connect_instance`
+- 实例发现：按服务名枚举全部逻辑实例（含 `instance_id` / `host_id` / `host` / `port`）
+- 实例寻址：客户端只绑定 `instance_id` 即可连接；host_id 由 SM 解析
+- 实例迁移：同一逻辑实例从新 host 注册时发送旧 offline + 新 online
+- 实例级订阅与状态 watch：区分数据来源实例，按逻辑实例感知上下线
+- C / C++ 双接口：C++ 提供 `setInstanceId` / `listServiceInstances` / `connectServiceInstance(name, instance_id)` / `setInstance(instance_id)`，C 提供 `omni_service_set_instance_id` / `omni_runtime_list_instances` / `omni_runtime_connect_service_instance` / 生成 Proxy 的 `*_proxy_set_instance_id`
 
-**运行约束**：要在一台设备上运行多个同名服务，必须为每个实例声明**不同的 `instance_id`**；相同身份会被视为同一实例并互相顶替（后者接管）。此外，每台设备必须具有**唯一 `host_id`**——克隆镜像会共享 `/etc/machine-id`，需在各设备通过 `setHostId()` 显式设置唯一标识（MAC / 芯片 ID / 序列号），否则多板会被误判为同一身份。
+**运行约束**：同一服务名下 `instance_id` 必须**集群内唯一**；相同逻辑身份会被视为同一实例并互相接管（后者顶替）。每台设备仍应具有**唯一 `host_id`**——克隆镜像会共享 `/etc/machine-id`，需在各设备通过 `setHostId()` 设置唯一标识（MAC / 芯片 ID / 序列号），否则 SHM 会误判为同机；host_id 不参与业务逻辑身份。
 
 ---
 
@@ -96,7 +97,7 @@ OmniBinder 采用控制面与数据面分离架构：
 - 服务注册
 - 服务发现
 - topic 关系维护
-- 服务死亡通知管理
+- 服务状态 watch 管理
 
 ### 数据面
 
@@ -121,7 +122,7 @@ OmniBinder 采用控制面与数据面分离架构：
 - 服务发现
 - RPC 调用
 - topic 订阅与发布
-- 死亡通知监听
+- 服务状态 watch
 
 对外提供线程安全公共 API，便于接入多线程业务系统。
 
@@ -202,7 +203,7 @@ OmniBinder 采用控制面与数据面分离架构：
 - 通过 `find_package(OmniBinder REQUIRED)` 进行链接
 - 使用 `omni-idlc` 进行接口代码生成
 - 实现服务端与客户端
-- 完成 RPC、pub/sub、死亡通知接入
+- 完成 RPC、pub/sub、服务状态 watch 接入
 
 示例同时提供：
 

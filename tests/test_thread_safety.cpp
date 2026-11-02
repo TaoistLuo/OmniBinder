@@ -68,6 +68,19 @@ protected:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         ASSERT_NE(svc_->port(), 0);
+
+        // 端口先于 SM 注册完成可见；并发 lookup 测试必须等服务真正可见后再启动，
+        // 否则并行 ctest 下会把“尚未注册”误报成并发 lookup 失败。
+        bool visible = false;
+        for (int i = 0; i < 100; ++i) {
+            ServiceInfo info;
+            if (server_rt_->lookupService("TestService", info) == 0) {
+                visible = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ASSERT_TRUE(visible) << "TestService is not visible from SM after startup";
     }
 
     static void TearDownTestSuite() {

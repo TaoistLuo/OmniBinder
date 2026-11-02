@@ -2,7 +2,7 @@
 
 中文 | [English](omni-tool-usage.en.md)
 
-> **版本**：1.1.0  
+> **版本**：1.2.0
 > **更新日期**：2026-10-31
 
 ## 概述
@@ -659,5 +659,5 @@ omni-cli --idl sensor_service.bidl info SensorService
 
 ---
 
-**文档版本**：1.1.0  
+**文档版本**：1.2.0
 **最后更新**：2026-09-21
