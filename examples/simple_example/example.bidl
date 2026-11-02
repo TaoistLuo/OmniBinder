@@ -1,0 +1,16 @@
+// example.bidl
+// 最小示例：一个 RPC + 一个 topic。
+
+package demo;
+
+import "common.bidl";
+
+topic Update {
+    int32  value;
+    string text;
+}
+
+service ExampleService {
+    common.Output Echo(common.Input input);
+    publishes Update;
+}

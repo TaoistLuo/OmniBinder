@@ -256,14 +256,39 @@ Build options:
 
 ### Run the built-in example
 
+The minimal quick-start example is `examples/simple_example/` (4 source files + 2 IDL files):
+
+```text
+common.bidl     # one input struct + one output struct
+example.bidl    # one RPC + one publish topic
+cpp_server.cpp
+cpp_client.cpp
+c_server.c
+c_client.c
+```
+
 ```bash
 # 1. Start ServiceManager
 ./build/target/bin/service_manager
 
-# 2. Start the service provider
-./build/target/example/example_cpp_sensor_server
+# 2. Start the simple C++ server
+./build/target/example/simple_cpp_server
 
-# 3. Start the service consumer
+# 3. Start the simple C++ client
+./build/target/example/simple_cpp_client
+```
+
+C versions:
+
+```bash
+./build/target/example/simple_c_server
+./build/target/example/simple_c_client
+```
+
+The full type/capability matrix is in `examples/all_type_example/`:
+
+```bash
+./build/target/example/example_cpp_sensor_server
 ./build/target/example/example_cpp_sensor_client
 ```
 
@@ -286,7 +311,7 @@ cmake --build build/example_artifacts_c -j$(nproc)
 That example provides both C and CPP versions.
 It demonstrates service-to-service RPC calls, topic subscription, and service online/offline tracking when the sensor service exits.
 
-The built-in demo in `examples/sensor_service.bidl` / `examples/example_cpp/*` / `examples/example_c/*` has also been expanded into a fuller capability matrix covering:
+The full example in `examples/all_type_example/` covers:
 
 - primitive RPCs (`EchoBool` ~ `EchoFloat64`, `EchoString`, `EchoBytes`)
 - custom / nested struct RPCs (`EchoStatus`, `EchoConfig`, `EchoEnvelope`)
@@ -311,9 +336,9 @@ For the full example flow, refer to [examples/](examples/) and the [Examples Gui
 **IDL-aware mode (JSON I/O):**
 
 ```bash
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl info SensorService
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl info SensorService
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService GetLatestData
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService SetThreshold \
   '{"command_type":1,"target":"sensor1","value":100}'
 ```
 
@@ -348,15 +373,15 @@ Response (status=OK, 38 bytes, 0.81 ms):
 
 ### Define an interface (IDL)
 
-The complete, self-contained generation input is [`examples/sensor_service.bidl`](examples/sensor_service.bidl), together with its imported
-[`examples/common_types.bidl`](examples/common_types.bidl). Run the command below from the repository root. Prefer these checked-in examples
+The complete, self-contained generation input is [`examples/all_type_example/sensor_service.bidl`](examples/all_type_example/sensor_service.bidl), together with its imported
+[`examples/all_type_example/common_types.bidl`](examples/all_type_example/common_types.bidl). Run the command below from the repository root. Prefer these checked-in examples
 over copying an abbreviated snippet that can drift from the generated API.
 
 Generate C++ Stub/Proxy code with `omni-idlc`:
 
 ```bash
 mkdir -p generated/
-./build/target/bin/omni-idlc --lang=cpp --output=generated/ examples/sensor_service.bidl
+./build/target/bin/omni-idlc --lang=cpp --output=generated/ examples/all_type_example/sensor_service.bidl
 ```
 
 ### Server
@@ -564,7 +589,10 @@ omnibinder/
 ├── src/                           # Core library implementation
 ├── service_manager/               # ServiceManager process
 ├── tools/                         # omni-idlc and omni-cli sources
-├── examples/                      # Built-in and downstream examples
+├── examples/
+│   ├── simple_example/            # Minimal quick-start example (C/C++)
+│   ├── all_type_example/          # Full type/capability matrix (C/C++)
+│   └── artifact_examples/         # Downstream artifact-consumer example
 ├── tests/                         # Unit, integration, performance, and longevity tests
 ├── docs/                          # Project documentation
 └── CMakeLists.txt

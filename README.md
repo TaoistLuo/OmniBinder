@@ -264,14 +264,42 @@ TOOLCHAIN_FILE=/path/to/toolchain.cmake \
 
 ### 运行示例
 
+最简单的入门示例在 `examples/simple_example/`（4 个源文件 + 2 个 IDL）：
+
+```text
+common.bidl     # 一个输入结构体 + 一个输出结构体
+example.bidl    # 一个 RPC + 一个 publish
+cpp_server.cpp
+cpp_client.cpp
+c_server.c
+c_client.c
+```
+
 ```bash
-# 1. 启动 ServiceManager（中心注册服务）
+# 1. 启动 ServiceManager
 ./build/target/bin/service_manager
 
-# 2. 启动服务提供者（SensorService，注册服务 + 广播数据）
+# 2. 启动简单服务端
+./build/target/example/simple_cpp_server
+
+# 3. 启动简单客户端
+./build/target/example/simple_cpp_client
+```
+
+C 版本：
+
+```bash
+./build/target/example/simple_c_server
+./build/target/example/simple_c_client
+```
+
+完整类型/能力示例在 `examples/all_type_example/`：
+
+```bash
+# 服务提供者（SensorService，注册服务 + 广播数据）
 ./build/target/example/example_cpp_sensor_server
 
-# 3. 启动服务消费者（调用接口 + 订阅广播）
+# 服务消费者（调用接口 + 订阅广播）
 ./build/target/example/example_cpp_sensor_client
 ```
 
@@ -294,7 +322,7 @@ cmake --build build/example_artifacts_c -j$(nproc)
 该示例同时提供 C 和 CPP 两套版本，用于演示：服务之间调用控制接口、订阅 sensor 广播、以及通过服务状态 watch 感知 sensor 上线/离线。
 更详细的下游构建说明请参考 `examples/artifact_examples/README.md`。
 
-当前内置示例 `examples/sensor_service.bidl` / `examples/example_cpp/*` / `examples/example_c/*` 已经扩展为一组更完整的 demo，覆盖：
+完整示例位于 `examples/all_type_example/`，覆盖：
 
 - 基础类型 RPC（`EchoBool` ~ `EchoFloat64`、`EchoString`、`EchoBytes`）
 - 自定义结构体 / 嵌套结构体 RPC（`EchoStatus`、`EchoConfig`、`EchoEnvelope`）
@@ -323,13 +351,13 @@ cmake --build build/example_artifacts_c -j$(nproc)
 **详细模式（JSON 格式）：**
 ```bash
 # 查看服务接口（展开字段定义）
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl info SensorService
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl info SensorService
 
 # 调用接口（JSON 输入/输出）
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService GetLatestData
 
 # 带参数调用（JSON 格式）
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService SetThreshold \
   '{"command_type":1,"target":"sensor1","value":100}'
 ```
 
@@ -363,15 +391,15 @@ Response (status=OK, 38 bytes, 0.81 ms):
 
 ### 定义接口 (IDL)
 
-完整、可直接生成的定义位于 [`examples/sensor_service.bidl`](examples/sensor_service.bidl)，其导入的公共类型位于
-[`examples/common_types.bidl`](examples/common_types.bidl)。下面的命令从仓库根目录运行；相比复制易漂移的片段，
+完整、可直接生成的定义位于 [`examples/all_type_example/sensor_service.bidl`](examples/all_type_example/sensor_service.bidl)，其导入的公共类型位于
+[`examples/all_type_example/common_types.bidl`](examples/all_type_example/common_types.bidl)。下面的命令从仓库根目录运行；相比复制易漂移的片段，
 请直接修改并编译这两个真实示例文件。
 
 使用 `omni-idlc` 编译生成 C++ Stub/Proxy 代码：
 
 ```bash
 mkdir -p generated/
-./build/target/bin/omni-idlc --lang=cpp --output=generated/ examples/sensor_service.bidl
+./build/target/bin/omni-idlc --lang=cpp --output=generated/ examples/all_type_example/sensor_service.bidl
 ```
 
 ### 服务端
@@ -588,9 +616,9 @@ omnibinder/
 │   ├── omni_idlc/                 # IDL 编译器源码
 │   └── omni_cli/                  # 命令行工具源码
 ├── examples/
-│   ├── example_cpp/               # 仓库内 C++ 示例
-│   ├── example_c/                 # 仓库内 C 示例
-│   └── artifact_examples/       # 下游独立消费式示例
+│   ├── simple_example/            # 最小快速开始示例（C/C++）
+│   ├── all_type_example/          # 完整类型/能力矩阵示例（C/C++）
+│   └── artifact_examples/         # 下游独立消费式示例
 ├── tests/                         # 单元 / 集成 / 性能 / 长稳测试
 ├── docs/                          # 对外文档
 ├── RELEASE_FEATURES.md            # 当前版本发布特性文档

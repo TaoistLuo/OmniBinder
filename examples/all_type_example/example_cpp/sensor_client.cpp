@@ -179,6 +179,29 @@ int main(int argc, char* argv[]) {
     common::StatusResponse status_out = resultValue(proxy.EchoStatus(status));
     std::printf("EchoStatus => code=%d message=%s\n", status_out.code, status_out.message.c_str());
 
+    // 跨包 struct 同类型输入/输出：common.Timestamp。
+    common::Timestamp timestamp;
+    timestamp.seconds = 123456789;
+    timestamp.nanos = 321;
+    common::Timestamp timestamp_out = resultValue(proxy.EchoTimestamp(timestamp));
+    std::printf("EchoTimestamp => seconds=%lld nanos=%d\n",
+               (long long)timestamp_out.seconds, timestamp_out.nanos);
+
+    // 跨包 struct 同类型输入/输出：common.NameValue。
+    common::NameValue name_value;
+    name_value.name = "mode";
+    name_value.value = 9;
+    common::NameValue name_value_out = resultValue(proxy.EchoNameValue(name_value));
+    std::printf("EchoNameValue => name=%s value=%d\n",
+               name_value_out.name.c_str(), name_value_out.value);
+
+    // 本地 struct 同类型输入/输出：SensorData。
+    demo::SensorData sensor_data_in = makeEnvelope().data;
+    demo::SensorData sensor_data_out = resultValue(proxy.EchoSensorData(sensor_data_in));
+    std::printf("EchoSensorData => id=%d timestamp=%lld location=%s\n",
+               sensor_data_out.sensor_id, (long long)sensor_data_out.timestamp,
+               sensor_data_out.location.c_str());
+
     // 调用自定义配置结构体回显 RPC，演示普通 struct 参数与返回值。
     demo::SensorConfig cfg_out = resultValue(proxy.EchoConfig(makeConfig()));
     std::printf("EchoConfig => enabled=%d rate=%d label=%s\n",

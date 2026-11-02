@@ -256,6 +256,43 @@ int main(int argc, char* argv[]) {
     demo_SensorService_proxy_echo_status(&proxy, &status_in, &status_out);
     printf("EchoStatus => code=%d message=%s\n", status_out.code, status_out.message);
 
+    common_Timestamp timestamp_in;
+    common_Timestamp timestamp_out;
+    common_Timestamp_init(&timestamp_in);
+    common_Timestamp_init(&timestamp_out);
+    timestamp_in.seconds = 123456789;
+    timestamp_in.nanos = 321;
+    demo_SensorService_proxy_echo_timestamp(&proxy, &timestamp_in, &timestamp_out);
+    printf("EchoTimestamp => seconds=%lld nanos=%d\n",
+           (long long)timestamp_out.seconds, timestamp_out.nanos);
+    common_Timestamp_destroy(&timestamp_out);
+
+    common_NameValue name_value_in;
+    common_NameValue name_value_out;
+    common_NameValue_init(&name_value_in);
+    common_NameValue_init(&name_value_out);
+    name_value_in.name = (char*)"mode";
+    name_value_in.value = 9;
+    demo_SensorService_proxy_echo_name_value(&proxy, &name_value_in, &name_value_out);
+    printf("EchoNameValue => name=%s value=%d\n",
+           name_value_out.name, name_value_out.value);
+    common_NameValue_destroy(&name_value_out);
+
+    demo_SensorData sensor_data_in;
+    demo_SensorData sensor_data_out;
+    demo_SensorData_init(&sensor_data_in);
+    demo_SensorData_init(&sensor_data_out);
+    sensor_data_in.sensor_id = 10;
+    sensor_data_in.temperature = 18.5;
+    sensor_data_in.humidity = 45.5;
+    sensor_data_in.timestamp = 123456789;
+    sensor_data_in.location = (char*)"Lab-1";
+    demo_SensorService_proxy_echo_sensor_data(&proxy, &sensor_data_in, &sensor_data_out);
+    printf("EchoSensorData => id=%d timestamp=%lld location=%s\n",
+           sensor_data_out.sensor_id, (long long)sensor_data_out.timestamp,
+           sensor_data_out.location);
+    demo_SensorData_destroy(&sensor_data_out);
+
     demo_SensorConfig cfg_in;
     demo_SensorConfig cfg_out;
     fill_config(&cfg_in);

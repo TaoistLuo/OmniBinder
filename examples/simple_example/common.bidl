@@ -1,0 +1,14 @@
+// common.bidl
+// 最小示例的公共数据结构。
+
+package common;
+
+struct Input {
+    int32  value;
+    string text;
+}
+
+struct Output {
+    int32  code;
+    string message;
+}

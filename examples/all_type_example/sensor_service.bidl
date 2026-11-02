@@ -75,6 +75,9 @@ service SensorService {
     string                  EchoString(string value);
     bytes                   EchoBytes(bytes value);
     common.StatusResponse   EchoStatus(common.StatusResponse value);
+    common.Timestamp        EchoTimestamp(common.Timestamp value);
+    common.NameValue        EchoNameValue(common.NameValue value);
+    SensorData              EchoSensorData(SensorData value);
     SensorConfig            EchoConfig(SensorConfig value);
     SensorEnvelope          EchoEnvelope(SensorEnvelope value);
     array<int32>            EchoIdArray(array<int32> value);

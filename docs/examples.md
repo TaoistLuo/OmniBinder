@@ -16,6 +16,29 @@
 > `find_package(OmniBinder REQUIRED)` 和已安装的 `omni-idlc` 构建，
 > 不依赖仓库内部 target 名称。
 
+## 1.1 最快入门：simple_example
+
+`examples/simple_example/` 只保留 6 个文件：
+
+```text
+common.bidl     # 一个输入结构体 + 一个输出结构体
+example.bidl    # 一个 RPC + 一个 publish topic
+cpp_server.cpp
+cpp_client.cpp
+c_server.c
+c_client.c
+```
+
+启动顺序：
+
+```bash
+./build/target/bin/service_manager
+./build/target/example/simple_cpp_server
+./build/target/example/simple_cpp_client
+```
+
+C 版本对应 `simple_c_server` / `simple_c_client`。完整类型矩阵在 `examples/all_type_example/`。
+
 ## 2. IDL 接口定义
 
 本示例使用两个 IDL 文件，展示了 `import` 跨文件引用的用法。
@@ -23,7 +46,7 @@
 ### 2.1 common_types.bidl（公共类型定义）
 
 ```protobuf
-// examples/common_types.bidl
+// examples/all_type_example/common_types.bidl
 // 公共类型定义
 
 package common;
@@ -46,7 +69,7 @@ struct NameValue {
 
 ### 2.2 sensor_service.bidl（服务接口定义）
 
-当前 demo 使用的 `examples/sensor_service.bidl` 已扩展为完整能力矩阵，包含：
+当前 demo 使用的 `examples/all_type_example/sensor_service.bidl` 已扩展为完整能力矩阵，包含：
 
 - 基础类型 RPC：`EchoBool` / `EchoInt8` / `EchoUInt8` / ... / `EchoFloat64` / `EchoString` / `EchoBytes`
 - 自定义结构体 RPC：`EchoStatus` / `EchoConfig`
@@ -59,7 +82,7 @@ struct NameValue {
 关键结构如下：
 
 ```protobuf
-// examples/sensor_service.bidl
+// examples/all_type_example/sensor_service.bidl
 package demo;
 
 import "common_types.bidl";
@@ -114,7 +137,7 @@ topic AsyncResultReady {
 }
 ```
 
-完整方法列表请直接以仓库中的 `examples/sensor_service.bidl` 为准。
+完整方法列表请直接以仓库中的 `examples/all_type_example/sensor_service.bidl` 为准。
 
 **关键点**：
 - `import "common_types.bidl"` 导入公共类型定义
@@ -152,7 +175,7 @@ omni-idlc --lang=c --output=generated/ sensor_service.bidl
 ### 3.1 CMakeLists.txt
 
 ```cmake
-# examples/example_cpp/CMakeLists.txt
+# examples/all_type_example/example_cpp/CMakeLists.txt
 
 add_executable(example_cpp_sensor_server sensor_server.cpp)
 target_link_libraries(example_cpp_sensor_server PRIVATE omnibinder_static)
@@ -163,8 +186,8 @@ if(TARGET omni-idlc OR TARGET omnic)
         TARGET example_cpp_sensor_server
         LANGUAGE cpp
         FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
 endif()
@@ -172,7 +195,7 @@ endif()
 
 ### 3.2 `sensor_server.cpp`
 
-当前 `examples/example_cpp/sensor_server.cpp` 已扩展为完整 demo 服务端。它实现了：
+当前 `examples/all_type_example/example_cpp/sensor_server.cpp` 已扩展为完整 demo 服务端。它实现了：
 
 - 所有基础类型 RPC（`EchoBool` ~ `EchoFloat64`、`EchoString`、`EchoBytes`）
 - 自定义结构体 RPC（`EchoStatus`、`EchoConfig`）
@@ -215,14 +238,14 @@ public:
 };
 ```
 
-完整代码请直接以 `examples/example_cpp/sensor_server.cpp` 为准。
+完整代码请直接以 `examples/all_type_example/example_cpp/sensor_server.cpp` 为准。
 
 ## 4. C++ 客户端：SensorClient
 
 ### 4.1 CMakeLists.txt
 
 ```cmake
-# examples/example_cpp/CMakeLists.txt
+# examples/all_type_example/example_cpp/CMakeLists.txt
 
 add_executable(example_cpp_sensor_client sensor_client.cpp)
 target_link_libraries(example_cpp_sensor_client PRIVATE omnibinder_static)
@@ -233,8 +256,8 @@ if(TARGET omni-idlc OR TARGET omnic)
         TARGET example_cpp_sensor_client
         LANGUAGE cpp
         FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
 endif()
@@ -242,7 +265,7 @@ endif()
 
 ### 4.2 sensor_client.cpp
 
-当前 `examples/example_cpp/sensor_client.cpp` 已扩展为完整 demo 客户端，覆盖：
+当前 `examples/all_type_example/example_cpp/sensor_client.cpp` 已扩展为完整 demo 客户端，覆盖：
 
 - 所有基础类型 RPC 调用
 - 自定义结构体 / 嵌套结构体 RPC 调用
@@ -286,7 +309,7 @@ req.client_tag = "cpp-client";
 common::StatusResponse ack = proxy.RequestLatestDataAsync(req);
 ```
 
-完整代码请直接以 `examples/example_cpp/sensor_client.cpp` 为准。
+完整代码请直接以 `examples/all_type_example/example_cpp/sensor_client.cpp` 为准。
 
 ## 5. C 服务端
 
@@ -296,7 +319,7 @@ common::StatusResponse ack = proxy.RequestLatestDataAsync(req);
 ### 5.1 CMakeLists.txt
 
 ```cmake
-# examples/example_c/CMakeLists.txt
+# examples/all_type_example/example_c/CMakeLists.txt
 
 add_executable(example_c_sensor_server sensor_server.c)
 target_link_libraries(example_c_sensor_server PRIVATE omnibinder_static)
@@ -306,8 +329,8 @@ if(TARGET omni-idlc OR TARGET omnic)
         TARGET example_c_sensor_server
         LANGUAGE c
         FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
 endif()
@@ -315,7 +338,7 @@ endif()
 
 ### 5.2 `sensor_server.c`
 
-当前 `examples/example_c/sensor_server.c` 已扩展为完整 demo 服务端。它实现了：
+当前 `examples/all_type_example/example_c/sensor_server.c` 已扩展为完整 demo 服务端。它实现了：
 
 - 所有基础类型 RPC
 - 自定义结构体 / 嵌套结构体 RPC
@@ -345,7 +368,7 @@ omni_impl demo_SensorService_impl_request_latest_data_async(
 omni_service_t* svc = demo_SensorService_stub_create(runtime);
 ```
 
-完整代码请直接以 `examples/example_c/sensor_server.c` 为准。
+完整代码请直接以 `examples/all_type_example/example_c/sensor_server.c` 为准。
 
 与 C++ 版本的关键区别：
 - 继承 Stub 基类 → 直接实现生成的 `demo_SensorService_impl_xxx(...)` 接口
@@ -361,7 +384,7 @@ omni_service_t* svc = demo_SensorService_stub_create(runtime);
 
 ### 6.1 `sensor_client.c`
 
-当前 `examples/example_c/sensor_client.c` 也已经扩展为完整 demo 客户端，覆盖：
+当前 `examples/all_type_example/example_c/sensor_client.c` 也已经扩展为完整 demo 客户端，覆盖：
 
 - 所有基础类型 RPC 调用
 - 自定义结构体 / 嵌套结构体 RPC 调用
@@ -395,7 +418,7 @@ demo_AsyncRequest async_req;
 demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 ```
 
-完整代码请直接以 `examples/example_c/sensor_client.c` 为准。
+完整代码请直接以 `examples/all_type_example/example_c/sensor_client.c` 为准。
 
 与 C++ 版本的关键区别：
 - `SensorServiceProxy proxy(client)` → `demo_SensorService_proxy proxy; demo_SensorService_proxy_init(&proxy, runtime)`
@@ -463,7 +486,7 @@ Instance: instance_id="" (default) host_id="a1b2c3d4e5f6" endpoint=127.0.0.1:800
 
 **详细模式（展开字段定义）：**
 ```bash
-$ ./build/target/bin/omni-cli --idl examples/sensor_service.bidl info SensorService
+$ ./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl info SensorService
 Service: SensorService
 NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
 ------------------------ -------------------- -------------------------------- --------------------- ------
@@ -518,7 +541,7 @@ Instance: instance_id="" (default) host_id="a1b2c3d4e5f6" endpoint=127.0.0.1:800
 #### 7.3.1 通用格式
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <参数>
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService <Method> <参数>
 ```
 
 #### 7.3.2 每个接口的调用方式
@@ -526,25 +549,25 @@ Instance: instance_id="" (default) host_id="a1b2c3d4e5f6" endpoint=127.0.0.1:800
 **无参 RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService GetLatestData
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService GetSensorCount
 ```
 
 **基础类型 RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString hello
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoBool false
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt8 7
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt8 7
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt16 16
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt16 16
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt32 32
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt32 32
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt64 64
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt64 64
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoFloat32 1.5
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoFloat64 2.5
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoString hello
 ```
 
 > 注意：字符串基础类型使用原始命令行参数，例如 `EchoString hello`；保留内部双引号会把引号本身作为字符串内容。
@@ -552,22 +575,22 @@ Instance: instance_id="" (default) host_id="a1b2c3d4e5f6" endpoint=127.0.0.1:800
 **普通 struct RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
 ```
 
 **嵌套 struct RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
 ```
 
 **单向 RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService ResetSensor 1
 ```
 
 **当前不建议使用 `omni-cli` 调用的接口**
@@ -577,14 +600,14 @@ Instance: instance_id="" (default) host_id="a1b2c3d4e5f6" endpoint=127.0.0.1:800
 - `EchoBytes(bytes value)`
 - `EchoBundle(SensorArrayBundle value)`
 
-这些接口请使用 `examples/example_cpp/sensor_client.cpp` 或 `examples/example_c/sensor_client.c` 验证。
+这些接口请使用 `examples/all_type_example/example_cpp/sensor_client.cpp` 或 `examples/all_type_example/example_c/sensor_client.c` 验证。
 
 #### 7.3.3 查询服务信息
 
 ```bash
 ./build/target/bin/omni-cli list
 ./build/target/bin/omni-cli info SensorService
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl info SensorService
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl info SensorService
 ```
 
 详细使用说明见 [omni-cli 使用指南](omni-tool-usage.md)。
@@ -710,7 +733,7 @@ Instance: instance_id="" (default) host_id="<host_id>" endpoint=127.0.0.1:<dynam
       ...
 
 # 调用接口（JSON 模式）
-$ ./target/bin/omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData
+$ ./target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService GetLatestData
 No instance selector given; using deterministic first instance: instance_id="" (default) host_id="<host_id>" endpoint=127.0.0.1:<dynamic>
   Hint: use --instance-id <id> [--host-id <id>] to target another instance.
 Calling SensorService.GetLatestData() ...

@@ -5,7 +5,7 @@
 - `examples/`：仓库内（in-tree）构建，直接依赖本仓库 target
 - `examples/artifact_examples/`：下游/产物消费式构建，依赖已安装的 OmniBinder 构建产物
 
-它复用了当前 `example_cpp/`、`example_c/` 的源码与 `examples/*.bidl`，不再维护另一套独立示例逻辑。
+它复用了当前 `all_type_example/example_cpp/`、`all_type_example/example_c/` 的源码与 `examples/all_type_example/*.bidl`，不再维护另一套独立示例逻辑。
 
 ## 构建方式
 

@@ -11,14 +11,19 @@ find_package(OmniBinder REQUIRED)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+set(APP_THREAD_SOURCE ${CMAKE_CURRENT_LIST_DIR}/../../common/app_thread.cpp)
+set(APP_THREAD_INCLUDE ${CMAKE_CURRENT_LIST_DIR}/../../common)
+
 set(EXAMPLE_BIDL_FILES
-    ${CMAKE_CURRENT_LIST_DIR}/../../common_types.bidl
-    ${CMAKE_CURRENT_LIST_DIR}/../../sensor_service.bidl
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/common_types.bidl
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/sensor_service.bidl
 )
 
 add_executable(example_c_sensor_server
-    ${CMAKE_CURRENT_LIST_DIR}/../../example_c/sensor_server.c)
-target_link_libraries(example_c_sensor_server PRIVATE OmniBinder::omnibinder_static)
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/example_c/sensor_server.c
+    ${APP_THREAD_SOURCE})
+target_include_directories(example_c_sensor_server PRIVATE ${APP_THREAD_INCLUDE})
+target_link_libraries(example_c_sensor_server PRIVATE OmniBinder::omnibinder_static Threads::Threads)
 omnic_generate(
     TARGET example_c_sensor_server
     LANGUAGE c
@@ -27,8 +32,10 @@ omnic_generate(
 )
 
 add_executable(example_c_sensor_client
-    ${CMAKE_CURRENT_LIST_DIR}/../../example_c/sensor_client.c)
-target_link_libraries(example_c_sensor_client PRIVATE OmniBinder::omnibinder_static)
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/example_c/sensor_client.c
+    ${APP_THREAD_SOURCE})
+target_include_directories(example_c_sensor_client PRIVATE ${APP_THREAD_INCLUDE})
+target_link_libraries(example_c_sensor_client PRIVATE OmniBinder::omnibinder_static Threads::Threads)
 omnic_generate(
     TARGET example_c_sensor_client
     LANGUAGE c

@@ -14,6 +14,29 @@ This document shows end-to-end OmniBinder usage examples, including:
 > `examples/artifact_examples/`. That directory is a standalone CMake project that uses
 > `find_package(OmniBinder REQUIRED)` and an installed `omni-idlc`, instead of depending on internal repo targets.
 
+## 1.1 Quick start: simple_example
+
+`examples/simple_example/` contains only six files:
+
+```text
+common.bidl     # one input struct + one output struct
+example.bidl    # one RPC + one publish topic
+cpp_server.cpp
+cpp_client.cpp
+c_server.c
+c_client.c
+```
+
+Run:
+
+```bash
+./build/target/bin/service_manager
+./build/target/example/simple_cpp_server
+./build/target/example/simple_cpp_client
+```
+
+Use `simple_c_server` / `simple_c_client` for C. The full type/capability matrix is in `examples/all_type_example/`.
+
 ---
 
 ## 1. Overview
@@ -59,7 +82,7 @@ struct NameValue {
 
 ### 2.2 `sensor_service.bidl`
 
-The current demo `examples/sensor_service.bidl` has been expanded into a fuller capability matrix. It includes:
+The current demo `examples/all_type_example/sensor_service.bidl` has been expanded into a fuller capability matrix. It includes:
 
 - primitive RPC methods: `EchoBool` / `EchoInt8` / `EchoUInt8` / ... / `EchoFloat64` / `EchoString` / `EchoBytes`
 - custom-struct RPC: `EchoStatus` / `EchoConfig`
@@ -126,7 +149,7 @@ topic AsyncResultReady {
 }
 ```
 
-Use the checked-in `examples/sensor_service.bidl` as the authoritative source for the complete method list.
+Use the checked-in `examples/all_type_example/sensor_service.bidl` as the authoritative source for the complete method list.
 
 Key points:
 
@@ -162,7 +185,7 @@ For `--lang=c`, the generated file names are:
 ### 3.1 CMakeLists.txt
 
 ```cmake
-# examples/example_cpp/CMakeLists.txt
+# examples/all_type_example/example_cpp/CMakeLists.txt
 
 add_executable(example_cpp_sensor_server sensor_server.cpp)
 target_link_libraries(example_cpp_sensor_server PRIVATE omnibinder_static)
@@ -173,8 +196,8 @@ if(TARGET omni-idlc OR TARGET omnic)
         TARGET example_cpp_sensor_server
         LANGUAGE cpp
         FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
 endif()
@@ -182,7 +205,7 @@ endif()
 
 ### 3.2 `sensor_server.cpp`
 
-The current `examples/example_cpp/sensor_server.cpp` has been expanded into a comprehensive demo server. It covers:
+The current `examples/all_type_example/example_cpp/sensor_server.cpp` has been expanded into a comprehensive demo server. It covers:
 
 - all primitive RPC methods (`EchoBool` ~ `EchoFloat64`, `EchoString`, `EchoBytes`)
 - custom struct RPC (`EchoStatus`, `EchoConfig`)
@@ -221,7 +244,7 @@ public:
 };
 ```
 
-Use `examples/example_cpp/sensor_server.cpp` as the authoritative source for the full implementation.
+Use `examples/all_type_example/example_cpp/sensor_server.cpp` as the authoritative source for the full implementation.
 
 ---
 
@@ -230,7 +253,7 @@ Use `examples/example_cpp/sensor_server.cpp` as the authoritative source for the
 ### 4.1 CMakeLists.txt
 
 ```cmake
-# examples/example_cpp/CMakeLists.txt
+# examples/all_type_example/example_cpp/CMakeLists.txt
 
 add_executable(example_cpp_sensor_client sensor_client.cpp)
 target_link_libraries(example_cpp_sensor_client PRIVATE omnibinder_static)
@@ -241,8 +264,8 @@ if(TARGET omni-idlc OR TARGET omnic)
         TARGET example_cpp_sensor_client
         LANGUAGE cpp
         FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
 endif()
@@ -250,7 +273,7 @@ endif()
 
 ### 4.2 `sensor_client.cpp`
 
-The current `examples/example_cpp/sensor_client.cpp` has also been expanded into a comprehensive demo client. It covers:
+The current `examples/all_type_example/example_cpp/sensor_client.cpp` has also been expanded into a comprehensive demo client. It covers:
 
 - all primitive RPC calls
 - custom and nested struct RPC calls
@@ -294,7 +317,7 @@ req.client_tag = "cpp-client";
 common::StatusResponse ack = proxy.RequestLatestDataAsync(req);
 ```
 
-Use `examples/example_cpp/sensor_client.cpp` as the authoritative source for the full implementation.
+Use `examples/all_type_example/example_cpp/sensor_client.cpp` as the authoritative source for the full implementation.
 
 ---
 
@@ -303,7 +326,7 @@ Use `examples/example_cpp/sensor_client.cpp` as the authoritative source for the
 ### 5.1 CMakeLists.txt
 
 ```cmake
-# examples/example_c/CMakeLists.txt
+# examples/all_type_example/example_c/CMakeLists.txt
 
 add_executable(example_c_sensor_server sensor_server.c)
 target_link_libraries(example_c_sensor_server PRIVATE omnibinder_static)
@@ -313,8 +336,8 @@ if(TARGET omni-idlc OR TARGET omnic)
         TARGET example_c_sensor_server
         LANGUAGE c
         FILES
-            ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-            ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/common_types.bidl
+            ${CMAKE_SOURCE_DIR}/examples/all_type_example/sensor_service.bidl
         OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
     )
 endif()
@@ -338,7 +361,7 @@ This gives C users a stronger workflow: after the IDL changes, newly required se
 
 ## 6. C client
 
-The current `examples/example_c/sensor_client.c` is also a comprehensive demo client. It covers:
+The current `examples/all_type_example/example_c/sensor_client.c` is also a comprehensive demo client. It covers:
 
 - all primitive RPC calls
 - custom and nested struct RPC calls
@@ -372,7 +395,7 @@ demo_AsyncRequest async_req;
 demo_SensorService_proxy_request_latest_data_async(&proxy, &async_req, &ack);
 ```
 
-Use `examples/example_c/sensor_client.c` as the authoritative source for the full implementation.
+Use `examples/all_type_example/example_c/sensor_client.c` as the authoritative source for the full implementation.
 
 Compared with C++:
 
@@ -418,7 +441,7 @@ This C client now demonstrates the same feature matrix as the C++ client:
 **IDL-aware mode:**
 
 ```bash
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl info SensorService
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl info SensorService
 ```
 
 ### 7.3 Invoke methods
@@ -440,7 +463,7 @@ Current `omni-cli` rules:
 #### 7.3.1 Generic form
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService <Method> <param>
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService <Method> <param>
 ```
 
 #### 7.3.2 Methods that can be called directly with `omni-cli`
@@ -448,25 +471,25 @@ Current `omni-cli` rules:
 **No-arg RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetSensorCount
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService GetLatestData
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService GetSensorCount
 ```
 
 **Primitive RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoBool false
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt8 7
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt8 7
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt16 16
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt16 16
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt32 32
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt32 32
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoInt64 64
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoUInt64 64
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat32 1.5
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoFloat64 2.5
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoString hello
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoBool false
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt8 7
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt8 7
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt16 16
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt16 16
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt32 32
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt32 32
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoInt64 64
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoUInt64 64
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoFloat32 1.5
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoFloat64 2.5
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoString hello
 ```
 
 > String scalar parameters are passed as raw CLI text. For example, use `EchoString hello`; writing `EchoString '"hello"'` includes the quote characters in the string.
@@ -474,22 +497,22 @@ Current `omni-cli` rules:
 **Regular struct RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoStatus '{"code":7,"message":"demo"}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoConfig '{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService SetThreshold '{"command_type":1,"target":"temperature","value":30}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService RequestLatestDataAsync '{"request_id":42,"client_tag":"cli"}'
 ```
 
 **Nested struct RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService EchoEnvelope '{"data":{"sensor_id":10,"temperature":18.5,"humidity":45.5,"timestamp":123456789,"location":"Lab-1"},"config":{"enabled":true,"sample_rate_hz":25,"label":"sensor-main"},"captured_at":{"seconds":123456789,"nanos":321}}'
 ```
 
 **Oneway RPC**
 
 ```bash
-./build/target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService ResetSensor 1
+./build/target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService ResetSensor 1
 ```
 
 #### 7.3.3 Methods not currently recommended through `omni-cli`
@@ -499,7 +522,7 @@ The following methods contain `bytes` and are rejected by the current JSON codec
 - `EchoBytes(bytes value)`
 - `EchoBundle(SensorArrayBundle value)`
 
-Use `examples/example_cpp/sensor_client.cpp` or `examples/example_c/sensor_client.c` to validate those methods.
+Use `examples/all_type_example/example_cpp/sensor_client.cpp` or `examples/all_type_example/example_c/sensor_client.c` to validate those methods.
 
 #### 7.3.4 Service inspection
 
@@ -576,7 +599,7 @@ Example commands:
 ```bash
 ./target/bin/omni-cli list
 ./target/bin/omni-cli info SensorService
-./target/bin/omni-cli --idl ./examples/sensor_service.bidl call SensorService GetLatestData
+./target/bin/omni-cli --idl ./examples/all_type_example/sensor_service.bidl call SensorService GetLatestData
 ```
 
 In steady state you should see:

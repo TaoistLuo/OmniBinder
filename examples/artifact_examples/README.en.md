@@ -5,7 +5,7 @@ This directory provides the **second build mode** for the current examples:
 - `examples/`: in-tree build, directly using this repository's targets
 - `examples/artifact_examples/`: downstream/artifact-consumer build, using installed OmniBinder outputs
 
-It reuses the current `example_cpp/`, `example_c/`, and `examples/*.bidl` files, so there is only one set of example logic to maintain.
+It reuses the current `all_type_example/example_cpp/`, `all_type_example/example_c/`, and `examples/all_type_example/*.bidl` files, so there is only one set of example logic to maintain.
 
 ## Build steps
 

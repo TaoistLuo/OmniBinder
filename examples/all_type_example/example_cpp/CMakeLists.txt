@@ -1,4 +1,4 @@
-# examples/example_cpp/CMakeLists.txt
+# examples/all_type_example/example_cpp/CMakeLists.txt
 # C++ 示例：服务端 + 客户端
 
 add_executable(example_cpp_sensor_server sensor_server.cpp)
@@ -12,7 +12,7 @@ omnic_generate(
     TARGET example_cpp_sensor_server example_cpp_sensor_client
     LANGUAGE cpp
     FILES
-        ${CMAKE_SOURCE_DIR}/examples/common_types.bidl
-        ${CMAKE_SOURCE_DIR}/examples/sensor_service.bidl
+        ${CMAKE_CURRENT_LIST_DIR}/../common_types.bidl
+        ${CMAKE_CURRENT_LIST_DIR}/../sensor_service.bidl
     OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated
 )

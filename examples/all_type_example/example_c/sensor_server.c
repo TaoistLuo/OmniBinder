@@ -166,6 +166,33 @@ omni_impl demo_SensorService_impl_echo_status(
     fill_status(result, value->code + 100, "demo_echo");
 }
 
+omni_impl demo_SensorService_impl_echo_timestamp(
+    const common_Timestamp* value, common_Timestamp* result,
+    void* user_data) {
+    (void)user_data;
+    result->seconds = value->seconds + 1;
+    result->nanos = value->nanos + 1;
+}
+
+omni_impl demo_SensorService_impl_echo_name_value(
+    const common_NameValue* value, common_NameValue* result,
+    void* user_data) {
+    (void)user_data;
+    result->name = omni_strdup(value->name);
+    result->value = value->value + 1;
+}
+
+omni_impl demo_SensorService_impl_echo_sensor_data(
+    const demo_SensorData* value, demo_SensorData* result,
+    void* user_data) {
+    (void)user_data;
+    result->sensor_id = value->sensor_id + 1;
+    result->temperature = value->temperature;
+    result->humidity = value->humidity;
+    result->timestamp = value->timestamp + 1;
+    result->location = omni_strdup(value->location);
+}
+
 omni_impl demo_SensorService_impl_echo_config(
     const demo_SensorConfig* value, demo_SensorConfig* result,
     void* user_data) {

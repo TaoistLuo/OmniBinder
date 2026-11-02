@@ -14,12 +14,12 @@ find_package(OmniBinder REQUIRED)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 set(EXAMPLE_BIDL_FILES
-    ${CMAKE_CURRENT_LIST_DIR}/../../common_types.bidl
-    ${CMAKE_CURRENT_LIST_DIR}/../../sensor_service.bidl
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/common_types.bidl
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/sensor_service.bidl
 )
 
 add_executable(example_cpp_sensor_server
-    ${CMAKE_CURRENT_LIST_DIR}/../../example_cpp/sensor_server.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/example_cpp/sensor_server.cpp)
 target_link_libraries(example_cpp_sensor_server PRIVATE OmniBinder::omnibinder_static)
 omnic_generate(
     TARGET example_cpp_sensor_server
@@ -29,7 +29,7 @@ omnic_generate(
 )
 
 add_executable(example_cpp_sensor_client
-    ${CMAKE_CURRENT_LIST_DIR}/../../example_cpp/sensor_client.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/../../all_type_example/example_cpp/sensor_client.cpp)
 target_link_libraries(example_cpp_sensor_client PRIVATE OmniBinder::omnibinder_static)
 omnic_generate(
     TARGET example_cpp_sensor_client

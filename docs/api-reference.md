@@ -1229,7 +1229,7 @@ C API 需要手动管理内存。完整规则（含失败路径、回调借用�
 > **状态：已完全实现** ✅  
 > **头文件**：`include/omnibinder/omnibinder_c.h`  
 > **实现文件**：`src/core/omnibinder_c.cpp`  
-> **示例代码**：`examples/example_c/`
+> **示例代码**：`examples/all_type_example/example_c/`
 
 对于 C 语言用户，提供一套完整的 C 风格 API 封装，覆盖客户端调用、服务端注册、Buffer 操作、话题订阅与服务状态 watch。
 
@@ -1575,7 +1575,7 @@ char* omni_strdup(const char* str);
 
 ### 6.6 使用示例
 
-完整的 C 语言示例代码位于 `examples/example_c/` 目录：
+完整的 C 语言示例代码位于 `examples/all_type_example/example_c/` 目录：
 
 **服务端示例** (`sensor_server.c`)：
 ```c

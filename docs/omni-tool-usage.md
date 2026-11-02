@@ -176,7 +176,7 @@ Multiple instances found; not selecting one automatically. Use --instance-id <id
 
 **示例 3：选中指定实例（可加 `--idl` 展开字段）**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl info SensorService --instance-id ttyUSB1
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl info SensorService --instance-id ttyUSB1
 Service: SensorService
 NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
 ------------------------ -------------------- -------------------------------- --------------------- ------
@@ -267,7 +267,7 @@ omni-cli --idl <file.bidl> call <service> <method> [json_params] [--instance-id 
 
 **示例 1：无参数方法**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData --instance-id ttyUSB1
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService GetLatestData --instance-id ttyUSB1
 Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.GetLatestData() ...
   interface_id = 0xa112646d
@@ -284,7 +284,7 @@ Response (status=OK, 38 bytes, 0.81 ms):
 
 **示例 2：结构体参数**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService SetThreshold \
   '{"command_type":1,"target":"sensor1","value":100}' --instance-id ttyUSB1
 Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.SetThreshold() ...
@@ -300,7 +300,7 @@ Response (status=OK, 10 bytes, 0.47 ms):
 
 **示例 3：基础类型参数**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1 --instance-id ttyUSB0
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService ResetSensor 1 --instance-id ttyUSB0
 Target instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
 Calling SensorService.ResetSensor() ...
   interface_id = 0xa112646d
@@ -393,8 +393,8 @@ omni-cli --idl <file.bidl> subscribe <topic>
 
 **示例**：
 ```bash
-omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate
-omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate | jq .
+omni-cli --idl examples/all_type_example/sensor_service.bidl subscribe SensorUpdate
+omni-cli --idl examples/all_type_example/sensor_service.bidl subscribe SensorUpdate | jq .
 ```
 
 ---
@@ -417,7 +417,7 @@ omni-cli watch --pid <pid> --idl <file.bidl> [--filter <name>]
 
 **示例**：
 ```bash
-omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatestData
+omni-cli watch --pid 12345 --idl examples/all_type_example/sensor_service.bidl --filter GetLatestData
 ```
 
 ---

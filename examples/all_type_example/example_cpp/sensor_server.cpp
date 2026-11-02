@@ -45,6 +45,28 @@ public:
         return out;
     }
 
+    common::Timestamp EchoTimestamp(const common::Timestamp& value) override {
+        common::Timestamp out = value;
+        out.seconds += 1;
+        out.nanos += 1;
+        return out;
+    }
+
+    common::NameValue EchoNameValue(const common::NameValue& value) override {
+        common::NameValue out = value;
+        out.name += "_echo";
+        out.value += 1;
+        return out;
+    }
+
+    demo::SensorData EchoSensorData(const demo::SensorData& value) override {
+        demo::SensorData out = value;
+        out.sensor_id += 1;
+        out.timestamp += 1;
+        out.location += "_echo";
+        return out;
+    }
+
     demo::SensorConfig EchoConfig(const demo::SensorConfig& value) override {
         demo::SensorConfig out = value;
         out.enabled = !value.enabled;

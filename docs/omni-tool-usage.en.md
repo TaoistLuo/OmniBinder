@@ -193,7 +193,7 @@ Multiple instances found; not selecting one automatically. Use --instance-id <id
 Expands full field definitions for structs:
 
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl info SensorService --instance-id ttyUSB1
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl info SensorService --instance-id ttyUSB1
 Service: SensorService
 NAME                     INSTANCE_ID          HOST_ID                          ENDPOINT              STATUS
 ------------------------ -------------------- -------------------------------- --------------------- ------
@@ -284,7 +284,7 @@ Examples:
 
 **Example 1: no-argument method**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService GetLatestData --instance-id ttyUSB1
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService GetLatestData --instance-id ttyUSB1
 Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.GetLatestData() ...
   interface_id = 0xa112646d
@@ -301,7 +301,7 @@ Response (status=OK, 38 bytes, 0.81 ms):
 
 **Example 2: struct parameter**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService SetThreshold \
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService SetThreshold \
   '{"command_type":1,"target":"sensor1","value":100}' --instance-id ttyUSB1
 Target instance: instance_id="ttyUSB1" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35452
 Calling SensorService.SetThreshold() ...
@@ -317,7 +317,7 @@ Response (status=OK, 10 bytes, 0.47 ms):
 
 **Example 3: scalar parameter**
 ```bash
-$ omni-cli --idl examples/sensor_service.bidl call SensorService ResetSensor 1 --instance-id ttyUSB0
+$ omni-cli --idl examples/all_type_example/sensor_service.bidl call SensorService ResetSensor 1 --instance-id ttyUSB0
 Target instance: instance_id="ttyUSB0" host_id="0cee7b0ae232461ba25df5376b29b46b" endpoint=127.0.0.1:35451
 Calling SensorService.ResetSensor() ...
   interface_id = 0xa112646d
@@ -399,8 +399,8 @@ Output envelope:
 Example:
 
 ```bash
-omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate
-omni-cli --idl examples/sensor_service.bidl subscribe SensorUpdate | jq .
+omni-cli --idl examples/all_type_example/sensor_service.bidl subscribe SensorUpdate
+omni-cli --idl examples/all_type_example/sensor_service.bidl subscribe SensorUpdate | jq .
 ```
 
 ---
@@ -423,7 +423,7 @@ Behavior:
 Example:
 
 ```bash
-omni-cli watch --pid 12345 --idl examples/sensor_service.bidl --filter GetLatestData
+omni-cli watch --pid 12345 --idl examples/all_type_example/sensor_service.bidl --filter GetLatestData
 ```
 
 ---

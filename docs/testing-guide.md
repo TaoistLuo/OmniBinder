@@ -713,14 +713,14 @@ timeout 10s ./build/target/example/example_cpp_sensor_client --sm-host 127.0.0.1
 ./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 list
 ./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 ps
 ./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 info SensorService
-./build/target/bin/omni-cli --idl examples/sensor_service.bidl -h 127.0.0.1 -p 19930 call SensorService GetLatestData
+./build/target/bin/omni-cli --idl examples/all_type_example/sensor_service.bidl -h 127.0.0.1 -p 19930 call SensorService GetLatestData
 ```
 
 诊断命令可按实际 PID 进一步验证：
 
 ```bash
 ./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 log set --pid <pid> --level D
-./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 watch --pid <pid> --idl examples/sensor_service.bidl --filter GetLatestData
+./build/target/bin/omni-cli -h 127.0.0.1 -p 19930 watch --pid <pid> --idl examples/all_type_example/sensor_service.bidl --filter GetLatestData
 ```
 
 ### 8.3 omni-idlc
